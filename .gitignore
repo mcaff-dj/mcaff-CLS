@@ -1,0 +1,6 @@
+# Never commit the Google service-account private key or raw customer data dumps
+*.pem
+*.key
+sheetdata-*.json
+sa_key*
+/data/
