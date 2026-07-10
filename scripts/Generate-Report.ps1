@@ -1,0 +1,186 @@
+param([Parameter(Mandatory=$true)][int]$BrandIndex)
+
+# Config-driven report generator. Fetches a brand's sheet data and produces the
+# full self-contained <brand>.html at the repo root. Reuses the verified build
+# logic from the original per-brand scripts, generalised via scripts/brands.ps1.
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Web
+
+$Here = Split-Path -Parent $MyInvocation.MyCommand.Path
+. "$Here\lib.ps1"
+. "$Here\brands.ps1"
+$B   = $Brands[$BrandIndex]
+$Col = $B.Col
+$RepoRoot = Split-Path -Parent $Here
+$OutPath  = Join-Path $RepoRoot $B.OutFile
+
+function HEnc($s){ return [System.Web.HttpUtility]::HtmlEncode([string]$s) }
+function Round1($n){ return [math]::Round($n,1) }
+function JEnc($s){ $s=[string]$s; $s=$s -replace '\\','\\\\' -replace '"','\"' -replace "`r`n",'\n' -replace "`r",'\n' -replace "`n",'\n' -replace "`t",'\t'; return $s }
+function Cell($row,$i){
+    if($null -eq $row){ return "" }
+    if($row -is [System.Collections.IList]){ if($i -lt $row.Count){ $v=$row[$i]; if($null -eq $v){return ""}; return $v } else { return "" } }
+    if($i -eq 0){ return $row } else { return "" }   # scalar row -> single cell at col 0
+}
+function PrettyMonth($raw){ $p=$raw -split "_",2; if($p.Count -lt 2){return $raw}; return ($p[1] -replace "'"," '") }
+function NiceMax($v){ if($v -le 0){return 10}; $m=[math]::Pow(10,[math]::Floor([math]::Log10($v))); foreach($s in @(1,2,2.5,5,10)){ $c=$s*$m; if($c -ge $v){return $c} }; return 10*$m }
+function CountBy($data,$i){ $d=[ordered]@{}; foreach($r in $data){ $v=Cell $r $i; if([string]::IsNullOrWhiteSpace($v)){$v="(blank)"}; if($d.Contains($v)){$d[$v]++}else{$d[$v]=1} }; return $d }
+function TopN($dict,$n){ return @($dict.GetEnumerator()|Sort-Object Value -Descending|Select-Object -First $n|ForEach-Object{[PSCustomObject]@{key=$_.Key;value=$_.Value}}) }
+
+if ($env:REPORT_CACHE_FILE -and (Test-Path $env:REPORT_CACHE_FILE)) {
+    Write-Host "[$($B.Brand)] loading main rows from cache $($env:REPORT_CACHE_FILE)"
+    $dataRows = Get-Content -Raw -Path $env:REPORT_CACHE_FILE | ConvertFrom-Json
+} else {
+    Write-Host "[$($B.Brand)] fetching main sheet ($($B.TotalRows) rows)..."
+    $dataRows = Get-SheetRowsChunked $B.SpreadsheetId $B.SheetName $B.LastCol $B.TotalRows
+}
+Write-Host "[$($B.Brand)] fetched $($dataRows.Count) rows; fetching small tabs..."
+$mom     = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.mom
+$prodnps = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.prodnps
+$agent   = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.agent
+$ai      = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.ai
+
+$months = $B.Months
+$N = $months.Count
+$unique = $dataRows | Where-Object { (Cell $_ $Col.uniq) -eq "Unique" }
+
+function Get-SalesMByMonth($rowsSubset){
+    $tmp=@{}
+    foreach($r in $rowsSubset){ $mo=Cell $r $Col.month; $sm=Cell $r $Col.sales
+        if([string]::IsNullOrWhiteSpace($mo) -or [string]::IsNullOrWhiteSpace($sm)){continue}
+        if(-not $tmp.ContainsKey($mo)){$tmp[$mo]=@{}}
+        if($tmp[$mo].ContainsKey($sm)){$tmp[$mo][$sm]++}else{$tmp[$mo][$sm]=1} }
+    $res=@{}; foreach($mo in $tmp.Keys){ $best=$tmp[$mo].GetEnumerator()|Sort-Object Value -Descending|Select-Object -First 1; $res[$mo]=[double]$best.Key }
+    return $res
+}
+$salesM = Get-SalesMByMonth $dataRows
+$salesArr = @(foreach($mo in $months){ if($salesM.ContainsKey($mo)){$salesM[$mo]}else{0} })
+
+# ---------- Overview ----------
+function Build-ClassMonthCounts($rows){
+    $res=[ordered]@{}
+    foreach($r in $rows){ $c=Cell $r $Col.cls; if([string]::IsNullOrWhiteSpace($c)){continue}; $mo=Cell $r $Col.month; if([string]::IsNullOrWhiteSpace($mo)){continue}
+        if(-not $res.Contains($c)){$res[$c]=[ordered]@{}}; if($res[$c].Contains($mo)){$res[$c][$mo]++}else{$res[$c][$mo]=1} }
+    return $res
+}
+function Build-Pivot($title,$countsByClassMonth){
+    $sb=New-Object System.Text.StringBuilder
+    [void]$sb.Append("<div class='pivot-wrap'><div class='pivot-title'>$(HEnc $title)</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Query Class</th>")
+    foreach($mo in $months){[void]$sb.Append("<th colspan='2' class='month-hdr'>$(HEnc $mo)</th>")}
+    [void]$sb.Append("</tr><tr>")
+    foreach($mo in $months){[void]$sb.Append("<th class='sub-hdr'>Count</th><th class='sub-hdr'>%</th>")}
+    [void]$sb.Append("</tr></thead><tbody>")
+    $ri=0; $totals=@{}
+    foreach($c in $B.Classes){ $ri++; $z=if($ri%2 -eq 1){"zebra"}else{""}
+        [void]$sb.Append("<tr class='$z'><td class='rowlabel'>$(HEnc $c.label)</td>")
+        foreach($mo in $months){ $cnt=0; if($countsByClassMonth.Contains($c.key) -and $countsByClassMonth[$c.key].Contains($mo)){$cnt=$countsByClassMonth[$c.key][$mo]}
+            if(-not $totals.ContainsKey($mo)){$totals[$mo]=0}; $totals[$mo]+=$cnt
+            $sm=0; if($salesM.ContainsKey($mo)){$sm=$salesM[$mo]}; $pct=0; if($sm -gt 0){$pct=Round1 ($cnt/$sm*100)}
+            $cd=if($cnt -gt 0){$cnt.ToString('N0')}else{"-"}
+            [void]$sb.Append("<td class='num'>$cd</td><td class='pct'>$pct%</td>") }
+        [void]$sb.Append("</tr>") }
+    [void]$sb.Append("<tr class='total-row'><td class='rowlabel'>Total</td>")
+    foreach($mo in $months){ $t=0; if($totals.ContainsKey($mo)){$t=$totals[$mo]}; $sm=0; if($salesM.ContainsKey($mo)){$sm=$salesM[$mo]}; $pct=0; if($sm -gt 0){$pct=Round1 ($t/$sm*100)}
+        [void]$sb.Append("<td class='num'>$($t.ToString('N0'))</td><td class='pct'>$pct%</td>") }
+    [void]$sb.Append("</tr></tbody></table></div></div>")
+    return $sb.ToString()
+}
+$totalRows=$dataRows.Count; $totalUnique=$unique.Count; $totalDup=$totalRows-$totalUnique
+$ov=New-Object System.Text.StringBuilder
+[void]$ov.Append("<div class=""kpi-row""><div class=""kpi""><div class=""label"">Total Rows</div><div class=""value"">$($totalRows.ToString('N0'))</div></div><div class=""kpi""><div class=""label"">Unique Tickets</div><div class=""value"">$($totalUnique.ToString('N0'))</div></div><div class=""kpi""><div class=""label"">Duplicate Rows</div><div class=""value"">$($totalDup.ToString('N0'))</div></div><div class=""kpi""><div class=""label"">Overall Duplicate Rate</div><div class=""value"">$(Round1 ($totalDup/$totalRows*100))%</div></div></div>")
+[void]$ov.Append((Build-Pivot "Overall Query Class-Wise Comparison" (Build-ClassMonthCounts $dataRows)))
+[void]$ov.Append((Build-Pivot "Unique Query Class-Wise Comparison" (Build-ClassMonthCounts $unique)))
+[void]$ov.Append('<p class="note">Count = tickets that month for that query class. Percent = count &divide; that month''s total order volume ("Total Sales M"). "Overall" includes duplicates; "Unique" excludes them.</p>')
+
+# ---------- shared chart + category-pivot builders ----------
+function Build-CategoryPivot($subset,$title,[ref]$monthTotalsOut){
+    $catMonth=[ordered]@{}; $catTot=@{}
+    foreach($r in $subset){ $cat=Cell $r $Col.cat; if([string]::IsNullOrWhiteSpace($cat)){$cat="(blank)"}; $mo=Cell $r $Col.month; if([string]::IsNullOrWhiteSpace($mo)){continue}
+        if(-not $catMonth.Contains($cat)){$catMonth[$cat]=@{}}; if($catMonth[$cat].ContainsKey($mo)){$catMonth[$cat][$mo]++}else{$catMonth[$cat][$mo]=1}
+        if(-not $catTot.ContainsKey($cat)){$catTot[$cat]=0}; $catTot[$cat]++ }
+    $catOrder=$catTot.GetEnumerator()|Sort-Object Value -Descending|ForEach-Object{$_.Key}
+    $sb=New-Object System.Text.StringBuilder
+    [void]$sb.Append("<div class='pivot-wrap'><div class='pivot-title'>$(HEnc $title)</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Query Category</th>")
+    foreach($mo in $months){[void]$sb.Append("<th colspan='2' class='month-hdr'>$(HEnc $mo)</th>")}
+    [void]$sb.Append("</tr><tr>")
+    foreach($mo in $months){[void]$sb.Append("<th class='sub-hdr'>Complaints</th><th class='sub-hdr'>wrt sales</th>")}
+    [void]$sb.Append("</tr></thead><tbody>")
+    $ri=0; $totals=@{}
+    foreach($cat in $catOrder){ $ri++; $z=if($ri%2 -eq 1){"zebra"}else{""}
+        [void]$sb.Append("<tr class='$z'><td class='rowlabel'>$(HEnc $cat)</td>")
+        foreach($mo in $months){ $cnt=0; if($catMonth[$cat].ContainsKey($mo)){$cnt=$catMonth[$cat][$mo]}
+            if(-not $totals.ContainsKey($mo)){$totals[$mo]=0}; $totals[$mo]+=$cnt
+            $sm=0; if($salesM.ContainsKey($mo)){$sm=$salesM[$mo]}; $pct=0; if($sm -gt 0){$pct=Round1 ($cnt/$sm*100)}
+            $cd=if($cnt -gt 0){$cnt.ToString('N0')}else{"-"}; $pd=if($cnt -gt 0){"$pct%"}else{"-"}
+            [void]$sb.Append("<td class='num'>$cd</td><td class='pct'>$pd</td>") }
+        [void]$sb.Append("</tr>") }
+    [void]$sb.Append("<tr class='total-row'><td class='rowlabel'>Grand Total</td>")
+    foreach($mo in $months){ $t=0; if($totals.ContainsKey($mo)){$t=$totals[$mo]}; $sm=0; if($salesM.ContainsKey($mo)){$sm=$salesM[$mo]}; $pct=0; if($sm -gt 0){$pct=Round1 ($t/$sm*100)}
+        [void]$sb.Append("<td class='num'>$($t.ToString('N0'))</td><td class='pct'>$pct%</td>") }
+    [void]$sb.Append("</tr></tbody></table></div></div>")
+    $mt=@(foreach($mo in $months){ if($totals.ContainsKey($mo)){$totals[$mo]}else{0} })
+    $monthTotalsOut.Value=$mt
+    return $sb.ToString()
+}
+function Build-ComboChart($vals,$title,$barColor,$lineColor){
+    $pcts=@(); for($i=0;$i -lt $N;$i++){ $sm=$salesArr[$i]; $p=0; if($sm -gt 0){$p=[math]::Round(($vals[$i]/$sm*100),2)}; $pcts+=$p }
+    $barMax=NiceMax ((($vals|Measure-Object -Maximum).Maximum)*1.15); $pctMax=NiceMax ((($pcts|Measure-Object -Maximum).Maximum)*1.2)
+    $W=1200;$H=380;$padL=55;$padR=55;$padT=40;$padB=55;$plotW=$W-$padL-$padR;$plotH=$H-$padT-$padB;$slot=$plotW/$N;$barW=$slot*0.55
+    $sb=New-Object System.Text.StringBuilder
+    [void]$sb.Append("<div class='card'><div class='pivot-title' style='margin-bottom:18px;'>$(HEnc $title)</div><div class='legend-row' style='justify-content:center;'><div class='legend-item'><span class='swatch' style='background:$barColor;'></span><span class='lname'>Complaints</span></div><div class='legend-item'><span class='swatch' style='background:$lineColor;border-radius:50%;'></span><span class='lname'>wrt sales %</span></div></div>")
+    [void]$sb.Append("<svg viewBox='0 0 $W $H' width='100%' height='$H' role='img'><line x1='$padL' y1='$($padT+$plotH)' x2='$($W-$padR)' y2='$($padT+$plotH)' stroke='var(--baseline)' stroke-width='1'/>")
+    $pts=@()
+    for($i=0;$i -lt $N;$i++){ $cx=$padL+$slot*$i+$slot/2; $bx=$cx-$barW/2; $bh=$plotH*($vals[$i]/$barMax); $by=$padT+$plotH-$bh
+        [void]$sb.Append("<rect x='$bx' y='$by' width='$barW' height='$bh' fill='$barColor' rx='2'/><text x='$cx' y='$($by-8)' text-anchor='middle' font-size='10.5' fill='var(--text-primary)' font-weight='600'>$('{0:N0}' -f $vals[$i])</text>")
+        $ly=$padT+$plotH-($plotH*($pcts[$i]/$pctMax)); $pts+="$cx,$ly"
+        $ml=PrettyMonth $months[$i]; [void]$sb.Append("<text x='$cx' y='$($H-$padB+18)' text-anchor='middle' font-size='10.5' fill='var(--text-muted)'>$ml</text>") }
+    [void]$sb.Append("<polyline points='$($pts -join ' ')' fill='none' stroke='$lineColor' stroke-width='2'/>")
+    for($i=0;$i -lt $N;$i++){ $p=$pts[$i] -split ','; [void]$sb.Append("<circle cx='$($p[0])' cy='$($p[1])' r='3' fill='$lineColor'/><text x='$($p[0])' y='$([double]$p[1]-10)' text-anchor='middle' font-size='10.5' font-weight='600' fill='$lineColor'>$($pcts[$i])%</text>") }
+    [void]$sb.Append("</svg></div>")
+    return $sb.ToString()
+}
+
+# ---------- KPI helpers ----------
+$classDup=[ordered]@{}
+foreach($r in $dataRows){ $c=Cell $r $Col.cls; if([string]::IsNullOrWhiteSpace($c)){$c="(blank)"}; $f=Cell $r $Col.uniq
+    if(-not $classDup.Contains($c)){$classDup[$c]=@{U=0;D=0}}; if($f -eq "Unique"){$classDup[$c].U++}elseif($f -eq "Duplicate"){$classDup[$c].D++} }
+function KpiRow($cls,$subset){
+    $m=$classDup[$cls.key]; if(-not $m){$m=@{U=$subset.Count;D=0}}
+    $tot=$m.U+$m.D; $dup=if($tot -gt 0){Round1 ($m.D/$tot*100)}else{0}
+    $share=if($totalUnique -gt 0){Round1 ($subset.Count/$totalUnique*100)}else{0}
+    $tm=CountBy $subset $Col.month
+    $peakKey=""; $peakVal=0; foreach($mo in $months){ $v=0; if($tm.Contains($mo)){$v=$tm[$mo]}; if($v -gt $peakVal){$peakVal=$v;$peakKey=$mo} }
+    $peakLabel=if($peakKey){PrettyMonth $peakKey}else{"-"}
+    $uid=if($cls.id -eq "delivery"){" id=""delivery-kpi-unique-label"""}else{""}
+    $vid=if($cls.id -eq "delivery"){" id=""delivery-kpi-unique-value"""}else{""}
+    return "<div class=""kpi-row""><div class=""kpi""><div class=""label""$uid>Unique Tickets</div><div class=""value""$vid>$($subset.Count.ToString('N0'))</div></div><div class=""kpi""><div class=""label"">Share of All Unique Tickets</div><div class=""value"">$share%</div></div><div class=""kpi""><div class=""label"">Duplicate Rate (this class)</div><div class=""value"">$dup%</div><div class=""sub"">$($m.D.ToString('N0')) duplicates</div></div><div class=""kpi""><div class=""label"">Peak Ticket Month</div><div class=""value"">$peakLabel</div><div class=""sub"">$($peakVal.ToString('N0')) tickets</div></div></div>"
+}
+
+# ---------- Batch table (packaging/product) ----------
+function Build-BatchTable($subset,$title){
+    $pm=[ordered]@{}; $pt=@{}
+    foreach($r in $subset){ $b=Cell $r $Col.batch; if([string]::IsNullOrWhiteSpace($b)){continue}; $prod=Cell $r $Col.prod; if([string]::IsNullOrWhiteSpace($prod)){$prod="(blank)"}; $mo=Cell $r $Col.month; if([string]::IsNullOrWhiteSpace($mo)){continue}
+        if(-not $pm.Contains($prod)){$pm[$prod]=@{}}; if($pm[$prod].ContainsKey($mo)){$pm[$prod][$mo]++}else{$pm[$prod][$mo]=1}
+        if(-not $pt.ContainsKey($prod)){$pt[$prod]=0}; $pt[$prod]++ }
+    $order=$pt.GetEnumerator()|Sort-Object Value -Descending|Select-Object -First 25|ForEach-Object{$_.Key}
+    if(-not $order){ return "" }
+    $sb=New-Object System.Text.StringBuilder
+    [void]$sb.Append("<div class='pivot-wrap'><div class='pivot-title'>$(HEnc $title) Batch Numberwise Complaints - Monthly</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner'>Product Name</th>")
+    foreach($mo in $months){[void]$sb.Append("<th class='month-hdr'>$(HEnc $mo)</th>")}
+    [void]$sb.Append("</tr></thead><tbody>")
+    $ri=0; foreach($prod in $order){ $ri++; $z=if($ri%2 -eq 1){"zebra"}else{""}
+        [void]$sb.Append("<tr class='$z'><td class='rowlabel' title=""$(HEnc $prod)"">$(HEnc $prod)</td>")
+        foreach($mo in $months){ $cnt=0; if($pm[$prod].ContainsKey($mo)){$cnt=$pm[$prod][$mo]}; $cd=if($cnt -gt 0){$cnt.ToString('N0')}else{"-"}; [void]$sb.Append("<td class='num'>$cd</td>") }
+        [void]$sb.Append("</tr>") }
+    [void]$sb.Append("</tbody></table></div></div>")
+    return "<section><h2>Batch Numberwise Complaints (Top 25 Products)</h2><p class=""desc"">Count of $(HEnc $title) tickets that carry a Batch Number, by product and ticket month.</p>$($sb.ToString())</section>"
+}
+
+Write-Host "[$($B.Brand)] building panels..."
+. "$Here\gen-panels.ps1"   # defines Build-DeliveryPanel, Build-ClassPanel, Build-NpsCsat, Build-ProdPkg using the vars above
+
+$html = Assemble-Report
+Set-Content -Path $OutPath -Value $html -Encoding utf8
+Write-Host "[$($B.Brand)] wrote $OutPath ($([math]::Round((Get-Item $OutPath).Length/1KB)) KB)"

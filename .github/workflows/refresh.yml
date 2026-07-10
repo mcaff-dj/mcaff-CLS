@@ -1,0 +1,46 @@
+name: Refresh reports
+
+on:
+  schedule:
+    - cron: '30 8 * * *'   # 08:30 UTC = 2:00 PM IST, daily
+  workflow_dispatch: {}     # manual "Run workflow" button
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-reports
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Regenerate reports from Google Sheets
+        shell: pwsh
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+        run: |
+          if (-not $env:GOOGLE_SA_KEY_JSON) {
+            throw "Missing repository secret GOOGLE_SA_KEY (paste the service-account JSON there)."
+          }
+          ./scripts/refresh.ps1
+
+      - name: Commit & push if changed
+        shell: pwsh
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mcaffeine.html hyphen.html
+          $changed = git status --porcelain mcaffeine.html hyphen.html
+          if ($changed) {
+            $stamp = (Get-Date).ToUniversalTime().AddHours(5.5).ToString('yyyy-MM-dd HH:mm')
+            git commit -m "Auto-refresh reports ($stamp IST)"
+            git push
+            Write-Host "Pushed refreshed reports."
+          } else {
+            Write-Host "No data changes; nothing to commit."
+          }
