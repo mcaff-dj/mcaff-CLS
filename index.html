@@ -41,9 +41,14 @@
   a.card:hover .arrow{transform:translateX(4px);}
   .toolbar{display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;margin:0 0 24px;}
   .refresh-btn{display:inline-flex;align-items:center;gap:7px;text-decoration:none;font-size:13px;font-weight:600;
-    color:#fff;background:var(--mcaff);border:none;border-radius:10px;padding:10px 16px;cursor:pointer;transition:opacity .15s ease;}
-  .refresh-btn:hover{opacity:.88;}
+    color:#fff;background:var(--mcaff);border:none;border-radius:10px;padding:10px 16px;cursor:pointer;transition:opacity .15s ease;font-family:inherit;}
+  .refresh-btn:hover:not(:disabled){opacity:.88;}
+  .refresh-btn:disabled{opacity:.55;cursor:default;}
+  .refresh-btn .spin{display:inline-block;animation:spin 1s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg);}}
   .refresh-note{font-size:12px;color:var(--text-muted);}
+  .refresh-note.ok{color:#1a9c5c;}
+  .refresh-note.err{color:#d6503f;}
   footer{margin-top:28px;text-align:center;font-size:11.5px;color:var(--text-muted);line-height:1.6;}
 </style>
 </head>
@@ -55,8 +60,8 @@
       <p>Monthly ticket analysis by query class, delivery partner, product &amp; batch.</p>
     </header>
     <div class="toolbar">
-      <a class="refresh-btn" href="https://github.com/Vikash-P/mcaff-CLS/actions/workflows/refresh.yml" target="_blank" rel="noopener">&#8635; Refresh data now</a>
-      <span class="refresh-note">Auto-refreshes daily at 2:00 PM IST</span>
+      <button class="refresh-btn" id="refreshBtn" type="button">&#8635; Refresh data now</button>
+      <span class="refresh-note" id="refreshNote">Auto-refreshes daily at 2:00 PM IST</span>
     </div>
     <div class="cards">
       <a class="card mcaff" href="/mcaffeine.html">
@@ -75,5 +80,71 @@
       No raw ticket-level or customer PII data is included.
     </footer>
   </div>
+  <script>
+    (function(){
+      var btn = document.getElementById('refreshBtn');
+      var note = document.getElementById('refreshNote');
+      var defaultNote = note.textContent;
+      var pollTimer = null;
+
+      function setNote(text, cls){
+        note.textContent = text;
+        note.className = 'refresh-note' + (cls ? ' ' + cls : '');
+      }
+      function setBusy(busy){
+        btn.disabled = busy;
+        btn.innerHTML = busy ? '<span class="spin">&#8635;</span> Refreshing&hellip;' : '&#8635; Refresh data now';
+      }
+      function stopPoll(){ if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
+
+      function poll(startedAt){
+        fetch('/api/refresh-status').then(function(r){ return r.json(); }).then(function(d){
+          if (d.status === 'completed') {
+            stopPoll(); setBusy(false);
+            if (d.conclusion === 'success') { setNote('Data refreshed just now.', 'ok'); }
+            else { setNote('Refresh finished with an issue (' + (d.conclusion || 'unknown') + ').', 'err'); }
+            setTimeout(function(){ setNote(defaultNote); }, 8000);
+          } else {
+            // still queued/in_progress
+            if (Date.now() - startedAt > 6 * 60 * 1000) {
+              stopPoll(); setBusy(false);
+              setNote('Still running in the background — check back shortly.', '');
+              setTimeout(function(){ setNote(defaultNote); }, 8000);
+              return;
+            }
+            pollTimer = setTimeout(function(){ poll(startedAt); }, 5000);
+          }
+        }).catch(function(){
+          pollTimer = setTimeout(function(){ poll(startedAt); }, 8000);
+        });
+      }
+
+      btn.addEventListener('click', function(){
+        setBusy(true);
+        setNote('Requesting refresh…');
+        fetch('/api/refresh', { method: 'POST' }).then(function(r){ return r.json(); }).then(function(d){
+          if (d.status === 'started') {
+            setNote('Refresh started — usually takes 2–4 minutes.');
+            poll(Date.now());
+          } else if (d.status === 'already_running') {
+            setNote('A refresh is already in progress…');
+            poll(Date.now());
+          } else if (d.status === 'cooldown') {
+            setBusy(false);
+            setNote(d.message, 'err');
+            setTimeout(function(){ setNote(defaultNote); }, 6000);
+          } else {
+            setBusy(false);
+            setNote(d.message || 'Could not start refresh.', 'err');
+            setTimeout(function(){ setNote(defaultNote); }, 6000);
+          }
+        }).catch(function(){
+          setBusy(false);
+          setNote('Network error — could not reach the refresh service.', 'err');
+          setTimeout(function(){ setNote(defaultNote); }, 6000);
+        });
+      });
+    })();
+  </script>
 </body>
 </html>
