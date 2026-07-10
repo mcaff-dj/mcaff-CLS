@@ -182,6 +182,7 @@ function Build-BatchTable($subset,$title){
 }
 
 Write-Host "[$($B.Brand)] building panels..."
+. "$Here\gen-monthly.ps1"  # defines Build-MonthlyAnalysisPanel using the vars above
 . "$Here\gen-panels.ps1"   # defines Build-DeliveryPanel, Build-ClassPanel, Build-NpsCsat, Build-ProdPkg using the vars above
 
 $html = Assemble-Report

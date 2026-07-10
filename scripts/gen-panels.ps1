@@ -347,12 +347,13 @@ $js
 function Assemble-Report {
     $head = Get-Content -Raw -Path (Join-Path $Here "_shell_head.html")
     # tab nav: CSAT, NPS, Overview, then classes, then Product & Packaging
-    $nav = "<button class=""tab-btn active"" data-tab=""csat"">CSAT</button><button class=""tab-btn"" data-tab=""nps"">NPS</button><button class=""tab-btn"" data-tab=""overview"">Overview</button>"
+    $nav = "<button class=""tab-btn active"" data-tab=""csat"">CSAT</button><button class=""tab-btn"" data-tab=""nps"">NPS</button><button class=""tab-btn"" data-tab=""overview"">Overview</button><button class=""tab-btn"" data-tab=""monthly"">Monthly Analysis</button>"
     foreach($c in $B.Classes){ $nav += "<button class=""tab-btn"" data-tab=""$($c.id)"">$(HEnc $c.label)</button>" }
     $nav += "<button class=""tab-btn"" data-tab=""prodpkg"">Product &amp; Packaging wrt Sales</button>"
 
     $panels = New-Object System.Text.StringBuilder
     [void]$panels.Append("<div class=""tab-panel"" id=""panel-overview"">$($ov.ToString())</div>")
+    [void]$panels.Append((Build-MonthlyAnalysisPanel))
     foreach($c in $B.Classes){
         $kpi = KpiRow $c ($unique | Where-Object { (Cell $_ $Col.cls) -eq $c.key })
         $detail = if($c.id -eq "delivery"){ Build-DeliveryPanel } else { Build-ClassPanel $c }
