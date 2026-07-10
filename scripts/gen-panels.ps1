@@ -94,11 +94,15 @@ function Build-DeliveryPanel {
 </script>
 "@
 
+    $insightItems = @(Get-CategoryInsightItems $delivery) + @(Get-DeliveryPartnerInsight $delivery)
+    $insights = Build-InsightsCard "Insights &mdash; Delivery" $insightItems
+
     return @"
 $filter
 <section><h2>Delivery Complaints by Issue Category</h2><p class="desc">Percent = complaints &divide; that month's total order volume ("Total Sales M"). Recomputes for the partner selected above.</p>$($sb1.ToString())</section>
 <section><h2>Delivery Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line). Recomputes for the partner selected above.</p>$($sb2.ToString())</section>
 <section><h2>Delivery Complaints wrt Delivery Partners</h2><p class="desc">Percent = that partner's complaint count &divide; the average of its "Partner Allocation" for the month. "-" means allocation wasn't recorded that month.</p>$($sb3.ToString())</section>
+$insights
 $js
 "@
 }
@@ -110,10 +114,12 @@ function Build-ClassPanel($cls){
     $chart = Build-ComboChart $mt.Value "$($cls.label) Complaints wrt Sales" $cls.color "var(--s1)"
     $batch=""
     if($cls.key -eq "Packaging and Operational" -or $cls.key -eq "Product" -or $cls.key -eq "Product Suggestion/Recommendation"){ $batch = Build-BatchTable $subset $cls.label }
+    $insights = Build-InsightsCard "Insights &mdash; $(HEnc $cls.label)" (Get-CategoryInsightItems $subset)
     return @"
 <section><h2>$(HEnc $cls.label) Complaints by Issue Category</h2><p class="desc">Percent = complaints &divide; that month's total order volume ("Total Sales M").</p>$pivot</section>
 <section><h2>$(HEnc $cls.label) Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line).</p>$chart</section>
 $batch
+$insights
 "@
 }
 
@@ -143,12 +149,14 @@ function Build-Combo2($rows,$title,$scoreLabel,$scoreMax){
 function Build-NpsPanel {
     $o = Build-Combo2 $mom "NPS - Overall" "NPS%" 100
     $p = Build-Combo2 $prodnps "NPS - Product" "NPS" 100
-    return "<div class=""tab-panel"" id=""panel-nps""><section><h2>Net Promoter Score</h2><p class=""desc"">Monthly survey responses (bars, right axis) against NPS (line, left axis).</p>$o</section><section>$p</section></div>"
+    $insights = Build-InsightsCard "Insights &mdash; NPS" @((Get-ScoreInsight $mom "Overall NPS" 30 0), (Get-ScoreInsight $prodnps "Product NPS" 30 0))
+    return "<div class=""tab-panel"" id=""panel-nps""><section><h2>Net Promoter Score</h2><p class=""desc"">Monthly survey responses (bars, right axis) against NPS (line, left axis).</p>$o</section><section>$p</section>$insights</div>"
 }
 function Build-CsatPanel {
     $a = Build-Combo2 $agent "Agent CSAT" "CSAT" 5
     $i = Build-Combo2 $ai "AI CSAT" "CSAT" 5
-    return "<div class=""tab-panel active"" id=""panel-csat""><section><h2>Customer Satisfaction (CSAT)</h2><p class=""desc"">Monthly survey responses (bars, right axis) against CSAT out of 5 (line, left axis).</p>$a</section><section>$i</section></div>"
+    $insights = Build-InsightsCard "Insights &mdash; CSAT" @((Get-ScoreInsight $agent "Agent CSAT" 4.3 3.7), (Get-ScoreInsight $ai "AI CSAT" 4.3 3.7))
+    return "<div class=""tab-panel active"" id=""panel-csat""><section><h2>Customer Satisfaction (CSAT)</h2><p class=""desc"">Monthly survey responses (bars, right axis) against CSAT out of 5 (line, left axis).</p>$a</section><section>$i</section>$insights</div>"
 }
 
 # ---------- Product & Packaging 5-level drilldown ----------
@@ -303,6 +311,24 @@ function Build-ProdPkgPanel {
     function DD($id,$lbl,$opts){ $s=New-Object System.Text.StringBuilder; [void]$s.Append("<div style='display:flex;flex-direction:column;gap:4px;min-width:150px;'><label for='$id' style='font-size:11px;color:var(--text-muted);'>$(HEnc $lbl)</label><select id='$id' onchange='onProdPkgFilterChange()' style='font-size:12.5px;padding:7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;max-width:220px;'><option value=''>All</option>"); for($oi=0;$oi -lt $opts.Count;$oi++){[void]$s.Append("<option value=""$(HEnc $opts[$oi])"" data-idx='$oi'>$(HEnc $opts[$oi])</option>")}; [void]$s.Append("</select></div>"); return $s.ToString() }
     $filterHtml="<div style='display:flex;gap:14px;flex-wrap:wrap;margin-bottom:16px;align-items:flex-end;'>" + (DD "ppk-filter-month" "Month" $months) + (DD "ppk-filter-product" "Product Name" $PRODS) + (DD "ppk-filter-sku" "SKU" $SKUS) + (DD "ppk-filter-class" "Query Class" $CLASSES) + (DD "ppk-filter-category" "Query Category" $CATS) + "</div><div id='ppk-filter-note' style='font-size:12px;color:var(--text-muted);margin-bottom:14px;'></div>"
 
+    # ---- insights: sharpest single combo + top SKU overall, both by last month volume ----
+    $ppkItems=@()
+    $topKey=$null; $topComboVal=-1
+    foreach($kv in $comboTot.GetEnumerator()){ $cval=$comboMC[$kv.Key][$LM]; if($cval -gt $topComboVal){$topComboVal=$cval;$topKey=$kv.Key} }
+    if($topKey -and $topComboVal -gt 0){
+        $parts=$topKey -split '\|'; $si=[int]$parts[0];$tpi=[int]$parts[1];$tli=[int]$parts[2];$tci=[int]$parts[3];$tbi=[int]$parts[4]
+        $pct=if($lmSales -gt 0){Round1 ($topComboVal/$lmSales*100)}else{0}
+        $ppkItems += InsightItem 'watch' "Sharpest single pain point in $(PrettyMonth $months[$LM]): <b>$(HEnc $SKUS[$si])</b> / $(HEnc $PRODS[$tpi]) &mdash; $(HEnc $CLASSES[$tli]) &rarr; $(HEnc $CATS[$tci]) (batch $(HEnc $BATCHES[$tbi])), $($topComboVal.ToString('N0')) tickets ($pct% of last month's sales)."
+    }
+    if($topSku.Count -gt 0){
+        $tsIdx=[int]$topSku[0]; $tsVal=(LMK $skuTree[$topSku[0]].mc).cnt
+        if($tsVal -gt 0){
+            $tsPct=if($lmSales -gt 0){Round1 ($tsVal/$lmSales*100)}else{0}
+            $ppkItems += InsightItem 'info' "SKU with the most product/packaging complaints overall in $(PrettyMonth $months[$LM]): <b>$(HEnc $SKUS[$tsIdx])</b> &mdash; $($tsVal.ToString('N0')) tickets ($tsPct% of last month's sales)."
+        }
+    }
+    $ppkInsights = Build-InsightsCard "Insights &mdash; Product &amp; Packaging" $ppkItems
+
     return @"
   <div class="tab-panel" id="panel-prodpkg">
     <section>
@@ -311,6 +337,7 @@ function Build-ProdPkgPanel {
       $filterHtml
       <div class='pivot-wrap'><div class='pivot-title'>Product Packaging and Operational Complaints wrt Product Sales</div>$($t.ToString())</div>
     </section>
+    $ppkInsights
   </div>
 $ppkCss
 $js

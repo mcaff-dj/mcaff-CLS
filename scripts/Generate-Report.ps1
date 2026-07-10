@@ -11,6 +11,7 @@ Add-Type -AssemblyName System.Web
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . "$Here\lib.ps1"
 . "$Here\brands.ps1"
+. "$Here\gen-insights.ps1"
 $B   = $Brands[$BrandIndex]
 $Col = $B.Col
 $RepoRoot = Split-Path -Parent $Here
@@ -90,9 +91,11 @@ function Build-Pivot($title,$countsByClassMonth){
 $totalRows=$dataRows.Count; $totalUnique=$unique.Count; $totalDup=$totalRows-$totalUnique
 $ov=New-Object System.Text.StringBuilder
 [void]$ov.Append("<div class=""kpi-row""><div class=""kpi""><div class=""label"">Total Rows</div><div class=""value"">$($totalRows.ToString('N0'))</div></div><div class=""kpi""><div class=""label"">Unique Tickets</div><div class=""value"">$($totalUnique.ToString('N0'))</div></div><div class=""kpi""><div class=""label"">Duplicate Rows</div><div class=""value"">$($totalDup.ToString('N0'))</div></div><div class=""kpi""><div class=""label"">Overall Duplicate Rate</div><div class=""value"">$(Round1 ($totalDup/$totalRows*100))%</div></div></div>")
+$uniqClassMonth = Build-ClassMonthCounts $unique
 [void]$ov.Append((Build-Pivot "Overall Query Class-Wise Comparison" (Build-ClassMonthCounts $dataRows)))
-[void]$ov.Append((Build-Pivot "Unique Query Class-Wise Comparison" (Build-ClassMonthCounts $unique)))
+[void]$ov.Append((Build-Pivot "Unique Query Class-Wise Comparison" $uniqClassMonth))
 [void]$ov.Append('<p class="note">Count = tickets that month for that query class. Percent = count &divide; that month''s total order volume ("Total Sales M"). "Overall" includes duplicates; "Unique" excludes them.</p>')
+[void]$ov.Append((Build-InsightsCard "Insights &mdash; Overview" (Get-OverviewInsightItems $uniqClassMonth)))
 
 # ---------- shared chart + category-pivot builders ----------
 function Build-CategoryPivot($subset,$title,[ref]$monthTotalsOut){
