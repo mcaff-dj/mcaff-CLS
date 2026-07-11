@@ -115,7 +115,7 @@ function Get-SheetRowsChunked([string]$SpreadsheetId, [string]$SheetName, [strin
     $start = 2
     while ($true) {
         $end = $start + $ChunkSize - 1
-        $rows = Get-SheetValues $SpreadsheetId "$SheetName!A$start`:$LastCol$end"
+        $rows = Get-SheetValues $SpreadsheetId "'$SheetName'!A$start`:$LastCol$end"
         if (-not $rows -or $rows.Count -eq 0) { break }
         foreach ($r in $rows) { $all.Add($r) }
         Write-Host "  fetched $SheetName rows $start-$($start + $rows.Count - 1) ($($all.Count) total)"
