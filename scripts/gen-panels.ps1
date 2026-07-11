@@ -111,6 +111,126 @@ $js
 "@
 }
 
+function Build-TechnicalPanel($cls){
+    $subset = $unique | Where-Object { (Cell $_ $Col.cls) -eq $cls.key }
+    $catTot=@{}; foreach($r in $subset){ $c=Cell $r $Col.cat; if([string]::IsNullOrWhiteSpace($c)){$c="(blank)"}; if(-not $catTot.ContainsKey($c)){$catTot[$c]=0}; $catTot[$c]++ }
+    $catOrder=@($catTot.GetEnumerator()|Sort-Object Value -Descending|ForEach-Object{$_.Key})
+    $platTot=@{}; foreach($r in $subset){ $p=Cell $r $Col.platform; if([string]::IsNullOrWhiteSpace($p)){$p="(blank)"}; if(-not $platTot.ContainsKey($p)){$platTot[$p]=0}; $platTot[$p]++ }
+    $platOrder=@($platTot.GetEnumerator()|Sort-Object Value -Descending|ForEach-Object{$_.Key})
+    $platNonBlank=0; foreach($p in $platOrder){ if($p -ne "(blank)"){$platNonBlank+=$platTot[$p]} }
+    $platCoveragePct=if($subset.Count -gt 0){Round1 ($platNonBlank/$subset.Count*100)}else{0}
+    $firstCoveredMonth=$null
+    foreach($mo in $months){ $has=$false
+        foreach($r in $subset){ if((Cell $r $Col.month) -eq $mo -and -not [string]::IsNullOrWhiteSpace((Cell $r $Col.platform))){$has=$true;break} }
+        if($has){ $firstCoveredMonth=$mo; break } }
+
+    $tk=New-Object System.Collections.Generic.List[object]
+    $catMonthCounts=[ordered]@{}; foreach($cat in $catOrder){ $catMonthCounts[$cat]=New-Object 'int[]' $N }
+    foreach($r in $subset){ $mo=Cell $r $Col.month; $mi=[array]::IndexOf($months,$mo); if($mi -lt 0){continue}
+        $cat=Cell $r $Col.cat; if([string]::IsNullOrWhiteSpace($cat)){$cat="(blank)"}; $ci=[array]::IndexOf($catOrder,$cat)
+        $p=Cell $r $Col.platform; if([string]::IsNullOrWhiteSpace($p)){$p="(blank)"}; $pi=[array]::IndexOf($platOrder,$p)
+        $tk.Add("[$mi,$ci,$pi]")
+        $catMonthCounts[$cat][$mi]++ }
+    $ticketsJson="[" + ($tk -join ",") + "]"
+    $catsJson="[" + (($catOrder|ForEach-Object{'"'+(JEnc $_)+'"'}) -join ",") + "]"
+    $platsJson="[" + (($platOrder|ForEach-Object{'"'+(JEnc $_)+'"'}) -join ",") + "]"
+    $monthsJson="[" + (($months|ForEach-Object{'"'+(JEnc $_)+'"'}) -join ",") + "]"
+    $salesJson="[" + (($salesArr|ForEach-Object{[string]$_}) -join ",") + "]"
+
+    $W=1200;$H=380;$padL=55;$padR=55;$padT=40;$padB=55;$plotW=$W-$padL-$padR;$plotH=$H-$padT-$padB;$slot=$plotW/$N;$barW=$slot*0.55
+
+    $sb1=New-Object System.Text.StringBuilder
+    [void]$sb1.Append("<div class='pivot-wrap'><div class='pivot-title'>Technical Complaints by Issue Category</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Query Category</th>")
+    foreach($mo in $months){[void]$sb1.Append("<th colspan='2' class='month-hdr'>$(HEnc $mo)</th>")}
+    [void]$sb1.Append("</tr><tr>"); foreach($mo in $months){[void]$sb1.Append("<th class='sub-hdr'>Complaints</th><th class='sub-hdr'>wrt sales</th>")}
+    [void]$sb1.Append("</tr></thead><tbody>")
+    for($ci=0;$ci -lt $catOrder.Count;$ci++){ $z=if(($ci+1)%2 -eq 1){"zebra"}else{""}
+        [void]$sb1.Append("<tr class='$z tech-cat-row' id='tech-catrow-$ci' data-ci='$ci' onclick='onTechCatClick($ci)'><td class='rowlabel'>$(HEnc $catOrder[$ci])</td>")
+        for($mi=0;$mi -lt $N;$mi++){ $cnt=$catMonthCounts[$catOrder[$ci]][$mi]; $sm=$salesArr[$mi]; $pct=0; if($sm -gt 0){$pct=Round1 ($cnt/$sm*100)}
+            $cd=if($cnt -gt 0){$cnt.ToString('N0')}else{"-"}; $pd=if($cnt -gt 0){"$pct%"}else{"-"}
+            [void]$sb1.Append("<td class='num'>$cd</td><td class='pct'>$pd</td>") }
+        [void]$sb1.Append("</tr>") }
+    [void]$sb1.Append("<tr class='total-row'><td class='rowlabel'>Grand Total</td>")
+    for($mi=0;$mi -lt $N;$mi++){ $t=0; foreach($cat in $catOrder){ $t+=$catMonthCounts[$cat][$mi] }; $sm=$salesArr[$mi]; $pct=0; if($sm -gt 0){$pct=Round1 ($t/$sm*100)}
+        [void]$sb1.Append("<td class='num'>$($t.ToString('N0'))</td><td class='pct'>$pct%</td>") }
+    [void]$sb1.Append("</tr></tbody></table></div></div>")
+
+    $sb2=New-Object System.Text.StringBuilder
+    [void]$sb2.Append("<div class='pivot-wrap'><div class='pivot-title'>Technical Complaints by Platform</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Platform</th>")
+    foreach($mo in $months){[void]$sb2.Append("<th colspan='2' class='month-hdr'>$(HEnc $mo)</th>")}
+    [void]$sb2.Append("</tr><tr>"); foreach($mo in $months){[void]$sb2.Append("<th class='sub-hdr'>Complaints</th><th class='sub-hdr'>wrt sales</th>")}
+    [void]$sb2.Append("</tr></thead><tbody>")
+    for($pi=0;$pi -lt $platOrder.Count;$pi++){ $z=if(($pi+1)%2 -eq 1){"zebra"}else{""}
+        [void]$sb2.Append("<tr class='$z'><td class='rowlabel'>$(HEnc $platOrder[$pi])</td>")
+        for($mi=0;$mi -lt $N;$mi++){[void]$sb2.Append("<td class='num' id='tech-plat-$pi-mo-$mi-cnt'>-</td><td class='pct' id='tech-plat-$pi-mo-$mi-pct'>-</td>")}
+        [void]$sb2.Append("</tr>") }
+    [void]$sb2.Append("<tr class='total-row'><td class='rowlabel'>Grand Total</td>")
+    for($mi=0;$mi -lt $N;$mi++){[void]$sb2.Append("<td class='num' id='tech-plat-total-mo-$mi-cnt'>-</td><td class='pct' id='tech-plat-total-mo-$mi-pct'>-</td>")}
+    [void]$sb2.Append("</tr></tbody></table></div></div>")
+
+    $sb3=New-Object System.Text.StringBuilder
+    [void]$sb3.Append("<div class='card'><div class='pivot-title' style='margin-bottom:18px;'>Technical Complaints wrt Sales</div><div class='legend-row' style='justify-content:center;'><div class='legend-item'><span class='swatch' style='background:$($cls.color);'></span><span class='lname'>Complaints</span></div><div class='legend-item'><span class='swatch' style='background:var(--s1);border-radius:50%;'></span><span class='lname'>wrt sales %</span></div></div>")
+    [void]$sb3.Append("<svg viewBox='0 0 $W $H' width='100%' height='$H' role='img'><line x1='$padL' y1='$($padT+$plotH)' x2='$($W-$padR)' y2='$($padT+$plotH)' stroke='var(--baseline)' stroke-width='1'/>")
+    for($i=0;$i -lt $N;$i++){ $cx=$padL+$slot*$i+$slot/2; $bx=$cx-$barW/2; $ml=PrettyMonth $months[$i]
+        [void]$sb3.Append("<rect id='tech-bar-$i' x='$bx' y='$($padT+$plotH)' width='$barW' height='0' fill='$($cls.color)' rx='2'/><text id='tech-barval-$i' x='$cx' y='$($padT+$plotH-8)' text-anchor='middle' font-size='10.5' fill='var(--text-primary)' font-weight='600'></text><text x='$cx' y='$($H-$padB+18)' text-anchor='middle' font-size='10.5' fill='var(--text-muted)'>$ml</text>") }
+    [void]$sb3.Append("<polyline id='tech-polyline' points='' fill='none' stroke='var(--s1)' stroke-width='2'/>")
+    for($i=0;$i -lt $N;$i++){[void]$sb3.Append("<circle id='tech-dot-$i' cx='0' cy='0' r='3' fill='var(--s1)' visibility='hidden'/><text id='tech-dotval-$i' x='0' y='0' text-anchor='middle' font-size='10.5' font-weight='600' fill='var(--s1)'></text>")}
+    [void]$sb3.Append("</svg></div>")
+
+    $filterNote = "<div class='filter-row' style='display:flex;align-items:center;gap:10px;margin:0 0 4px;flex-wrap:wrap;'><span id='tech-filter-note' style='font-size:12px;color:var(--text-muted);'>Showing platform breakdown &amp; chart for all Technical tickets. Click a category row above to filter.</span></div>"
+    $platCoverageNote = if($firstCoveredMonth){ "<p class='desc'>Platform (App/Web) has only been captured since $(HEnc (PrettyMonth $firstCoveredMonth)) &mdash; $platCoveragePct% of all $(HEnc $cls.label) tickets have it filled in; earlier months show entirely as &quot;(blank)&quot;.</p>" } else { "<p class='desc'>Platform (App/Web) isn't populated on any $(HEnc $cls.label) tickets yet.</p>" }
+
+    $js = @"
+<script>
+(function(){
+  var DT=$ticketsJson, CATS=$catsJson, PLATS=$platsJson, MONTHS=$monthsJson, SALES=$salesJson, N=MONTHS.length;
+  var padL=$padL,padT=$padT,plotH=$plotH,slot=$slot,barW=$barW, BAR=null,PCT=null;
+  var activeCat=null;
+  function agg(ci){ var pm=PLATS.map(function(){return new Array(N).fill(0)}), tot=new Array(N).fill(0), tc=0;
+    for(var i=0;i<DT.length;i++){ var t=DT[i],mo=t[0],c=t[1],p=t[2]; if(mo<0||mo>=N||c<0||c>=CATS.length||p<0||p>=PLATS.length)continue; if(ci!==null&&c!==ci)continue; pm[p][mo]++; tot[mo]++; tc++; }
+    return {pm:pm,tot:tot,tc:tc}; }
+  function fmt(n){return n.toLocaleString('en-IN');}
+  function nice(v){ if(v<=0)return 10; var m=Math.pow(10,Math.floor(Math.log10(v))); var s=[1,2,2.5,5,10]; for(var i=0;i<s.length;i++){var c=s[i]*m; if(c>=v)return c;} return 10*m; }
+  function rpt(a){ for(var pi=0;pi<PLATS.length;pi++){ for(var mi=0;mi<N;mi++){ var cnt=a.pm[pi][mi],sm=SALES[mi],p=sm>0?Math.round(cnt/sm*1000)/10:0; var ce=document.getElementById('tech-plat-'+pi+'-mo-'+mi+'-cnt'); if(ce)ce.textContent=cnt>0?fmt(cnt):'-'; var pe=document.getElementById('tech-plat-'+pi+'-mo-'+mi+'-pct'); if(pe)pe.textContent=p+'%'; } }
+    for(var m2=0;m2<N;m2++){ var t=a.tot[m2],sm2=SALES[m2],p2=sm2>0?Math.round(t/sm2*1000)/10:0; var ce2=document.getElementById('tech-plat-total-mo-'+m2+'-cnt'); if(ce2)ce2.textContent=fmt(t); var pe2=document.getElementById('tech-plat-total-mo-'+m2+'-pct'); if(pe2)pe2.textContent=p2+'%'; } }
+  function rch(a){ var vals=a.tot, pcts=vals.map(function(v,i){var sm=SALES[i];return sm>0?Math.round(v/sm*10000)/100:0;});
+    BAR=nice(Math.max.apply(null,vals)*1.15); PCT=nice(Math.max.apply(null,pcts)*1.2); var pts=[];
+    for(var i=0;i<N;i++){ var cx=padL+slot*i+slot/2,bx=cx-barW/2,bh=plotH*(vals[i]/BAR),by=padT+plotH-bh;
+      var r=document.getElementById('tech-bar-'+i); r.setAttribute('y',by); r.setAttribute('height',bh);
+      var bv=document.getElementById('tech-barval-'+i); bv.setAttribute('y',by-8); bv.textContent=vals[i]>0?fmt(vals[i]):'';
+      var ly=padT+plotH-(plotH*(pcts[i]/PCT)); pts.push(cx+','+ly);
+      var d=document.getElementById('tech-dot-'+i); d.setAttribute('cx',cx); d.setAttribute('cy',ly); d.setAttribute('visibility','visible');
+      var dv=document.getElementById('tech-dotval-'+i); dv.setAttribute('x',cx); dv.setAttribute('y',ly-10); dv.textContent=pcts[i]+'%'; }
+    document.getElementById('tech-polyline').setAttribute('points',pts.join(' ')); }
+  window.onTechCatClick=function(ci){ try{
+      activeCat = (activeCat===ci) ? null : ci;
+      document.querySelectorAll('.tech-cat-row').forEach(function(row){ row.classList.remove('active-filter'); });
+      if(activeCat!==null){ var el=document.getElementById('tech-catrow-'+activeCat); if(el)el.classList.add('active-filter'); }
+      var a=agg(activeCat); rpt(a); rch(a);
+      var note=document.getElementById('tech-filter-note');
+      if(note){ note.textContent = activeCat!==null ? ('Showing platform breakdown & chart for "'+CATS[activeCat]+'" ('+fmt(a.tc)+' tickets). Click the row again to clear.') : 'Showing platform breakdown & chart for all Technical tickets. Click a category row above to filter.'; }
+    }catch(e){ var n2=document.getElementById('tech-filter-note'); if(n2){n2.textContent='Filter error: '+e.message; n2.style.color='var(--s6)';} if(window.console)console.error('Technical filter error',e); } };
+  function init(){ var a=agg(null); rpt(a); rch(a); }
+  if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',init);}else{init();}
+})();
+</script>
+"@
+
+    $insights = Build-InsightsCard "Insights &mdash; Technical" (Get-CategoryInsightItems $subset)
+    $weekly = Build-WeeklyClassBlock $cls
+
+    return @"
+<div class="gran-monthly">
+<section><h2>Technical Complaints by Issue Category</h2><p class="desc">Percent = complaints &divide; that month's total order volume ("Total Sales M"). Click a category row to filter the platform breakdown and chart below.</p>$filterNote$($sb1.ToString())</section>
+<section><h2>Technical Complaints by Platform</h2>$platCoverageNote$($sb2.ToString())</section>
+<section><h2>Technical Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line). Recomputes for the category selected above.</p>$($sb3.ToString())</section>
+</div>
+$weekly
+$insights
+$js
+"@
+}
+
 function Build-ClassPanel($cls){
     $subset = $unique | Where-Object { (Cell $_ $Col.cls) -eq $cls.key }
     $mt=[ref]@()
@@ -364,7 +484,7 @@ function Assemble-Report {
     [void]$panels.Append((Build-MonthlyAnalysisPanel))
     foreach($c in $B.Classes){
         $kpi = KpiRow $c ($unique | Where-Object { (Cell $_ $Col.cls) -eq $c.key })
-        $detail = if($c.id -eq "delivery"){ Build-DeliveryPanel } else { Build-ClassPanel $c }
+        $detail = if($c.id -eq "delivery"){ Build-DeliveryPanel } elseif($c.id -eq "technical"){ Build-TechnicalPanel $c } else { Build-ClassPanel $c }
         [void]$panels.Append("<div class=""tab-panel"" id=""panel-$($c.id)"">$kpi`n$detail</div>")
     }
     $nowStr = (Get-Date).ToUniversalTime().AddHours(5.5).ToString('dd MMM yyyy, HH:mm') + " IST"
@@ -384,7 +504,7 @@ function Assemble-Report {
     <label for="gran-month-select">Month</label>
     <select id="gran-month-select" onchange="applyGranularity()">$($granOpts.ToString())</select>
   </div>
-  <span class="gran-note">Weekly applies to Overview and every complaint-category tab (including Delivery's category/partner breakdowns, but not its partner filter) &mdash; not NPS/CSAT or Product &amp; Packaging.</span>
+  <span class="gran-note">Weekly applies to Overview and every complaint-category tab (including Delivery's category/partner breakdowns, but not its partner filter, and Technical's category breakdown, but not its platform split or click-to-filter) &mdash; not NPS/CSAT or Product &amp; Packaging.</span>
 </div>
 <script>
 (function(){

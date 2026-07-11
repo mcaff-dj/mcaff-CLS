@@ -63,6 +63,22 @@
     </section>
 
     <section>
+      <h2>Bulk invite</h2>
+      <p class="sub" style="margin-bottom:14px;">One person per line: <code>email</code> or <code>email, Name</code>. Same permissions are applied to everyone in the list.</p>
+      <div class="row">
+        <div style="flex:1;min-width:260px;">
+          <label for="bulk-emails">Emails</label>
+          <textarea id="bulk-emails" rows="6" placeholder="jane@company.com, Jane Doe&#10;john@company.com" style="width:100%;font-size:13px;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--page);color:var(--text-primary);font-family:inherit;resize:vertical;"></textarea>
+        </div>
+      </div>
+      <div class="row">
+        <div class="chip-row" id="bulk-perms"></div>
+      </div>
+      <button id="bulk-submit">Invite all</button>
+      <div class="msg" id="bulk-msg"></div>
+    </section>
+
+    <section>
       <h2>Users &amp; permissions</h2>
       <table>
         <thead><tr><th>Email</th><th>Name</th><th>Admin</th><th>Reports</th></tr></thead>
@@ -92,6 +108,22 @@
       wrap.innerHTML = CARD_KEYS.map(function(k){
         return '<label class="chip"><input type="checkbox" value="'+esc(k)+'"> '+esc(k)+'</label>';
       }).join('');
+      var bulkWrap = document.getElementById('bulk-perms');
+      bulkWrap.innerHTML = CARD_KEYS.map(function(k){
+        return '<label class="chip"><input type="checkbox" value="'+esc(k)+'"> '+esc(k)+'</label>';
+      }).join('');
+    }
+
+    function parseBulkEmails(raw){
+      return raw.split('\n').map(function(line){
+        line = line.trim();
+        if(!line) return null;
+        var parts = line.split(',');
+        var email = (parts[0]||'').trim().toLowerCase();
+        var name = parts.slice(1).join(',').trim();
+        if(!email) return null;
+        return { email: email, name: name };
+      }).filter(Boolean);
     }
 
     function togglePerm(userId, cardKey, on, btn){
@@ -147,6 +179,32 @@
         document.getElementById('inv-email').value = '';
         document.getElementById('inv-name').value = '';
         document.querySelectorAll('#inv-perms input').forEach(function(c){ c.checked = false; });
+        loadUsers();
+      });
+    });
+
+    document.getElementById('bulk-submit').addEventListener('click', function(){
+      var raw = document.getElementById('bulk-emails').value;
+      var users = parseBulkEmails(raw);
+      var perms = Array.prototype.slice.call(document.querySelectorAll('#bulk-perms input:checked')).map(function(c){ return c.value; });
+      var msg = document.getElementById('bulk-msg');
+      if(!users.length){ msg.textContent = 'Enter at least one email.'; return; }
+      msg.textContent = 'Inviting ' + users.length + ' people…';
+      fetch('/api/admin/users', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ users: users, permissions: perms })
+      }).then(function(r){ return r.json(); }).then(function(d){
+        if(d.error){ msg.textContent = d.error; return; }
+        var results = d.results || [];
+        var ok = results.filter(function(r){ return r.ok; }).length;
+        var failed = results.filter(function(r){ return !r.ok; });
+        var text = ok + ' of ' + results.length + ' invited.';
+        if(failed.length){
+          text += ' Failed: ' + failed.map(function(f){ return f.email + ' (' + f.error + ')'; }).join(', ');
+        }
+        msg.textContent = text;
+        document.getElementById('bulk-emails').value = '';
+        document.querySelectorAll('#bulk-perms input').forEach(function(c){ c.checked = false; });
         loadUsers();
       });
     });
