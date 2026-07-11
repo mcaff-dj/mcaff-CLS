@@ -7,13 +7,13 @@
 <style>
   :root{
     --page:#f9f9f7; --surface-card:#ffffff; --text-primary:#0b0b0b; --text-secondary:#52514e;
-    --text-muted:#898781; --border:rgba(11,11,11,0.10); --grid:#e1e0d9;
+    --text-muted:#898781; --border:rgba(11,11,11,0.10);
     --pkyc:#c2740c;
   }
   @media (prefers-color-scheme: dark){
     :root{
       --page:#0d0d0d; --surface-card:#1a1a19; --text-primary:#ffffff; --text-secondary:#c3c2b7;
-      --text-muted:#898781; --border:rgba(255,255,255,0.10); --grid:#2c2c2a;
+      --text-muted:#898781; --border:rgba(255,255,255,0.10);
       --pkyc:#e0993d;
     }
   }
@@ -24,26 +24,23 @@
   .home-link{display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-size:13px;font-weight:600;
     color:var(--text-secondary);margin-bottom:20px;}
   .home-link:hover{color:var(--text-primary);}
-  header{text-align:center;margin-bottom:24px;}
+  header{text-align:center;margin-bottom:28px;}
   .badge{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
     color:var(--pkyc);background:color-mix(in srgb, var(--pkyc) 14%, transparent);border-radius:999px;padding:4px 12px;margin-bottom:14px;}
   h1{font-size:clamp(22px,4vw,28px);margin:0 0 12px;letter-spacing:-0.01em;}
   header p{margin:0;color:var(--text-secondary);font-size:14px;line-height:1.6;}
 
-  .tab-nav{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 20px;border-bottom:1px solid var(--grid);padding-bottom:0;}
-  .tab-btn{appearance:none;border:1px solid transparent;background:transparent;color:var(--text-secondary);
-    font-size:13px;font-family:inherit;padding:9px 14px;border-radius:8px 8px 0 0;cursor:pointer;position:relative;top:1px;}
-  .tab-btn:hover{color:var(--text-primary);background:var(--surface-card);}
-  .tab-btn.active{color:var(--text-primary);font-weight:600;background:var(--surface-card);border:1px solid var(--grid);border-bottom:1px solid var(--surface-card);}
-  .tab-panel{display:none;background:var(--surface-card);border:1px solid var(--border);border-radius:14px;padding:22px 24px;}
-  .tab-panel.active{display:block;}
-  .tab-panel h2{font-size:16px;margin:0 0 10px;}
-  .tab-panel p{margin:0 0 14px;color:var(--text-secondary);font-size:13.5px;line-height:1.6;}
-  .src-list{margin:0;padding-left:20px;font-size:13px;color:var(--text-secondary);line-height:1.8;}
-  .src-list b{color:var(--text-primary);}
-  .unsure{font-size:11.5px;color:var(--pkyc);}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  @media (max-width:560px){.cards{grid-template-columns:1fr;}}
+  .card{background:var(--surface-card);border:1px solid var(--border);border-radius:14px;padding:20px 22px;
+    transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease;}
+  .card:hover{transform:translateY(-2px);box-shadow:0 10px 30px -14px rgba(0,0,0,0.35);border-color:var(--pkyc);}
+  .card h2{font-size:16px;margin:0 0 8px;}
   .status-pill{display:inline-block;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;
-    color:var(--pkyc);background:color-mix(in srgb, var(--pkyc) 14%, transparent);border-radius:999px;padding:2px 9px;margin-bottom:12px;}
+    color:var(--pkyc);background:color-mix(in srgb, var(--pkyc) 14%, transparent);border-radius:999px;padding:2px 9px;margin-bottom:10px;}
+  .card p{margin:0 0 10px;color:var(--text-secondary);font-size:13px;line-height:1.6;}
+  .src-list{margin:0;padding-left:18px;font-size:12.5px;color:var(--text-secondary);line-height:1.75;}
+  .src-list b{color:var(--text-primary);}
 </style>
 </head>
 <body>
@@ -52,67 +49,52 @@
     <header>
       <div><span class="badge">Coming Soon</span></div>
       <h1>Product Calling KYC</h1>
-      <p>Built from the "Product feedback KYC" workbook. Tabs below map to source sheets &mdash; data pipeline not yet connected.</p>
+      <p>Built from the "Product feedback KYC" workbook. Cards below map to source sheets &mdash; data pipeline not yet connected.</p>
     </header>
 
-    <nav class="tab-nav">
-      <button class="tab-btn active" data-tab="lotions">Lotions</button>
-      <button class="tab-btn" data-tab="bodywash">Body Wash</button>
-      <button class="tab-btn" data-tab="lipbalms">Lip Balms</button>
-      <button class="tab-btn" data-tab="scrubs">Scrubs</button>
-    </nav>
+    <div class="cards">
+      <div class="card">
+        <span class="status-pill">Pending</span>
+        <h2>Lotions</h2>
+        <p>Source sheet tabs mapped to this category:</p>
+        <ul class="src-list">
+          <li><b>Magnesium Body Lotion</b> &mdash; 31,849 rows</li>
+          <li><b>Perfume Body Lotion</b> &mdash; 12,104 rows</li>
+          <li><b>Summer Breeze</b> &mdash; 42,178 rows</li>
+          <li><b>Sweet Escape</b> &mdash; 45,084 rows</li>
+        </ul>
+      </div>
 
-    <div class="tab-panel active" id="panel-lotions">
-      <span class="status-pill">Pending</span>
-      <h2>Lotions</h2>
-      <p>Source sheet tabs mapped to this category:</p>
-      <ul class="src-list">
-        <li><b>Magnesium Body Lotion</b> &mdash; 31,849 rows</li>
-        <li><b>Perfume Body Lotion</b> &mdash; 12,104 rows</li>
-        <li><b>Summer Breeze</b> &mdash; 42,178 rows</li>
-        <li><b>Sweet Escape</b> &mdash; 45,084 rows</li>
-      </ul>
-    </div>
+      <div class="card">
+        <span class="status-pill">Pending</span>
+        <h2>Body Wash</h2>
+        <p>Source sheet tabs mapped to this category:</p>
+        <ul class="src-list">
+          <li><b>GT & CC Body Wash</b> &mdash; 5,743 rows</li>
+          <li><b>Brightening Raspberry Rush Body Wash</b> &mdash; 596 rows</li>
+          <li><b>Guava and Caramel Data</b> &mdash; 9,005 rows</li>
+        </ul>
+      </div>
 
-    <div class="tab-panel" id="panel-bodywash">
-      <span class="status-pill">Pending</span>
-      <h2>Body Wash</h2>
-      <p>Source sheet tabs mapped to this category:</p>
-      <ul class="src-list">
-        <li><b>GT & CC Body Wash</b> &mdash; 5,743 rows</li>
-        <li><b>Brightening Raspberry Rush Body Wash</b> &mdash; 596 rows</li>
-      </ul>
-    </div>
+      <div class="card">
+        <span class="status-pill">Pending</span>
+        <h2>Lip Balms</h2>
+        <p>Source sheet tabs mapped to this category:</p>
+        <ul class="src-list">
+          <li><b>Jelly Glaze Lip Balm</b> &mdash; 3,293 rows</li>
+          <li><b>Balm</b> &mdash; 31,781 rows</li>
+        </ul>
+      </div>
 
-    <div class="tab-panel" id="panel-lipbalms">
-      <span class="status-pill">Pending</span>
-      <h2>Lip Balms</h2>
-      <p>Source sheet tabs mapped to this category:</p>
-      <ul class="src-list">
-        <li><b>Jelly Glaze Lip Balm</b> &mdash; 3,293 rows</li>
-        <li><b>Balm</b> &mdash; 31,781 rows</li>
-      </ul>
-    </div>
-
-    <div class="tab-panel" id="panel-scrubs">
-      <span class="status-pill">Pending</span>
-      <h2>Scrubs</h2>
-      <p>Source sheet tabs mapped to this category:</p>
-      <ul class="src-list">
-        <li><b>Cookie Face scrub</b> &mdash; 7,585 rows</li>
-        <li><b>Guava and Caramel Data</b> &mdash; 9,005 rows <span class="unsure">(unconfirmed &mdash; may belong elsewhere)</span></li>
-      </ul>
+      <div class="card">
+        <span class="status-pill">Pending</span>
+        <h2>Scrubs</h2>
+        <p>Source sheet tabs mapped to this category:</p>
+        <ul class="src-list">
+          <li><b>Cookie Face scrub</b> &mdash; 7,585 rows</li>
+        </ul>
+      </div>
     </div>
   </div>
-  <script>
-    document.querySelectorAll('.tab-btn').forEach(function(b){
-      b.addEventListener('click', function(){
-        document.querySelectorAll('.tab-btn').forEach(function(x){ x.classList.remove('active'); });
-        document.querySelectorAll('.tab-panel').forEach(function(p){ p.classList.remove('active'); });
-        b.classList.add('active');
-        document.getElementById('panel-' + b.dataset.tab).classList.add('active');
-      });
-    });
-  </script>
 </body>
 </html>
