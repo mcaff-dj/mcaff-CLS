@@ -17,7 +17,7 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . "$Here\lib.ps1"
 . "$Here\productkyc-config.ps1"
 $RepoRoot = Split-Path -Parent $Here
-$OutPath = Join-Path $RepoRoot "product-kyc.html"
+$OutPath = Join-Path $RepoRoot "api/_reports/productkyc.html"
 
 function HEnc($s){ return [System.Web.HttpUtility]::HtmlEncode([string]$s) }
 function Cell($row,$i){
@@ -274,5 +274,6 @@ $html = @"
 </html>
 "@
 
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutPath) | Out-Null
 Set-Content -Path $OutPath -Value $html -Encoding utf8
 Write-Host "Wrote $OutPath ($([math]::Round((Get-Item $OutPath).Length/1KB)) KB)"

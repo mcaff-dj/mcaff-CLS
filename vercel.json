@@ -8,5 +8,15 @@
         { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
       ]
     }
-  ]
+  ],
+  "rewrites": [
+    { "source": "/mcaffeine.html", "destination": "/api/report/mcaffeine" },
+    { "source": "/hyphen.html", "destination": "/api/report/hyphen" },
+    { "source": "/product-kyc.html", "destination": "/api/report/productkyc" }
+  ],
+  "functions": {
+    "api/report/[card].js": {
+      "includeFiles": "api/_reports/**"
+    }
+  }
 }

@@ -237,5 +237,6 @@ Write-Host "[$($B.Brand)] building panels..."
 . "$Here\gen-panels.ps1"   # defines Build-DeliveryPanel, Build-ClassPanel, Build-NpsCsat, Build-ProdPkg using the vars above
 
 $html = Assemble-Report
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutPath) | Out-Null
 Set-Content -Path $OutPath -Value $html -Encoding utf8
 Write-Host "[$($B.Brand)] wrote $OutPath ($([math]::Round((Get-Item $OutPath).Length/1KB)) KB)"

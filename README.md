@@ -8,13 +8,14 @@ brands.
 
 | File | Description |
 |------|-------------|
-| `index.html` | Landing page linking to both reports |
-| `mcaffeine.html` | mCaffeine customer-query segment report |
-| `hyphen.html` | Hyphen customer-query segment report |
-| `vercel.json` | Vercel static-hosting config (clean URLs) |
+| `index.html` | Landing page — shows only the reports the signed-in user has been granted |
+| `login.html` | Google sign-in page |
+| `admin.html` | Admin-only: invite users, grant/revoke per-report access, view audit log |
+| `api/_reports/*.html` | The actual generated reports (mCaffeine, Hyphen, Product Calling KYC) — not publicly servable, only readable by `api/report/[card].js` after an auth + permission check |
+| `vercel.json` | Vercel static-hosting config (clean URLs, function file bundling) |
 
 Each report is a single self-contained HTML file (inline CSS/JS, no external
-requests) — it can also be opened directly in a browser.
+requests).
 
 ## Deploy on Vercel
 
@@ -34,6 +35,19 @@ npm i -g vercel
 vercel        # preview deploy
 vercel --prod # production deploy
 ```
+
+## Access control
+
+Reports require Google sign-in and per-user, per-report permission (granted by an
+admin at `/admin.html`) — they are no longer public static files. Required Vercel
+project environment variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `POSTGRES_URL` | Postgres connection string (Vercel Postgres/Neon or any standard Postgres provider) — stores users, permissions, audit log |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | OAuth Client ID credentials (Google Cloud Console → Credentials), redirect URI `https://<your-domain>/api/auth/callback` |
+| `SESSION_SECRET` | Random string (e.g. `openssl rand -hex 32`) used to sign session cookies |
+| `ADMIN_EMAILS` | Comma-separated emails auto-promoted to admin (with access to every report) on first login — bootstraps the first admin(s) since there's no self-serve signup |
 
 ## Data & privacy
 

@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Admin &mdash; Access Management</title>
+<style>
+  :root{
+    --page:#f9f9f7; --surface-card:#ffffff; --text-primary:#0b0b0b; --text-secondary:#52514e;
+    --text-muted:#898781; --border:rgba(11,11,11,0.10); --grid:#e1e0d9; --accent:#4a3aa7;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --page:#0d0d0d; --surface-card:#1a1a19; --text-primary:#ffffff; --text-secondary:#c3c2b7;
+      --text-muted:#898781; --border:rgba(255,255,255,0.10); --grid:#2c2c2a; --accent:#9085e9;
+    }
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;min-height:100vh;background:var(--page);color:var(--text-primary);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif;padding:32px 20px;}
+  .wrap{max-width:900px;margin:0 auto;}
+  .home-link{display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:20px;}
+  .home-link:hover{color:var(--text-primary);}
+  h1{font-size:22px;margin:0 0 6px;}
+  .sub{color:var(--text-secondary);font-size:13.5px;margin:0 0 24px;}
+  section{background:var(--surface-card);border:1px solid var(--border);border-radius:14px;padding:22px 24px;margin-bottom:22px;}
+  section h2{font-size:15px;margin:0 0 14px;}
+  .row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;align-items:flex-end;}
+  label{display:block;font-size:11.5px;color:var(--text-muted);margin-bottom:4px;}
+  input[type=text],input[type=email]{font-size:13px;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--page);color:var(--text-primary);font-family:inherit;min-width:200px;}
+  .chip-row{display:flex;gap:10px;flex-wrap:wrap;}
+  .chip{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;padding:6px 10px;border-radius:999px;border:1px solid var(--border);cursor:pointer;user-select:none;}
+  .chip input{margin:0;}
+  button{appearance:none;border:none;background:var(--accent);color:#fff;font-size:13px;font-weight:600;
+    padding:9px 16px;border-radius:8px;cursor:pointer;font-family:inherit;}
+  button:hover{opacity:.9;}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;}
+  th{text-align:left;padding:8px 10px;border-bottom:2px solid var(--grid);color:var(--text-secondary);}
+  td{padding:8px 10px;border-bottom:1px solid var(--grid);vertical-align:middle;}
+  .perm-toggle{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;padding:3px 8px;border-radius:999px;border:1px solid var(--border);cursor:pointer;margin:2px;}
+  .perm-toggle.on{background:rgba(26,156,92,.14);color:#1a9c5c;border-color:transparent;}
+  .msg{font-size:12.5px;color:var(--text-muted);margin-top:8px;}
+  .denied{padding:60px 20px;text-align:center;color:var(--text-secondary);}
+</style>
+</head>
+<body>
+  <div class="wrap" id="app" style="display:none;">
+    <a class="home-link" href="/">&larr; Home</a>
+    <h1>Access Management</h1>
+    <p class="sub">Invite people, grant/revoke per-report access, and see who's viewed what.</p>
+
+    <section>
+      <h2>Invite a user</h2>
+      <div class="row">
+        <div><label for="inv-email">Email</label><input type="email" id="inv-email" placeholder="name@company.com"></div>
+        <div><label for="inv-name">Name (optional)</label><input type="text" id="inv-name" placeholder="Full name"></div>
+      </div>
+      <div class="row">
+        <div class="chip-row" id="inv-perms"></div>
+      </div>
+      <button id="inv-submit">Invite / Update</button>
+      <div class="msg" id="inv-msg"></div>
+    </section>
+
+    <section>
+      <h2>Users &amp; permissions</h2>
+      <table>
+        <thead><tr><th>Email</th><th>Name</th><th>Admin</th><th>Reports</th></tr></thead>
+        <tbody id="users-body"></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Recent access (last 200)</h2>
+      <table>
+        <thead><tr><th>Email</th><th>Report</th><th>When</th><th>IP</th></tr></thead>
+        <tbody id="audit-body"></tbody>
+      </table>
+    </section>
+  </div>
+  <div id="denied" class="denied" style="display:none;">
+    <p>You don't have admin access.</p>
+    <a class="home-link" href="/" style="justify-content:center;">&larr; Back to Home</a>
+  </div>
+
+  <script>
+    var CARD_KEYS = [];
+    function esc(s){ var d=document.createElement('div'); d.textContent=(s==null?'':String(s)); return d.innerHTML; }
+
+    function renderInvitePerms(){
+      var wrap = document.getElementById('inv-perms');
+      wrap.innerHTML = CARD_KEYS.map(function(k){
+        return '<label class="chip"><input type="checkbox" value="'+esc(k)+'"> '+esc(k)+'</label>';
+      }).join('');
+    }
+
+    function togglePerm(userId, cardKey, on, btn){
+      fetch('/api/admin/permissions', {
+        method: on ? 'DELETE' : 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ userId: userId, cardKey: cardKey })
+      }).then(function(r){ return r.json(); }).then(function(){
+        loadUsers();
+      });
+    }
+
+    function loadUsers(){
+      fetch('/api/admin/users').then(function(r){ return r.json(); }).then(function(d){
+        CARD_KEYS = d.cardKeys || [];
+        renderInvitePerms();
+        var body = document.getElementById('users-body');
+        body.innerHTML = (d.users || []).map(function(u){
+          var perms = CARD_KEYS.map(function(k){
+            var on = u.permissions.indexOf(k) !== -1;
+            return '<span class="perm-toggle'+(on?' on':'')+'" data-uid="'+u.id+'" data-key="'+esc(k)+'" data-on="'+on+'">'+esc(k)+(on?' ✓':' +')+'</span>';
+          }).join('');
+          return '<tr><td>'+esc(u.email)+'</td><td>'+esc(u.name||'')+'</td><td>'+(u.is_admin?'Yes':'')+'</td><td>'+perms+'</td></tr>';
+        }).join('');
+        body.querySelectorAll('.perm-toggle').forEach(function(el){
+          el.addEventListener('click', function(){
+            togglePerm(el.dataset.uid, el.dataset.key, el.dataset.on === 'true', el);
+          });
+        });
+      });
+    }
+
+    function loadAudit(){
+      fetch('/api/admin/audit').then(function(r){ return r.json(); }).then(function(d){
+        var body = document.getElementById('audit-body');
+        body.innerHTML = (d.entries || []).map(function(e){
+          return '<tr><td>'+esc(e.email)+'</td><td>'+esc(e.cardLabel)+'</td><td>'+esc(new Date(e.accessed_at).toLocaleString())+'</td><td>'+esc(e.ip||'')+'</td></tr>';
+        }).join('');
+      });
+    }
+
+    document.getElementById('inv-submit').addEventListener('click', function(){
+      var email = document.getElementById('inv-email').value.trim();
+      var name = document.getElementById('inv-name').value.trim();
+      var perms = Array.prototype.slice.call(document.querySelectorAll('#inv-perms input:checked')).map(function(c){ return c.value; });
+      var msg = document.getElementById('inv-msg');
+      if(!email){ msg.textContent = 'Email is required.'; return; }
+      fetch('/api/admin/users', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ email: email, name: name, permissions: perms })
+      }).then(function(r){ return r.json(); }).then(function(d){
+        msg.textContent = d.error ? d.error : 'Saved.';
+        document.getElementById('inv-email').value = '';
+        document.getElementById('inv-name').value = '';
+        document.querySelectorAll('#inv-perms input').forEach(function(c){ c.checked = false; });
+        loadUsers();
+      });
+    });
+
+    fetch('/api/auth/me').then(function(r){ return r.json(); }).then(function(d){
+      if(!d.authenticated){ location.href = '/login.html?next=' + encodeURIComponent('/admin.html'); return; }
+      if(!d.isAdmin){ document.getElementById('denied').style.display = 'block'; return; }
+      document.getElementById('app').style.display = 'block';
+      loadUsers();
+      loadAudit();
+    });
+  </script>
+</body>
+</html>

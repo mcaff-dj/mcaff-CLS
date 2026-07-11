@@ -34,8 +34,8 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add mcaffeine.html hyphen.html
-          $changed = git status --porcelain mcaffeine.html hyphen.html
+          git add api/_reports/mcaffeine.html api/_reports/hyphen.html
+          $changed = git status --porcelain api/_reports/mcaffeine.html api/_reports/hyphen.html
           if ($changed) {
             $stamp = (Get-Date).ToUniversalTime().AddHours(5.5).ToString('yyyy-MM-dd HH:mm')
             git commit -m "Auto-refresh reports ($stamp IST)"

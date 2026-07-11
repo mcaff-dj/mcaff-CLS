@@ -8,7 +8,7 @@ $Brands = @(
         SpreadsheetId = "1fjrwKgi26q3kxsLsFrXP0KY0uAJNfcpTeHBQhCXwkPA"
         SheetName   = "mCaffeine"
         LastCol     = "AG"
-        OutFile     = "mcaffeine.html"
+        OutFile     = "api/_reports/mcaffeine.html"
         Months      = @("12_Dec'25","1_Jan'26","2_Feb'26","3_Mar'26","4_Apr'26","5_May'26","6_Jun'26","7_Jul'26")
         Classes     = @(
             @{ key="Delivery"; id="delivery"; label="Delivery"; color="var(--s1)" },
@@ -28,7 +28,7 @@ $Brands = @(
         SpreadsheetId = "11RM238fAcqZxLKF1zzrUB0fPTQgDO2kwfkzcQSoYjBg"
         SheetName   = "Hyphen"
         LastCol     = "AO"
-        OutFile     = "hyphen.html"
+        OutFile     = "api/_reports/hyphen.html"
         Months      = @("08_Aug'25","09_Sep'25","10_Oct'25","11_Nov'25","12_Dec'25","1_Jan'26","2_Feb'26","3_Mar'26","4_Apr'26","5_May'26","6_Jun'26","7_Jul'26")
         Classes     = @(
             @{ key="Delivery"; id="delivery"; label="Delivery"; color="var(--s1)" },

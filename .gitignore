@@ -4,3 +4,5 @@
 sheetdata-*.json
 sa_key*
 /data/
+
+node_modules/

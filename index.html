@@ -52,6 +52,16 @@
   .refresh-note.ok{color:#1a9c5c;}
   .refresh-note.err{color:#d6503f;}
   footer{margin-top:28px;text-align:center;font-size:11.5px;color:var(--text-muted);line-height:1.6;}
+  .acct-row{display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;margin:0 0 20px;font-size:12.5px;color:var(--text-secondary);}
+  .acct-row a{color:var(--text-secondary);text-decoration:none;font-weight:600;}
+  .acct-row a:hover{color:var(--text-primary);}
+  .signin-card{background:var(--surface-card);border:1px solid var(--border);border-radius:16px;padding:36px 28px;text-align:center;}
+  .signin-card p{margin:0 0 18px;color:var(--text-secondary);font-size:13.5px;}
+  .g-btn{display:inline-flex;align-items:center;gap:10px;text-decoration:none;font-size:14px;font-weight:600;
+    color:var(--text-primary);background:var(--page);border:1px solid var(--border);border-radius:10px;padding:11px 20px;}
+  .g-btn:hover{border-color:var(--mcaff);}
+  .g-btn svg{width:18px;height:18px;}
+  .empty-note{text-align:center;color:var(--text-muted);font-size:13px;padding:20px;}
 </style>
 <script>
   window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
@@ -65,32 +75,66 @@
       <h1>Customer Query Segment Reports</h1>
       <p>Monthly ticket analysis by query class, delivery partner, product &amp; batch.</p>
     </header>
-    <div class="toolbar">
-      <button class="refresh-btn" id="refreshBtn" type="button">&#8635; Refresh data now</button>
-      <span class="refresh-note" id="refreshNote">Auto-refreshes daily at 2:00 PM IST</span>
+    <div id="signedOut" style="display:none;">
+      <div class="signin-card">
+        <p>Sign in with your Google account to view the reports you've been granted access to.</p>
+        <a class="g-btn" id="signInBtn" href="#">
+          <svg viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.6 6.1 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.7-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 18.9 12 24 12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.6 6.1 29.6 4 24 4c-7.7 0-14.3 4.4-17.7 10.7z"/><path fill="#4CAF50" d="M24 44c5.5 0 10.5-2.1 14.3-5.6l-6.6-5.6C29.6 34.7 26.9 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.6 39.5 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.3-4.2 5.8l6.6 5.6C41.9 36.8 44 31.1 44 24c0-1.3-.1-2.7-.4-3.5z"/></svg>
+          Sign in with Google
+        </a>
+      </div>
     </div>
-    <div class="cards">
-      <a class="card mcaff" href="/mcaffeine.html">
-        <h2><span class="dot" style="background:var(--mcaff)"></span>mCaffeine</h2>
-        <p>Segment report across Delivery, Warehouse, Technical, Packaging, Product, plus NPS, CSAT and a Product &amp; Packaging drill-down.</p>
-        <span class="open">Open report <span class="arrow">&rarr;</span></span>
-      </a>
-      <a class="card hyphen" href="/hyphen.html">
-        <h2><span class="dot" style="background:var(--hyphen)"></span>Hyphen</h2>
-        <p>Segment report across Delivery, Warehouse, Technical, Packaging, Product, plus NPS, CSAT and a Product &amp; Packaging drill-down.</p>
-        <span class="open">Open report <span class="arrow">&rarr;</span></span>
-      </a>
-      <a class="card pkyc" href="/product-kyc.html">
-        <h2><span class="dot" style="background:var(--pkyc)"></span>Product Calling KYC</h2>
-        <p>Product feedback analysis &mdash; coming soon.</p>
-        <span class="open">Open report <span class="arrow">&rarr;</span></span>
-      </a>
+    <div id="signedIn" style="display:none;">
+      <div class="acct-row">
+        <span id="acctEmail"></span>
+        <a href="/admin.html" id="adminLink" style="display:none;">Admin</a>
+        <a href="/api/auth/logout">Sign out</a>
+      </div>
+      <div class="toolbar">
+        <button class="refresh-btn" id="refreshBtn" type="button">&#8635; Refresh data now</button>
+        <span class="refresh-note" id="refreshNote">Auto-refreshes daily at 2:00 PM IST</span>
+      </div>
+      <div class="cards" id="cardsWrap"></div>
     </div>
     <footer>
       Figures are aggregated segment counts computed from the Master KYC Raw Dump workbooks.<br>
       No raw ticket-level or customer PII data is included.
     </footer>
   </div>
+  <script>
+    (function(){
+      var CARD_META = {
+        mcaffeine: { cls:'mcaff', color:'var(--mcaff)', title:'mCaffeine', desc:'Segment report across Delivery, Warehouse, Technical, Packaging, Product, plus NPS, CSAT and a Product &amp; Packaging drill-down.' },
+        hyphen: { cls:'hyphen', color:'var(--hyphen)', title:'Hyphen', desc:'Segment report across Delivery, Warehouse, Technical, Packaging, Product, plus NPS, CSAT and a Product &amp; Packaging drill-down.' },
+        productkyc: { cls:'pkyc', color:'var(--pkyc)', title:'Product Calling KYC', desc:'Product feedback analysis by category &mdash; comparison tables and customer feedback themes.' }
+      };
+      fetch('/api/auth/me').then(function(r){ return r.json(); }).then(function(d){
+        if(!d.authenticated){
+          document.getElementById('signedOut').style.display = '';
+          document.getElementById('signInBtn').href = '/api/auth/login?next=' + encodeURIComponent(location.pathname);
+          return;
+        }
+        document.getElementById('signedIn').style.display = '';
+        document.getElementById('acctEmail').textContent = d.name || d.email;
+        if(d.isAdmin){ document.getElementById('adminLink').style.display = ''; }
+        var wrap = document.getElementById('cardsWrap');
+        if(!d.cards || d.cards.length === 0){
+          wrap.innerHTML = '<div class="empty-note">No reports have been shared with you yet. Contact your admin.</div>';
+          return;
+        }
+        wrap.innerHTML = d.cards.map(function(c){
+          var m = CARD_META[c.key] || { cls:'', color:'var(--text-muted)', title:c.label, desc:'' };
+          return '<a class="card '+m.cls+'" href="/api/report/'+encodeURIComponent(c.key)+'">'
+            + '<h2><span class="dot" style="background:'+m.color+'"></span>'+m.title+'</h2>'
+            + '<p>'+m.desc+'</p>'
+            + '<span class="open">Open report <span class="arrow">&rarr;</span></span></a>';
+        }).join('');
+      }).catch(function(){
+        document.getElementById('signedOut').style.display = '';
+        document.getElementById('signInBtn').href = '/api/auth/login';
+      });
+    })();
+  </script>
   <script>
     (function(){
       var btn = document.getElementById('refreshBtn');
