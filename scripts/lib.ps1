@@ -143,7 +143,7 @@ function Get-SheetRowsIncremental([string]$SpreadsheetId, [string]$SheetName, [s
         return $all
     }
 
-    $cached = @(Get-Content -Raw -Path $CachePath | ConvertFrom-Json)
+    $cached = Get-Content -Raw -Path $CachePath | ConvertFrom-Json
     $earliestTarget = $TargetMonths[0]
     $boundary = -1
     for ($i = 0; $i -lt $cached.Count; $i++) {

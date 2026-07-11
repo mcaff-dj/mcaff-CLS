@@ -52,6 +52,10 @@ if ($dataRows -isnot [System.Collections.Generic.List[object]]) {
 # Its Last Source Type / Parent Order columns are swapped vs the primary sheet, so each
 # kept row is realigned before merging; months that overlap with the primary sheet are
 # skipped there to avoid double-counting the same period from two different systems.
+# Its Unique column also uses a different convention: a numeric duplicate-rank ("1","2",...)
+# instead of the primary sheet's literal "Unique"/"Duplicate" strings, so every downstream
+# `-eq "Unique"` check (KPI cards, per-category tables) silently dropped these rows until
+# the value is normalized here (rank "1" -> "Unique", everything else -> "Duplicate").
 if ($B.ContainsKey('Secondary')) {
     Write-Host "[$($B.Brand)] fetching secondary sheet ($($B.Secondary.SpreadsheetId))..."
     $secRows = Get-SheetRowsChunked $B.Secondary.SpreadsheetId $B.Secondary.SheetName $B.Secondary.LastCol
@@ -64,6 +68,9 @@ if ($B.ContainsKey('Secondary')) {
         $row = @($r)
         if ($swapA -lt $row.Count -and $swapB -lt $row.Count) {
             $t = $row[$swapA]; $row[$swapA] = $row[$swapB]; $row[$swapB] = $t
+        }
+        if ($Col.uniq -lt $row.Count) {
+            $row[$Col.uniq] = if ((Cell $row $Col.uniq).Trim() -eq "1") { "Unique" } else { "Duplicate" }
         }
         [void]$dataRows.Add($row)
         $keptCount++
