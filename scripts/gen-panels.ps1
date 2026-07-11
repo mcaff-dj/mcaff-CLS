@@ -96,12 +96,16 @@ function Build-DeliveryPanel {
 
     $insightItems = @(Get-CategoryInsightItems $delivery) + @(Get-DeliveryPartnerInsight $delivery)
     $insights = Build-InsightsCard "Insights &mdash; Delivery" $insightItems
+    $weekly = Build-WeeklyDeliveryBlock
 
     return @"
+<div class="gran-monthly">
 $filter
 <section><h2>Delivery Complaints by Issue Category</h2><p class="desc">Percent = complaints &divide; that month's total order volume ("Total Sales M"). Recomputes for the partner selected above.</p>$($sb1.ToString())</section>
 <section><h2>Delivery Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line). Recomputes for the partner selected above.</p>$($sb2.ToString())</section>
 <section><h2>Delivery Complaints wrt Delivery Partners</h2><p class="desc">Percent = that partner's complaint count &divide; the average of its "Partner Allocation" for the month. "-" means allocation wasn't recorded that month.</p>$($sb3.ToString())</section>
+</div>
+$weekly
 $insights
 $js
 "@
@@ -380,7 +384,7 @@ function Assemble-Report {
     <label for="gran-month-select">Month</label>
     <select id="gran-month-select" onchange="applyGranularity()">$($granOpts.ToString())</select>
   </div>
-  <span class="gran-note">Weekly applies to Overview and each complaint-category tab &mdash; not Delivery, NPS/CSAT, or Product &amp; Packaging.</span>
+  <span class="gran-note">Weekly applies to Overview and every complaint-category tab (including Delivery's category/partner breakdowns, but not its partner filter) &mdash; not NPS/CSAT or Product &amp; Packaging.</span>
 </div>
 <script>
 (function(){

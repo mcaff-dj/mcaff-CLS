@@ -138,3 +138,85 @@ function Build-WeeklyClassBlock($cls){
     }
     return $sb.ToString()
 }
+
+# Delivery-specific weekly block: category breakdown + chart (like Build-WeeklyClassBlock)
+# plus a partner-vs-allocation table. The interactive partner FILTER dropdown stays
+# monthly-only (that's the complex ticket-tuple JS re-aggregation system); this just
+# shows the same figures the monthly "All Partners" view shows, with weeks as columns.
+function Build-WeeklyDeliveryBlock {
+    if($script:WeeklyEligibleMonths.Count -eq 0){ return "" }
+    $delivery = @($unique | Where-Object { (Cell $_ $Col.cls) -eq "Delivery" })
+    $catByMonth = Get-WeekBucketsAllMonths $delivery $Col.cat
+
+    $partnerByMonth = @(); $allocByMonth = @()
+    for($m=0; $m -lt $N; $m++){ $partnerByMonth += ,@{ byKey=[ordered]@{}; keyTot=@{} }; $allocByMonth += ,@{} }
+    foreach($r in $delivery){
+        $moLbl = Cell $r $Col.month
+        if(-not $script:MonthIndexLookup.ContainsKey($moLbl)){ continue }
+        $mi2 = $script:MonthIndexLookup[$moLbl]
+        $wkVal = Cell $r $Col.week; if([string]::IsNullOrWhiteSpace($wkVal) -or $wkVal -eq "#N/A"){ continue }
+        $p = Cell $r $Col.partner; if([string]::IsNullOrWhiteSpace($p)){ $p = "(blank)" }
+        $bkt = $partnerByMonth[$mi2]
+        if(-not $bkt.byKey.Contains($p)){ $bkt.byKey[$p] = @{} }
+        if($bkt.byKey[$p].ContainsKey($wkVal)){ $bkt.byKey[$p][$wkVal]++ } else { $bkt.byKey[$p][$wkVal] = 1 }
+        if(-not $bkt.keyTot.ContainsKey($p)){ $bkt.keyTot[$p] = 0 }; $bkt.keyTot[$p]++
+
+        $ar = Cell $r $Col.alloc; $av = 0.0
+        if([double]::TryParse(($ar -replace ',',''), [ref]$av) -and $av -gt 0){
+            $ak = "$p|$wkVal"; $am = $allocByMonth[$mi2]
+            if(-not $am.ContainsKey($ak)){ $am[$ak] = @{ sum = 0.0; cnt = 0 } }
+            $am[$ak].sum += $av; $am[$ak].cnt++
+        }
+    }
+
+    $sb = New-Object System.Text.StringBuilder
+    foreach($mi in $script:WeeklyEligibleMonths){
+        $weekList = $weeksByMonthIdx[$mi]
+        $weekSalesMap = Get-WeekSalesMap $mi
+        $catBkt = $catByMonth[$mi]
+
+        [void]$sb.Append("<div class='gran-weekly' data-month='$mi' style='display:none;'>")
+        [void]$sb.Append("<p class='note'>Weekly view for $(HEnc (PrettyMonth $months[$mi])).</p>")
+
+        if($catBkt.keyTot.Count -eq 0){
+            [void]$sb.Append("<p class='note'>No Delivery tickets in $(HEnc (PrettyMonth $months[$mi])).</p></div>")
+            continue
+        }
+        $catOrder = @($catBkt.keyTot.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { $_.Key })
+        $rowDefs = @($catOrder | ForEach-Object { @{ key=$_; label=$_ } })
+        $vals = @(foreach($wk in $weekList){ $t=0; foreach($k in $catOrder){ if($catBkt.byKey[$k].ContainsKey($wk)){ $t += $catBkt.byKey[$k][$wk] } }; $t })
+
+        [void]$sb.Append((Build-PeriodPivot "Delivery Complaints (Weekly)" "Query Category" $rowDefs $catBkt.byKey $weekList $weekSalesMap $mi))
+        [void]$sb.Append((Build-PeriodChart "Delivery Complaints wrt Sales (Weekly)" $vals $weekList $weekSalesMap $mi "var(--s1)" "var(--s3)"))
+
+        $pBkt = $partnerByMonth[$mi]
+        if($pBkt.keyTot.Count -gt 0){
+            $partnerOrder = @($pBkt.keyTot.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { $_.Key })
+            $am = $allocByMonth[$mi]
+            $tsb = New-Object System.Text.StringBuilder
+            [void]$tsb.Append("<div class='pivot-wrap'><div class='pivot-title'>Delivery Complaints wrt Delivery Partners (Weekly)</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Delivery Partner Name</th>")
+            foreach($wk in $weekList){ [void]$tsb.Append("<th colspan='2' class='month-hdr'>$(HEnc (WeekColHeader $wk $mi))</th>") }
+            [void]$tsb.Append("</tr><tr>")
+            foreach($wk in $weekList){ [void]$tsb.Append("<th class='sub-hdr'>Complaints</th><th class='sub-hdr'>wrt allocation</th>") }
+            [void]$tsb.Append("</tr></thead><tbody>")
+            $ri = 0
+            foreach($p in $partnerOrder){
+                $ri++; $z = if($ri % 2 -eq 1){ "zebra" } else { "" }
+                [void]$tsb.Append("<tr class='$z'><td class='rowlabel'>$(HEnc $p)</td>")
+                foreach($wk in $weekList){
+                    $cnt = 0; if($pBkt.byKey[$p].ContainsKey($wk)){ $cnt = $pBkt.byKey[$p][$wk] }
+                    $ak = "$p|$wk"; $avg = 0
+                    if($am.ContainsKey($ak) -and $am[$ak].cnt -gt 0){ $avg = $am[$ak].sum / $am[$ak].cnt }
+                    $cd = if($cnt -gt 0){ $cnt.ToString('N0') } else { "-" }
+                    $pd = if($cnt -gt 0 -and $avg -gt 0){ "$(Round1 ($cnt/$avg*100))%" } else { "-" }
+                    [void]$tsb.Append("<td class='num'>$cd</td><td class='pct'>$pd</td>")
+                }
+                [void]$tsb.Append("</tr>")
+            }
+            [void]$tsb.Append("</tbody></table></div></div>")
+            [void]$sb.Append($tsb.ToString())
+        }
+        [void]$sb.Append("</div>")
+    }
+    return $sb.ToString()
+}
