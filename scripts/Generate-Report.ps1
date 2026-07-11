@@ -34,8 +34,41 @@ if ($env:REPORT_CACHE_FILE -and (Test-Path $env:REPORT_CACHE_FILE)) {
     Write-Host "[$($B.Brand)] loading main rows from cache $($env:REPORT_CACHE_FILE)"
     $dataRows = Get-Content -Raw -Path $env:REPORT_CACHE_FILE | ConvertFrom-Json
 } else {
-    Write-Host "[$($B.Brand)] fetching main sheet..."
-    $dataRows = Get-SheetRowsChunked $B.SpreadsheetId $B.SheetName $B.LastCol
+    # Rows for months older than the last 3 are treated as settled and reused from the
+    # persisted primary-sheet cache instead of being re-fetched on every refresh - only
+    # the last-3-months tail (plus anything newly appended) is pulled live each time.
+    Write-Host "[$($B.Brand)] fetching main sheet (incremental: last 3 months live, rest from cache)..."
+    $primaryCachePath = Join-Path $RepoRoot "data/$($B.Brand)_primary_cache.json"
+    $targetMonths = $B.Months[-3..-1]
+    $dataRows = Get-SheetRowsIncremental $B.SpreadsheetId $B.SheetName $B.LastCol $primaryCachePath $Col.month $targetMonths
+}
+if ($dataRows -isnot [System.Collections.Generic.List[object]]) {
+    $listed = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $dataRows) { [void]$listed.Add($r) }
+    $dataRows = $listed
+}
+
+# Older KYC raw-dump sheet covering months the primary sheet doesn't (see brands.ps1).
+# Its Last Source Type / Parent Order columns are swapped vs the primary sheet, so each
+# kept row is realigned before merging; months that overlap with the primary sheet are
+# skipped there to avoid double-counting the same period from two different systems.
+if ($B.ContainsKey('Secondary')) {
+    Write-Host "[$($B.Brand)] fetching secondary sheet ($($B.Secondary.SpreadsheetId))..."
+    $secRows = Get-SheetRowsChunked $B.Secondary.SpreadsheetId $B.Secondary.SheetName $B.Secondary.LastCol
+    $swapA, $swapB = $B.Secondary.SwapCols
+    $exclude = $B.Secondary.ExcludeMonths
+    $keptCount = 0
+    foreach ($r in $secRows) {
+        $mo = Cell $r $Col.month
+        if ($exclude -contains $mo) { continue }
+        $row = @($r)
+        if ($swapA -lt $row.Count -and $swapB -lt $row.Count) {
+            $t = $row[$swapA]; $row[$swapA] = $row[$swapB]; $row[$swapB] = $t
+        }
+        [void]$dataRows.Add($row)
+        $keptCount++
+    }
+    Write-Host "[$($B.Brand)] secondary sheet: $($secRows.Count) rows fetched, $keptCount kept after excluding overlapping months"
 }
 Write-Host "[$($B.Brand)] fetched $($dataRows.Count) rows; fetching small tabs..."
 $mom     = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.mom

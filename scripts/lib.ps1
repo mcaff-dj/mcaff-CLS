@@ -110,9 +110,11 @@ function Get-SheetValues([string]$SpreadsheetId, [string]$Range, [int]$TimeoutSe
 # Fetch a large sheet in row chunks (returns array of row arrays, no header).
 # Auto-detects the end of data (stops once a chunk comes back short of ChunkSize) rather
 # than relying on a hardcoded row count, so it never silently misses newly added rows.
-function Get-SheetRowsChunked([string]$SpreadsheetId, [string]$SheetName, [string]$LastCol, [int]$ChunkSize = 10000) {
+# StartRow lets a caller resume mid-sheet (1-based sheet row, e.g. 2 = first data row)
+# instead of always re-fetching from the top - used by Get-SheetRowsIncremental below.
+function Get-SheetRowsChunked([string]$SpreadsheetId, [string]$SheetName, [string]$LastCol, [int]$ChunkSize = 10000, [int]$StartRow = 2) {
     $all = New-Object System.Collections.Generic.List[object]
-    $start = 2
+    $start = $StartRow
     while ($true) {
         $end = $start + $ChunkSize - 1
         $rows = Get-SheetValues $SpreadsheetId "'$SheetName'!A$start`:$LastCol$end"
@@ -123,4 +125,44 @@ function Get-SheetRowsChunked([string]$SpreadsheetId, [string]$SheetName, [strin
         $start = $end + 1
     }
     return $all
+}
+
+# Incremental fetch: on first run (no cache yet) does a full fetch and seeds the cache.
+# On later runs, trusts that rows for months older than the last-3-months window are
+# settled and re-fetches only the tail starting from the first cached row that falls
+# inside that window - merging it back over the corresponding cached tail. This assumes
+# the sheet is append-only (new tickets added at the bottom); if the sheet owner ever
+# edits/inserts a row for an old month ABOVE that boundary, it would be missed - the
+# same trade-off the user explicitly asked for ("only refresh last 3 months").
+function Get-SheetRowsIncremental([string]$SpreadsheetId, [string]$SheetName, [string]$LastCol, [string]$CachePath, [int]$MonthColIdx, [string[]]$TargetMonths) {
+    if (-not (Test-Path $CachePath)) {
+        Write-Host "  no incremental cache yet at $CachePath - doing a full fetch"
+        $all = Get-SheetRowsChunked $SpreadsheetId $SheetName $LastCol
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $CachePath) | Out-Null
+        Set-Content -Path $CachePath -Value (ConvertTo-Json -InputObject $all -Depth 6 -Compress) -Encoding utf8
+        return $all
+    }
+
+    $cached = @(Get-Content -Raw -Path $CachePath | ConvertFrom-Json)
+    $earliestTarget = $TargetMonths[0]
+    $boundary = -1
+    for ($i = 0; $i -lt $cached.Count; $i++) {
+        $row = $cached[$i]
+        $mo = if ($row -is [System.Collections.IList] -and $MonthColIdx -lt $row.Count) { $row[$MonthColIdx] } else { $null }
+        if ($mo -eq $earliestTarget) { $boundary = $i; break }
+    }
+    if ($boundary -lt 0) {
+        Write-Host "  '$earliestTarget' not found in cache - refetching everything this once"
+        $all = Get-SheetRowsChunked $SpreadsheetId $SheetName $LastCol
+        Set-Content -Path $CachePath -Value (ConvertTo-Json -InputObject $all -Depth 6 -Compress) -Encoding utf8
+        return $all
+    }
+
+    Write-Host "  reusing $boundary cached rows (months before $earliestTarget); refetching from row $($boundary + 2) onward"
+    $freshTail = Get-SheetRowsChunked $SpreadsheetId $SheetName $LastCol -StartRow ($boundary + 2)
+    $merged = New-Object System.Collections.Generic.List[object]
+    for ($i = 0; $i -lt $boundary; $i++) { $merged.Add($cached[$i]) }
+    foreach ($r in $freshTail) { $merged.Add($r) }
+    Set-Content -Path $CachePath -Value (ConvertTo-Json -InputObject $merged -Depth 6 -Compress) -Encoding utf8
+    return $merged
 }
