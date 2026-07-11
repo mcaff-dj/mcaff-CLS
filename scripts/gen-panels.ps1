@@ -1,232 +1,203 @@
 # Panel builders, dot-sourced by Generate-Report.ps1 (shares its variables/functions).
 
-function Build-DeliveryPanel {
-    $delivery = $unique | Where-Object { (Cell $_ $Col.cls) -eq "Delivery" }
-    $catTot=@{}; foreach($r in $delivery){ $c=Cell $r $Col.cat; if([string]::IsNullOrWhiteSpace($c)){$c="(blank)"}; if(-not $catTot.ContainsKey($c)){$catTot[$c]=0}; $catTot[$c]++ }
-    $catOrder=@($catTot.GetEnumerator()|Sort-Object Value -Descending|ForEach-Object{$_.Key})
-    $pTot=@{}; foreach($r in $delivery){ $p=Cell $r $Col.partner; if([string]::IsNullOrWhiteSpace($p)){$p="(blank)"}; if(-not $pTot.ContainsKey($p)){$pTot[$p]=0}; $pTot[$p]++ }
-    $partnerOrder=@($pTot.GetEnumerator()|Sort-Object Value -Descending|ForEach-Object{$_.Key})
-
-    $tk=New-Object System.Collections.Generic.List[object]
-    foreach($r in $delivery){ $mo=Cell $r $Col.month; $mi=[array]::IndexOf($months,$mo); if($mi -lt 0){continue}
-        $cat=Cell $r $Col.cat; if([string]::IsNullOrWhiteSpace($cat)){$cat="(blank)"}; $ci=[array]::IndexOf($catOrder,$cat)
-        $p=Cell $r $Col.partner; if([string]::IsNullOrWhiteSpace($p)){$p="(blank)"}; $pi=[array]::IndexOf($partnerOrder,$p)
-        $tk.Add("[$mi,$ci,$pi]") }
-    $ticketsJson="[" + ($tk -join ",") + "]"
-    $catsJson="[" + (($catOrder|ForEach-Object{'"'+(JEnc $_)+'"'}) -join ",") + "]"
-    $partnersJson="[" + (($partnerOrder|ForEach-Object{'"'+(JEnc $_)+'"'}) -join ",") + "]"
-    $monthsJson="[" + (($months|ForEach-Object{'"'+(JEnc $_)+'"'}) -join ",") + "]"
-    $salesJson="[" + (($salesArr|ForEach-Object{[string]$_}) -join ",") + "]"
-
-    $W=1200;$H=380;$padL=55;$padR=55;$padT=40;$padB=55;$plotW=$W-$padL-$padR;$plotH=$H-$padT-$padB;$slot=$plotW/$N;$barW=$slot*0.55
-
-    $sb1=New-Object System.Text.StringBuilder
-    [void]$sb1.Append("<div class='pivot-wrap'><div class='pivot-title'>Delivery Complaints</div><div class='pivot-scroll'><table class='pivot-table' id='cat-pivot-table'><thead><tr><th class='corner' rowspan='2'>Query Category</th>")
-    foreach($mo in $months){[void]$sb1.Append("<th colspan='2' class='month-hdr'>$(HEnc $mo)</th>")}
-    [void]$sb1.Append("</tr><tr>"); foreach($mo in $months){[void]$sb1.Append("<th class='sub-hdr'>Complaints</th><th class='sub-hdr'>wrt sales</th>")}
-    [void]$sb1.Append("</tr></thead><tbody>")
-    for($ci=0;$ci -lt $catOrder.Count;$ci++){ $z=if(($ci+1)%2 -eq 1){"zebra"}else{""}
-        [void]$sb1.Append("<tr class='$z'><td class='rowlabel'>$(HEnc $catOrder[$ci])</td>")
-        for($mi=0;$mi -lt $N;$mi++){[void]$sb1.Append("<td class='num' id='cat-$ci-mo-$mi-cnt'>-</td><td class='pct' id='cat-$ci-mo-$mi-pct'>-</td>")}
-        [void]$sb1.Append("</tr>") }
-    [void]$sb1.Append("<tr class='total-row'><td class='rowlabel'>Grand Total</td>")
-    for($mi=0;$mi -lt $N;$mi++){[void]$sb1.Append("<td class='num' id='cat-total-mo-$mi-cnt'>-</td><td class='pct' id='cat-total-mo-$mi-pct'>-</td>")}
-    [void]$sb1.Append("</tr></tbody></table></div></div>")
-
-    $sb2=New-Object System.Text.StringBuilder
-    [void]$sb2.Append("<div class='card'><div class='pivot-title' style='margin-bottom:18px;'>Delivery Complaints wrt Sales</div><div class='legend-row' style='justify-content:center;'><div class='legend-item'><span class='swatch' style='background:var(--s1);'></span><span class='lname'>Complaints</span></div><div class='legend-item'><span class='swatch' style='background:var(--s3);border-radius:50%;'></span><span class='lname'>wrt sales %</span></div></div>")
-    [void]$sb2.Append("<svg viewBox='0 0 $W $H' width='100%' height='$H' role='img'><line x1='$padL' y1='$($padT+$plotH)' x2='$($W-$padR)' y2='$($padT+$plotH)' stroke='var(--baseline)' stroke-width='1'/>")
-    for($i=0;$i -lt $N;$i++){ $cx=$padL+$slot*$i+$slot/2; $bx=$cx-$barW/2; $ml=PrettyMonth $months[$i]
-        [void]$sb2.Append("<rect id='d-bar-$i' x='$bx' y='$($padT+$plotH)' width='$barW' height='0' fill='var(--s1)' rx='2'/><text id='d-barval-$i' x='$cx' y='$($padT+$plotH-8)' text-anchor='middle' font-size='10.5' fill='var(--text-primary)' font-weight='600'></text><text x='$cx' y='$($H-$padB+18)' text-anchor='middle' font-size='10.5' fill='var(--text-muted)'>$ml</text>") }
-    [void]$sb2.Append("<polyline id='d-polyline' points='' fill='none' stroke='var(--s3)' stroke-width='2'/>")
-    for($i=0;$i -lt $N;$i++){[void]$sb2.Append("<circle id='d-dot-$i' cx='0' cy='0' r='3' fill='var(--s3)' visibility='hidden'/><text id='d-dotval-$i' x='0' y='0' text-anchor='middle' font-size='10.5' font-weight='600' fill='var(--s3)'></text>")}
-    [void]$sb2.Append("</svg></div>")
-
-    $pm=[ordered]@{}; $aSum=@{}; $aCnt=@{}
-    foreach($r in $delivery){ $p=Cell $r $Col.partner; if([string]::IsNullOrWhiteSpace($p)){$p="(blank)"}; $mo=Cell $r $Col.month; if([string]::IsNullOrWhiteSpace($mo)){continue}
-        if(-not $pm.Contains($p)){$pm[$p]=@{}}; if($pm[$p].ContainsKey($mo)){$pm[$p][$mo]++}else{$pm[$p][$mo]=1}
-        $ar=Cell $r $Col.alloc; $av=0.0; if([double]::TryParse(($ar -replace ',',''),[ref]$av) -and $av -gt 0){ $ak="$p|$mo"; if($aSum.ContainsKey($ak)){$aSum[$ak]+=$av;$aCnt[$ak]++}else{$aSum[$ak]=$av;$aCnt[$ak]=1} } }
-    $sb3=New-Object System.Text.StringBuilder
-    [void]$sb3.Append("<div class='pivot-wrap'><div class='pivot-title'>Delivery Complaints wrt Delivery Partners</div><div class='pivot-scroll'><table class='pivot-table' id='partner-pivot-table'><thead><tr><th class='corner' rowspan='2'>Delivery Partner Name</th>")
-    foreach($mo in $months){[void]$sb3.Append("<th colspan='2' class='month-hdr'>$(HEnc $mo)</th>")}
-    [void]$sb3.Append("</tr><tr>"); foreach($mo in $months){[void]$sb3.Append("<th class='sub-hdr'>Complaints</th><th class='sub-hdr'>wrt allocation</th>")}
-    [void]$sb3.Append("</tr></thead><tbody>")
-    $ri=0; foreach($p in $partnerOrder){ $ri++; $z=if($ri%2 -eq 1){"zebra"}else{""}
-        [void]$sb3.Append("<tr class='$z' data-partner=""$(HEnc $p)""><td class='rowlabel'>$(HEnc $p)</td>")
-        foreach($mo in $months){ $cnt=0; if($pm[$p].ContainsKey($mo)){$cnt=$pm[$p][$mo]}; $ak="$p|$mo"; $avg=0; if($aCnt.ContainsKey($ak) -and $aCnt[$ak] -gt 0){$avg=$aSum[$ak]/$aCnt[$ak]}
-            $cd=if($cnt -gt 0){$cnt.ToString('N0')}else{"-"}; $pd=if($cnt -gt 0 -and $avg -gt 0){"$(Round1 ($cnt/$avg*100))%"}else{"-"}
-            [void]$sb3.Append("<td class='num'>$cd</td><td class='pct'>$pd</td>") }
-        [void]$sb3.Append("</tr>") }
-    [void]$sb3.Append("</tbody></table></div></div>")
-
-    $filter="<div class='filter-row' style='display:flex;align-items:center;gap:10px;margin:0 0 20px;flex-wrap:wrap;'><label for='delivery-partner-filter' style='font-size:13px;color:var(--text-secondary);font-weight:500;'>Filter by Delivery Partner:</label><select id='delivery-partner-filter' onchange='onDeliveryPartnerChange(this.value)' style='font-size:13px;padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;'><option value=''>All Partners</option>" + (($partnerOrder|ForEach-Object{"<option value=""$(HEnc $_)"">$(HEnc $_)</option>"}) -join "") + "</select><span id='delivery-filter-note' style='font-size:12px;color:var(--text-muted);'></span></div>"
-
-    $js = @"
-<script>
-(function(){
-  var DT=$ticketsJson, CATS=$catsJson, PARTNERS=$partnersJson, MONTHS=$monthsJson, SALES=$salesJson, N=MONTHS.length;
-  var padL=$padL,padT=$padT,plotH=$plotH,slot=$slot,barW=$barW, BAR=null,PCT=null;
-  function agg(pi){ var cm=CATS.map(function(){return new Array(N).fill(0)}), tot=new Array(N).fill(0), tc=0;
-    for(var i=0;i<DT.length;i++){ var t=DT[i],mo=t[0],c=t[1],p=t[2]; if(mo<0||mo>=N||c<0||c>=CATS.length||p<0||p>=PARTNERS.length)continue; if(pi!==null&&p!==pi)continue; cm[c][mo]++; tot[mo]++; tc++; }
-    return {cm:cm,tot:tot,tc:tc}; }
-  function fmt(n){return n.toLocaleString('en-IN');}
-  function nice(v){ if(v<=0)return 10; var m=Math.pow(10,Math.floor(Math.log10(v))); var s=[1,2,2.5,5,10]; for(var i=0;i<s.length;i++){var c=s[i]*m; if(c>=v)return c;} return 10*m; }
-  function rct(a){ for(var ci=0;ci<CATS.length;ci++){ for(var mi=0;mi<N;mi++){ var cnt=a.cm[ci][mi],sm=SALES[mi],p=sm>0?Math.round(cnt/sm*1000)/10:0; document.getElementById('cat-'+ci+'-mo-'+mi+'-cnt').textContent=cnt>0?fmt(cnt):'-'; document.getElementById('cat-'+ci+'-mo-'+mi+'-pct').textContent=p+'%'; } }
-    for(var m2=0;m2<N;m2++){ var t=a.tot[m2],sm2=SALES[m2],p2=sm2>0?Math.round(t/sm2*1000)/10:0; document.getElementById('cat-total-mo-'+m2+'-cnt').textContent=fmt(t); document.getElementById('cat-total-mo-'+m2+'-pct').textContent=p2+'%'; } }
-  function rch(a){ var vals=a.tot, pcts=vals.map(function(v,i){var sm=SALES[i];return sm>0?Math.round(v/sm*10000)/100:0;});
-    BAR=nice(Math.max.apply(null,vals)*1.15); PCT=nice(Math.max.apply(null,pcts)*1.2); var pts=[];
-    for(var i=0;i<N;i++){ var cx=padL+slot*i+slot/2,bx=cx-barW/2,bh=plotH*(vals[i]/BAR),by=padT+plotH-bh;
-      var r=document.getElementById('d-bar-'+i); r.setAttribute('y',by); r.setAttribute('height',bh);
-      var bv=document.getElementById('d-barval-'+i); bv.setAttribute('y',by-8); bv.textContent=vals[i]>0?fmt(vals[i]):'';
-      var ly=padT+plotH-(plotH*(pcts[i]/PCT)); pts.push(cx+','+ly);
-      var d=document.getElementById('d-dot-'+i); d.setAttribute('cx',cx); d.setAttribute('cy',ly); d.setAttribute('visibility','visible');
-      var dv=document.getElementById('d-dotval-'+i); dv.setAttribute('x',cx); dv.setAttribute('y',ly-10); dv.textContent=pcts[i]+'%'; }
-    document.getElementById('d-polyline').setAttribute('points',pts.join(' ')); }
-  function fpt(sel){ document.querySelectorAll('#partner-pivot-table tbody tr').forEach(function(row){ row.style.display=(!sel||row.getAttribute('data-partner')===sel)?'':'none'; }); }
-  window.onDeliveryPartnerChange=function(sel){ try{ var idx=(sel&&sel.length)?PARTNERS.indexOf(sel):null; var a=agg(idx); rct(a); rch(a); fpt(sel);
-      var note=document.getElementById('delivery-filter-note'); if(note){note.textContent=sel?('('+fmt(a.tc)+' tickets for '+sel+')'):'';}
-      var kv=document.getElementById('delivery-kpi-unique-value'); if(kv){kv.textContent=fmt(a.tc);}
-      var kl=document.getElementById('delivery-kpi-unique-label'); if(kl){kl.textContent=sel?('Tickets ('+sel+')'):'Unique Tickets';}
-    }catch(e){ var n2=document.getElementById('delivery-filter-note'); if(n2){n2.textContent='Filter error: '+e.message; n2.style.color='var(--s6)';} if(window.console)console.error('Delivery filter error',e); } };
-  function init(){ onDeliveryPartnerChange(''); }
-  if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',init);}else{init();}
-})();
-</script>
-"@
-
-    $insightItems = @(Get-CategoryInsightItems $delivery) + @(Get-DeliveryPartnerInsight $delivery)
-    $insights = Build-InsightsCard "Insights &mdash; Delivery" $insightItems
-    $weekly = Build-WeeklyDeliveryBlock
-
-    return @"
-<div class="gran-monthly">
-$filter
-<section><h2>Delivery Complaints by Issue Category</h2><p class="desc">Percent = complaints &divide; that month's total order volume ("Total Sales M"). Recomputes for the partner selected above.</p>$($sb1.ToString())</section>
-<section><h2>Delivery Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line). Recomputes for the partner selected above.</p>$($sb2.ToString())</section>
-<section><h2>Delivery Complaints wrt Delivery Partners</h2><p class="desc">Percent = that partner's complaint count &divide; the average of its "Partner Allocation" for the month. "-" means allocation wasn't recorded that month.</p>$($sb3.ToString())</section>
-</div>
-$weekly
-$insights
-$js
-"@
-}
-
-function Build-TechnicalPanel($cls){
+# Generic bidirectional category <-> second-dimension cross-filter panel, used by
+# every class that has a meaningful second breakdown dimension (Delivery: partner,
+# Technical: platform, Warehouse: facility, Product/Suggestion: product name).
+# Clicking a row in EITHER table filters the OTHER table + chart to that selection;
+# the clicked table itself keeps showing its full breakdown so the user can pick again.
+# Packaging & Operational has no viable second dimension (its QA fields are <1% populated)
+# so it stays on the plain single-table Build-ClassPanel below.
+function Build-CrossFilterPanel($cls, $dim2Key, $dim2Label, $dim2Title, $pctMode, $dim2PctLabel, $dim2Cap, $coverageMode){
     $subset = $unique | Where-Object { (Cell $_ $Col.cls) -eq $cls.key }
+    $pfx = $cls.id
+    $dim2Col = $Col[$dim2Key]
+
     $catTot=@{}; foreach($r in $subset){ $c=Cell $r $Col.cat; if([string]::IsNullOrWhiteSpace($c)){$c="(blank)"}; if(-not $catTot.ContainsKey($c)){$catTot[$c]=0}; $catTot[$c]++ }
     $catOrder=@($catTot.GetEnumerator()|Sort-Object Value -Descending|ForEach-Object{$_.Key})
-    $platTot=@{}; foreach($r in $subset){ $p=Cell $r $Col.platform; if([string]::IsNullOrWhiteSpace($p)){$p="(blank)"}; if(-not $platTot.ContainsKey($p)){$platTot[$p]=0}; $platTot[$p]++ }
-    $platOrder=@($platTot.GetEnumerator()|Sort-Object Value -Descending|ForEach-Object{$_.Key})
-    $platNonBlank=0; foreach($p in $platOrder){ if($p -ne "(blank)"){$platNonBlank+=$platTot[$p]} }
-    $platCoveragePct=if($subset.Count -gt 0){Round1 ($platNonBlank/$subset.Count*100)}else{0}
+
+    $dim2TotAll=@{}; foreach($r in $subset){ $v=Cell $r $dim2Col; if([string]::IsNullOrWhiteSpace($v)){$v="(blank)"}; if(-not $dim2TotAll.ContainsKey($v)){$dim2TotAll[$v]=0}; $dim2TotAll[$v]++ }
+    $dim2OrderFull=@($dim2TotAll.GetEnumerator()|Sort-Object Value -Descending|ForEach-Object{$_.Key})
+    $dim2Capped = $dim2OrderFull.Count -gt $dim2Cap
+    $dim2Top = New-Object 'System.Collections.Generic.HashSet[string]'
+    if($dim2Capped){
+        $topVals = @($dim2OrderFull | Select-Object -First ($dim2Cap-1))
+        $dim2Order = @($topVals) + @("(other)")
+        foreach($v in $topVals){ [void]$dim2Top.Add($v) }
+    } else {
+        $dim2Order = $dim2OrderFull
+        foreach($v in $dim2OrderFull){ [void]$dim2Top.Add($v) }
+    }
+    $otherIdx = $dim2Order.Count - 1
+
+    $dim2NonBlank=0; foreach($kv in $dim2TotAll.GetEnumerator()){ if($kv.Key -ne "(blank)"){$dim2NonBlank+=$kv.Value} }
+    $dim2CoveragePct=if($subset.Count -gt 0){Round1 ($dim2NonBlank/$subset.Count*100)}else{0}
     $firstCoveredMonth=$null
-    foreach($mo in $months){ $has=$false
-        foreach($r in $subset){ if((Cell $r $Col.month) -eq $mo -and -not [string]::IsNullOrWhiteSpace((Cell $r $Col.platform))){$has=$true;break} }
-        if($has){ $firstCoveredMonth=$mo; break } }
+    if($coverageMode -eq "sinceFirst"){
+        foreach($mo in $months){ $has=$false
+            foreach($r in $subset){ if((Cell $r $Col.month) -eq $mo -and -not [string]::IsNullOrWhiteSpace((Cell $r $dim2Col))){$has=$true;break} }
+            if($has){ $firstCoveredMonth=$mo; break } }
+    }
+    $coverageNote = switch($coverageMode){
+        "sinceFirst" { if($firstCoveredMonth){ "<p class='desc'>$(HEnc $dim2Label) has only been captured since $(HEnc (PrettyMonth $firstCoveredMonth)) &mdash; $dim2CoveragePct% of all $(HEnc $cls.label) tickets have it filled in; earlier months show entirely as &quot;(blank)&quot;.</p>" } else { "<p class='desc'>$(HEnc $dim2Label) isn't populated on any $(HEnc $cls.label) tickets yet.</p>" } }
+        "sparsePct" { "<p class='desc'>$(HEnc $dim2Label) is only tagged on $dim2CoveragePct% of $(HEnc $cls.label) tickets &mdash; directional only; the rest show as &quot;(blank)&quot;.</p>" }
+        default { "" }
+    }
+    $cappedNote = if($dim2Capped){ "<p class='desc'>Showing the top $($dim2Cap-1) $(HEnc $dim2Label) values by ticket volume (of $($dim2OrderFull.Count) total); the rest are grouped into &quot;(other)&quot;.</p>" } else { "" }
 
     $tk=New-Object System.Collections.Generic.List[object]
-    $catMonthCounts=[ordered]@{}; foreach($cat in $catOrder){ $catMonthCounts[$cat]=New-Object 'int[]' $N }
+    $allocSum=@{}; $allocCnt=@{}
     foreach($r in $subset){ $mo=Cell $r $Col.month; $mi=[array]::IndexOf($months,$mo); if($mi -lt 0){continue}
         $cat=Cell $r $Col.cat; if([string]::IsNullOrWhiteSpace($cat)){$cat="(blank)"}; $ci=[array]::IndexOf($catOrder,$cat)
-        $p=Cell $r $Col.platform; if([string]::IsNullOrWhiteSpace($p)){$p="(blank)"}; $pi=[array]::IndexOf($platOrder,$p)
-        $tk.Add("[$mi,$ci,$pi]")
-        $catMonthCounts[$cat][$mi]++ }
+        $v=Cell $r $dim2Col; if([string]::IsNullOrWhiteSpace($v)){$v="(blank)"}
+        $di = if($dim2Capped -and -not $dim2Top.Contains($v)){ $otherIdx } else { [array]::IndexOf($dim2Order,$v) }
+        $tk.Add("[$mi,$ci,$di]")
+        if($pctMode -eq "alloc"){
+            $ar=Cell $r $Col.alloc; $av=0.0
+            if([double]::TryParse(($ar -replace ',',''),[ref]$av) -and $av -gt 0){
+                $ak="$di|$mi"; if($allocSum.ContainsKey($ak)){$allocSum[$ak]+=$av;$allocCnt[$ak]++}else{$allocSum[$ak]=$av;$allocCnt[$ak]=1}
+            }
+        }
+    }
     $ticketsJson="[" + ($tk -join ",") + "]"
     $catsJson="[" + (($catOrder|ForEach-Object{'"'+(JEnc $_)+'"'}) -join ",") + "]"
-    $platsJson="[" + (($platOrder|ForEach-Object{'"'+(JEnc $_)+'"'}) -join ",") + "]"
+    $dim2sJson="[" + (($dim2Order|ForEach-Object{'"'+(JEnc $_)+'"'}) -join ",") + "]"
     $monthsJson="[" + (($months|ForEach-Object{'"'+(JEnc $_)+'"'}) -join ",") + "]"
     $salesJson="[" + (($salesArr|ForEach-Object{[string]$_}) -join ",") + "]"
+    $allocJson = "[]"
+    if($pctMode -eq "alloc"){
+        $rows=@()
+        for($di=0;$di -lt $dim2Order.Count;$di++){
+            $cols=@()
+            for($mi=0;$mi -lt $N;$mi++){ $ak="$di|$mi"; $avg=0; if($allocCnt.ContainsKey($ak) -and $allocCnt[$ak] -gt 0){$avg=$allocSum[$ak]/$allocCnt[$ak]}; $cols+=[string]$avg }
+            $rows+="[" + ($cols -join ",") + "]"
+        }
+        $allocJson = "[" + ($rows -join ",") + "]"
+    }
 
     $W=1200;$H=380;$padL=55;$padR=55;$padT=40;$padB=55;$plotW=$W-$padL-$padR;$plotH=$H-$padT-$padB;$slot=$plotW/$N;$barW=$slot*0.55
+    $barColor = $cls.color
+    $lineColor = if($cls.color -eq "var(--s1)"){"var(--s3)"}else{"var(--s1)"}
 
     $sb1=New-Object System.Text.StringBuilder
-    [void]$sb1.Append("<div class='pivot-wrap'><div class='pivot-title'>Technical Complaints by Issue Category</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Query Category</th>")
+    [void]$sb1.Append("<div class='pivot-wrap'><div class='pivot-title'>$(HEnc $cls.label) Complaints by Issue Category</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Query Category</th>")
     foreach($mo in $months){[void]$sb1.Append("<th colspan='2' class='month-hdr'>$(HEnc $mo)</th>")}
     [void]$sb1.Append("</tr><tr>"); foreach($mo in $months){[void]$sb1.Append("<th class='sub-hdr'>Complaints</th><th class='sub-hdr'>wrt sales</th>")}
     [void]$sb1.Append("</tr></thead><tbody>")
     for($ci=0;$ci -lt $catOrder.Count;$ci++){ $z=if(($ci+1)%2 -eq 1){"zebra"}else{""}
-        [void]$sb1.Append("<tr class='$z tech-cat-row' id='tech-catrow-$ci' data-ci='$ci' onclick='onTechCatClick($ci)'><td class='rowlabel'>$(HEnc $catOrder[$ci])</td>")
-        for($mi=0;$mi -lt $N;$mi++){ $cnt=$catMonthCounts[$catOrder[$ci]][$mi]; $sm=$salesArr[$mi]; $pct=0; if($sm -gt 0){$pct=Round1 ($cnt/$sm*100)}
-            $cd=if($cnt -gt 0){$cnt.ToString('N0')}else{"-"}; $pd=if($cnt -gt 0){"$pct%"}else{"-"}
-            [void]$sb1.Append("<td class='num'>$cd</td><td class='pct'>$pd</td>") }
+        [void]$sb1.Append("<tr class='$z xf-row' id='xf-$pfx-catrow-$ci' onclick='onXfClick(""$pfx"",""cat"",$ci)'><td class='rowlabel'>$(HEnc $catOrder[$ci])</td>")
+        for($mi=0;$mi -lt $N;$mi++){[void]$sb1.Append("<td class='num' id='xf-$pfx-cat-$ci-mo-$mi-cnt'>-</td><td class='pct' id='xf-$pfx-cat-$ci-mo-$mi-pct'>-</td>")}
         [void]$sb1.Append("</tr>") }
     [void]$sb1.Append("<tr class='total-row'><td class='rowlabel'>Grand Total</td>")
-    for($mi=0;$mi -lt $N;$mi++){ $t=0; foreach($cat in $catOrder){ $t+=$catMonthCounts[$cat][$mi] }; $sm=$salesArr[$mi]; $pct=0; if($sm -gt 0){$pct=Round1 ($t/$sm*100)}
-        [void]$sb1.Append("<td class='num'>$($t.ToString('N0'))</td><td class='pct'>$pct%</td>") }
+    for($mi=0;$mi -lt $N;$mi++){[void]$sb1.Append("<td class='num' id='xf-$pfx-cat-total-mo-$mi-cnt'>-</td><td class='pct' id='xf-$pfx-cat-total-mo-$mi-pct'>-</td>")}
     [void]$sb1.Append("</tr></tbody></table></div></div>")
 
     $sb2=New-Object System.Text.StringBuilder
-    [void]$sb2.Append("<div class='pivot-wrap'><div class='pivot-title'>Technical Complaints by Platform</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Platform</th>")
+    [void]$sb2.Append("<div class='pivot-wrap'><div class='pivot-title'>$(HEnc $dim2Title)</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>$(HEnc $dim2Label)</th>")
     foreach($mo in $months){[void]$sb2.Append("<th colspan='2' class='month-hdr'>$(HEnc $mo)</th>")}
-    [void]$sb2.Append("</tr><tr>"); foreach($mo in $months){[void]$sb2.Append("<th class='sub-hdr'>Complaints</th><th class='sub-hdr'>wrt sales</th>")}
+    [void]$sb2.Append("</tr><tr>"); foreach($mo in $months){[void]$sb2.Append("<th class='sub-hdr'>Complaints</th><th class='sub-hdr'>$(HEnc $dim2PctLabel)</th>")}
     [void]$sb2.Append("</tr></thead><tbody>")
-    for($pi=0;$pi -lt $platOrder.Count;$pi++){ $z=if(($pi+1)%2 -eq 1){"zebra"}else{""}
-        [void]$sb2.Append("<tr class='$z'><td class='rowlabel'>$(HEnc $platOrder[$pi])</td>")
-        for($mi=0;$mi -lt $N;$mi++){[void]$sb2.Append("<td class='num' id='tech-plat-$pi-mo-$mi-cnt'>-</td><td class='pct' id='tech-plat-$pi-mo-$mi-pct'>-</td>")}
+    for($di=0;$di -lt $dim2Order.Count;$di++){ $z=if(($di+1)%2 -eq 1){"zebra"}else{""}
+        [void]$sb2.Append("<tr class='$z xf-row' id='xf-$pfx-dimrow-$di' onclick='onXfClick(""$pfx"",""dim2"",$di)'><td class='rowlabel'>$(HEnc $dim2Order[$di])</td>")
+        for($mi=0;$mi -lt $N;$mi++){[void]$sb2.Append("<td class='num' id='xf-$pfx-dim-$di-mo-$mi-cnt'>-</td><td class='pct' id='xf-$pfx-dim-$di-mo-$mi-pct'>-</td>")}
         [void]$sb2.Append("</tr>") }
     [void]$sb2.Append("<tr class='total-row'><td class='rowlabel'>Grand Total</td>")
-    for($mi=0;$mi -lt $N;$mi++){[void]$sb2.Append("<td class='num' id='tech-plat-total-mo-$mi-cnt'>-</td><td class='pct' id='tech-plat-total-mo-$mi-pct'>-</td>")}
+    for($mi=0;$mi -lt $N;$mi++){[void]$sb2.Append("<td class='num' id='xf-$pfx-dim-total-mo-$mi-cnt'>-</td><td class='pct' id='xf-$pfx-dim-total-mo-$mi-pct'>-</td>")}
     [void]$sb2.Append("</tr></tbody></table></div></div>")
 
     $sb3=New-Object System.Text.StringBuilder
-    [void]$sb3.Append("<div class='card'><div class='pivot-title' style='margin-bottom:18px;'>Technical Complaints wrt Sales</div><div class='legend-row' style='justify-content:center;'><div class='legend-item'><span class='swatch' style='background:$($cls.color);'></span><span class='lname'>Complaints</span></div><div class='legend-item'><span class='swatch' style='background:var(--s1);border-radius:50%;'></span><span class='lname'>wrt sales %</span></div></div>")
+    [void]$sb3.Append("<div class='card'><div class='pivot-title' style='margin-bottom:18px;'>$(HEnc $cls.label) Complaints wrt Sales</div><div class='legend-row' style='justify-content:center;'><div class='legend-item'><span class='swatch' style='background:$barColor;'></span><span class='lname'>Complaints</span></div><div class='legend-item'><span class='swatch' style='background:$lineColor;border-radius:50%;'></span><span class='lname'>wrt sales %</span></div></div>")
     [void]$sb3.Append("<svg viewBox='0 0 $W $H' width='100%' height='$H' role='img'><line x1='$padL' y1='$($padT+$plotH)' x2='$($W-$padR)' y2='$($padT+$plotH)' stroke='var(--baseline)' stroke-width='1'/>")
     for($i=0;$i -lt $N;$i++){ $cx=$padL+$slot*$i+$slot/2; $bx=$cx-$barW/2; $ml=PrettyMonth $months[$i]
-        [void]$sb3.Append("<rect id='tech-bar-$i' x='$bx' y='$($padT+$plotH)' width='$barW' height='0' fill='$($cls.color)' rx='2'/><text id='tech-barval-$i' x='$cx' y='$($padT+$plotH-8)' text-anchor='middle' font-size='10.5' fill='var(--text-primary)' font-weight='600'></text><text x='$cx' y='$($H-$padB+18)' text-anchor='middle' font-size='10.5' fill='var(--text-muted)'>$ml</text>") }
-    [void]$sb3.Append("<polyline id='tech-polyline' points='' fill='none' stroke='var(--s1)' stroke-width='2'/>")
-    for($i=0;$i -lt $N;$i++){[void]$sb3.Append("<circle id='tech-dot-$i' cx='0' cy='0' r='3' fill='var(--s1)' visibility='hidden'/><text id='tech-dotval-$i' x='0' y='0' text-anchor='middle' font-size='10.5' font-weight='600' fill='var(--s1)'></text>")}
+        [void]$sb3.Append("<rect id='xf-$pfx-bar-$i' x='$bx' y='$($padT+$plotH)' width='$barW' height='0' fill='$barColor' rx='2'/><text id='xf-$pfx-barval-$i' x='$cx' y='$($padT+$plotH-8)' text-anchor='middle' font-size='10.5' fill='var(--text-primary)' font-weight='600'></text><text x='$cx' y='$($H-$padB+18)' text-anchor='middle' font-size='10.5' fill='var(--text-muted)'>$ml</text>") }
+    [void]$sb3.Append("<polyline id='xf-$pfx-polyline' points='' fill='none' stroke='$lineColor' stroke-width='2'/>")
+    for($i=0;$i -lt $N;$i++){[void]$sb3.Append("<circle id='xf-$pfx-dot-$i' cx='0' cy='0' r='3' fill='$lineColor' visibility='hidden'/><text id='xf-$pfx-dotval-$i' x='0' y='0' text-anchor='middle' font-size='10.5' font-weight='600' fill='$lineColor'></text>")}
     [void]$sb3.Append("</svg></div>")
 
-    $filterNote = "<div class='filter-row' style='display:flex;align-items:center;gap:10px;margin:0 0 4px;flex-wrap:wrap;'><span id='tech-filter-note' style='font-size:12px;color:var(--text-muted);'>Showing platform breakdown &amp; chart for all Technical tickets. Click a category row above to filter.</span></div>"
-    $platCoverageNote = if($firstCoveredMonth){ "<p class='desc'>Platform (App/Web) has only been captured since $(HEnc (PrettyMonth $firstCoveredMonth)) &mdash; $platCoveragePct% of all $(HEnc $cls.label) tickets have it filled in; earlier months show entirely as &quot;(blank)&quot;.</p>" } else { "<p class='desc'>Platform (App/Web) isn't populated on any $(HEnc $cls.label) tickets yet.</p>" }
+    $filterNote = "<div class='filter-row' style='display:flex;align-items:center;gap:10px;margin:0 0 4px;flex-wrap:wrap;'><span id='xf-$pfx-filter-note' style='font-size:12px;color:var(--text-muted);'></span></div>"
 
     $js = @"
 <script>
 (function(){
-  var DT=$ticketsJson, CATS=$catsJson, PLATS=$platsJson, MONTHS=$monthsJson, SALES=$salesJson, N=MONTHS.length;
-  var padL=$padL,padT=$padT,plotH=$plotH,slot=$slot,barW=$barW, BAR=null,PCT=null;
-  var activeCat=null;
-  function agg(ci){ var pm=PLATS.map(function(){return new Array(N).fill(0)}), tot=new Array(N).fill(0), tc=0;
-    for(var i=0;i<DT.length;i++){ var t=DT[i],mo=t[0],c=t[1],p=t[2]; if(mo<0||mo>=N||c<0||c>=CATS.length||p<0||p>=PLATS.length)continue; if(ci!==null&&c!==ci)continue; pm[p][mo]++; tot[mo]++; tc++; }
-    return {pm:pm,tot:tot,tc:tc}; }
+  var DT=$ticketsJson, CATS=$catsJson, DIMS=$dim2sJson, MONTHS=$monthsJson, SALES=$salesJson, ALLOC=$allocJson, N=MONTHS.length;
+  var padL=$padL,padT=$padT,plotH=$plotH,slot=$slot,barW=$barW, BAR=null,PCT=null, pctMode='$pctMode', filter=null;
   function fmt(n){return n.toLocaleString('en-IN');}
   function nice(v){ if(v<=0)return 10; var m=Math.pow(10,Math.floor(Math.log10(v))); var s=[1,2,2.5,5,10]; for(var i=0;i<s.length;i++){var c=s[i]*m; if(c>=v)return c;} return 10*m; }
-  function rpt(a){ for(var pi=0;pi<PLATS.length;pi++){ for(var mi=0;mi<N;mi++){ var cnt=a.pm[pi][mi],sm=SALES[mi],p=sm>0?Math.round(cnt/sm*1000)/10:0; var ce=document.getElementById('tech-plat-'+pi+'-mo-'+mi+'-cnt'); if(ce)ce.textContent=cnt>0?fmt(cnt):'-'; var pe=document.getElementById('tech-plat-'+pi+'-mo-'+mi+'-pct'); if(pe)pe.textContent=p+'%'; } }
-    for(var m2=0;m2<N;m2++){ var t=a.tot[m2],sm2=SALES[m2],p2=sm2>0?Math.round(t/sm2*1000)/10:0; var ce2=document.getElementById('tech-plat-total-mo-'+m2+'-cnt'); if(ce2)ce2.textContent=fmt(t); var pe2=document.getElementById('tech-plat-total-mo-'+m2+'-pct'); if(pe2)pe2.textContent=p2+'%'; } }
-  function rch(a){ var vals=a.tot, pcts=vals.map(function(v,i){var sm=SALES[i];return sm>0?Math.round(v/sm*10000)/100:0;});
+  function passOther(t, exceptAxis){ var mo=t[0],c=t[1],d=t[2]; if(mo<0||mo>=N||c<0||c>=CATS.length||d<0||d>=DIMS.length)return false;
+    if(filter && filter.axis!==exceptAxis){ if(filter.axis==='cat'&&c!==filter.idx)return false; if(filter.axis==='dim2'&&d!==filter.idx)return false; }
+    return true; }
+  function catBreakdown(){ var cm=CATS.map(function(){return new Array(N).fill(0)});
+    for(var i=0;i<DT.length;i++){ var t=DT[i]; if(!passOther(t,'cat'))continue; cm[t[1]][t[0]]++; } return cm; }
+  function dimBreakdown(){ var dm=DIMS.map(function(){return new Array(N).fill(0)});
+    for(var i=0;i<DT.length;i++){ var t=DT[i]; if(!passOther(t,'dim2'))continue; dm[t[2]][t[0]]++; } return dm; }
+  function filteredTotals(){ var tot=new Array(N).fill(0),tc=0; for(var i=0;i<DT.length;i++){ var t=DT[i]; if(!passOther(t,null))continue; tot[t[0]]++; tc++; } return {tot:tot,tc:tc}; }
+  function rct(){ var cm=catBreakdown(), tot=new Array(N).fill(0);
+    for(var ci=0;ci<CATS.length;ci++){ for(var mi=0;mi<N;mi++){ var cnt=cm[ci][mi],sm=SALES[mi],p=sm>0?Math.round(cnt/sm*1000)/10:0; tot[mi]+=cnt;
+      var ce=document.getElementById('xf-$pfx-cat-'+ci+'-mo-'+mi+'-cnt'); if(ce)ce.textContent=cnt>0?fmt(cnt):'-';
+      var pe=document.getElementById('xf-$pfx-cat-'+ci+'-mo-'+mi+'-pct'); if(pe)pe.textContent=cnt>0?(p+'%'):'-'; } }
+    for(var m=0;m<N;m++){ var sm2=SALES[m],p2=sm2>0?Math.round(tot[m]/sm2*1000)/10:0;
+      var ce2=document.getElementById('xf-$pfx-cat-total-mo-'+m+'-cnt'); if(ce2)ce2.textContent=fmt(tot[m]);
+      var pe2=document.getElementById('xf-$pfx-cat-total-mo-'+m+'-pct'); if(pe2)pe2.textContent=p2+'%'; } }
+  function rdt(){ var dm=dimBreakdown(), tot=new Array(N).fill(0);
+    for(var di=0;di<DIMS.length;di++){ for(var mi=0;mi<N;mi++){ var cnt=dm[di][mi]; tot[mi]+=cnt;
+      var basis = (pctMode==='alloc') ? (ALLOC[di]?ALLOC[di][mi]:0) : SALES[mi];
+      var p = basis>0?Math.round(cnt/basis*1000)/10:0;
+      var ce=document.getElementById('xf-$pfx-dim-'+di+'-mo-'+mi+'-cnt'); if(ce)ce.textContent=cnt>0?fmt(cnt):'-';
+      var pe=document.getElementById('xf-$pfx-dim-'+di+'-mo-'+mi+'-pct'); if(pe)pe.textContent=(cnt>0&&basis>0)?(p+'%'):'-'; } }
+    for(var m=0;m<N;m++){
+      var ce2=document.getElementById('xf-$pfx-dim-total-mo-'+m+'-cnt'); if(ce2)ce2.textContent=fmt(tot[m]);
+      var pe2=document.getElementById('xf-$pfx-dim-total-mo-'+m+'-pct');
+      if(pe2){ if(pctMode==='alloc'){ pe2.textContent='-'; } else { var sm3=SALES[m],p3=sm3>0?Math.round(tot[m]/sm3*1000)/10:0; pe2.textContent=p3+'%'; } } } }
+  function rch(){ var r=filteredTotals(); var vals=r.tot, pcts=vals.map(function(v,i){var sm=SALES[i];return sm>0?Math.round(v/sm*10000)/100:0;});
     BAR=nice(Math.max.apply(null,vals)*1.15); PCT=nice(Math.max.apply(null,pcts)*1.2); var pts=[];
     for(var i=0;i<N;i++){ var cx=padL+slot*i+slot/2,bx=cx-barW/2,bh=plotH*(vals[i]/BAR),by=padT+plotH-bh;
-      var r=document.getElementById('tech-bar-'+i); r.setAttribute('y',by); r.setAttribute('height',bh);
-      var bv=document.getElementById('tech-barval-'+i); bv.setAttribute('y',by-8); bv.textContent=vals[i]>0?fmt(vals[i]):'';
+      var rEl=document.getElementById('xf-$pfx-bar-'+i); rEl.setAttribute('y',by); rEl.setAttribute('height',bh);
+      var bv=document.getElementById('xf-$pfx-barval-'+i); bv.setAttribute('y',by-8); bv.textContent=vals[i]>0?fmt(vals[i]):'';
       var ly=padT+plotH-(plotH*(pcts[i]/PCT)); pts.push(cx+','+ly);
-      var d=document.getElementById('tech-dot-'+i); d.setAttribute('cx',cx); d.setAttribute('cy',ly); d.setAttribute('visibility','visible');
-      var dv=document.getElementById('tech-dotval-'+i); dv.setAttribute('x',cx); dv.setAttribute('y',ly-10); dv.textContent=pcts[i]+'%'; }
-    document.getElementById('tech-polyline').setAttribute('points',pts.join(' ')); }
-  window.onTechCatClick=function(ci){ try{
-      activeCat = (activeCat===ci) ? null : ci;
-      document.querySelectorAll('.tech-cat-row').forEach(function(row){ row.classList.remove('active-filter'); });
-      if(activeCat!==null){ var el=document.getElementById('tech-catrow-'+activeCat); if(el)el.classList.add('active-filter'); }
-      var a=agg(activeCat); rpt(a); rch(a);
-      var note=document.getElementById('tech-filter-note');
-      if(note){ note.textContent = activeCat!==null ? ('Showing platform breakdown & chart for "'+CATS[activeCat]+'" ('+fmt(a.tc)+' tickets). Click the row again to clear.') : 'Showing platform breakdown & chart for all Technical tickets. Click a category row above to filter.'; }
-    }catch(e){ var n2=document.getElementById('tech-filter-note'); if(n2){n2.textContent='Filter error: '+e.message; n2.style.color='var(--s6)';} if(window.console)console.error('Technical filter error',e); } };
-  function init(){ var a=agg(null); rpt(a); rch(a); }
+      var d=document.getElementById('xf-$pfx-dot-'+i); d.setAttribute('cx',cx); d.setAttribute('cy',ly); d.setAttribute('visibility','visible');
+      var dv=document.getElementById('xf-$pfx-dotval-'+i); dv.setAttribute('x',cx); dv.setAttribute('y',ly-10); dv.textContent=pcts[i]+'%'; }
+    document.getElementById('xf-$pfx-polyline').setAttribute('points',pts.join(' ')); return r; }
+  function render(){ try{ rct(); rdt(); var r=rch();
+      var note=document.getElementById('xf-$pfx-filter-note');
+      if(note){
+        if(!filter){ note.textContent='Showing all $(HEnc $cls.label) tickets. Click a row in either table to cross-filter.'; }
+        else if(filter.axis==='cat'){ note.textContent='Filtered to category "'+CATS[filter.idx]+'" ('+fmt(r.tc)+' tickets). Click the row again to clear.'; }
+        else { note.textContent='Filtered to $(HEnc $dim2Label) "'+DIMS[filter.idx]+'" ('+fmt(r.tc)+' tickets). Click the row again to clear.'; }
+      }
+    }catch(e){ var n2=document.getElementById('xf-$pfx-filter-note'); if(n2){n2.textContent='Filter error: '+e.message; n2.style.color='var(--s6)';} if(window.console)console.error('$pfx filter error',e); } }
+  window._xfPanels = window._xfPanels || {};
+  window._xfPanels['$pfx'] = { onClick: function(axis, idx){
+    filter = (filter && filter.axis===axis && filter.idx===idx) ? null : {axis:axis, idx:idx};
+    document.querySelectorAll('#panel-$pfx .xf-row').forEach(function(row){ row.classList.remove('active-filter'); });
+    if(filter){ var id = filter.axis==='cat' ? ('xf-$pfx-catrow-'+filter.idx) : ('xf-$pfx-dimrow-'+filter.idx); var el=document.getElementById(id); if(el)el.classList.add('active-filter'); }
+    render();
+  }};
+  window.onXfClick = window.onXfClick || function(pfx, axis, idx){ if(window._xfPanels[pfx])window._xfPanels[pfx].onClick(axis, idx); };
+  function init(){ render(); }
   if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',init);}else{init();}
 })();
 </script>
 "@
 
-    $insights = Build-InsightsCard "Insights &mdash; Technical" (Get-CategoryInsightItems $subset)
-    $weekly = Build-WeeklyClassBlock $cls
+    if($cls.id -eq "delivery"){
+        $insightsBlock = Build-InsightsCard "Insights &mdash; Delivery" (@(Get-CategoryInsightItems $subset) + @(Get-DeliveryPartnerInsight $subset))
+        $weeklyBlock = Build-WeeklyDeliveryBlock
+    } else {
+        $insightsBlock = Build-InsightsCard "Insights &mdash; $(HEnc $cls.label)" (Get-CategoryInsightItems $subset)
+        $weeklyBlock = Build-WeeklyClassBlock $cls
+    }
+    $batch = ""
+    if($cls.key -eq "Product" -or $cls.key -eq "Product Suggestion/Recommendation"){ $batch = Build-BatchTable $subset $cls.label }
 
     return @"
 <div class="gran-monthly">
-<section><h2>Technical Complaints by Issue Category</h2><p class="desc">Percent = complaints &divide; that month's total order volume ("Total Sales M"). Click a category row to filter the platform breakdown and chart below.</p>$filterNote$($sb1.ToString())</section>
-<section><h2>Technical Complaints by Platform</h2>$platCoverageNote$($sb2.ToString())</section>
-<section><h2>Technical Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line). Recomputes for the category selected above.</p>$($sb3.ToString())</section>
+$filterNote
+<section><h2>$(HEnc $cls.label) Complaints by Issue Category</h2><p class="desc">Percent = complaints &divide; that month's total order volume ("Total Sales M"). Click a row in either table below to cross-filter.</p>$($sb1.ToString())</section>
+<section><h2>$(HEnc $dim2Title)</h2>$coverageNote$cappedNote$($sb2.ToString())</section>
+<section><h2>$(HEnc $cls.label) Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line). Recomputes for the row selected above.</p>$($sb3.ToString())</section>
 </div>
-$weekly
-$insights
+$weeklyBlock
+$batch
+$insightsBlock
 $js
 "@
 }
@@ -236,8 +207,7 @@ function Build-ClassPanel($cls){
     $mt=[ref]@()
     $pivot = Build-CategoryPivot $subset "$($cls.label) Complaints" $mt
     $chart = Build-ComboChart $mt.Value "$($cls.label) Complaints wrt Sales" $cls.color "var(--s1)"
-    $batch=""
-    if($cls.key -eq "Packaging and Operational" -or $cls.key -eq "Product" -or $cls.key -eq "Product Suggestion/Recommendation"){ $batch = Build-BatchTable $subset $cls.label }
+    $batch = Build-BatchTable $subset $cls.label
     $insights = Build-InsightsCard "Insights &mdash; $(HEnc $cls.label)" (Get-CategoryInsightItems $subset)
     $weekly = Build-WeeklyClassBlock $cls
     return @"
@@ -484,7 +454,14 @@ function Assemble-Report {
     [void]$panels.Append((Build-MonthlyAnalysisPanel))
     foreach($c in $B.Classes){
         $kpi = KpiRow $c ($unique | Where-Object { (Cell $_ $Col.cls) -eq $c.key })
-        $detail = if($c.id -eq "delivery"){ Build-DeliveryPanel } elseif($c.id -eq "technical"){ Build-TechnicalPanel $c } else { Build-ClassPanel $c }
+        $detail = switch($c.id){
+            "delivery"   { Build-CrossFilterPanel $c "partner"  "Delivery Partner Name" "$(HEnc $c.label) Complaints wrt Delivery Partners" "alloc" "wrt allocation" 9999 "none" }
+            "technical"  { Build-CrossFilterPanel $c "platform" "Platform"              "$(HEnc $c.label) Complaints by Platform"           "sales" "wrt sales"      9999 "sinceFirst" }
+            "warehouse"  { Build-CrossFilterPanel $c "wh"       "Warehouse Facility"    "$(HEnc $c.label) Complaints by Warehouse Facility" "sales" "wrt sales"      9999 "none" }
+            "product"    { Build-CrossFilterPanel $c "prod"     "Product Name"          "$(HEnc $c.label) Complaints by Product"            "sales" "wrt sales"      25   "none" }
+            "suggestion" { Build-CrossFilterPanel $c "prod"     "Product Name"          "$(HEnc $c.label) Complaints by Product"            "sales" "wrt sales"      25   "sparsePct" }
+            default      { Build-ClassPanel $c }
+        }
         [void]$panels.Append("<div class=""tab-panel"" id=""panel-$($c.id)"">$kpi`n$detail</div>")
     }
     $nowStr = (Get-Date).ToUniversalTime().AddHours(5.5).ToString('dd MMM yyyy, HH:mm') + " IST"
@@ -504,7 +481,7 @@ function Assemble-Report {
     <label for="gran-month-select">Month</label>
     <select id="gran-month-select" onchange="applyGranularity()">$($granOpts.ToString())</select>
   </div>
-  <span class="gran-note">Weekly applies to Overview and every complaint-category tab (including Delivery's category/partner breakdowns, but not its partner filter, and Technical's category breakdown, but not its platform split or click-to-filter) &mdash; not NPS/CSAT or Product &amp; Packaging.</span>
+  <span class="gran-note">Weekly applies to Overview and every complaint-category tab, including the category breakdown on Delivery/Technical/Warehouse/Product/Suggestion &mdash; but their second-dimension breakdown (partner/platform/facility/product name) and click-to-cross-filter stay monthly-only. Not available on NPS/CSAT or the separate Product &amp; Packaging wrt Sales tab.</span>
 </div>
 <script>
 (function(){
