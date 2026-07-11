@@ -48,6 +48,8 @@ project environment variables:
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | OAuth Client ID credentials (Google Cloud Console → Credentials), redirect URI `https://<your-domain>/api/auth/callback` |
 | `SESSION_SECRET` | Random string (e.g. `openssl rand -hex 32`) used to sign session cookies |
 | `ADMIN_EMAILS` | Comma-separated emails auto-promoted to admin (with access to every report) on first login — bootstraps the first admin(s) since there's no self-serve signup |
+| `RESEND_API_KEY` | [Resend](https://resend.com) API key — sends the "you've been invited / your access changed" email when an admin invites/updates a user at `/admin.html`. Optional: invites still work without it, just silently skip the email. |
+| `FROM_EMAIL` | Optional sender address for invite emails (defaults to Resend's shared `onboarding@resend.dev` sandbox sender). Set this to an address on a domain you've verified in Resend for better deliverability. |
 
 ## Data & privacy
 

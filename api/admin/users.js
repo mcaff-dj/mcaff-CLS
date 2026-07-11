@@ -1,7 +1,8 @@
 // GET  /api/admin/users -> list all users + their permissions (admin only)
 // POST /api/admin/users -> create/invite a user: { email, name, permissions: ['mcaffeine',...] }
-const { sql, ensureSchema, CARD_KEYS } = require('../_lib/db');
+const { sql, ensureSchema, CARD_KEYS, CARD_LABELS } = require('../_lib/db');
 const { getSession } = require('../_lib/session');
+const { sendMail, siteBaseUrl } = require('../_lib/mail');
 
 module.exports = async (req, res) => {
   const session = getSession(req);
@@ -36,6 +37,9 @@ module.exports = async (req, res) => {
       res.status(400).json({ error: 'Email is required' });
       return;
     }
+    const existing = await sql`SELECT id FROM users WHERE email = ${email}`;
+    const isNewUser = existing.rows.length === 0;
+
     const { rows } = await sql`
       INSERT INTO users (email, name) VALUES (${email}, ${name})
       ON CONFLICT (email) DO UPDATE SET name = COALESCE(NULLIF(EXCLUDED.name, ''), users.name)
@@ -45,6 +49,30 @@ module.exports = async (req, res) => {
     for (const key of perms) {
       await sql`INSERT INTO permissions (user_id, card_key) VALUES (${user.id}, ${key}) ON CONFLICT DO NOTHING`;
     }
+
+    const { rows: permRows } = await sql`SELECT card_key FROM permissions WHERE user_id = ${user.id}`;
+    const cardLabels = permRows.map((r) => CARD_LABELS[r.card_key] || r.card_key);
+
+    // Best-effort notification - awaited before responding so Vercel doesn't freeze
+    // the function mid-send (which can happen if you write the response first), but
+    // failures here still never block the invite itself from succeeding.
+    try {
+      const base = siteBaseUrl(req);
+      const listHtml = cardLabels.length ? `<ul>${cardLabels.map((l) => `<li>${l}</li>`).join('')}</ul>` : '<p>(no reports yet)</p>';
+      await sendMail({
+        to: email,
+        subject: isNewUser ? "You've been invited to Customer Query Segment Reports" : 'Your report access was updated',
+        html: `
+          <p>Hi ${name || email},</p>
+          <p>${isNewUser ? "You've been given access to the Customer Query Segment Reports site." : 'Your access was just updated.'} You can currently view:</p>
+          ${listHtml}
+          <p><a href="${base}/">Sign in with Google</a> using this email address (${email}) to view them.</p>
+        `,
+      });
+    } catch (e) {
+      console.error('Invite email failed:', e.message || e);
+    }
+
     res.status(200).json({ user });
     return;
   }
