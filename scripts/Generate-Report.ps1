@@ -34,8 +34,8 @@ if ($env:REPORT_CACHE_FILE -and (Test-Path $env:REPORT_CACHE_FILE)) {
     Write-Host "[$($B.Brand)] loading main rows from cache $($env:REPORT_CACHE_FILE)"
     $dataRows = Get-Content -Raw -Path $env:REPORT_CACHE_FILE | ConvertFrom-Json
 } else {
-    Write-Host "[$($B.Brand)] fetching main sheet ($($B.TotalRows) rows)..."
-    $dataRows = Get-SheetRowsChunked $B.SpreadsheetId $B.SheetName $B.LastCol $B.TotalRows
+    Write-Host "[$($B.Brand)] fetching main sheet..."
+    $dataRows = Get-SheetRowsChunked $B.SpreadsheetId $B.SheetName $B.LastCol
 }
 Write-Host "[$($B.Brand)] fetched $($dataRows.Count) rows; fetching small tabs..."
 $mom     = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.mom
@@ -58,6 +58,53 @@ function Get-SalesMByMonth($rowsSubset){
 }
 $salesM = Get-SalesMByMonth $dataRows
 $salesArr = @(foreach($mo in $months){ if($salesM.ContainsKey($mo)){$salesM[$mo]}else{0} })
+
+# ---------- Weekly period derivation (native Week / Total Sales W columns) ----------
+function Get-WeekNum($weekLabel){ if($weekLabel -match 'Week\s*(\d+)'){ return [int]$Matches[1] }; return 999 }
+
+$weeksByMonthIdx = New-Object System.Collections.Generic.List[object]
+$allWeeks        = New-Object System.Collections.Generic.List[object]
+$weekMonthOf     = New-Object System.Collections.Generic.List[object]
+
+for($mi2=0; $mi2 -lt $N; $mi2++){
+    $moLbl2 = $months[$mi2]
+    $wkSeen = [ordered]@{}
+    foreach($r in $dataRows){
+        if((Cell $r $Col.month) -ne $moLbl2){ continue }
+        $wkVal2 = Cell $r $Col.week
+        if([string]::IsNullOrWhiteSpace($wkVal2) -or $wkVal2 -eq "#N/A"){ continue }
+        if(-not $wkSeen.Contains($wkVal2)){ $wkSeen[$wkVal2] = $true }
+    }
+    $wkOrdered2 = @($wkSeen.Keys | Sort-Object { Get-WeekNum $_ })
+    [void]$weeksByMonthIdx.Add($wkOrdered2)
+    foreach($wkVal2 in $wkOrdered2){ [void]$allWeeks.Add($wkVal2); [void]$weekMonthOf.Add($mi2) }
+}
+$totalWeeks = $allWeeks.Count
+$lastWeekIdx = $totalWeeks - 1
+$weekStartIdx = New-Object System.Collections.Generic.List[object]
+$weekStartAcc = 0
+for($mi2=0; $mi2 -lt $N; $mi2++){ [void]$weekStartIdx.Add($weekStartAcc); $weekStartAcc += $weeksByMonthIdx[$mi2].Count }
+
+function Get-SalesWByWeek($rowsSubset){
+    $tmp=@{}
+    foreach($r in $rowsSubset){
+        $wkVal3=Cell $r $Col.week; if([string]::IsNullOrWhiteSpace($wkVal3) -or $wkVal3 -eq "#N/A"){continue}
+        $moLbl3=Cell $r $Col.month
+        $sw=Cell $r $Col.salesW; if([string]::IsNullOrWhiteSpace($sw)){continue}
+        $wkKey3="$moLbl3||$wkVal3"
+        if(-not $tmp.ContainsKey($wkKey3)){$tmp[$wkKey3]=@{}}
+        if($tmp[$wkKey3].ContainsKey($sw)){$tmp[$wkKey3][$sw]++}else{$tmp[$wkKey3][$sw]=1}
+    }
+    $res=@{}
+    foreach($wkKey3 in $tmp.Keys){ $best3=$tmp[$wkKey3].GetEnumerator()|Sort-Object Value -Descending|Select-Object -First 1; $res[$wkKey3]=[double]$best3.Key }
+    return $res
+}
+$salesWLookup = Get-SalesWByWeek $dataRows
+$weekSalesArr = New-Object System.Collections.Generic.List[object]
+for($wi2=0; $wi2 -lt $totalWeeks; $wi2++){
+    $mi3 = $weekMonthOf[$wi2]; $wkKey4 = "$($months[$mi3])||$($allWeeks[$wi2])"
+    if($salesWLookup.ContainsKey($wkKey4)){ [void]$weekSalesArr.Add($salesWLookup[$wkKey4]) } else { [void]$weekSalesArr.Add(0.0) }
+}
 
 # ---------- Overview ----------
 function Build-ClassMonthCounts($rows){
@@ -92,10 +139,11 @@ $totalRows=$dataRows.Count; $totalUnique=$unique.Count; $totalDup=$totalRows-$to
 $ov=New-Object System.Text.StringBuilder
 [void]$ov.Append("<div class=""kpi-row""><div class=""kpi""><div class=""label"">Total Rows</div><div class=""value"">$($totalRows.ToString('N0'))</div></div><div class=""kpi""><div class=""label"">Unique Tickets</div><div class=""value"">$($totalUnique.ToString('N0'))</div></div><div class=""kpi""><div class=""label"">Duplicate Rows</div><div class=""value"">$($totalDup.ToString('N0'))</div></div><div class=""kpi""><div class=""label"">Overall Duplicate Rate</div><div class=""value"">$(Round1 ($totalDup/$totalRows*100))%</div></div></div>")
 $uniqClassMonth = Build-ClassMonthCounts $unique
+[void]$ov.Append("<div class='gran-monthly'>")
 [void]$ov.Append((Build-Pivot "Overall Query Class-Wise Comparison" (Build-ClassMonthCounts $dataRows)))
 [void]$ov.Append((Build-Pivot "Unique Query Class-Wise Comparison" $uniqClassMonth))
 [void]$ov.Append('<p class="note">Count = tickets that month for that query class. Percent = count &divide; that month''s total order volume ("Total Sales M"). "Overall" includes duplicates; "Unique" excludes them.</p>')
-[void]$ov.Append((Build-InsightsCard "Insights &mdash; Overview" (Get-OverviewInsightItems $uniqClassMonth)))
+[void]$ov.Append("</div>")
 
 # ---------- shared chart + category-pivot builders ----------
 function Build-CategoryPivot($subset,$title,[ref]$monthTotalsOut){
@@ -182,6 +230,9 @@ function Build-BatchTable($subset,$title){
 }
 
 Write-Host "[$($B.Brand)] building panels..."
+. "$Here\gen-weekly.ps1"   # defines Build-Week* helpers for the weekly-granularity view
+[void]$ov.Append((Build-WeeklyOverviewBlock))
+[void]$ov.Append((Build-InsightsCard "Insights &mdash; Overview" (Get-OverviewInsightItems $uniqClassMonth)))
 . "$Here\gen-monthly.ps1"  # defines Build-MonthlyAnalysisPanel using the vars above
 . "$Here\gen-panels.ps1"   # defines Build-DeliveryPanel, Build-ClassPanel, Build-NpsCsat, Build-ProdPkg using the vars above
 

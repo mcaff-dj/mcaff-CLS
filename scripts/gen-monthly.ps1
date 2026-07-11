@@ -1,7 +1,8 @@
-# Monthly Analysis tab: auto-generated narrative comparing a picked month to the one
-# before it, mirroring the manual "segmented KYC" write-up style. Stats-only — no
+# Monthly/Weekly Analysis tab: auto-generated narrative comparing a picked period to the
+# one before it, mirroring the manual "segmented KYC" write-up style. Stats-only — no
 # root-cause text is inferred, since that isn't present in any structured column.
-# Dot-sourced by Generate-Report.ps1 (shares its variables/functions).
+# Dot-sourced by Generate-Report.ps1 (shares its variables/functions). Depends on gen-weekly.ps1
+# having already run (for $allWeeks / $weekMonthOf / $totalWeeks / Get-WeekNum).
 
 function PctFmt($v){
     if($null -eq $v){ return "-" }
@@ -31,45 +32,76 @@ function ChangeVerb($prev,$cur){
 $script:MA_SubDim   = @{ delivery="partner"; warehouse="wh"; packaging="prod"; product="prod"; suggestion="prod" }
 $script:MA_SubLabel = @{ partner="courier"; wh="warehouse"; prod="product" }
 
-function Build-ClassMonthlyData($cls){
+# Fast (month-label, week-label) -> global week index lookup.
+$script:MA_WeekGlobalIdx = @{}
+for($mawi=0; $mawi -lt $totalWeeks; $mawi++){ $script:MA_WeekGlobalIdx["$($months[$weekMonthOf[$mawi]])||$($allWeeks[$mawi])"] = $mawi }
+function Get-GlobalWeekIndex($moLbl,$wkVal){ $k="$moLbl||$wkVal"; if($script:MA_WeekGlobalIdx.ContainsKey($k)){ return $script:MA_WeekGlobalIdx[$k] }; return -1 }
+function PrettyWeekFull($weekIdx){
+    $mi=$weekMonthOf[$weekIdx]; $wn=Get-WeekNum $allWeeks[$weekIdx]
+    $lbl="$(PrettyMonth $months[$mi]) W$wn"
+    if($weekIdx -eq $lastWeekIdx){ $lbl += " (partial)" }
+    return $lbl
+}
+
+# Period context: abstracts "month" vs "week" so the narrative builders below run unchanged
+# against either. indexFn returns this row's period index (or -1 to skip); labelFn formats it.
+$script:MA_MonthCtx = @{
+    n = $N
+    sales = $salesArr
+    indexFn = { param($r) [array]::IndexOf($months,(Cell $r $Col.month)) }
+    labelFn = { param($idx) PrettyMonth $months[$idx] }
+}
+$script:MA_WeekCtx = @{
+    n = $totalWeeks
+    sales = $weekSalesArr
+    indexFn = { param($r)
+        $wk=Cell $r $Col.week; if([string]::IsNullOrWhiteSpace($wk) -or $wk -eq "#N/A"){ return -1 }
+        Get-GlobalWeekIndex (Cell $r $Col.month) $wk
+    }
+    labelFn = { param($idx) PrettyWeekFull $idx }
+}
+
+function Build-ClassPeriodData($cls,$period){
     $subset = @($unique | Where-Object { (Cell $_ $Col.cls) -eq $cls.key })
     $subDimName = $script:MA_SubDim[$cls.id]
     $subCol = if($subDimName){ $Col[$subDimName] } else { $null }
 
-    $catMonth=[ordered]@{}; $catTot=@{}
-    $subMonth=@{}
-    $classMonthTot = New-Object 'int[]' $N
+    $catPeriod=[ordered]@{}; $catTot=@{}
+    $subPeriod=@{}
+    $classPeriodTot = New-Object 'int[]' $period.n
 
     foreach($r in $subset){
-        $mo=Cell $r $Col.month; $mi=[array]::IndexOf($months,$mo); if($mi -lt 0){continue}
+        $pIdx = & $period.indexFn $r
+        if($pIdx -lt 0){continue}
         $cat=Cell $r $Col.cat; if([string]::IsNullOrWhiteSpace($cat)){$cat="(blank)"}
-        if(-not $catMonth.Contains($cat)){$catMonth[$cat]=(New-Object 'int[]' $N)}
-        $catMonth[$cat][$mi]++
+        if(-not $catPeriod.Contains($cat)){$catPeriod[$cat]=(New-Object 'int[]' $period.n)}
+        $catPeriod[$cat][$pIdx]++
         if(-not $catTot.ContainsKey($cat)){$catTot[$cat]=0}; $catTot[$cat]++
-        $classMonthTot[$mi]++
+        $classPeriodTot[$pIdx]++
         if($subCol -ne $null){
             $sv=Cell $r $subCol; if([string]::IsNullOrWhiteSpace($sv)){$sv="(blank)"}
-            if(-not $subMonth.ContainsKey($cat)){$subMonth[$cat]=@{}}
-            if(-not $subMonth[$cat].ContainsKey($sv)){$subMonth[$cat][$sv]=(New-Object 'int[]' $N)}
-            $subMonth[$cat][$sv][$mi]++
+            if(-not $subPeriod.ContainsKey($cat)){$subPeriod[$cat]=@{}}
+            if(-not $subPeriod[$cat].ContainsKey($sv)){$subPeriod[$cat][$sv]=(New-Object 'int[]' $period.n)}
+            $subPeriod[$cat][$sv][$pIdx]++
         }
     }
     $catOrder=@($catTot.GetEnumerator()|Sort-Object Value -Descending|ForEach-Object{$_.Key})
-    return @{ catMonth=$catMonth; catOrder=$catOrder; subMonth=$subMonth; subDimName=$subDimName; classMonthTot=$classMonthTot }
+    return @{ catPeriod=$catPeriod; catOrder=$catOrder; subPeriod=$subPeriod; subDimName=$subDimName; classPeriodTot=$classPeriodTot }
 }
 
-function Build-ClassNarrative($cls,$data,$curIdx){
+function Build-ClassPeriodNarrative($cls,$data,$period,$curIdx){
     $prevIdx=$curIdx-1
-    $curLabel=PrettyMonth $months[$curIdx]; $prevLabel=PrettyMonth $months[$prevIdx]
-    $salesCur=$salesArr[$curIdx]; $salesPrev=$salesArr[$prevIdx]
-    $totCur=$data.classMonthTot[$curIdx]; $totPrev=$data.classMonthTot[$prevIdx]
+    $curLabel = & $period.labelFn $curIdx
+    $prevLabel = & $period.labelFn $prevIdx
+    $salesCur=$period.sales[$curIdx]; $salesPrev=$period.sales[$prevIdx]
+    $totCur=$data.classPeriodTot[$curIdx]; $totPrev=$data.classPeriodTot[$prevIdx]
     $pctCur=if($salesCur -gt 0){$totCur/$salesCur*100}else{0}
     $pctPrev=if($salesPrev -gt 0){$totPrev/$salesPrev*100}else{0}
     $relChange = if($pctPrev -gt 0){[math]::Abs($pctCur-$pctPrev)/$pctPrev} else { if($pctCur -gt 0){1}else{0} }
 
     $bullets=@()
     foreach($cat in $data.catOrder){
-        $curC=$data.catMonth[$cat][$curIdx]; $prevC=$data.catMonth[$cat][$prevIdx]
+        $curC=$data.catPeriod[$cat][$curIdx]; $prevC=$data.catPeriod[$cat][$prevIdx]
         if($curC -lt 3){ continue }
         $growth = if($prevC -gt 0){$curC/$prevC}else{[double]::PositiveInfinity}
         $absDelta = $curC-$prevC
@@ -81,11 +113,11 @@ function Build-ClassNarrative($cls,$data,$curIdx){
         $line="<b>$(HEnc $cat)</b>: Complaints $verb from $($prevC.ToString('N0')) to $($curC.ToString('N0')) ($(PctFmt $pP) &rarr; $(PctFmt $pC))."
 
         $subLines=@()
-        if($data.subDimName -and $data.subMonth.ContainsKey($cat)){
+        if($data.subDimName -and $data.subPeriod.ContainsKey($cat)){
             $movers=@()
-            foreach($sv in $data.subMonth[$cat].Keys){
+            foreach($sv in $data.subPeriod[$cat].Keys){
                 if($sv -eq "(blank)"){continue}
-                $sc=$data.subMonth[$cat][$sv][$curIdx]; $sp=$data.subMonth[$cat][$sv][$prevIdx]
+                $sc=$data.subPeriod[$cat][$sv][$curIdx]; $sp=$data.subPeriod[$cat][$sv][$prevIdx]
                 $d=$sc-$sp
                 if($d -gt 0 -and $sc -ge 3){ $movers += @{name=$sv;cur=$sc;prev=$sp;delta=$d} }
             }
@@ -121,41 +153,86 @@ function Build-ClassNarrative($cls,$data,$curIdx){
 
 function Build-MonthlyAnalysisPanel {
     if($N -lt 2){ return "" }
-    $classData=@{}
-    foreach($c in $B.Classes){ $classData[$c.key] = Build-ClassMonthlyData $c }
 
+    # ---------- Monthly narrative (existing) ----------
+    $monthClassData=@{}
+    foreach($c in $B.Classes){ $monthClassData[$c.key] = Build-ClassPeriodData $c $script:MA_MonthCtx }
     $monthDivs=New-Object System.Text.StringBuilder
     for($mi=1; $mi -lt $N; $mi++){
         $sections=@()
         foreach($c in $B.Classes){
-            $html = Build-ClassNarrative $c $classData[$c.key] $mi
+            $html = Build-ClassPeriodNarrative $c $monthClassData[$c.key] $script:MA_MonthCtx $mi
             if($html){ $sections += $html }
         }
         $body = if($sections.Count -gt 0){ $sections -join "" } else { "<p class='note'>No notable month-on-month changes crossed the reporting threshold for $(HEnc (PrettyMonth $months[$mi])).</p>" }
         $disp = if($mi -eq $N-1){""}else{" style='display:none;'"}
-        [void]$monthDivs.Append("<div class='ma-month' id='ma-month-$mi'$disp>$body</div>")
+        [void]$monthDivs.Append("<div class='ma-period' id='ma-month-$mi'$disp>$body</div>")
     }
+    $monthOpts=New-Object System.Text.StringBuilder
+    for($mi=1; $mi -lt $N; $mi++){ $sel=if($mi -eq $N-1){" selected"}else{""}; [void]$monthOpts.Append("<option value='$mi'$sel>$(HEnc (PrettyMonth $months[$mi])) vs $(HEnc (PrettyMonth $months[$mi-1]))</option>") }
 
-    $opts=New-Object System.Text.StringBuilder
-    for($mi=1; $mi -lt $N; $mi++){ $sel=if($mi -eq $N-1){" selected"}else{""}; [void]$opts.Append("<option value='$mi'$sel>$(HEnc (PrettyMonth $months[$mi])) vs $(HEnc (PrettyMonth $months[$mi-1]))</option>") }
+    # ---------- Weekly narrative (new) ----------
+    $weekDivs=New-Object System.Text.StringBuilder
+    $weekOpts=New-Object System.Text.StringBuilder
+    if($totalWeeks -ge 2){
+        $weekClassData=@{}
+        foreach($c in $B.Classes){ $weekClassData[$c.key] = Build-ClassPeriodData $c $script:MA_WeekCtx }
+        for($wi=1; $wi -lt $totalWeeks; $wi++){
+            $sections=@()
+            foreach($c in $B.Classes){
+                $html = Build-ClassPeriodNarrative $c $weekClassData[$c.key] $script:MA_WeekCtx $wi
+                if($html){ $sections += $html }
+            }
+            $body = if($sections.Count -gt 0){ $sections -join "" } else { "<p class='note'>No notable week-on-week changes crossed the reporting threshold for $(HEnc (PrettyWeekFull $wi)).</p>" }
+            $disp = if($wi -eq $totalWeeks-1){""}else{" style='display:none;'"}
+            [void]$weekDivs.Append("<div class='ma-period' id='ma-week-$wi'$disp>$body</div>")
+        }
+        for($wi=1; $wi -lt $totalWeeks; $wi++){ $sel=if($wi -eq $totalWeeks-1){" selected"}else{""}; [void]$weekOpts.Append("<option value='$wi'$sel>$(HEnc (PrettyWeekFull $wi)) vs $(HEnc (PrettyWeekFull ($wi-1)))</option>") }
+    }
 
     $js = @"
 <script>
 (function(){
   window.onMonthlyAnalysisChange=function(v){
-    document.querySelectorAll('.ma-month').forEach(function(el){ el.style.display = (el.id==='ma-month-'+v) ? '' : 'none'; });
+    document.querySelectorAll('#ma-monthly-wrap .ma-period').forEach(function(el){ el.style.display = (el.id==='ma-month-'+v) ? '' : 'none'; });
+  };
+  window.onWeeklyAnalysisChange=function(v){
+    document.querySelectorAll('#ma-weekly-wrap .ma-period').forEach(function(el){ el.style.display = (el.id==='ma-week-'+v) ? '' : 'none'; });
+  };
+  window.setMaGranularity=function(g){
+    document.querySelectorAll('.ma-gran-toggle .gran-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.magran===g); });
+    var mw=document.getElementById('ma-monthly-wrap'), ww=document.getElementById('ma-weekly-wrap');
+    if(mw){ mw.style.display = (g==='monthly') ? '' : 'none'; }
+    if(ww){ ww.style.display = (g==='weekly') ? '' : 'none'; }
   };
 })();
 </script>
 "@
 
+    $weeklyToggleHtml = if($totalWeeks -ge 2){ "<button type=""button"" class=""gran-btn"" data-magran=""weekly"" onclick=""setMaGranularity('weekly')"">Weekly</button>" } else { "" }
+    $weeklySectionHtml = if($totalWeeks -ge 2){
+@"
+    <div id="ma-weekly-wrap" style="display:none;">
+      <div style="margin-bottom:18px;"><label for="ma-week-select" style="font-size:12px;color:var(--text-muted);margin-right:8px;">Week</label><select id="ma-week-select" onchange="onWeeklyAnalysisChange(this.value)" style="font-size:13px;padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;">$($weekOpts.ToString())</select></div>
+      $($weekDivs.ToString())
+    </div>
+"@
+    } else { "" }
+
     return @"
 <div class="tab-panel" id="panel-monthly">
   <section>
     <h2>Monthly Analysis</h2>
-    <p class="desc">Auto-generated from ticket data &mdash; compares the selected month to the one before it. Figures are wrt that month's total sales; drill-downs show the courier/warehouse/product driving most of a category's change. Root-cause context (e.g. a specific coupon bug) isn't captured in the data and is not inferred here.</p>
-    <div style="margin-bottom:18px;"><label for="ma-select" style="font-size:12px;color:var(--text-muted);margin-right:8px;">Month</label><select id="ma-select" onchange="onMonthlyAnalysisChange(this.value)" style="font-size:13px;padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;">$($opts.ToString())</select></div>
-    $($monthDivs.ToString())
+    <p class="desc">Auto-generated from ticket data &mdash; compares the selected period to the one before it. Figures are wrt that period's total sales; drill-downs show the courier/warehouse/product driving most of a category's change. Root-cause context (e.g. a specific coupon bug) isn't captured in the data and is not inferred here.</p>
+    <div class="ma-gran-toggle">
+      <button type="button" class="gran-btn active" data-magran="monthly" onclick="setMaGranularity('monthly')">Monthly</button>
+      $weeklyToggleHtml
+    </div>
+    <div id="ma-monthly-wrap">
+      <div style="margin-bottom:18px;"><label for="ma-select" style="font-size:12px;color:var(--text-muted);margin-right:8px;">Month</label><select id="ma-select" onchange="onMonthlyAnalysisChange(this.value)" style="font-size:13px;padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;">$($monthOpts.ToString())</select></div>
+      $($monthDivs.ToString())
+    </div>
+$weeklySectionHtml
   </section>
 </div>
 $js

@@ -108,14 +108,18 @@ function Get-SheetValues([string]$SpreadsheetId, [string]$Range, [int]$TimeoutSe
 }
 
 # Fetch a large sheet in row chunks (returns array of row arrays, no header).
-function Get-SheetRowsChunked([string]$SpreadsheetId, [string]$SheetName, [string]$LastCol, [int]$TotalRows, [int]$ChunkSize = 10000) {
+# Auto-detects the end of data (stops once a chunk comes back short of ChunkSize) rather
+# than relying on a hardcoded row count, so it never silently misses newly added rows.
+function Get-SheetRowsChunked([string]$SpreadsheetId, [string]$SheetName, [string]$LastCol, [int]$ChunkSize = 10000) {
     $all = New-Object System.Collections.Generic.List[object]
     $start = 2
-    while ($start -le $TotalRows) {
-        $end = [math]::Min($start + $ChunkSize - 1, $TotalRows)
+    while ($true) {
+        $end = $start + $ChunkSize - 1
         $rows = Get-SheetValues $SpreadsheetId "$SheetName!A$start`:$LastCol$end"
-        if ($rows) { foreach ($r in $rows) { $all.Add($r) } }
-        Write-Host "  fetched $SheetName rows $start-$end ($($all.Count) total)"
+        if (-not $rows -or $rows.Count -eq 0) { break }
+        foreach ($r in $rows) { $all.Add($r) }
+        Write-Host "  fetched $SheetName rows $start-$($start + $rows.Count - 1) ($($all.Count) total)"
+        if ($rows.Count -lt $ChunkSize) { break }
         $start = $end + 1
     }
     return $all

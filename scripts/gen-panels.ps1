@@ -115,9 +115,13 @@ function Build-ClassPanel($cls){
     $batch=""
     if($cls.key -eq "Packaging and Operational" -or $cls.key -eq "Product" -or $cls.key -eq "Product Suggestion/Recommendation"){ $batch = Build-BatchTable $subset $cls.label }
     $insights = Build-InsightsCard "Insights &mdash; $(HEnc $cls.label)" (Get-CategoryInsightItems $subset)
+    $weekly = Build-WeeklyClassBlock $cls
     return @"
+<div class="gran-monthly">
 <section><h2>$(HEnc $cls.label) Complaints by Issue Category</h2><p class="desc">Percent = complaints &divide; that month's total order volume ("Total Sales M").</p>$pivot</section>
 <section><h2>$(HEnc $cls.label) Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line).</p>$chart</section>
+</div>
+$weekly
 $batch
 $insights
 "@
@@ -363,6 +367,42 @@ function Assemble-Report {
     $foot = "<footer><p><strong>Methodology:</strong> Aggregated from the raw ""$($B.SheetName)"" tab. Rows flagged ""Duplicate"" are excluded from per-class drill-downs (Overview shows both). Percentages use the sheet's own ""Total Sales M"" / ""Partner Allocation"" figures.</p><p>Auto-refreshed daily at 2 PM IST. Last updated $nowStr. No raw ticket-level PII is stored &mdash; all figures are aggregated segment counts.</p></footer>"
     $tabjs = "<script>document.querySelectorAll('.tab-btn').forEach(function(b){b.addEventListener('click',function(){document.querySelectorAll('.tab-btn').forEach(function(x){x.classList.remove('active');});document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.remove('active');});b.classList.add('active');document.getElementById('panel-'+b.dataset.tab).classList.add('active');});});</script>"
 
+    $granOpts = New-Object System.Text.StringBuilder
+    $lastEligible = if($script:WeeklyEligibleMonths.Count -gt 0){$script:WeeklyEligibleMonths[$script:WeeklyEligibleMonths.Count-1]}else{-1}
+    foreach($mi in $script:WeeklyEligibleMonths){ $sel=if($mi -eq $lastEligible){" selected"}else{""}; [void]$granOpts.Append("<option value='$mi'$sel>$(HEnc (PrettyMonth $months[$mi]))</option>") }
+    $granToolbar = @"
+<div class="gran-toolbar">
+  <div class="gran-toggle">
+    <button type="button" class="gran-btn active" data-gran="monthly" onclick="setGranularity('monthly')">Monthly</button>
+    <button type="button" class="gran-btn" data-gran="weekly" onclick="setGranularity('weekly')">Weekly</button>
+  </div>
+  <div class="gran-month-picker" id="gran-month-wrap" style="display:none;">
+    <label for="gran-month-select">Month</label>
+    <select id="gran-month-select" onchange="applyGranularity()">$($granOpts.ToString())</select>
+  </div>
+  <span class="gran-note">Weekly applies to Overview and each complaint-category tab &mdash; not Delivery, NPS/CSAT, or Product &amp; Packaging.</span>
+</div>
+<script>
+(function(){
+  var curGran='monthly';
+  window.setGranularity=function(g){
+    curGran=g;
+    document.querySelectorAll('.gran-btn').forEach(function(b){b.classList.toggle('active',b.dataset.gran===g);});
+    var mw=document.getElementById('gran-month-wrap'); if(mw){mw.style.display=(g==='weekly')?'':'none';}
+    applyGranularity();
+  };
+  window.applyGranularity=function(){
+    var sel=document.getElementById('gran-month-select'); var mi=sel?sel.value:'';
+    document.querySelectorAll('.gran-monthly').forEach(function(el){el.style.display=(curGran==='monthly')?'':'none';});
+    document.querySelectorAll('.gran-weekly').forEach(function(el){el.style.display='none';});
+    if(curGran==='weekly'){
+      document.querySelectorAll('.gran-weekly[data-month="'+mi+'"]').forEach(function(el){el.style.display='';});
+    }
+  };
+})();
+</script>
+"@
+
     return @"
 <title>$(HEnc $B.Title) Customer Query &mdash; Segment Report</title>
 $head
@@ -377,6 +417,7 @@ $head
     <p>Source: "$(HEnc $B.SheetName)" tab &middot; $($totalRows.ToString('N0')) raw ticket rows, deduplicated to $($totalUnique.ToString('N0')) unique tickets</p>
   </header>
   <nav class="tab-nav">$nav</nav>
+  $granToolbar
   $(Build-CsatPanel)
   $(Build-NpsPanel)
   $($panels.ToString())
