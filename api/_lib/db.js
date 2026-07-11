@@ -1,14 +1,18 @@
 // Postgres access + schema bootstrap. @vercel/postgres's `sql` specifically reads
-// process.env.POSTGRES_URL - but Vercel's storage integrations (Neon, Supabase, etc.)
-// don't all name their connection string var that, so fall back through the common
-// variants here rather than requiring the exact name.
+// process.env.POSTGRES_URL - but Vercel storage integrations name their connection
+// string var all sorts of things (sometimes with a custom prefix, e.g. this project's
+// Neon integration uses "auth_POSTGRES_URL" etc.), so search broadly for it rather
+// than requiring an exact name.
 if (!process.env.POSTGRES_URL) {
-  process.env.POSTGRES_URL =
-    process.env.DATABASE_URL ||
-    process.env.POSTGRES_PRISMA_URL ||
-    process.env.POSTGRES_URL_NON_POOLING ||
-    process.env.DATABASE_URL_UNPOOLED ||
-    '';
+  const candidateNames = Object.keys(process.env).filter((k) =>
+    /(^|_)(POSTGRES_URL|DATABASE_URL)$/.test(k) && !/_UNPOOLING|NON_POOLING|UNPOOLED|NO_SSL|PRISMA/.test(k)
+  );
+  // Prefer an exact/prefixed POSTGRES_URL or DATABASE_URL match; fall back to
+  // anything else that looks like a connection string var if none found.
+  const preferred = candidateNames.find((k) => k.endsWith('POSTGRES_URL')) || candidateNames.find((k) => k.endsWith('DATABASE_URL'));
+  if (preferred) {
+    process.env.POSTGRES_URL = process.env[preferred];
+  }
 }
 const { sql } = require('@vercel/postgres');
 
