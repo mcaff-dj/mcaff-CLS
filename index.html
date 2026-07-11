@@ -8,13 +8,13 @@
   :root{
     --page:#f9f9f7; --surface-card:#ffffff; --text-primary:#0b0b0b; --text-secondary:#52514e;
     --text-muted:#898781; --border:rgba(11,11,11,0.10); --grid:#e1e0d9;
-    --mcaff:#4a3aa7; --hyphen:#1baf7a;
+    --mcaff:#4a3aa7; --hyphen:#1baf7a; --pkyc:#c2740c;
   }
   @media (prefers-color-scheme: dark){
     :root{
       --page:#0d0d0d; --surface-card:#1a1a19; --text-primary:#ffffff; --text-secondary:#c3c2b7;
       --text-muted:#898781; --border:rgba(255,255,255,0.10); --grid:#2c2c2a;
-      --mcaff:#9085e9; --hyphen:#199e70;
+      --mcaff:#9085e9; --hyphen:#199e70; --pkyc:#e0993d;
     }
   }
   *{box-sizing:border-box;}
@@ -28,11 +28,13 @@
   header p{margin:0;color:var(--text-secondary);font-size:14px;}
   .cards{display:grid;grid-template-columns:1fr 1fr;gap:18px;}
   @media (max-width:640px){.cards{grid-template-columns:1fr;}}
+  .cards a.card:last-child:nth-child(odd){grid-column:1 / -1;}
   a.card{display:block;text-decoration:none;color:inherit;background:var(--surface-card);
     border:1px solid var(--border);border-radius:16px;padding:24px 22px;transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease;}
   a.card:hover{transform:translateY(-3px);box-shadow:0 10px 30px -12px rgba(0,0,0,0.35);}
   a.card.mcaff:hover{border-color:var(--mcaff);}
   a.card.hyphen:hover{border-color:var(--hyphen);}
+  a.card.pkyc:hover{border-color:var(--pkyc);}
   .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px;vertical-align:middle;}
   .card h2{font-size:18px;margin:0 0 6px;display:flex;align-items:center;}
   .card p{margin:0 0 14px;font-size:13px;color:var(--text-secondary);line-height:1.5;}
@@ -76,6 +78,11 @@
       <a class="card hyphen" href="/hyphen.html">
         <h2><span class="dot" style="background:var(--hyphen)"></span>Hyphen</h2>
         <p>Segment report across Delivery, Warehouse, Technical, Packaging, Product, plus NPS, CSAT and a Product &amp; Packaging drill-down.</p>
+        <span class="open">Open report <span class="arrow">&rarr;</span></span>
+      </a>
+      <a class="card pkyc" href="/product-kyc.html">
+        <h2><span class="dot" style="background:var(--pkyc)"></span>Product Calling KYC</h2>
+        <p>Product feedback analysis &mdash; coming soon.</p>
         <span class="open">Open report <span class="arrow">&rarr;</span></span>
       </a>
     </div>

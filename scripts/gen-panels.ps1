@@ -408,6 +408,7 @@ function Assemble-Report {
 $head
 <div class="wrap">
   <header class="hero">
+    <a class="home-link" href="/">&larr; Home</a>
     <div>
       <span class="badge">Customer Experience</span>
       <span class="badge">$(HEnc $B.Title)</span>

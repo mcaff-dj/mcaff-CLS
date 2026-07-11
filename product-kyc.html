@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Product Calling KYC &mdash; Coming Soon</title>
+<style>
+  :root{
+    --page:#f9f9f7; --surface-card:#ffffff; --text-primary:#0b0b0b; --text-secondary:#52514e;
+    --text-muted:#898781; --border:rgba(11,11,11,0.10);
+    --pkyc:#c2740c;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --page:#0d0d0d; --surface-card:#1a1a19; --text-primary:#ffffff; --text-secondary:#c3c2b7;
+      --text-muted:#898781; --border:rgba(255,255,255,0.10);
+      --pkyc:#e0993d;
+    }
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;min-height:100vh;background:var(--page);color:var(--text-primary);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 20px;text-align:center;}
+  .wrap{width:100%;max-width:520px;}
+  .home-link{display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-size:13px;font-weight:600;
+    color:var(--text-secondary);margin-bottom:28px;}
+  .home-link:hover{color:var(--text-primary);}
+  .badge{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--pkyc);background:color-mix(in srgb, var(--pkyc) 14%, transparent);border-radius:999px;padding:4px 12px;margin-bottom:14px;}
+  h1{font-size:clamp(22px,4vw,28px);margin:0 0 12px;letter-spacing:-0.01em;}
+  p{margin:0;color:var(--text-secondary);font-size:14px;line-height:1.6;}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <a class="home-link" href="/">&larr; Home</a>
+    <div><span class="badge">Coming Soon</span></div>
+    <h1>Product Calling KYC</h1>
+    <p>This report is being built from the "Product feedback KYC" workbook. Check back soon.</p>
+  </div>
+</body>
+</html>

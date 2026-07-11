@@ -40,6 +40,8 @@
   header.hero h1{font-size:clamp(19px,3.2vw,26px);margin:0 0 6px;letter-spacing:-0.01em;}
   header.hero p{margin:0;color:var(--text-secondary);font-size:13px;}
   .badge{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted);background:var(--surface-card);border:1px solid var(--border);border-radius:999px;padding:3px 10px;margin-right:8px;margin-bottom:6px;}
+  .home-link{display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:14px;}
+  .home-link:hover{color:var(--text-primary);}
 
   .tab-nav{display:flex;flex-wrap:wrap;gap:6px;margin:20px 0 28px;border-bottom:1px solid var(--grid);padding-bottom:0;overflow-x:auto;-ms-overflow-style:none;scrollbar-width:none;}
   .tab-nav::-webkit-scrollbar{display:none;}
@@ -207,6 +209,7 @@
 
 <div class="wrap">
   <header class="hero">
+    <a class="home-link" href="/">&larr; Home</a>
     <div>
       <span class="badge">Customer Experience</span>
       <span class="badge">mCaffeine</span>
