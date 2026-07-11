@@ -178,10 +178,16 @@ foreach($p in $PKYC_Products){
 
 $nowStr = (Get-Date).ToUniversalTime().AddHours(5.5).ToString('dd MMM yyyy, HH:mm') + " IST"
 
-$categoryCardsHtml = New-Object System.Text.StringBuilder
+$tabNavHtml = New-Object System.Text.StringBuilder
+$tabPanelsHtml = New-Object System.Text.StringBuilder
+$firstCat = $true
 foreach($cat in $PKYC_CategoryLabels.Keys){
     $label = $PKYC_CategoryLabels[$cat]
-    [void]$categoryCardsHtml.Append("<div class='card'><span class='status-pill'>Live</span><h2>$(HEnc $label)</h2>$($cardsByCategory[$cat].ToString())</div>")
+    $activeBtn = if($firstCat){ " active" } else { "" }
+    $activePanel = if($firstCat){ " active" } else { "" }
+    [void]$tabNavHtml.Append("<button class=""tab-btn$activeBtn"" data-tab=""$cat"">$(HEnc $label)</button>")
+    [void]$tabPanelsHtml.Append("<div class=""tab-panel$activePanel"" id=""panel-$cat""><span class='status-pill'>Live</span>$($cardsByCategory[$cat].ToString())</div>")
+    $firstCat = $false
 }
 
 $html = @"
@@ -217,9 +223,13 @@ $html = @"
   h1{font-size:clamp(22px,4vw,28px);margin:0 0 12px;letter-spacing:-0.01em;}
   header p{margin:0;color:var(--text-secondary);font-size:14px;line-height:1.6;}
 
-  .cards{display:flex;flex-direction:column;gap:20px;}
-  .card{background:var(--surface-card);border:1px solid var(--border);border-radius:14px;padding:22px 24px;}
-  .card h2{font-size:18px;margin:0 0 16px;}
+  .tab-nav{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 20px;border-bottom:1px solid var(--grid);padding-bottom:0;}
+  .tab-btn{appearance:none;border:1px solid transparent;background:transparent;color:var(--text-secondary);
+    font-size:13px;font-family:inherit;padding:9px 14px;border-radius:8px 8px 0 0;cursor:pointer;position:relative;top:1px;}
+  .tab-btn:hover{color:var(--text-primary);background:var(--surface-card);}
+  .tab-btn.active{color:var(--text-primary);font-weight:600;background:var(--surface-card);border:1px solid var(--grid);border-bottom:1px solid var(--surface-card);}
+  .tab-panel{display:none;background:var(--surface-card);border:1px solid var(--border);border-radius:14px;padding:22px 24px;}
+  .tab-panel.active{display:block;}
   .status-pill{display:inline-block;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;
     color:#1a9c5c;background:rgba(26,156,92,.14);border-radius:999px;padding:2px 9px;margin-bottom:10px;}
 
@@ -247,10 +257,19 @@ $html = @"
       <h1>Product Calling KYC</h1>
       <p>Built from the "Product feedback KYC" workbook &middot; last updated $nowStr.<br>Comparison tables are computed from response counts; feedback themes are keyword frequency + verbatim quotes pulled directly from free-text answers &mdash; not AI-written summaries.</p>
     </header>
-    <div class="cards">
-      $($categoryCardsHtml.ToString())
-    </div>
+    <nav class="tab-nav">$($tabNavHtml.ToString())</nav>
+    $($tabPanelsHtml.ToString())
   </div>
+  <script>
+    document.querySelectorAll('.tab-btn').forEach(function(b){
+      b.addEventListener('click', function(){
+        document.querySelectorAll('.tab-btn').forEach(function(x){ x.classList.remove('active'); });
+        document.querySelectorAll('.tab-panel').forEach(function(p){ p.classList.remove('active'); });
+        b.classList.add('active');
+        document.getElementById('panel-' + b.dataset.tab).classList.add('active');
+      });
+    });
+  </script>
 </body>
 </html>
 "@
