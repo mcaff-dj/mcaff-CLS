@@ -1,6 +1,15 @@
-// Postgres access + schema bootstrap. Works with Vercel Postgres (Neon) out of the box
-// via POSTGRES_URL; any standard Postgres connection string works too (e.g. Supabase),
-// just set POSTGRES_URL to that connection string in the Vercel project's env vars.
+// Postgres access + schema bootstrap. @vercel/postgres's `sql` specifically reads
+// process.env.POSTGRES_URL - but Vercel's storage integrations (Neon, Supabase, etc.)
+// don't all name their connection string var that, so fall back through the common
+// variants here rather than requiring the exact name.
+if (!process.env.POSTGRES_URL) {
+  process.env.POSTGRES_URL =
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_PRISMA_URL ||
+    process.env.POSTGRES_URL_NON_POOLING ||
+    process.env.DATABASE_URL_UNPOOLED ||
+    '';
+}
 const { sql } = require('@vercel/postgres');
 
 let schemaReady = false;
