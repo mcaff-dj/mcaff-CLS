@@ -80,37 +80,37 @@ function Build-CrossFilterPanel($cls, $dim2Key, $dim2Label, $dim2Title, $pctMode
 
     $sb1=New-Object System.Text.StringBuilder
     [void]$sb1.Append("<div class='pivot-wrap'><div class='pivot-title'>$(HEnc $cls.label) Complaints by Issue Category</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Query Category</th>")
-    foreach($mo in $months){[void]$sb1.Append("<th colspan='2' class='month-hdr'>$(HEnc $mo)</th>")}
-    [void]$sb1.Append("</tr><tr>"); foreach($mo in $months){[void]$sb1.Append("<th class='sub-hdr'>Complaints</th><th class='sub-hdr'>wrt sales</th>")}
+    foreach($mo in $months){[void]$sb1.Append("<th colspan='2' class='month-hdr' data-yr='$(YearOf $mo)'>$(HEnc $mo)</th>")}
+    [void]$sb1.Append("</tr><tr>"); foreach($mo in $months){$yr=YearOf $mo; [void]$sb1.Append("<th class='sub-hdr' data-yr='$yr'>Complaints</th><th class='sub-hdr' data-yr='$yr'>wrt sales</th>")}
     [void]$sb1.Append("</tr></thead><tbody>")
     for($ci=0;$ci -lt $catOrder.Count;$ci++){ $z=if(($ci+1)%2 -eq 1){"zebra"}else{""}
         [void]$sb1.Append("<tr class='$z xf-row' id='xf-$pfx-catrow-$ci' onclick='onXfClick(""$pfx"",""cat"",$ci)'><td class='rowlabel'>$(HEnc $catOrder[$ci])</td>")
-        for($mi=0;$mi -lt $N;$mi++){[void]$sb1.Append("<td class='num' id='xf-$pfx-cat-$ci-mo-$mi-cnt'>-</td><td class='pct' id='xf-$pfx-cat-$ci-mo-$mi-pct'>-</td>")}
+        for($mi=0;$mi -lt $N;$mi++){$yr=YearOf $months[$mi]; [void]$sb1.Append("<td class='num' id='xf-$pfx-cat-$ci-mo-$mi-cnt' data-yr='$yr'>-</td><td class='pct' id='xf-$pfx-cat-$ci-mo-$mi-pct' data-yr='$yr'>-</td>")}
         [void]$sb1.Append("</tr>") }
     [void]$sb1.Append("<tr class='total-row'><td class='rowlabel'>Grand Total</td>")
-    for($mi=0;$mi -lt $N;$mi++){[void]$sb1.Append("<td class='num' id='xf-$pfx-cat-total-mo-$mi-cnt'>-</td><td class='pct' id='xf-$pfx-cat-total-mo-$mi-pct'>-</td>")}
+    for($mi=0;$mi -lt $N;$mi++){$yr=YearOf $months[$mi]; [void]$sb1.Append("<td class='num' id='xf-$pfx-cat-total-mo-$mi-cnt' data-yr='$yr'>-</td><td class='pct' id='xf-$pfx-cat-total-mo-$mi-pct' data-yr='$yr'>-</td>")}
     [void]$sb1.Append("</tr></tbody></table></div></div>")
 
     $sb2=New-Object System.Text.StringBuilder
     [void]$sb2.Append("<div class='pivot-wrap'><div class='pivot-title'>$(HEnc $dim2Title)</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>$(HEnc $dim2Label)</th>")
-    foreach($mo in $months){[void]$sb2.Append("<th colspan='2' class='month-hdr'>$(HEnc $mo)</th>")}
-    [void]$sb2.Append("</tr><tr>"); foreach($mo in $months){[void]$sb2.Append("<th class='sub-hdr'>Complaints</th><th class='sub-hdr'>$(HEnc $dim2PctLabel)</th>")}
+    foreach($mo in $months){[void]$sb2.Append("<th colspan='2' class='month-hdr' data-yr='$(YearOf $mo)'>$(HEnc $mo)</th>")}
+    [void]$sb2.Append("</tr><tr>"); foreach($mo in $months){$yr=YearOf $mo; [void]$sb2.Append("<th class='sub-hdr' data-yr='$yr'>Complaints</th><th class='sub-hdr' data-yr='$yr'>$(HEnc $dim2PctLabel)</th>")}
     [void]$sb2.Append("</tr></thead><tbody>")
     for($di=0;$di -lt $dim2Order.Count;$di++){ $z=if(($di+1)%2 -eq 1){"zebra"}else{""}
         [void]$sb2.Append("<tr class='$z xf-row' id='xf-$pfx-dimrow-$di' onclick='onXfClick(""$pfx"",""dim2"",$di)'><td class='rowlabel'>$(HEnc $dim2Order[$di])</td>")
-        for($mi=0;$mi -lt $N;$mi++){[void]$sb2.Append("<td class='num' id='xf-$pfx-dim-$di-mo-$mi-cnt'>-</td><td class='pct' id='xf-$pfx-dim-$di-mo-$mi-pct'>-</td>")}
+        for($mi=0;$mi -lt $N;$mi++){$yr=YearOf $months[$mi]; [void]$sb2.Append("<td class='num' id='xf-$pfx-dim-$di-mo-$mi-cnt' data-yr='$yr'>-</td><td class='pct' id='xf-$pfx-dim-$di-mo-$mi-pct' data-yr='$yr'>-</td>")}
         [void]$sb2.Append("</tr>") }
     [void]$sb2.Append("<tr class='total-row'><td class='rowlabel'>Grand Total</td>")
-    for($mi=0;$mi -lt $N;$mi++){[void]$sb2.Append("<td class='num' id='xf-$pfx-dim-total-mo-$mi-cnt'>-</td><td class='pct' id='xf-$pfx-dim-total-mo-$mi-pct'>-</td>")}
+    for($mi=0;$mi -lt $N;$mi++){$yr=YearOf $months[$mi]; [void]$sb2.Append("<td class='num' id='xf-$pfx-dim-total-mo-$mi-cnt' data-yr='$yr'>-</td><td class='pct' id='xf-$pfx-dim-total-mo-$mi-pct' data-yr='$yr'>-</td>")}
     [void]$sb2.Append("</tr></tbody></table></div></div>")
 
     $sb3=New-Object System.Text.StringBuilder
     [void]$sb3.Append("<div class='card'><div class='pivot-title' style='margin-bottom:18px;'>$(HEnc $cls.label) Complaints wrt Sales</div><div class='legend-row' style='justify-content:center;'><div class='legend-item'><span class='swatch' style='background:$barColor;'></span><span class='lname'>Complaints</span></div><div class='legend-item'><span class='swatch' style='background:$lineColor;border-radius:50%;'></span><span class='lname'>wrt sales %</span></div></div>")
     [void]$sb3.Append("<svg viewBox='0 0 $W $H' width='100%' height='$H' role='img'><line x1='$padL' y1='$($padT+$plotH)' x2='$($W-$padR)' y2='$($padT+$plotH)' stroke='var(--baseline)' stroke-width='1'/>")
-    for($i=0;$i -lt $N;$i++){ $cx=$padL+$slot*$i+$slot/2; $bx=$cx-$barW/2; $ml=PrettyMonth $months[$i]
-        [void]$sb3.Append("<rect id='xf-$pfx-bar-$i' x='$bx' y='$($padT+$plotH)' width='$barW' height='0' fill='$barColor' rx='2'/><text id='xf-$pfx-barval-$i' x='$cx' y='$($padT+$plotH-8)' text-anchor='middle' font-size='10.5' fill='var(--text-primary)' font-weight='600'></text><text x='$cx' y='$($H-$padB+18)' text-anchor='middle' font-size='10.5' fill='var(--text-muted)'>$ml</text>") }
+    for($i=0;$i -lt $N;$i++){ $cx=$padL+$slot*$i+$slot/2; $bx=$cx-$barW/2; $ml=PrettyMonth $months[$i]; $yr=YearOf $months[$i]
+        [void]$sb3.Append("<g data-yr='$yr'><rect id='xf-$pfx-bar-$i' x='$bx' y='$($padT+$plotH)' width='$barW' height='0' fill='$barColor' rx='2'/><text id='xf-$pfx-barval-$i' x='$cx' y='$($padT+$plotH-8)' text-anchor='middle' font-size='10.5' fill='var(--text-primary)' font-weight='600'></text><text x='$cx' y='$($H-$padB+18)' text-anchor='middle' font-size='10.5' fill='var(--text-muted)'>$ml</text></g>") }
     [void]$sb3.Append("<polyline id='xf-$pfx-polyline' points='' fill='none' stroke='$lineColor' stroke-width='2'/>")
-    for($i=0;$i -lt $N;$i++){[void]$sb3.Append("<circle id='xf-$pfx-dot-$i' cx='0' cy='0' r='3' fill='$lineColor' visibility='hidden'/><text id='xf-$pfx-dotval-$i' x='0' y='0' text-anchor='middle' font-size='10.5' font-weight='600' fill='$lineColor'></text>")}
+    for($i=0;$i -lt $N;$i++){ $yr=YearOf $months[$i]; [void]$sb3.Append("<g data-yr='$yr'><circle id='xf-$pfx-dot-$i' cx='0' cy='0' r='3' fill='$lineColor' visibility='hidden'/><text id='xf-$pfx-dotval-$i' x='0' y='0' text-anchor='middle' font-size='10.5' font-weight='600' fill='$lineColor'></text></g>")}
     [void]$sb3.Append("</svg></div>")
 
     $filterNote = "<div class='filter-row' style='display:flex;align-items:center;gap:10px;margin:0 0 4px;flex-wrap:wrap;'><span id='xf-$pfx-filter-note' style='font-size:12px;color:var(--text-muted);'></span></div>"
@@ -222,9 +222,25 @@ $insights
 }
 
 function Build-Combo2($rows,$title,$scoreLabel,$scoreMax){
-    $mos=@();$vals=@();$sc=@()
-    for($i=1;$i -lt $rows.Count;$i++){ $r=$rows[$i]; $mos+=(PrettyMonth $r[0]); $vals+=[double]($r[1] -replace ',',''); $sc+=[double]$r[2] }
+    $mos=@();$vals=@();$sc=@();$yrsRaw=@();$monthNums=@()
+    for($i=1;$i -lt $rows.Count;$i++){ $r=$rows[$i]; $raw=$r[0]
+        $mos+=(PrettyMonth $raw); $yrsRaw+=(YearOf $raw); $vals+=[double]($r[1] -replace ',',''); $sc+=[double]$r[2]
+        $mn=0; if($raw -match '^(\d+)_'){ $mn=[int]$Matches[1] }
+        $monthNums+=$mn }
     $n=$mos.Count; if($n -eq 0){ return "<div class='card'><p class='note'>No data.</p></div>" }
+    # This sheet's month labels are inconsistently formatted (some carry no year at all,
+    # e.g. "12_Dec" vs "2_Feb'26") - backfill missing years by walking backward from the
+    # nearest row that does have one, decrementing across month-number wraparounds
+    # (e.g. Dec(12) immediately before a known Jan(1)/2026 must be Dec 2025).
+    $yrs = New-Object 'string[]' $n
+    $carryYear = $null
+    for($i=$n-1; $i -ge 0; $i--){
+        if($yrsRaw[$i]){ $carryYear = $yrsRaw[$i] }
+        elseif($carryYear -and $i -lt ($n-1) -and $monthNums[$i] -gt 0 -and $monthNums[$i+1] -gt 0 -and $monthNums[$i] -gt $monthNums[$i+1]){
+            $carryYear = [string]([int]$carryYear - 1)
+        }
+        $yrs[$i] = $carryYear
+    }
     $barMax=NiceMax ((($vals|Measure-Object -Maximum).Maximum)*1.12)
     $W=1120;$H=420;$padL=55;$padR=55;$padT=40;$padB=55;$plotW=$W-$padL-$padR;$plotH=$H-$padT-$padB;$slot=$plotW/$n;$barW=$slot*0.55
     $sb=New-Object System.Text.StringBuilder
@@ -235,11 +251,11 @@ function Build-Combo2($rows,$title,$scoreLabel,$scoreMax){
     [void]$sb.Append("<line x1='$padL' y1='$($padT+$plotH)' x2='$($W-$padR)' y2='$($padT+$plotH)' stroke='var(--baseline)' stroke-width='1'/>")
     $pts=@()
     for($i=0;$i -lt $n;$i++){ $cx=$padL+$slot*$i+$slot/2; $bx=$cx-$barW/2; $bh=$plotH*($vals[$i]/$barMax); $by=$padT+$plotH-$bh
-        [void]$sb.Append("<rect x='$bx' y='$by' width='$barW' height='$bh' fill='var(--s2)' rx='2'/><text x='$cx' y='$($by-8)' text-anchor='middle' font-size='12' font-weight='700' fill='var(--text-primary)'>$('{0:N0}' -f $vals[$i])</text>")
+        [void]$sb.Append("<g data-yr='$($yrs[$i])'><rect x='$bx' y='$by' width='$barW' height='$bh' fill='var(--s2)' rx='2'/><text x='$cx' y='$($by-8)' text-anchor='middle' font-size='12' font-weight='700' fill='var(--text-primary)'>$('{0:N0}' -f $vals[$i])</text>")
         $ly=$padT+$plotH*(1-$sc[$i]/$scoreMax); $pts+="$cx,$ly"
-        [void]$sb.Append("<text x='$cx' y='$($H-$padB+20)' text-anchor='middle' font-size='11' fill='var(--text-muted)'>$($mos[$i])</text>") }
+        [void]$sb.Append("<text x='$cx' y='$($H-$padB+20)' text-anchor='middle' font-size='11' fill='var(--text-muted)'>$($mos[$i])</text></g>") }
     [void]$sb.Append("<polyline points='$($pts -join ' ')' fill='none' stroke='var(--s1)' stroke-width='2.5'/>")
-    for($i=0;$i -lt $n;$i++){ $p=$pts[$i] -split ','; [void]$sb.Append("<circle cx='$($p[0])' cy='$($p[1])' r='4' fill='var(--s1)'/><text x='$($p[0])' y='$([double]$p[1]-12)' text-anchor='middle' font-size='12' font-weight='700' fill='var(--s1)'>$($sc[$i])</text>") }
+    for($i=0;$i -lt $n;$i++){ $p=$pts[$i] -split ','; [void]$sb.Append("<g data-yr='$($yrs[$i])'><circle cx='$($p[0])' cy='$($p[1])' r='4' fill='var(--s1)'/><text x='$($p[0])' y='$([double]$p[1]-12)' text-anchor='middle' font-size='12' font-weight='700' fill='var(--s1)'>$($sc[$i])</text></g>") }
     [void]$sb.Append("</svg></div>")
     return $sb.ToString()
 }
@@ -321,29 +337,29 @@ function Build-ProdPkgPanel {
     $rowsByCat=@{}; for($i=0;$i -lt $rowsOut.Count;$i++){ $k=$rowCatIdx[$i]; if(-not $rowsByCat.ContainsKey($k)){$rowsByCat[$k]=@()}; $rowsByCat[$k]+=$i }
     $t=New-Object System.Text.StringBuilder
     [void]$t.Append("<div class='pivot-scroll ppk-scroll'><table class='pivot-table' id='ppk-pivot-table'><thead><tr><th class='corner'>SKU</th><th class='corner'>Product Name</th><th class='corner'>Query Class</th><th class='corner'>Query Category</th><th class='corner'>Batch Number</th>")
-    foreach($mo in $months){[void]$t.Append("<th colspan='2' class='month-hdr'>$(HEnc $mo)</th>")}
+    foreach($mo in $months){[void]$t.Append("<th colspan='2' class='month-hdr' data-yr='$(YearOf $mo)'>$(HEnc $mo)</th>")}
     [void]$t.Append("</tr><tr><th class='corner'></th><th class='corner'></th><th class='corner'></th><th class='corner'></th><th class='corner'></th>")
-    foreach($mo in $months){[void]$t.Append("<th class='sub-hdr'>complain</th><th class='sub-hdr'>complain%</th>")}
+    foreach($mo in $months){$yr=YearOf $mo; [void]$t.Append("<th class='sub-hdr' data-yr='$yr'>complain</th><th class='sub-hdr' data-yr='$yr'>complain%</th>")}
     [void]$t.Append("</tr></thead><tbody>")
     for($pi=0;$pi -lt $parentsOut.Count;$pi++){ $p=$parentsOut[$pi]; $z=if(($pi+1)%2 -eq 1){"zebra"}else{""}
         [void]$t.Append("<tr class='$z ppk-lvl1' id='ppk-parent-$pi' style='font-weight:700;'><td class='rowlabel'><span id='ppk-icon-1-$pi' class='ppk-toggle-icon' onclick='ppkToggle(1,$pi,event)' style='cursor:pointer;'>+</span>$(HEnc $SKUS[$p.sku])</td><td class='rowlabel'>&mdash;</td><td class='rowlabel'>&mdash;</td><td class='rowlabel'>&mdash;</td><td class='rowlabel'>&mdash;</td>")
-        for($mi=0;$mi -lt $N;$mi++){[void]$t.Append("<td class='num' id='ppk-p-$pi-$mi-cnt'>-</td><td class='pct' id='ppk-p-$pi-$mi-pct'>-</td>")}
+        for($mi=0;$mi -lt $N;$mi++){$yr=YearOf $months[$mi]; [void]$t.Append("<td class='num' id='ppk-p-$pi-$mi-cnt' data-yr='$yr'>-</td><td class='pct' id='ppk-p-$pi-$mi-pct' data-yr='$yr'>-</td>")}
         [void]$t.Append("</tr>")
         foreach($pgi in ($pgByP[$pi])){ $pg=$prodGroups[$pgi]
             [void]$t.Append("<tr class='ppk-lvl2 ppk-child-of-p$pi' id='ppk-pg-$pgi' style='display:none;font-weight:600;background:var(--surface-1);'><td class='rowlabel'></td><td class='rowlabel' title=""$(HEnc $PRODS[$pg.prod])""><span id='ppk-icon-2-$pgi' class='ppk-toggle-icon' onclick='ppkToggle(2,$pgi,event)' style='cursor:pointer;'>+</span>$(HEnc $PRODS[$pg.prod])</td><td class='rowlabel'>&mdash;</td><td class='rowlabel'>&mdash;</td><td class='rowlabel'>&mdash;</td>")
-            for($mi=0;$mi -lt $N;$mi++){[void]$t.Append("<td class='num' id='ppk-pg-$pgi-$mi-cnt'>-</td><td class='pct' id='ppk-pg-$pgi-$mi-pct'>-</td>")}
+            for($mi=0;$mi -lt $N;$mi++){$yr=YearOf $months[$mi]; [void]$t.Append("<td class='num' id='ppk-pg-$pgi-$mi-cnt' data-yr='$yr'>-</td><td class='pct' id='ppk-pg-$pgi-$mi-pct' data-yr='$yr'>-</td>")}
             [void]$t.Append("</tr>")
             foreach($cgi in ($cgByPg[$pgi])){ $cg=$clsGroups[$cgi]
                 [void]$t.Append("<tr class='ppk-lvl3 ppk-child-of-pg$pgi' id='ppk-cg-$cgi' style='display:none;background:var(--pivot-zebra-bg);'><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'><span id='ppk-icon-3-$cgi' class='ppk-toggle-icon' onclick='ppkToggle(3,$cgi,event)' style='cursor:pointer;'>+</span>$(HEnc $CLASSES[$cg.cls])</td><td class='rowlabel'>&mdash;</td><td class='rowlabel'>&mdash;</td>")
-                for($mi=0;$mi -lt $N;$mi++){[void]$t.Append("<td class='num' id='ppk-cg-$cgi-$mi-cnt'>-</td><td class='pct' id='ppk-cg-$cgi-$mi-pct'>-</td>")}
+                for($mi=0;$mi -lt $N;$mi++){$yr=YearOf $months[$mi]; [void]$t.Append("<td class='num' id='ppk-cg-$cgi-$mi-cnt' data-yr='$yr'>-</td><td class='pct' id='ppk-cg-$cgi-$mi-pct' data-yr='$yr'>-</td>")}
                 [void]$t.Append("</tr>")
                 foreach($catgi in ($catByCg[$cgi])){ $catg=$catGroups[$catgi]
                     [void]$t.Append("<tr class='ppk-lvl4 ppk-child-of-cg$cgi' id='ppk-catg-$catgi' style='display:none;'><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'><span id='ppk-icon-4-$catgi' class='ppk-toggle-icon' onclick='ppkToggle(4,$catgi,event)' style='cursor:pointer;'>+</span>$(HEnc $CATS[$catg.cat])</td><td class='rowlabel'>&mdash;</td>")
-                    for($mi=0;$mi -lt $N;$mi++){[void]$t.Append("<td class='num' id='ppk-catg-$catgi-$mi-cnt'>-</td><td class='pct' id='ppk-catg-$catgi-$mi-pct'>-</td>")}
+                    for($mi=0;$mi -lt $N;$mi++){$yr=YearOf $months[$mi]; [void]$t.Append("<td class='num' id='ppk-catg-$catgi-$mi-cnt' data-yr='$yr'>-</td><td class='pct' id='ppk-catg-$catgi-$mi-pct' data-yr='$yr'>-</td>")}
                     [void]$t.Append("</tr>")
                     foreach($ri in ($rowsByCat[$catgi])){ $c=$rowsOut[$ri]
                         [void]$t.Append("<tr class='ppk-lvl5 ppk-child-of-catg$catgi' id='ppk-row-$ri' style='display:none;background:var(--surface-card);'><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'>$(HEnc $BATCHES[$c.batch])</td>")
-                        for($mi=0;$mi -lt $N;$mi++){[void]$t.Append("<td class='num' id='ppk-$ri-$mi-cnt'>-</td><td class='pct' id='ppk-$ri-$mi-pct'>-</td>")}
+                        for($mi=0;$mi -lt $N;$mi++){$yr=YearOf $months[$mi]; [void]$t.Append("<td class='num' id='ppk-$ri-$mi-cnt' data-yr='$yr'>-</td><td class='pct' id='ppk-$ri-$mi-pct' data-yr='$yr'>-</td>")}
                         [void]$t.Append("</tr>") } } } } }
     [void]$t.Append("</tbody></table></div>")
 
@@ -504,6 +520,29 @@ function Assemble-Report {
 </script>
 "@
 
+    $yearToolbar = ""
+    if($distinctYears.Count -gt 1){
+        $yearChips = ($distinctYears | ForEach-Object { "<button type=""button"" class=""year-chip active"" data-yr=""$_"" onclick=""toggleYearChip('$_')"">$_</button>" }) -join ""
+        $yearToolbar = @"
+<div class="gran-toolbar">
+  <span class="gran-note" style="font-weight:600;">Year</span>
+  $yearChips
+  <span class="gran-note">Narrows which month columns/bars show in every table and chart on the page (weekly view and Monthly Analysis are unaffected).</span>
+</div>
+<script>
+(function(){
+  var activeYears = new Set([$(($distinctYears | ForEach-Object { "'$_'" }) -join ",")]);
+  window.toggleYearChip=function(yr){
+    if(activeYears.has(yr)){ if(activeYears.size>1){ activeYears.delete(yr); } }
+    else { activeYears.add(yr); }
+    document.querySelectorAll('.year-chip').forEach(function(b){ b.classList.toggle('active', activeYears.has(b.dataset.yr)); });
+    document.querySelectorAll('[data-yr]').forEach(function(el){ el.style.display = activeYears.has(el.getAttribute('data-yr')) ? '' : 'none'; });
+  };
+})();
+</script>
+"@
+    }
+
     return @"
 <title>$(HEnc $B.Title) Customer Query &mdash; Segment Report</title>
 $head
@@ -520,6 +559,7 @@ $head
   </header>
   <nav class="tab-nav">$nav</nav>
   $granToolbar
+  $yearToolbar
   $(Build-CsatPanel)
   $(Build-NpsPanel)
   $($panels.ToString())

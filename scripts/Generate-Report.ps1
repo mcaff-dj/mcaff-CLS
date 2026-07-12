@@ -26,6 +26,13 @@ function Cell($row,$i){
     if($i -eq 0){ return $row } else { return "" }   # scalar row -> single cell at col 0
 }
 function PrettyMonth($raw){ $p=$raw -split "_",2; if($p.Count -lt 2){return $raw}; return ($p[1] -replace "'"," '") }
+$script:YearOfCache = @{}
+function YearOf($mo){
+    if($script:YearOfCache.ContainsKey($mo)){ return $script:YearOfCache[$mo] }
+    $y = if($mo -match "['\s](\d{2})$"){ "20$($Matches[1])" } else { "" }
+    $script:YearOfCache[$mo] = $y
+    return $y
+}
 function NiceMax($v){ if($v -le 0){return 10}; $m=[math]::Pow(10,[math]::Floor([math]::Log10($v))); foreach($s in @(1,2,2.5,5,10)){ $c=$s*$m; if($c -ge $v){return $c} }; return 10*$m }
 function CountBy($data,$i){ $d=[ordered]@{}; foreach($r in $data){ $v=Cell $r $i; if([string]::IsNullOrWhiteSpace($v)){$v="(blank)"}; if($d.Contains($v)){$d[$v]++}else{$d[$v]=1} }; return $d }
 function TopN($dict,$n){ return @($dict.GetEnumerator()|Sort-Object Value -Descending|Select-Object -First $n|ForEach-Object{[PSCustomObject]@{key=$_.Key;value=$_.Value}}) }
@@ -85,6 +92,7 @@ $ai      = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.ai
 
 $months = $B.Months
 $N = $months.Count
+$distinctYears = @($months | ForEach-Object { YearOf $_ } | Where-Object { $_ } | Select-Object -Unique | Sort-Object)
 $unique = $dataRows | Where-Object { (Cell $_ $Col.uniq) -eq "Unique" }
 
 function Get-SalesMByMonth($rowsSubset){
@@ -156,9 +164,9 @@ function Build-ClassMonthCounts($rows){
 function Build-Pivot($title,$countsByClassMonth){
     $sb=New-Object System.Text.StringBuilder
     [void]$sb.Append("<div class='pivot-wrap'><div class='pivot-title'>$(HEnc $title)</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Query Class</th>")
-    foreach($mo in $months){[void]$sb.Append("<th colspan='2' class='month-hdr'>$(HEnc $mo)</th>")}
+    foreach($mo in $months){[void]$sb.Append("<th colspan='2' class='month-hdr' data-yr='$(YearOf $mo)'>$(HEnc $mo)</th>")}
     [void]$sb.Append("</tr><tr>")
-    foreach($mo in $months){[void]$sb.Append("<th class='sub-hdr'>Count</th><th class='sub-hdr'>%</th>")}
+    foreach($mo in $months){[void]$sb.Append("<th class='sub-hdr' data-yr='$(YearOf $mo)'>Count</th><th class='sub-hdr' data-yr='$(YearOf $mo)'>%</th>")}
     [void]$sb.Append("</tr></thead><tbody>")
     $ri=0; $totals=@{}
     foreach($c in $B.Classes){ $ri++; $z=if($ri%2 -eq 1){"zebra"}else{""}
@@ -167,11 +175,13 @@ function Build-Pivot($title,$countsByClassMonth){
             if(-not $totals.ContainsKey($mo)){$totals[$mo]=0}; $totals[$mo]+=$cnt
             $sm=0; if($salesM.ContainsKey($mo)){$sm=$salesM[$mo]}; $pct=0; if($sm -gt 0){$pct=Round1 ($cnt/$sm*100)}
             $cd=if($cnt -gt 0){$cnt.ToString('N0')}else{"-"}
-            [void]$sb.Append("<td class='num'>$cd</td><td class='pct'>$pct%</td>") }
+            $yr=YearOf $mo
+            [void]$sb.Append("<td class='num' data-yr='$yr'>$cd</td><td class='pct' data-yr='$yr'>$pct%</td>") }
         [void]$sb.Append("</tr>") }
     [void]$sb.Append("<tr class='total-row'><td class='rowlabel'>Total</td>")
     foreach($mo in $months){ $t=0; if($totals.ContainsKey($mo)){$t=$totals[$mo]}; $sm=0; if($salesM.ContainsKey($mo)){$sm=$salesM[$mo]}; $pct=0; if($sm -gt 0){$pct=Round1 ($t/$sm*100)}
-        [void]$sb.Append("<td class='num'>$($t.ToString('N0'))</td><td class='pct'>$pct%</td>") }
+        $yr=YearOf $mo
+        [void]$sb.Append("<td class='num' data-yr='$yr'>$($t.ToString('N0'))</td><td class='pct' data-yr='$yr'>$pct%</td>") }
     [void]$sb.Append("</tr></tbody></table></div></div>")
     return $sb.ToString()
 }
@@ -194,9 +204,9 @@ function Build-CategoryPivot($subset,$title,[ref]$monthTotalsOut){
     $catOrder=$catTot.GetEnumerator()|Sort-Object Value -Descending|ForEach-Object{$_.Key}
     $sb=New-Object System.Text.StringBuilder
     [void]$sb.Append("<div class='pivot-wrap'><div class='pivot-title'>$(HEnc $title)</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Query Category</th>")
-    foreach($mo in $months){[void]$sb.Append("<th colspan='2' class='month-hdr'>$(HEnc $mo)</th>")}
+    foreach($mo in $months){[void]$sb.Append("<th colspan='2' class='month-hdr' data-yr='$(YearOf $mo)'>$(HEnc $mo)</th>")}
     [void]$sb.Append("</tr><tr>")
-    foreach($mo in $months){[void]$sb.Append("<th class='sub-hdr'>Complaints</th><th class='sub-hdr'>wrt sales</th>")}
+    foreach($mo in $months){[void]$sb.Append("<th class='sub-hdr' data-yr='$(YearOf $mo)'>Complaints</th><th class='sub-hdr' data-yr='$(YearOf $mo)'>wrt sales</th>")}
     [void]$sb.Append("</tr></thead><tbody>")
     $ri=0; $totals=@{}
     foreach($cat in $catOrder){ $ri++; $z=if($ri%2 -eq 1){"zebra"}else{""}
@@ -205,11 +215,13 @@ function Build-CategoryPivot($subset,$title,[ref]$monthTotalsOut){
             if(-not $totals.ContainsKey($mo)){$totals[$mo]=0}; $totals[$mo]+=$cnt
             $sm=0; if($salesM.ContainsKey($mo)){$sm=$salesM[$mo]}; $pct=0; if($sm -gt 0){$pct=Round1 ($cnt/$sm*100)}
             $cd=if($cnt -gt 0){$cnt.ToString('N0')}else{"-"}; $pd=if($cnt -gt 0){"$pct%"}else{"-"}
-            [void]$sb.Append("<td class='num'>$cd</td><td class='pct'>$pd</td>") }
+            $yr=YearOf $mo
+            [void]$sb.Append("<td class='num' data-yr='$yr'>$cd</td><td class='pct' data-yr='$yr'>$pd</td>") }
         [void]$sb.Append("</tr>") }
     [void]$sb.Append("<tr class='total-row'><td class='rowlabel'>Grand Total</td>")
     foreach($mo in $months){ $t=0; if($totals.ContainsKey($mo)){$t=$totals[$mo]}; $sm=0; if($salesM.ContainsKey($mo)){$sm=$salesM[$mo]}; $pct=0; if($sm -gt 0){$pct=Round1 ($t/$sm*100)}
-        [void]$sb.Append("<td class='num'>$($t.ToString('N0'))</td><td class='pct'>$pct%</td>") }
+        $yr=YearOf $mo
+        [void]$sb.Append("<td class='num' data-yr='$yr'>$($t.ToString('N0'))</td><td class='pct' data-yr='$yr'>$pct%</td>") }
     [void]$sb.Append("</tr></tbody></table></div></div>")
     $mt=@(foreach($mo in $months){ if($totals.ContainsKey($mo)){$totals[$mo]}else{0} })
     $monthTotalsOut.Value=$mt
@@ -223,12 +235,12 @@ function Build-ComboChart($vals,$title,$barColor,$lineColor){
     [void]$sb.Append("<div class='card'><div class='pivot-title' style='margin-bottom:18px;'>$(HEnc $title)</div><div class='legend-row' style='justify-content:center;'><div class='legend-item'><span class='swatch' style='background:$barColor;'></span><span class='lname'>Complaints</span></div><div class='legend-item'><span class='swatch' style='background:$lineColor;border-radius:50%;'></span><span class='lname'>wrt sales %</span></div></div>")
     [void]$sb.Append("<svg viewBox='0 0 $W $H' width='100%' height='$H' role='img'><line x1='$padL' y1='$($padT+$plotH)' x2='$($W-$padR)' y2='$($padT+$plotH)' stroke='var(--baseline)' stroke-width='1'/>")
     $pts=@()
-    for($i=0;$i -lt $N;$i++){ $cx=$padL+$slot*$i+$slot/2; $bx=$cx-$barW/2; $bh=$plotH*($vals[$i]/$barMax); $by=$padT+$plotH-$bh
-        [void]$sb.Append("<rect x='$bx' y='$by' width='$barW' height='$bh' fill='$barColor' rx='2'/><text x='$cx' y='$($by-8)' text-anchor='middle' font-size='10.5' fill='var(--text-primary)' font-weight='600'>$('{0:N0}' -f $vals[$i])</text>")
+    for($i=0;$i -lt $N;$i++){ $cx=$padL+$slot*$i+$slot/2; $bx=$cx-$barW/2; $bh=$plotH*($vals[$i]/$barMax); $by=$padT+$plotH-$bh; $yr=YearOf $months[$i]
+        [void]$sb.Append("<g data-yr='$yr'><rect x='$bx' y='$by' width='$barW' height='$bh' fill='$barColor' rx='2'/><text x='$cx' y='$($by-8)' text-anchor='middle' font-size='10.5' fill='var(--text-primary)' font-weight='600'>$('{0:N0}' -f $vals[$i])</text>")
         $ly=$padT+$plotH-($plotH*($pcts[$i]/$pctMax)); $pts+="$cx,$ly"
-        $ml=PrettyMonth $months[$i]; [void]$sb.Append("<text x='$cx' y='$($H-$padB+18)' text-anchor='middle' font-size='10.5' fill='var(--text-muted)'>$ml</text>") }
+        $ml=PrettyMonth $months[$i]; [void]$sb.Append("<text x='$cx' y='$($H-$padB+18)' text-anchor='middle' font-size='10.5' fill='var(--text-muted)'>$ml</text></g>") }
     [void]$sb.Append("<polyline points='$($pts -join ' ')' fill='none' stroke='$lineColor' stroke-width='2'/>")
-    for($i=0;$i -lt $N;$i++){ $p=$pts[$i] -split ','; [void]$sb.Append("<circle cx='$($p[0])' cy='$($p[1])' r='3' fill='$lineColor'/><text x='$($p[0])' y='$([double]$p[1]-10)' text-anchor='middle' font-size='10.5' font-weight='600' fill='$lineColor'>$($pcts[$i])%</text>") }
+    for($i=0;$i -lt $N;$i++){ $p=$pts[$i] -split ','; $yr=YearOf $months[$i]; [void]$sb.Append("<g data-yr='$yr'><circle cx='$($p[0])' cy='$($p[1])' r='3' fill='$lineColor'/><text x='$($p[0])' y='$([double]$p[1]-10)' text-anchor='middle' font-size='10.5' font-weight='600' fill='$lineColor'>$($pcts[$i])%</text></g>") }
     [void]$sb.Append("</svg></div>")
     return $sb.ToString()
 }
@@ -259,11 +271,11 @@ function Build-BatchTable($subset,$title){
     if(-not $order){ return "" }
     $sb=New-Object System.Text.StringBuilder
     [void]$sb.Append("<div class='pivot-wrap'><div class='pivot-title'>$(HEnc $title) Batch Numberwise Complaints - Monthly</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner'>Product Name</th>")
-    foreach($mo in $months){[void]$sb.Append("<th class='month-hdr'>$(HEnc $mo)</th>")}
+    foreach($mo in $months){[void]$sb.Append("<th class='month-hdr' data-yr='$(YearOf $mo)'>$(HEnc $mo)</th>")}
     [void]$sb.Append("</tr></thead><tbody>")
     $ri=0; foreach($prod in $order){ $ri++; $z=if($ri%2 -eq 1){"zebra"}else{""}
         [void]$sb.Append("<tr class='$z'><td class='rowlabel' title=""$(HEnc $prod)"">$(HEnc $prod)</td>")
-        foreach($mo in $months){ $cnt=0; if($pm[$prod].ContainsKey($mo)){$cnt=$pm[$prod][$mo]}; $cd=if($cnt -gt 0){$cnt.ToString('N0')}else{"-"}; [void]$sb.Append("<td class='num'>$cd</td>") }
+        foreach($mo in $months){ $cnt=0; if($pm[$prod].ContainsKey($mo)){$cnt=$pm[$prod][$mo]}; $cd=if($cnt -gt 0){$cnt.ToString('N0')}else{"-"}; [void]$sb.Append("<td class='num' data-yr='$(YearOf $mo)'>$cd</td>") }
         [void]$sb.Append("</tr>") }
     [void]$sb.Append("</tbody></table></div></div>")
     return "<section><h2>Batch Numberwise Complaints (Top 25 Products)</h2><p class=""desc"">Count of $(HEnc $title) tickets that carry a Batch Number, by product and ticket month.</p>$($sb.ToString())</section>"
