@@ -484,9 +484,10 @@ function Assemble-Report {
     $foot = "<footer><p><strong>Methodology:</strong> Aggregated from the raw ""$($B.SheetName)"" tab. Rows flagged ""Duplicate"" are excluded from per-class drill-downs (Overview shows both). Percentages use the sheet's own ""Total Sales M"" / ""Partner Allocation"" figures.</p><p>Auto-refreshed daily at 2 PM IST. Last updated $nowStr. No raw ticket-level PII is stored &mdash; all figures are aggregated segment counts.</p></footer>"
     $tabjs = "<script>document.querySelectorAll('.tab-btn').forEach(function(b){b.addEventListener('click',function(){document.querySelectorAll('.tab-btn').forEach(function(x){x.classList.remove('active');});document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.remove('active');});b.classList.add('active');document.getElementById('panel-'+b.dataset.tab).classList.add('active');});});</script>"
 
-    $granOpts = New-Object System.Text.StringBuilder
+    $monthChips = New-Object System.Text.StringBuilder
     $lastEligible = if($script:WeeklyEligibleMonths.Count -gt 0){$script:WeeklyEligibleMonths[$script:WeeklyEligibleMonths.Count-1]}else{-1}
-    foreach($mi in $script:WeeklyEligibleMonths){ $sel=if($mi -eq $lastEligible){" selected"}else{""}; [void]$granOpts.Append("<option value='$mi'$sel>$(HEnc (PrettyMonth $months[$mi]))</option>") }
+    foreach($mi in $script:WeeklyEligibleMonths){ $act=if($mi -eq $lastEligible){" active"}else{""}
+        [void]$monthChips.Append("<button type=""button"" class=""month-chip$act"" data-month=""$mi"" data-yr=""$(YearOf $months[$mi])"" onclick=""toggleWeekMonthChip($mi)"">$(HEnc (PrettyMonth $months[$mi]))</button>") }
     $granToolbar = @"
 <div class="gran-toolbar">
   <div class="gran-toggle">
@@ -494,26 +495,34 @@ function Assemble-Report {
     <button type="button" class="gran-btn" data-gran="weekly" onclick="setGranularity('weekly')">Weekly</button>
   </div>
   <div class="gran-month-picker" id="gran-month-wrap" style="display:none;">
-    <label for="gran-month-select">Month</label>
-    <select id="gran-month-select" onchange="applyGranularity()">$($granOpts.ToString())</select>
+    <span class="gran-note" style="font-weight:600;">Month</span>
+    $($monthChips.ToString())
   </div>
-  <span class="gran-note">Weekly applies to Overview and every complaint-category tab, including the category breakdown on Delivery/Technical/Warehouse/Product/Suggestion &mdash; but their second-dimension breakdown (partner/platform/facility/product name) and click-to-cross-filter stay monthly-only. Not available on NPS/CSAT or the separate Product &amp; Packaging wrt Sales tab.</span>
+  <span class="gran-note">Weekly applies to Overview and every complaint-category tab, including the category breakdown on Delivery/Technical/Warehouse/Product/Suggestion &mdash; but their second-dimension breakdown (partner/platform/facility/product name) and click-to-cross-filter stay monthly-only. Not available on NPS/CSAT or the separate Product &amp; Packaging wrt Sales tab. Pick multiple months to stack their weekly tables; the Year filter below also narrows which months are offered here.</span>
 </div>
 <script>
 (function(){
   var curGran='monthly';
+  var selectedWeekMonths = new Set([$lastEligible]);
   window.setGranularity=function(g){
     curGran=g;
     document.querySelectorAll('.gran-btn').forEach(function(b){b.classList.toggle('active',b.dataset.gran===g);});
     var mw=document.getElementById('gran-month-wrap'); if(mw){mw.style.display=(g==='weekly')?'':'none';}
     applyGranularity();
   };
+  window.toggleWeekMonthChip=function(mi){
+    if(selectedWeekMonths.has(mi)){ if(selectedWeekMonths.size>1){selectedWeekMonths.delete(mi);} }
+    else { selectedWeekMonths.add(mi); }
+    document.querySelectorAll('#gran-month-wrap .month-chip').forEach(function(b){ b.classList.toggle('active', selectedWeekMonths.has(parseInt(b.dataset.month,10))); });
+    applyGranularity();
+  };
   window.applyGranularity=function(){
-    var sel=document.getElementById('gran-month-select'); var mi=sel?sel.value:'';
     document.querySelectorAll('.gran-monthly').forEach(function(el){el.style.display=(curGran==='monthly')?'':'none';});
     document.querySelectorAll('.gran-weekly').forEach(function(el){el.style.display='none';});
     if(curGran==='weekly'){
-      document.querySelectorAll('.gran-weekly[data-month="'+mi+'"]').forEach(function(el){el.style.display='';});
+      selectedWeekMonths.forEach(function(mi){
+        document.querySelectorAll('.gran-weekly[data-month="'+mi+'"]').forEach(function(el){el.style.display='';});
+      });
     }
   };
 })();

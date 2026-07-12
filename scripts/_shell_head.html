@@ -170,12 +170,11 @@
   .gran-toggle, .ma-gran-toggle{display:inline-flex;gap:4px;background:var(--surface-1);border-radius:9px;padding:3px;}
   .gran-btn{appearance:none;border:none;background:transparent;color:var(--text-secondary);font-size:12.5px;font-weight:600;font-family:inherit;padding:6px 14px;border-radius:7px;cursor:pointer;}
   .gran-btn.active{background:var(--surface-card);color:var(--text-primary);box-shadow:0 1px 3px rgba(0,0,0,0.12);}
-  .gran-month-picker{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-secondary);}
-  .gran-month-picker select{font-size:13px;padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface-1);color:var(--text-primary);font-family:inherit;}
+  .gran-month-picker{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:12.5px;color:var(--text-secondary);}
   .gran-note{font-size:11.5px;color:var(--text-muted);}
   .ma-gran-toggle{margin:0 0 16px;}
-  .year-chip{appearance:none;border:1px solid var(--border);background:var(--surface-1);color:var(--text-muted);font-size:12.5px;font-weight:600;font-family:inherit;padding:6px 14px;border-radius:999px;cursor:pointer;}
-  .year-chip.active{background:var(--s1);color:#fff;border-color:transparent;}
+  .year-chip,.month-chip{appearance:none;border:1px solid var(--border);background:var(--surface-1);color:var(--text-muted);font-size:12.5px;font-weight:600;font-family:inherit;padding:6px 14px;border-radius:999px;cursor:pointer;}
+  .year-chip.active,.month-chip.active{background:var(--s1);color:#fff;border-color:transparent;}
 
   footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--grid);}
   footer p{font-size:11.5px;color:var(--text-muted);line-height:1.6;margin:0 0 8px;}
