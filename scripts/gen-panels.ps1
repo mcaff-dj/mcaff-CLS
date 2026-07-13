@@ -426,8 +426,8 @@ function Build-ProdPkgPanel {
     }catch(e){ var n2=document.getElementById('ppk-filter-note'); if(n2){n2.textContent='Filter error: '+e.message;n2.style.color='var(--s6)';} if(window.console)console.error('ProdPkg error',e); } }
   window.onProdPkgFilterChange=render;
   function ssCloseAll(except){ document.querySelectorAll('.ss-list').forEach(function(l){ if(l!==except) l.style.display='none'; }); }
-  document.addEventListener('focusin', function(e){ if(e.target.classList && e.target.classList.contains('ss-input')){ var list=document.getElementById(e.target.id+'-list'); if(list){ ssCloseAll(list); list.style.display=''; ssRefresh(e.target,list); } } });
-  document.addEventListener('input', function(e){ if(e.target.classList && e.target.classList.contains('ss-input')){ var list=document.getElementById(e.target.id+'-list'); if(list){ list.style.display=''; ssRefresh(e.target,list); } } });
+  document.addEventListener('focusin', function(e){ if(e.target.classList && e.target.classList.contains('ss-input')){ var list=document.getElementById(e.target.id+'-list'); if(list){ ssCloseAll(list); list.style.display='block'; ssRefresh(e.target,list); } } });
+  document.addEventListener('input', function(e){ if(e.target.classList && e.target.classList.contains('ss-input')){ var list=document.getElementById(e.target.id+'-list'); if(list){ list.style.display='block'; ssRefresh(e.target,list); } } });
   document.addEventListener('mousedown', function(e){
     var opt = e.target.closest ? e.target.closest('.ss-opt') : null;
     if(opt){ e.preventDefault(); var list=opt.closest('.ss-list'); var input=document.getElementById(list.id.replace(/-list$/,''));
@@ -445,7 +445,7 @@ function Build-ProdPkgPanel {
 "@
     function DD($id,$lbl,$opts){ $s=New-Object System.Text.StringBuilder
         [void]$s.Append("<div style='display:flex;flex-direction:column;gap:4px;min-width:150px;position:relative;'><label for='$id' style='font-size:11px;color:var(--text-muted);'>$(HEnc $lbl)</label>")
-        [void]$s.Append("<input type='text' id='$id' class='ss-input' data-confirmed='' placeholder='All &mdash; type to search' autocomplete='off' onchange='onProdPkgFilterChange()' style='font-size:12.5px;padding:7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;max-width:220px;'>")
+        [void]$s.Append("<div style='position:relative;'><input type='text' id='$id' class='ss-input' data-confirmed='' placeholder='All' autocomplete='off' onchange='onProdPkgFilterChange()' style='font-size:12.5px;padding:7px 26px 7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;max-width:220px;width:100%;box-sizing:border-box;'><span style='position:absolute;right:9px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--text-muted);font-size:10px;'>&#9662;</span></div>")
         [void]$s.Append("<div class='ss-list' id='$id-list'><div class='ss-opt' data-value='' data-idx=''>All</div>")
         for($oi=0;$oi -lt $opts.Count;$oi++){[void]$s.Append("<div class='ss-opt' data-value=""$(HEnc $opts[$oi])"" data-idx='$oi'>$(HEnc $opts[$oi])</div>")}
         [void]$s.Append("</div></div>")

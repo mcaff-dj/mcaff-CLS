@@ -20,10 +20,21 @@ $OutPath  = Join-Path $RepoRoot $B.OutFile
 function HEnc($s){ return [System.Web.HttpUtility]::HtmlEncode([string]$s) }
 function Round1($n){ return [math]::Round($n,1) }
 function JEnc($s){ $s=[string]$s; $s=$s -replace '\\','\\\\' -replace '"','\"' -replace "`r`n",'\n' -replace "`r",'\n' -replace "`n",'\n' -replace "`t",'\t'; return $s }
+# The older KYC raw-dump sheet (see brands.ps1 Secondary config) worded some Query
+# Category values differently than the primary sheet - normalized here so both sides
+# of a merged report count as one category instead of splitting the same complaint
+# type into two rows.
+$script:CatNormMap = @{
+    "Reattempt Request/ Fake update" = "Fake update"
+    "Pincode non Serviceable"        = "Pincode not serviceable"
+    "Lost order/Destroyed/Damaged"   = "Lost/Damaged/Destroyed"
+}
 function Cell($row,$i){
     if($null -eq $row){ return "" }
-    if($row -is [System.Collections.IList]){ if($i -lt $row.Count){ $v=$row[$i]; if($null -eq $v){return ""}; return $v } else { return "" } }
-    if($i -eq 0){ return $row } else { return "" }   # scalar row -> single cell at col 0
+    if($row -is [System.Collections.IList]){ if($i -lt $row.Count){ $v=$row[$i]; if($null -eq $v){return ""} } else { return "" } }
+    elseif($i -eq 0){ $v=$row } else { return "" }   # scalar row -> single cell at col 0
+    if($i -eq $Col.cat -and $script:CatNormMap.ContainsKey($v)){ return $script:CatNormMap[$v] }
+    return $v
 }
 function PrettyMonth($raw){ $p=$raw -split "_",2; if($p.Count -lt 2){return $raw}; return ($p[1] -replace "'"," '") }
 $script:YearOfCache = @{}
