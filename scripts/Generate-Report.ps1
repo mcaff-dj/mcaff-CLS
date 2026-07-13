@@ -28,6 +28,7 @@ $script:CatNormMap = @{
     "Reattempt Request/ Fake update" = "Fake update"
     "Pincode non Serviceable"        = "Pincode not serviceable"
     "Lost order/Destroyed/Damaged"   = "Lost/Damaged/Destroyed"
+    "Marked Delivered but customer did not received the order" = "Marked Delivered but customer did not receive order"
 }
 function Cell($row,$i){
     if($null -eq $row){ return "" }

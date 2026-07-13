@@ -61,6 +61,19 @@ $script:MA_WeekCtx = @{
     labelFn = { param($idx) PrettyWeekFull $idx }
 }
 
+# Year index lookup + year-summed sales, built from the same $distinctYears the Year
+# filter chips use, so "2025" here always means the same set of months as elsewhere.
+$script:MA_YearIndexOf = @{}
+for($mayi=0; $mayi -lt $distinctYears.Count; $mayi++){ $script:MA_YearIndexOf[$distinctYears[$mayi]] = $mayi }
+$script:MA_YearSalesArr = New-Object 'double[]' $distinctYears.Count
+for($mayi2=0; $mayi2 -lt $N; $mayi2++){ $yr=YearOf $months[$mayi2]; if($script:MA_YearIndexOf.ContainsKey($yr)){ $script:MA_YearSalesArr[$script:MA_YearIndexOf[$yr]] += $salesArr[$mayi2] } }
+$script:MA_YearCtx = @{
+    n = $distinctYears.Count
+    sales = $script:MA_YearSalesArr
+    indexFn = { param($r) $yr=YearOf (Cell $r $Col.month); if($script:MA_YearIndexOf.ContainsKey($yr)){ return $script:MA_YearIndexOf[$yr] }; return -1 }
+    labelFn = { param($idx) $distinctYears[$idx] }
+}
+
 function Build-ClassPeriodData($cls,$period){
     $subset = @($unique | Where-Object { (Cell $_ $Col.cls) -eq $cls.key })
     $subDimName = $script:MA_SubDim[$cls.id]
@@ -190,6 +203,25 @@ function Build-MonthlyAnalysisPanel {
         for($wi=1; $wi -lt $totalWeeks; $wi++){ $sel=if($wi -eq $totalWeeks-1){" selected"}else{""}; [void]$weekOpts.Append("<option value='$wi'$sel>$(HEnc (PrettyWeekFull $wi)) vs $(HEnc (PrettyWeekFull ($wi-1)))</option>") }
     }
 
+    # ---------- Yearly narrative (new) ----------
+    $yearDivs=New-Object System.Text.StringBuilder
+    $yearOpts=New-Object System.Text.StringBuilder
+    if($distinctYears.Count -ge 2){
+        $yearClassData=@{}
+        foreach($c in $B.Classes){ $yearClassData[$c.key] = Build-ClassPeriodData $c $script:MA_YearCtx }
+        for($yi=1; $yi -lt $distinctYears.Count; $yi++){
+            $sections=@()
+            foreach($c in $B.Classes){
+                $html = Build-ClassPeriodNarrative $c $yearClassData[$c.key] $script:MA_YearCtx $yi
+                if($html){ $sections += $html }
+            }
+            $body = if($sections.Count -gt 0){ $sections -join "" } else { "<p class='note'>No notable year-on-year changes crossed the reporting threshold for $(HEnc $distinctYears[$yi]).</p>" }
+            $disp = if($yi -eq $distinctYears.Count-1){""}else{" style='display:none;'"}
+            [void]$yearDivs.Append("<div class='ma-period' id='ma-year-$yi'$disp>$body</div>")
+        }
+        for($yi=1; $yi -lt $distinctYears.Count; $yi++){ $sel=if($yi -eq $distinctYears.Count-1){" selected"}else{""}; [void]$yearOpts.Append("<option value='$yi'$sel>$(HEnc $distinctYears[$yi]) vs $(HEnc $distinctYears[$yi-1])</option>") }
+    }
+
     $js = @"
 <script>
 (function(){
@@ -199,11 +231,15 @@ function Build-MonthlyAnalysisPanel {
   window.onWeeklyAnalysisChange=function(v){
     document.querySelectorAll('#ma-weekly-wrap .ma-period').forEach(function(el){ el.style.display = (el.id==='ma-week-'+v) ? '' : 'none'; });
   };
+  window.onYearlyAnalysisChange=function(v){
+    document.querySelectorAll('#ma-yearly-wrap .ma-period').forEach(function(el){ el.style.display = (el.id==='ma-year-'+v) ? '' : 'none'; });
+  };
   window.setMaGranularity=function(g){
     document.querySelectorAll('.ma-gran-toggle .gran-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.magran===g); });
-    var mw=document.getElementById('ma-monthly-wrap'), ww=document.getElementById('ma-weekly-wrap');
+    var mw=document.getElementById('ma-monthly-wrap'), ww=document.getElementById('ma-weekly-wrap'), yw=document.getElementById('ma-yearly-wrap');
     if(mw){ mw.style.display = (g==='monthly') ? '' : 'none'; }
     if(ww){ ww.style.display = (g==='weekly') ? '' : 'none'; }
+    if(yw){ yw.style.display = (g==='yearly') ? '' : 'none'; }
   };
 })();
 </script>
@@ -218,6 +254,15 @@ function Build-MonthlyAnalysisPanel {
     </div>
 "@
     } else { "" }
+    $yearlyToggleHtml = if($distinctYears.Count -ge 2){ "<button type=""button"" class=""gran-btn"" data-magran=""yearly"" onclick=""setMaGranularity('yearly')"">Yearly</button>" } else { "" }
+    $yearlySectionHtml = if($distinctYears.Count -ge 2){
+@"
+    <div id="ma-yearly-wrap" style="display:none;">
+      <div style="margin-bottom:18px;"><label for="ma-year-select" style="font-size:12px;color:var(--text-muted);margin-right:8px;">Year</label><select id="ma-year-select" onchange="onYearlyAnalysisChange(this.value)" style="font-size:13px;padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;">$($yearOpts.ToString())</select></div>
+      $($yearDivs.ToString())
+    </div>
+"@
+    } else { "" }
 
     return @"
 <div class="tab-panel" id="panel-monthly">
@@ -227,12 +272,14 @@ function Build-MonthlyAnalysisPanel {
     <div class="ma-gran-toggle">
       <button type="button" class="gran-btn active" data-magran="monthly" onclick="setMaGranularity('monthly')">Monthly</button>
       $weeklyToggleHtml
+      $yearlyToggleHtml
     </div>
     <div id="ma-monthly-wrap">
       <div style="margin-bottom:18px;"><label for="ma-select" style="font-size:12px;color:var(--text-muted);margin-right:8px;">Month</label><select id="ma-select" onchange="onMonthlyAnalysisChange(this.value)" style="font-size:13px;padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;">$($monthOpts.ToString())</select></div>
       $($monthDivs.ToString())
     </div>
 $weeklySectionHtml
+$yearlySectionHtml
   </section>
 </div>
 $js
