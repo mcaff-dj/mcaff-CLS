@@ -30,11 +30,51 @@ $script:CatNormMap = @{
     "Lost order/Destroyed/Damaged"   = "Lost/Damaged/Destroyed"
     "Marked Delivered but customer did not received the order" = "Marked Delivered but customer did not receive order"
 }
+# Same reasoning as CatNormMap above, but for Delivery Partner Name: the older KYC
+# raw-dump sheet has messy operational sub-labels (surface/air legs, direct/hyphen
+# routing codes, brand-specific suffixes) for couriers the primary sheet already
+# reports under clean canonical names.
+$script:PartnerNormMap = @{
+    "Blue Dart Air"                     = "Blue Dart"
+    "Blue Dart Surface"                 = "Blue Dart"
+    "Bluedart"                          = "Blue Dart"
+    "Bluedart brands 500 g Surface"     = "Blue Dart"
+    "Bluedart Surface - Select  500gm"  = "Blue Dart"
+    "Bluedart Surface - Select 500gm"   = "Blue Dart"
+    "Bluedart Surface 500 gms- Select"  = "Blue Dart"
+    "Cuberooteeine"                     = "PurpleDrone"
+    "Purpledrone_mCaff"                 = "PurpleDrone"
+    "Delhivery Air"                     = "DELHIVERY"
+    "DELHIVERY_SMYTTEN"                 = "DELHIVERY"
+    "DLSRF_Direct"                      = "DELHIVERY"
+    "Dlv_Direct_Air"                    = "DELHIVERY"
+    "HYP_DELHIVERY"                     = "DELHIVERY"
+    "SR_Delhivery"                      = "DELHIVERY"
+    "DTDC Surface"                      = "DTDC"
+    "DTDC_Surface_Direct"               = "DTDC"
+    "Ekart Logistics Surface"           = "Ekart"
+    "Elasticrun_direct_M"               = "ElasticRun"
+    "Pidge_Omnivio"                     = "Pidge"
+    "Pikndel_M_SDD"                     = "Pikndel"
+    "Shadowfax Surface"                 = "Shadowfax"
+    "SHADOWFAX_ESSENTIAL"               = "Shadowfax"
+    "Shadowfax_M_NDD"                   = "Shadowfax"
+    "Shadowfax_M_SDD"                   = "Shadowfax"
+    "Fedex Air"                         = "Fedex"
+    "SR_Fedex_Courier"                  = "Fedex"
+    "XBSRF_ Air_Direct"                 = "Xpressbees"
+    "XBSRF_Direct"                      = "Xpressbees"
+    "XBSRF_Direct_NDD"                  = "Xpressbees"
+    "xpressbees"                        = "Xpressbees"
+    "Xpressbees Surface"                = "Xpressbees"
+    "na"                                = "(blank)"
+}
 function Cell($row,$i){
     if($null -eq $row){ return "" }
     if($row -is [System.Collections.IList]){ if($i -lt $row.Count){ $v=$row[$i]; if($null -eq $v){return ""} } else { return "" } }
     elseif($i -eq 0){ $v=$row } else { return "" }   # scalar row -> single cell at col 0
     if($i -eq $Col.cat -and $script:CatNormMap.ContainsKey($v)){ return $script:CatNormMap[$v] }
+    if($i -eq $Col.partner -and $script:PartnerNormMap.ContainsKey($v)){ return $script:PartnerNormMap[$v] }
     return $v
 }
 function PrettyMonth($raw){ $p=$raw -split "_",2; if($p.Count -lt 2){return $raw}; return ($p[1] -replace "'"," '") }
