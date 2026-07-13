@@ -384,7 +384,15 @@ function Build-ProdPkgPanel {
   var DIMS=['month','product','sku','cls','category'],SIDS={month:'ppk-filter-month',product:'ppk-filter-product',sku:'ppk-filter-sku',cls:'ppk-filter-class',category:'ppk-filter-category'},TP={month:0,sku:1,product:2,cls:3,category:4};
   function rf(){ var g=function(id){var e=document.getElementById(id);return e?e.value:'';}; return {month:g(SIDS.month)?MONTHS.indexOf(g(SIDS.month)):null,product:g(SIDS.product)?PRODS.indexOf(g(SIDS.product)):null,sku:g(SIDS.sku)?SKUS.indexOf(g(SIDS.sku)):null,cls:g(SIDS.cls)?CLASSES.indexOf(g(SIDS.cls)):null,category:g(SIDS.category)?CATS.indexOf(g(SIDS.category)):null}; }
   function tmatch(t,f,ex){ for(var d=0;d<DIMS.length;d++){var dim=DIMS[d]; if(dim===ex)continue; var w=f[dim]; if(w===null)continue; if(t[TP[dim]]!==w)return false;} return true; }
-  function upd(f){ DIMS.forEach(function(dim){ var valid={}; for(var i=0;i<TICKETS.length;i++){var t=TICKETS[i]; if(tmatch(t,f,dim)){valid[t[TP[dim]]]=true;}} var sel=document.getElementById(SIDS[dim]); if(!sel)return; var hid=false; sel.querySelectorAll('option[data-idx]').forEach(function(o){var ix=parseInt(o.getAttribute('data-idx'),10),ok=!!valid[ix]; o.style.display=ok?'':'none'; o.disabled=!ok; if(!ok&&o.selected)hid=true;}); if(hid)sel.value=''; }); }
+  function ssRefresh(input,list){ var q=(input.value||'').toLowerCase();
+    list.querySelectorAll('.ss-opt').forEach(function(o){ var invalid=o.getAttribute('data-invalid')==='1'; var matches=q===''||o.textContent.toLowerCase().indexOf(q)!==-1; o.style.display=(matches&&!invalid)?'':'none'; }); }
+  function upd(f){ DIMS.forEach(function(dim){ var valid={}; for(var i=0;i<TICKETS.length;i++){var t=TICKETS[i]; if(tmatch(t,f,dim)){valid[t[TP[dim]]]=true;}}
+    var input=document.getElementById(SIDS[dim]); if(!input)return; var list=document.getElementById(SIDS[dim]+'-list'); if(!list)return;
+    var curConfirmed=input.dataset.confirmed||''; var curStillValid=true;
+    list.querySelectorAll('.ss-opt').forEach(function(o){ var ix=o.getAttribute('data-idx'),ok=(ix==='')?true:!!valid[parseInt(ix,10)]; o.setAttribute('data-invalid',ok?'0':'1'); if(curConfirmed!==''&&o.getAttribute('data-value')===curConfirmed&&!ok){curStillValid=false;} });
+    if(!curStillValid){ input.value=''; input.dataset.confirmed=''; }
+    ssRefresh(input,list);
+  }); }
   function sk(a){var LM=N-1,c=a[LM],p=SALES[LM]>0?c/SALES[LM]:0;return {c:c,p:p};}
   function cmp(a,b){var ka=sk(a),kb=sk(b); if(kb.c!==ka.c)return kb.c-ka.c; return kb.p-ka.p;}
   function render(){ try{ var f=rf(); upd(f); f=rf(); var lc=leafCounts(f);
@@ -417,12 +425,31 @@ function Build-ProdPkgPanel {
       var note=document.getElementById('ppk-filter-note'); if(note){note.textContent=withData+' of '+PARENTS.length+' SKUs have complaints for the selected filters, sorted by '+MONTHS[N-1]+' complaints. Expand SKU → Product → Query Class → Query Category to drill down.'; note.style.color='';}
     }catch(e){ var n2=document.getElementById('ppk-filter-note'); if(n2){n2.textContent='Filter error: '+e.message;n2.style.color='var(--s6)';} if(window.console)console.error('ProdPkg error',e); } }
   window.onProdPkgFilterChange=render;
+  function ssCloseAll(except){ document.querySelectorAll('.ss-list').forEach(function(l){ if(l!==except) l.style.display='none'; }); }
+  document.addEventListener('focusin', function(e){ if(e.target.classList && e.target.classList.contains('ss-input')){ var list=document.getElementById(e.target.id+'-list'); if(list){ ssCloseAll(list); list.style.display=''; ssRefresh(e.target,list); } } });
+  document.addEventListener('input', function(e){ if(e.target.classList && e.target.classList.contains('ss-input')){ var list=document.getElementById(e.target.id+'-list'); if(list){ list.style.display=''; ssRefresh(e.target,list); } } });
+  document.addEventListener('mousedown', function(e){
+    var opt = e.target.closest ? e.target.closest('.ss-opt') : null;
+    if(opt){ e.preventDefault(); var list=opt.closest('.ss-list'); var input=document.getElementById(list.id.replace(/-list$/,''));
+      var val=opt.getAttribute('data-value'); input.value=val; input.dataset.confirmed=val; list.style.display='none';
+      input.dispatchEvent(new Event('change',{bubbles:true})); return; }
+    if(!(e.target.classList && e.target.classList.contains('ss-input'))){ ssCloseAll(null); }
+  });
+  document.addEventListener('focusout', function(e){ if(e.target.classList && e.target.classList.contains('ss-input')){ var input=e.target;
+    setTimeout(function(){ var list=document.getElementById(input.id+'-list'); if(list)list.style.display='none';
+      if(input.value!==(input.dataset.confirmed||'')){ input.value=input.dataset.confirmed||''; } },150); } });
   function init(){render();}
   if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',init);}else{init();}
 })();
 </script>
 "@
-    function DD($id,$lbl,$opts){ $s=New-Object System.Text.StringBuilder; [void]$s.Append("<div style='display:flex;flex-direction:column;gap:4px;min-width:150px;'><label for='$id' style='font-size:11px;color:var(--text-muted);'>$(HEnc $lbl)</label><select id='$id' onchange='onProdPkgFilterChange()' style='font-size:12.5px;padding:7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;max-width:220px;'><option value=''>All</option>"); for($oi=0;$oi -lt $opts.Count;$oi++){[void]$s.Append("<option value=""$(HEnc $opts[$oi])"" data-idx='$oi'>$(HEnc $opts[$oi])</option>")}; [void]$s.Append("</select></div>"); return $s.ToString() }
+    function DD($id,$lbl,$opts){ $s=New-Object System.Text.StringBuilder
+        [void]$s.Append("<div style='display:flex;flex-direction:column;gap:4px;min-width:150px;position:relative;'><label for='$id' style='font-size:11px;color:var(--text-muted);'>$(HEnc $lbl)</label>")
+        [void]$s.Append("<input type='text' id='$id' class='ss-input' data-confirmed='' placeholder='All &mdash; type to search' autocomplete='off' onchange='onProdPkgFilterChange()' style='font-size:12.5px;padding:7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;max-width:220px;'>")
+        [void]$s.Append("<div class='ss-list' id='$id-list'><div class='ss-opt' data-value='' data-idx=''>All</div>")
+        for($oi=0;$oi -lt $opts.Count;$oi++){[void]$s.Append("<div class='ss-opt' data-value=""$(HEnc $opts[$oi])"" data-idx='$oi'>$(HEnc $opts[$oi])</div>")}
+        [void]$s.Append("</div></div>")
+        return $s.ToString() }
     $filterHtml="<div style='display:flex;gap:14px;flex-wrap:wrap;margin-bottom:16px;align-items:flex-end;'>" + (DD "ppk-filter-month" "Month" $months) + (DD "ppk-filter-product" "Product Name" $PRODS) + (DD "ppk-filter-sku" "SKU" $SKUS) + (DD "ppk-filter-class" "Query Class" $CLASSES) + (DD "ppk-filter-category" "Query Category" $CATS) + "</div><div id='ppk-filter-note' style='font-size:12px;color:var(--text-muted);margin-bottom:14px;'></div>"
 
     # ---- insights: sharpest single combo + top SKU overall, both by last month volume ----
@@ -545,7 +572,7 @@ function Assemble-Report {
     if(activeYears.has(yr)){ if(activeYears.size>1){ activeYears.delete(yr); } }
     else { activeYears.add(yr); }
     document.querySelectorAll('.year-chip').forEach(function(b){ b.classList.toggle('active', activeYears.has(b.dataset.yr)); });
-    document.querySelectorAll('[data-yr]').forEach(function(el){ el.style.display = activeYears.has(el.getAttribute('data-yr')) ? '' : 'none'; });
+    document.querySelectorAll('[data-yr]:not(.year-chip)').forEach(function(el){ el.style.display = activeYears.has(el.getAttribute('data-yr')) ? '' : 'none'; });
   };
 })();
 </script>
