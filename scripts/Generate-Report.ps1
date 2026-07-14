@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][int]$BrandIndex)
+param([Parameter(Mandatory=$true)][int]$BrandIndex, [switch]$Quick)
 
 # Config-driven report generator. Fetches a brand's sheet data and produces the
 # full self-contained <brand>.html at the repo root. Reuses the verified build
@@ -93,12 +93,14 @@ if ($env:REPORT_CACHE_FILE -and (Test-Path $env:REPORT_CACHE_FILE)) {
     Write-Host "[$($B.Brand)] loading main rows from cache $($env:REPORT_CACHE_FILE)"
     $dataRows = Get-Content -Raw -Path $env:REPORT_CACHE_FILE | ConvertFrom-Json
 } else {
-    # Rows for months older than the last 3 are treated as settled and reused from the
-    # persisted primary-sheet cache instead of being re-fetched on every refresh - only
-    # the last-3-months tail (plus anything newly appended) is pulled live each time.
-    Write-Host "[$($B.Brand)] fetching main sheet (incremental: last 3 months live, rest from cache)..."
+    # Rows for months older than the target window are treated as settled and reused from
+    # the persisted primary-sheet cache instead of being re-fetched on every refresh - only
+    # the tail (plus anything newly appended) is pulled live each time. The "Refresh data
+    # now" button (workflow_dispatch) only needs the last ~30 days, so it refetches just the
+    # latest month live; the scheduled daily run (schedule event) still refetches 3 months.
+    $targetMonths = @(if ($Quick) { $B.Months[-1] } else { $B.Months[-3..-1] })
+    Write-Host "[$($B.Brand)] fetching main sheet (incremental: last $($targetMonths.Count) month(s) live, rest from cache)..."
     $primaryCachePath = Join-Path $RepoRoot "data/$($B.Brand)_primary_cache.json"
-    $targetMonths = $B.Months[-3..-1]
     $dataRows = Get-SheetRowsIncremental $B.SpreadsheetId $B.SheetName $B.LastCol $primaryCachePath $Col.month $targetMonths
 }
 if ($dataRows -isnot [System.Collections.Generic.List[object]]) {
@@ -116,8 +118,18 @@ if ($dataRows -isnot [System.Collections.Generic.List[object]]) {
 # `-eq "Unique"` check (KPI cards, per-category tables) silently dropped these rows until
 # the value is normalized here (rank "1" -> "Unique", everything else -> "Duplicate").
 if ($B.ContainsKey('Secondary')) {
-    Write-Host "[$($B.Brand)] fetching secondary sheet ($($B.Secondary.SpreadsheetId))..."
-    $secRows = Get-SheetRowsChunked $B.Secondary.SpreadsheetId $B.Secondary.SheetName $B.Secondary.LastCol
+    # The quick (button-triggered) refresh only needs the primary sheet's latest month, so
+    # it reuses whatever secondary-sheet snapshot the last full refresh saved instead of
+    # re-pulling all ~71k rows live.
+    $secondaryCachePath = Join-Path $RepoRoot "data/$($B.Brand)_secondary_cache.json"
+    if ($Quick -and (Test-Path $secondaryCachePath)) {
+        Write-Host "[$($B.Brand)] quick refresh: reusing cached secondary sheet"
+        $secRows = Get-Content -Raw -Path $secondaryCachePath | ConvertFrom-Json
+    } else {
+        Write-Host "[$($B.Brand)] fetching secondary sheet ($($B.Secondary.SpreadsheetId))..."
+        $secRows = Get-SheetRowsChunked $B.Secondary.SpreadsheetId $B.Secondary.SheetName $B.Secondary.LastCol
+        Set-Content -Path $secondaryCachePath -Value (ConvertTo-Json -InputObject $secRows -Depth 6 -Compress) -Encoding utf8
+    }
     $swapA, $swapB = $B.Secondary.SwapCols
     $exclude = $B.Secondary.ExcludeMonths
     $keptCount = 0
@@ -137,10 +149,21 @@ if ($B.ContainsKey('Secondary')) {
     Write-Host "[$($B.Brand)] secondary sheet: $($secRows.Count) rows fetched, $keptCount kept after excluding overlapping months"
 }
 Write-Host "[$($B.Brand)] fetched $($dataRows.Count) rows; fetching small tabs..."
-$mom     = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.mom
-$prodnps = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.prodnps
-$agent   = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.agent
-$ai      = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.ai
+$smallTabsCachePath = Join-Path $RepoRoot "data/$($B.Brand)_smalltabs_cache.json"
+if ($Quick -and (Test-Path $smallTabsCachePath)) {
+    Write-Host "[$($B.Brand)] quick refresh: reusing cached small tabs"
+    $smallTabsCache = Get-Content -Raw -Path $smallTabsCachePath | ConvertFrom-Json
+    $mom     = $smallTabsCache.mom
+    $prodnps = $smallTabsCache.prodnps
+    $agent   = $smallTabsCache.agent
+    $ai      = $smallTabsCache.ai
+} else {
+    $mom     = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.mom
+    $prodnps = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.prodnps
+    $agent   = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.agent
+    $ai      = Get-SheetValues $B.SpreadsheetId $B.SmallTabs.ai
+    Set-Content -Path $smallTabsCachePath -Value (ConvertTo-Json -InputObject @{mom=$mom;prodnps=$prodnps;agent=$agent;ai=$ai} -Depth 8 -Compress) -Encoding utf8
+}
 
 $months = $B.Months
 $N = $months.Count

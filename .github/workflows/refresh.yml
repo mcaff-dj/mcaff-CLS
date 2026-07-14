@@ -23,19 +23,31 @@ jobs:
         shell: pwsh
         env:
           GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           if (-not $env:GOOGLE_SA_KEY_JSON) {
             throw "Missing repository secret GOOGLE_SA_KEY (paste the service-account JSON there)."
           }
-          ./scripts/refresh.ps1
+          # The "Refresh data now" button on the site calls workflow_dispatch; the daily
+          # 2 PM IST cron fires as a schedule event. Only the button gets the quick path
+          # (last ~30 days of the primary sheet; secondary sheet/small tabs reused from cache).
+          $isQuick = $env:EVENT_NAME -eq 'workflow_dispatch'
+          if ($isQuick) { Write-Host "Manual trigger - running a quick refresh (last 30 days of the primary sheet only)." }
+          ./scripts/refresh.ps1 -Quick:$isQuick
 
       - name: Commit & push if changed
         shell: pwsh
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add api/_reports/mcaffeine.html api/_reports/hyphen.html data/mcaffeine_primary_cache.json data/hyphen_primary_cache.json
-          $changed = git status --porcelain api/_reports/mcaffeine.html api/_reports/hyphen.html data/mcaffeine_primary_cache.json data/hyphen_primary_cache.json
+          $paths = @(
+            "api/_reports/mcaffeine.html", "api/_reports/hyphen.html",
+            "data/mcaffeine_primary_cache.json", "data/hyphen_primary_cache.json",
+            "data/mcaffeine_secondary_cache.json",
+            "data/mcaffeine_smalltabs_cache.json", "data/hyphen_smalltabs_cache.json"
+          ) | Where-Object { Test-Path $_ }
+          git add $paths
+          $changed = git status --porcelain $paths
           if ($changed) {
             $stamp = (Get-Date).ToUniversalTime().AddHours(5.5).ToString('yyyy-MM-dd HH:mm')
             git commit -m "Auto-refresh reports ($stamp IST)"
