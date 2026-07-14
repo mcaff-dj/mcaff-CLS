@@ -1,0 +1,163 @@
+"""Google Sheets access: service-account auth (hand-rolled RS256 JWT, no SDK) plus
+read/write helpers. Python port of lib.ps1 - see that file's comments for the
+reasoning behind the incremental-cache boundary math and retry/backoff choices;
+kept here 1:1 so behavior matches what's already running in production.
+"""
+import base64
+import json
+import os
+import time
+import urllib.parse
+from pathlib import Path
+
+import requests
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+
+
+def get_sa_credential():
+    """Credential resolution order: GOOGLE_SA_KEY_JSON env (full JSON text) ->
+    GOOGLE_SA_KEY_FILE env (path) -> hardcoded fallback path."""
+    if os.environ.get("GOOGLE_SA_KEY_JSON"):
+        return json.loads(os.environ["GOOGLE_SA_KEY_JSON"])
+    path = os.environ.get("GOOGLE_SA_KEY_FILE") or \
+        r"C:\Users\VIKASH PATHAK\Desktop\Service account\sheetdata-501810-53e5bf991483.json"
+    if not os.path.exists(path):
+        raise RuntimeError("Service-account key not found. Set GOOGLE_SA_KEY_JSON or GOOGLE_SA_KEY_FILE.")
+    with open(path, "r", encoding="utf-8-sig") as f:
+        return json.load(f)
+
+
+def _b64url(raw_bytes):
+    return base64.urlsafe_b64encode(raw_bytes).decode("ascii").rstrip("=")
+
+
+def _sign_rs256(signing_input, private_key_pem):
+    private_key = serialization.load_pem_private_key(private_key_pem.encode("ascii"), password=None)
+    return private_key.sign(signing_input.encode("ascii"), padding.PKCS1v15(), hashes.SHA256())
+
+
+_token_cache = {"read": {"token": None, "expiry": 0}, "write": {"token": None, "expiry": 0}}
+
+
+def _get_token(scope, cache_key):
+    cache = _token_cache[cache_key]
+    now = int(time.time())
+    if cache["token"] and now < (cache["expiry"] - 120):
+        return cache["token"]
+
+    cred = get_sa_credential()
+    header_json = '{"alg":"RS256","typ":"JWT"}'
+    exp = now + 3600
+    claim_json = (
+        '{"iss":"' + cred["client_email"] + '","scope":"' + scope + '","aud":"' +
+        cred["token_uri"] + '","exp":' + str(exp) + ',"iat":' + str(now) + '}'
+    )
+    header_b64 = _b64url(header_json.encode("ascii"))
+    claim_b64 = _b64url(claim_json.encode("ascii"))
+    signing_input = f"{header_b64}.{claim_b64}"
+    sig_b64 = _b64url(_sign_rs256(signing_input, cred["private_key"]))
+    jwt = f"{signing_input}.{sig_b64}"
+
+    resp = requests.post(cred["token_uri"], data={
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": jwt,
+    })
+    resp.raise_for_status()
+    data = resp.json()
+    cache["token"] = data["access_token"]
+    cache["expiry"] = now + data["expires_in"]
+    return cache["token"]
+
+
+def get_access_token():
+    return _get_token("https://www.googleapis.com/auth/spreadsheets.readonly", "read")
+
+
+def get_write_access_token():
+    return _get_token("https://www.googleapis.com/auth/spreadsheets", "write")
+
+
+def set_sheet_values_batch(spreadsheet_id, updates):
+    token = get_write_access_token()
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchUpdate"
+    body = {
+        "valueInputOption": "USER_ENTERED",
+        "data": [{"range": u["range"], "values": u["values"]} for u in updates],
+    }
+    resp = requests.post(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json; charset=utf-8",
+    }, json=body)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_sheet_values(spreadsheet_id, range_, timeout_sec=120):
+    encoded = urllib.parse.quote(range_, safe="")
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{encoded}"
+    last_err = None
+    for attempt in range(1, 6):
+        try:
+            token = get_access_token()
+            resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=timeout_sec)
+            resp.raise_for_status()
+            return resp.json().get("values", [])
+        except Exception as e:
+            last_err = e
+            print(f"  fetch '{range_}' attempt {attempt} failed: {e}")
+            time.sleep(4 * attempt)
+    raise RuntimeError(f"Failed to fetch range '{range_}' after 5 attempts") from last_err
+
+
+def get_sheet_rows_chunked(spreadsheet_id, sheet_name, last_col, chunk_size=10000, start_row=2):
+    all_rows = []
+    start = start_row
+    while True:
+        end = start + chunk_size - 1
+        range_ = f"'{sheet_name}'!A{start}:{last_col}{end}"
+        chunk = get_sheet_values(spreadsheet_id, range_)
+        if not chunk:
+            break
+        all_rows.extend(chunk)
+        print(f"  fetched {sheet_name} rows {start}-{end} ({len(all_rows)} total)")
+        if len(chunk) < chunk_size:
+            break
+        start = end + 1
+    return all_rows
+
+
+def get_sheet_rows_incremental(spreadsheet_id, sheet_name, last_col, cache_path, month_col_idx, target_months):
+    cache_path = Path(cache_path)
+    if not cache_path.exists():
+        print(f"  no incremental cache yet at {cache_path} - doing a full fetch")
+        all_rows = get_sheet_rows_chunked(spreadsheet_id, sheet_name, last_col)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(all_rows, f, separators=(",", ":"))
+        return all_rows
+
+    with open(cache_path, "r", encoding="utf-8-sig") as f:
+        cached = json.load(f)
+
+    earliest_target = target_months[0]
+    boundary = -1
+    for i, row in enumerate(cached):
+        mo = row[month_col_idx] if isinstance(row, list) and month_col_idx < len(row) else None
+        if mo == earliest_target:
+            boundary = i
+            break
+
+    if boundary < 0:
+        print(f"  '{earliest_target}' not found in cache - refetching everything this once")
+        all_rows = get_sheet_rows_chunked(spreadsheet_id, sheet_name, last_col)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(all_rows, f, separators=(",", ":"))
+        return all_rows
+
+    print(f"  reusing {boundary} cached rows (months before {earliest_target}); refetching from row {boundary + 2} onward")
+    fresh_tail = get_sheet_rows_chunked(spreadsheet_id, sheet_name, last_col, start_row=boundary + 2)
+    merged = cached[:boundary] + list(fresh_tail)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(merged, f, separators=(",", ":"))
+    return merged

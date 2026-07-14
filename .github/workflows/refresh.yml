@@ -19,6 +19,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: pip install -r requirements.txt
+
       - name: Regenerate reports from Google Sheets
         shell: pwsh
         env:
@@ -31,9 +40,12 @@ jobs:
           # The "Refresh data now" button on the site calls workflow_dispatch; the daily
           # 2 PM IST cron fires as a schedule event. Only the button gets the quick path
           # (last ~30 days of the primary sheet; secondary sheet/small tabs reused from cache).
-          $isQuick = $env:EVENT_NAME -eq 'workflow_dispatch'
-          if ($isQuick) { Write-Host "Manual trigger - running a quick refresh (last 30 days of the primary sheet only)." }
-          ./scripts/refresh.ps1 -Quick:$isQuick
+          $quickArgs = @()
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            Write-Host "Manual trigger - running a quick refresh (last 30 days of the primary sheet only)."
+            $quickArgs = @('--quick')
+          }
+          python ./scripts/refresh.py @quickArgs
 
       - name: Commit & push if changed
         shell: pwsh
