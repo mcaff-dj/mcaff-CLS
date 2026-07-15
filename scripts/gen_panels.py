@@ -881,9 +881,7 @@ def assemble_report(ctx, here_dir):
             detail = build_class_panel(ctx, c)
         panels.append(f'<div class="tab-panel" id="panel-{c["id"]}">{kpi}\n{detail}</div>')
 
-    from datetime import datetime, timedelta, timezone
-    now_ist = datetime.now(timezone.utc) + timedelta(hours=5.5)
-    now_str = now_ist.strftime("%d %b %Y, %H:%M") + " IST"
+    now_str = ctx.now_ist.strftime("%d %b %Y, %H:%M") + " IST"
     foot = (f'<footer><p><strong>Methodology:</strong> Aggregated from the raw "{ctx.b["sheet_name"]}" tab. '
             f'Rows flagged "Duplicate" are excluded from per-class drill-downs (Overview shows both). '
             f'Percentages use the sheet\'s own "Total Sales M" / "Partner Allocation" figures.</p>'

@@ -4,9 +4,15 @@ root-cause text is inferred, since that isn't present in any structured column.
 Python port of gen-monthly.ps1. Depends on gen_weekly.setup(ctx) having already run.
 """
 import math
+from datetime import timedelta
 
 from gen_weekly import get_week_num
-from report_context import ci_key, fnum, h_enc, n0, pretty_month, year_of
+from report_context import ci_key, fnum, h_enc, n0, pretty_month, round1, year_of
+
+
+def _sheet_date_str(d):
+    """Matches the sheet's own Created Date format: M/D/YYYY, no leading zeros."""
+    return f"{d.month}/{d.day}/{d.year}"
 
 _SUB_DIM = {"delivery": "partner", "warehouse": "wh", "packaging": "prod", "product": "prod", "suggestion": "prod"}
 _SUB_LABEL = {"partner": "courier", "wh": "warehouse", "prod": "product"}
@@ -98,6 +104,29 @@ def setup(ctx):
         "index_fn": lambda r: year_index_of.get(year_of(ctx.cell(r, ctx.col["month"])), -1),
         "label_fn": lambda idx: ctx.distinct_years[idx],
     }
+
+    # ---------- Daily (yesterday vs the day before) ----------
+    # Unlike Monthly/Weekly/Yearly there's no dropdown here (see build_daily_narrative) -
+    # just a fixed yesterday-vs-day-before comparison, recomputed fresh from ctx.now_ist
+    # (IST, the same "now" used for the report's own timestamp) every time the report runs.
+    yesterday = ctx.now_ist.date() - timedelta(days=1)
+    day_before = yesterday - timedelta(days=1)
+    yesterday_str = _sheet_date_str(yesterday)
+    day_before_str = _sheet_date_str(day_before)
+    date_col = ctx.col.get("created_date")
+    ctx.ma_yesterday_label = yesterday.strftime("%d %b %Y")
+    ctx.ma_day_before_label = day_before.strftime("%d %b %Y")
+
+    def day_index_fn(r):
+        if date_col is None:
+            return -1
+        v = ctx.cell(r, date_col)
+        if v == yesterday_str:
+            return 1
+        if v == day_before_str:
+            return 0
+        return -1
+    ctx.ma_day_ctx = {"n": 2, "index_fn": day_index_fn}
 
 
 def build_class_period_data(ctx, cls, period):
@@ -208,11 +237,93 @@ def build_class_period_narrative(cls, data, period, cur_idx):
     return "".join(parts)
 
 
+def build_daily_narrative(cls, data):
+    """Yesterday-vs-day-before variant of build_class_period_narrative. There's no daily
+    sales figure in the sheet (only "Total Sales M"/"Total Sales W"), so unlike the
+    Monthly/Weekly/Yearly views this frames change as ticket-count % change rather than
+    "% of sales" - the honest thing to show given what's actually measurable day to day."""
+    cur_idx, prev_idx = 1, 0
+    tot_cur = data["class_period_tot"][cur_idx]
+    tot_prev = data["class_period_tot"][prev_idx]
+
+    def pct_change(cur, prev):
+        return f" ({round1(((cur - prev) / prev) * 100)}%)" if prev > 0 else ""
+
+    bullets = []
+    for cat in data["cat_order"]:
+        cur_c = data["cat_period"][cat][cur_idx]
+        prev_c = data["cat_period"][cat][prev_idx]
+        if cur_c < 2:
+            continue
+        growth = (cur_c / prev_c) if prev_c > 0 else math.inf
+        abs_delta = cur_c - prev_c
+        qualifies = (prev_c == 0 and cur_c >= 2) or (prev_c > 0 and (growth >= 1.3 or abs_delta >= 5))
+        if not qualifies:
+            continue
+        verb = change_verb(prev_c, cur_c)
+        line = f"<b>{h_enc(cat)}</b>: Complaints {verb} from {n0(prev_c)} to {n0(cur_c)} tickets{pct_change(cur_c, prev_c)}."
+
+        sub_lines = []
+        if data["sub_dim_name"] and cat in data["sub_period"]:
+            movers = []
+            for sv, arr in data["sub_period"][cat].items():
+                if sv == "(blank)":
+                    continue
+                sc, sp = arr[cur_idx], arr[prev_idx]
+                d = sc - sp
+                if d > 0 and sc >= 2:
+                    movers.append({"name": sv, "cur": sc, "prev": sp, "delta": d})
+            movers = sorted(movers, key=lambda m: m["delta"], reverse=True)[:2]
+            for m in movers:
+                if abs_delta > 0 and (m["delta"] / abs_delta) < 0.25:
+                    continue
+                mverb = change_verb(m["prev"], m["cur"])
+                sub_label = _SUB_LABEL[data["sub_dim_name"]]
+                sub_lines.append(f"<li><b>{h_enc(m['name'])}</b> ({sub_label}): tickets {mverb} from {n0(m['prev'])} to {n0(m['cur'])}{pct_change(m['cur'], m['prev'])}.</li>")
+        if sub_lines:
+            line += f"<ul class='ma-sub'>{''.join(sub_lines)}</ul>"
+        bullets.append({"line": line, "sort_key": abs_delta})
+    bullets = sorted(bullets, key=lambda b: b["sort_key"], reverse=True)
+
+    rel_change = abs(tot_cur - tot_prev) / tot_prev if tot_prev > 0 else (1 if tot_cur > 0 else 0)
+    if not bullets and rel_change < 0.1:
+        return ""
+
+    overall_verb = change_verb(tot_prev, tot_cur)
+    parts = [f"<div class='ma-class'><h4>{h_enc(cls['label'])} Complaints</h4>"]
+    parts.append(f"<p class='ma-overall'>Overall {h_enc(cls['label'].lower())} complaints {overall_verb} from {n0(tot_prev)} to {n0(tot_cur)} tickets{pct_change(tot_cur, tot_prev)}.</p>")
+    if bullets:
+        parts.append("<ul class='ma-list'>")
+        for b in bullets:
+            parts.append(f"<li>{b['line']}</li>")
+        parts.append("</ul>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
 def build_monthly_analysis_panel(ctx):
     if ctx.n < 2:
         return ""
     n = ctx.n
     months = ctx.months
+
+    # ---------- Daily narrative (yesterday vs day before, no dropdown) ----------
+    day_class_data = {c["key"]: build_class_period_data(ctx, c, ctx.ma_day_ctx) for c in ctx.b["classes"]}
+    yesterday_total = sum(day_class_data[c["key"]]["class_period_tot"][1] for c in ctx.b["classes"])
+    if yesterday_total == 0:
+        # Every class showing zero for yesterday almost always means the source sheet
+        # hasn't been updated with yesterday's tickets yet (a data-entry lag), not that
+        # complaints genuinely dropped to zero across the board - say so plainly instead
+        # of letting each class's narrative below claim complaints "disappeared".
+        day_body = (f"<p class='note'>No tickets found for {h_enc(ctx.ma_yesterday_label)} yet. "
+                    f"This usually means the source sheet hasn't been updated with yesterday's tickets yet - try checking again later in the day.</p>")
+    else:
+        day_sections = []
+        for c in ctx.b["classes"]:
+            html = build_daily_narrative(c, day_class_data[c["key"]])
+            if html:
+                day_sections.append(html)
+        day_body = "".join(day_sections) if day_sections else f"<p class='note'>No notable day-on-day changes crossed the reporting threshold for {h_enc(ctx.ma_yesterday_label)}.</p>"
 
     # ---------- Monthly narrative ----------
     month_class_data = {c["key"]: build_class_period_data(ctx, c, ctx.ma_month_ctx) for c in ctx.b["classes"]}
@@ -283,7 +394,8 @@ def build_monthly_analysis_panel(ctx):
   };
   window.setMaGranularity=function(g){
     document.querySelectorAll('.ma-gran-toggle .gran-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.magran===g); });
-    var mw=document.getElementById('ma-monthly-wrap'), ww=document.getElementById('ma-weekly-wrap'), yw=document.getElementById('ma-yearly-wrap');
+    var dw=document.getElementById('ma-daily-wrap'), mw=document.getElementById('ma-monthly-wrap'), ww=document.getElementById('ma-weekly-wrap'), yw=document.getElementById('ma-yearly-wrap');
+    if(dw){ dw.style.display = (g==='daily') ? '' : 'none'; }
     if(mw){ mw.style.display = (g==='monthly') ? '' : 'none'; }
     if(ww){ ww.style.display = (g==='weekly') ? '' : 'none'; }
     if(yw){ yw.style.display = (g==='yearly') ? '' : 'none'; }
@@ -313,15 +425,24 @@ def build_monthly_analysis_panel(ctx):
             '    </div>\n'
         )
 
+    daily_section_html = (
+        '    <div id="ma-daily-wrap" style="display:none;">\n'
+        f'      <p class="note">Comparing {h_enc(ctx.ma_yesterday_label)} to {h_enc(ctx.ma_day_before_label)}. Ticket-count % change is shown here instead of "% of sales" (the sheet has no daily sales figure to divide by).</p>\n'
+        f'      {day_body}\n'
+        '    </div>\n'
+    )
+
     return f"""<div class="tab-panel" id="panel-monthly">
   <section>
     <h2>Monthly Analysis</h2>
     <p class="desc">Auto-generated from ticket data &mdash; compares the selected period to the one before it. Figures are wrt that period's total sales; drill-downs show the courier/warehouse/product driving most of a category's change. Root-cause context (e.g. a specific coupon bug) isn't captured in the data and is not inferred here.</p>
     <div class="ma-gran-toggle">
+      <button type="button" class="gran-btn" data-magran="daily" onclick="setMaGranularity('daily')">Daily</button>
       <button type="button" class="gran-btn active" data-magran="monthly" onclick="setMaGranularity('monthly')">Monthly</button>
       {weekly_toggle_html}
       {yearly_toggle_html}
     </div>
+{daily_section_html}
     <div id="ma-monthly-wrap">
       <div style="margin-bottom:18px;"><label for="ma-select" style="font-size:12px;color:var(--text-muted);margin-right:8px;">Month</label><select id="ma-select" onchange="onMonthlyAnalysisChange(this.value)" style="font-size:13px;padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;">{"".join(month_opts)}</select></div>
       {"".join(month_divs)}

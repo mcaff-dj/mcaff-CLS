@@ -7,6 +7,7 @@ Usage: python generate_report.py --brand-index 0 [--quick]
 import argparse
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import gen_monthly
@@ -124,6 +125,9 @@ def main():
     col = b["col"]
     ctx = Ctx(b)
     out_path = REPO_ROOT / b["out_file"]
+    # Single source of truth for "now" (IST) - shared by the footer/header timestamp and the
+    # Daily Analysis narrative's "yesterday" calculation, so both agree on what day it is.
+    ctx.now_ist = datetime.now(timezone.utc) + timedelta(hours=5.5)
 
     report_cache_file = os.environ.get("REPORT_CACHE_FILE")
     if report_cache_file and Path(report_cache_file).exists():
