@@ -1,10 +1,12 @@
-"""Delivery-complaint city-level "spike" insight.
+"""Delayed-order city/state breakdown.
 
 Joins the sheet's AWB (raw column 9, "Tracking Number" - never named/read anywhere else
 in the pipeline) against the mcaff_prod MySQL DWH's Item_level_data table to resolve each
-Delivery ticket's shipping city, then finds the city whose (complaints / that city's
-orders) rate rose the most from last month to this month - a real spike, not just a city
-that has more complaints because it also has more orders.
+"Delayed Order" (Delivery class) ticket's shipping city/state, then ranks the top 10
+cities and top 10 states by how much their (complaints / that area's orders) rate rose
+from last month to this month - a real spike, not just an area that has more complaints
+because it also has more orders. Scoped to "Delayed Order" specifically (not all Delivery
+categories), confirmed with the user.
 
 Requires MYSQL_* credentials (see mysql_lib.py) to reach the DWH. If they're not
 configured (e.g. CI doesn't have the secrets yet) this whole feature quietly returns None
@@ -13,22 +15,16 @@ existing report has no dependency on MySQL today.
 
 The two aggregate queries against Item_level_data (~50M rows) take ~15-20s apiece even
 with its Order_Date/Brand indexes, so the result is memoized on ctx - both call sites
-(the Delivery tab's Insights card and the Monthly Analysis narrative) share one computation.
+(the Delivery tab and the Monthly Analysis narrative) share one computation.
 """
 import re
 
-import mysql_lib
-from gen_insights import insight_item
-from report_context import fnum, h_enc, n0, pretty_month, round1
+from report_context import fnum, h_enc, n0, round1
 
 _MYSQL_BRAND = {"mcaffeine": "mCaffeine", "hyphen": "HYPHEN"}
-_MIN_CITY_COMPLAINTS = 5  # ignore cities too small for a rate to mean anything
-# A ticket's Month is when the COMPLAINT was raised, not when its order shipped - a small
-# city can rack up a handful of complaints against orders placed (and counted) in an
-# earlier month, making this-month's orders look artificially tiny and the rate spike past
-# 100%. Requiring a minimum order volume keeps the result to cities large enough that this
-# lag averages out.
-_MIN_CITY_ORDERS = 100
+_DELAYED_CATEGORY = "Delayed Order"
+_MIN_AREA_ORDERS = 100  # ignore areas too small for a rate to mean anything
+_TOP_N = 10
 
 
 def _month_bounds(month_label):
@@ -46,24 +42,29 @@ def _month_bounds(month_label):
     return start, end
 
 
-def _city_order_counts(brand_db, start, end):
+def _order_counts_by_geo(brand_db, start, end):
+    import mysql_lib
     rows = mysql_lib.query(
-        "SELECT Shipping_Address_City, COUNT(DISTINCT Sale_Order_Code) FROM Item_level_data "
-        "WHERE Brand = %s AND Order_Date >= %s AND Order_Date < %s GROUP BY Shipping_Address_City",
+        "SELECT Shipping_Address_City, Shipping_Address_State, COUNT(DISTINCT Sale_Order_Code) FROM Item_level_data "
+        "WHERE Brand = %s AND Order_Date >= %s AND Order_Date < %s GROUP BY Shipping_Address_City, Shipping_Address_State",
         (brand_db, start, end),
     )
     if rows is None:
-        return None
-    out = {}
-    for city, cnt in rows:
-        if not city or not str(city).strip():
-            continue
-        key = str(city).strip().upper()
-        out[key] = out.get(key, 0) + int(cnt)
-    return out
+        return None, None
+    city_counts, state_counts = {}, {}
+    for city, state, cnt in rows:
+        cnt = int(cnt)
+        if city and str(city).strip():
+            k = str(city).strip().upper()
+            city_counts[k] = city_counts.get(k, 0) + cnt
+        if state and str(state).strip():
+            k = str(state).strip().upper()
+            state_counts[k] = state_counts.get(k, 0) + cnt
+    return city_counts, state_counts
 
 
-def _awb_city_map(awbs):
+def _awb_geo_map(awbs):
+    import mysql_lib
     if not awbs:
         return {}
     out = {}
@@ -77,15 +78,16 @@ def _awb_city_map(awbs):
         # index. Matching on the raw indexed value costs some recall (rows with incidental
         # whitespace in Tracking_Number won't match) but stays fast.
         rows = mysql_lib.query(
-            f"SELECT Tracking_Number, Shipping_Address_City FROM Item_level_data WHERE Tracking_Number IN ({placeholders})",
+            f"SELECT Tracking_Number, Shipping_Address_City, Shipping_Address_State FROM Item_level_data WHERE Tracking_Number IN ({placeholders})",
             batch,
         )
         if rows is None:
             return None
-        for awb, city in rows:
-            if not city or not str(city).strip():
-                continue
-            out[str(awb).strip()] = str(city).strip().upper()
+        for awb, city, state in rows:
+            city = str(city).strip().upper() if city and str(city).strip() else None
+            state = str(state).strip().upper() if state and str(state).strip() else None
+            if city or state:
+                out[str(awb).strip()] = (city, state)
     return out
 
 
@@ -93,19 +95,46 @@ def _awb_tokens(raw):
     return [t.strip() for t in str(raw).split(",") if t.strip()]
 
 
-def _delivery_city_complaint_counts(ctx, awb_city, month_label):
+def _delayed_rows(ctx, month_label):
+    col = ctx.col
+    for r in ctx.unique:
+        if (ctx.cell(r, col["cls"]) == "Delivery" and ctx.cell(r, col["cat"]) == _DELAYED_CATEGORY
+                and ctx.cell(r, col["month"]) == month_label):
+            yield r
+
+
+def _geo_complaint_counts(ctx, awb_geo, month_label, dim_idx):
     col = ctx.col
     counts = {}
-    for r in ctx.unique:
-        if ctx.cell(r, col["cls"]) != "Delivery" or ctx.cell(r, col["month"]) != month_label:
-            continue
-        cities_seen = {awb_city[tok] for tok in _awb_tokens(ctx.cell(r, col["awb"])) if tok in awb_city}
-        for city in cities_seen:
-            counts[city] = counts.get(city, 0) + 1
+    for r in _delayed_rows(ctx, month_label):
+        seen = set()
+        for tok in _awb_tokens(ctx.cell(r, col["awb"])):
+            geo = awb_geo.get(tok)
+            if geo and geo[dim_idx]:
+                seen.add(geo[dim_idx])
+        for v in seen:
+            counts[v] = counts.get(v, 0) + 1
     return counts
 
 
-def _compute_delivery_city_spike(ctx):
+def _rank(complaints_this, complaints_prev, orders_this, orders_prev):
+    rows = []
+    for key, cur_cnt in complaints_this.items():
+        cur_orders = orders_this.get(key, 0)
+        if cur_orders < _MIN_AREA_ORDERS:
+            continue
+        prev_cnt = complaints_prev.get(key, 0)
+        prev_orders = orders_prev.get(key, 0)
+        rate_cur = cur_cnt / cur_orders * 100
+        rate_prev = (prev_cnt / prev_orders * 100) if prev_orders > 0 else 0
+        rows.append({"name": key, "cur_cnt": cur_cnt, "cur_orders": cur_orders, "rate_cur": rate_cur,
+                     "prev_cnt": prev_cnt, "prev_orders": prev_orders, "rate_prev": rate_prev,
+                     "delta": rate_cur - rate_prev})
+    rows.sort(key=lambda r: r["delta"], reverse=True)
+    return rows[:_TOP_N]
+
+
+def _compute_delayed_order_geo(ctx):
     if ctx.n < 2 or "awb" not in ctx.col:
         return None
     brand_db = _MYSQL_BRAND.get(ctx.b["brand"])
@@ -116,79 +145,82 @@ def _compute_delivery_city_spike(ctx):
     if not this_bounds or not prev_bounds:
         return None
 
-    orders_this = _city_order_counts(brand_db, *this_bounds)
-    orders_prev = _city_order_counts(brand_db, *prev_bounds) if orders_this is not None else None
-    if orders_this is None or orders_prev is None:
+    city_orders_this, state_orders_this = _order_counts_by_geo(brand_db, *this_bounds)
+    if city_orders_this is None:
+        return None
+    city_orders_prev, state_orders_prev = _order_counts_by_geo(brand_db, *prev_bounds)
+    if city_orders_prev is None:
         return None
 
     col = ctx.col
     awb_tokens = set()
-    for r in ctx.unique:
-        if ctx.cell(r, col["cls"]) != "Delivery" or ctx.cell(r, col["month"]) not in (this_month, prev_month):
-            continue
-        awb_tokens.update(_awb_tokens(ctx.cell(r, col["awb"])))
-    awb_city = _awb_city_map(awb_tokens)
-    if awb_city is None:
+    for month_label in (this_month, prev_month):
+        for r in _delayed_rows(ctx, month_label):
+            awb_tokens.update(_awb_tokens(ctx.cell(r, col["awb"])))
+    awb_geo = _awb_geo_map(awb_tokens)
+    if awb_geo is None:
         return None
 
-    complaints_this = _delivery_city_complaint_counts(ctx, awb_city, this_month)
-    complaints_prev = _delivery_city_complaint_counts(ctx, awb_city, prev_month)
+    city_complaints_this = _geo_complaint_counts(ctx, awb_geo, this_month, 0)
+    city_complaints_prev = _geo_complaint_counts(ctx, awb_geo, prev_month, 0)
+    state_complaints_this = _geo_complaint_counts(ctx, awb_geo, this_month, 1)
+    state_complaints_prev = _geo_complaint_counts(ctx, awb_geo, prev_month, 1)
 
-    best = None
-    for city, cur_cnt in complaints_this.items():
-        if cur_cnt < _MIN_CITY_COMPLAINTS:
-            continue
-        cur_orders = orders_this.get(city, 0)
-        if cur_orders < _MIN_CITY_ORDERS:
-            continue
-        prev_cnt = complaints_prev.get(city, 0)
-        prev_orders = orders_prev.get(city, 0)
-        rate_cur = cur_cnt / cur_orders * 100
-        rate_prev = (prev_cnt / prev_orders * 100) if prev_orders > 0 else 0
-        delta = rate_cur - rate_prev
-        if best is None or delta > best["delta"]:
-            best = {"city": city, "cur_cnt": cur_cnt, "cur_orders": cur_orders, "rate_cur": rate_cur,
-                    "prev_cnt": prev_cnt, "prev_orders": prev_orders, "rate_prev": rate_prev,
-                    "delta": delta, "month_label": this_month}
-    if best is None or best["delta"] <= 0:
+    top_cities = _rank(city_complaints_this, city_complaints_prev, city_orders_this, city_orders_prev)
+    top_states = _rank(state_complaints_this, state_complaints_prev, state_orders_this, state_orders_prev)
+    if not top_cities and not top_states:
         return None
-    return best
+    return {"month_label": this_month, "cities": top_cities, "states": top_states}
 
 
-def _get_spike(ctx):
-    if not hasattr(ctx, "_delivery_geo_spike"):
+def _get_delayed_geo(ctx):
+    if not hasattr(ctx, "_delayed_order_geo"):
         try:
-            ctx._delivery_geo_spike = _compute_delivery_city_spike(ctx)
+            ctx._delayed_order_geo = _compute_delayed_order_geo(ctx)
         except Exception as e:
-            print(f"[{ctx.b['brand']}] delivery city-spike insight skipped: {e}")
-            ctx._delivery_geo_spike = None
-    return ctx._delivery_geo_spike
+            print(f"[{ctx.b['brand']}] delayed-order geo breakdown skipped: {e}")
+            ctx._delayed_order_geo = None
+    return ctx._delayed_order_geo
 
 
-def _city_title(city):
-    return city.title()
+def _geo_title(v):
+    return v.title()
 
 
-def build_delivery_geo_insight_item(ctx):
-    """For the Delivery tab's 'Insights - Delivery' card."""
-    spike = _get_spike(ctx)
-    if not spike:
-        return None
-    return insight_item("watch",
-        f"<b>{h_enc(_city_title(spike['city']))}</b> has the sharpest delivery complaint-rate spike in "
-        f"{h_enc(pretty_month(spike['month_label']))}: {fnum(round1(spike['rate_cur']))}% of orders "
-        f"({n0(spike['cur_cnt'])} tickets / {n0(spike['cur_orders'])} orders), up from {fnum(round1(spike['rate_prev']))}% "
-        f"last month. City resolved via AWB lookup against the MySQL order DWH.")
+def _geo_table_html(title, rows, name_label):
+    if not rows:
+        return f"<p class='note'>No {h_enc(name_label.lower())} had enough order volume to rank.</p>"
+    trs = []
+    for i, r in enumerate(rows, start=1):
+        trs.append(
+            f"<tr><td class='rowlabel'>{i}. {h_enc(_geo_title(r['name']))}</td>"
+            f"<td class='num'>{n0(r['cur_cnt'])}</td><td class='num'>{n0(r['cur_orders'])}</td>"
+            f"<td class='pct'>{fnum(round1(r['rate_cur']))}%</td>"
+            f"<td class='pct'>{fnum(round1(r['rate_prev']))}%</td></tr>"
+        )
+    return (f"<div class='pivot-wrap'><div class='pivot-title'>{h_enc(title)}</div><div class='pivot-scroll'>"
+            f"<table class='pivot-table'><thead><tr><th class='corner'>{h_enc(name_label)}</th>"
+            f"<th>Delayed Tickets</th><th>Orders</th><th>Rate</th><th>Prev Rate</th></tr></thead>"
+            f"<tbody>{''.join(trs)}</tbody></table></div></div>")
+
+
+def _geo_block(ctx, heading_extra=""):
+    geo = _get_delayed_geo(ctx)
+    if not geo:
+        return ""
+    cities_html = _geo_table_html("Top 10 Cities — Delayed Order", geo["cities"], "City")
+    states_html = _geo_table_html("Top 10 States — Delayed Order", geo["states"], "State")
+    return (f"<div class='gran-monthly'><section><h2>Delayed Order by City &amp; State{heading_extra}</h2>"
+            f"<p class=\"desc\">Ranked by how much each area's (delayed-order tickets &divide; that area's orders) rate rose vs last month. "
+            f"City/state resolved via AWB lookup against the MySQL order DWH; areas with fewer than {n0(_MIN_AREA_ORDERS)} orders that month are excluded as too small to rank.</p>"
+            f"{cities_html}{states_html}</section></div>")
+
+
+def build_delivery_geo_block(ctx):
+    """For the Delivery tab, appended after the Insights card."""
+    return _geo_block(ctx)
 
 
 def build_delivery_geo_narrative(ctx):
     """For the Monthly Analysis tab's Delivery narrative (current month vs last only)."""
-    spike = _get_spike(ctx)
-    if not spike:
-        return ""
-    return (f"<div class='ma-class'><h4>Delivery Complaints by City <span style='font-weight:400;font-size:12px;color:var(--text-muted);'>"
-            f"(via MySQL AWB lookup)</span></h4>"
-            f"<p class='ma-overall'><b>{h_enc(_city_title(spike['city']))}</b> shows the sharpest city-level complaint-rate spike this month: "
-            f"{fnum(round1(spike['rate_cur']))}% of that city's orders ({n0(spike['cur_cnt'])} tickets / {n0(spike['cur_orders'])} orders) "
-            f"resulted in a delivery complaint, up from {fnum(round1(spike['rate_prev']))}% last month "
-            f"({n0(spike['prev_cnt'])} tickets / {n0(spike['prev_orders'])} orders).</p></div>")
+    return _geo_block(ctx)

@@ -14,7 +14,7 @@ are built as plain strings with unique `__TOKEN__` placeholders replaced via .re
 deliberately NOT f-strings, since an f-string would require escaping every brace in the
 embedded JS/CSS as `{{`/`}}` (high risk of a missed brace silently corrupting the script).
 """
-from gen_geo_insights import build_delivery_geo_insight_item
+from gen_geo_insights import build_delivery_geo_block
 from gen_insights import build_insights_card, get_category_insight_items, get_delivery_partner_insight
 from gen_weekly import build_weekly_class_block, build_weekly_delivery_block
 from gen_monthly import build_monthly_analysis_panel
@@ -302,8 +302,8 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
 
     if cls["id"] == "delivery":
         insights_block = build_insights_card("Insights &mdash; Delivery",
-                                              get_category_insight_items(ctx, subset) + [get_delivery_partner_insight(ctx, subset),
-                                                                                          build_delivery_geo_insight_item(ctx)])
+                                              get_category_insight_items(ctx, subset) + [get_delivery_partner_insight(ctx, subset)])
+        insights_block += build_delivery_geo_block(ctx)
         weekly_block = build_weekly_delivery_block(ctx)
     else:
         insights_block = build_insights_card(f"Insights &mdash; {h_enc(cls['label'])}", get_category_insight_items(ctx, subset))
