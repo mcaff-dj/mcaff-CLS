@@ -34,7 +34,8 @@ BRANDS = [
         ],
         "col": {"prod": 6, "batch": 7, "sku": 8, "cls": 4, "cat": 5, "partner": 10, "month": 12, "week": 13,
                 "sales": 19, "salesW": 20, "alloc": 23, "uniq": 17, "created_date": 1,
-                "wh": 21, "lastsource": 3, "platform": 32, "visdamage": 30, "outerpkg": 29, "statezone": 28},
+                "wh": 21, "lastsource": 3, "platform": 32, "visdamage": 30, "outerpkg": 29, "statezone": 28,
+                "order_id": 2, "awb": 9},
         "small_tabs": {"mom": "MoM", "prodnps": "MCF:PRODUCT NPS", "agent": "AGENT", "ai": "AI"},
     },
     {
@@ -55,7 +56,8 @@ BRANDS = [
         ],
         "col": {"prod": 6, "batch": 7, "sku": 8, "cls": 4, "cat": 5, "partner": 10, "month": 12, "week": 13,
                 "sales": 19, "salesW": 20, "alloc": 23, "uniq": 17, "created_date": 1,
-                "wh": 22, "lastsource": 3, "platform": 40, "visdamage": 33, "outerpkg": 32, "statezone": 34},
+                "wh": 22, "lastsource": 3, "platform": 40, "visdamage": 33, "outerpkg": 32, "statezone": 34,
+                "order_id": 2, "awb": 9},
         "small_tabs": {"mom": "Hyp: MoM", "prodnps": "HYP:PRODUCT NPS", "agent": "Hyp Agent Chart", "ai": "HYP AI Chart"},
     },
 ]

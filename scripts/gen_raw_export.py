@@ -19,6 +19,7 @@ import io
 
 RAW_CORE_FIELDS = [
     ("Created Date", "created_date"),
+    ("Order ID", "order_id"),
     ("Query Class", "cls"),
     ("Query Category", "cat"),
     ("Product Name", "prod"),
@@ -27,12 +28,12 @@ RAW_CORE_FIELDS = [
     ("Delivery Partner", "partner"),
     ("Month", "month"),
     ("Week", "week"),
-    ("Total Sales (M)", "sales"),
-    ("Unique/Duplicate", "uniq"),
+    ("Source", "lastsource"),
 ]
 
 RAW_TAB_EXTRA_FIELDS = {
-    "warehouse": [("Warehouse Facility", "wh")],
+    "delivery": [("AWB Number", "awb")],
+    "warehouse": [("Warehouse Facility", "wh"), ("AWB Number", "awb")],
     "technical": [("Platform", "platform")],
 }
 
