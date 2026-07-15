@@ -330,14 +330,16 @@ def build_geo_script(ctx):
 def build_delivery_geo_containers(ctx):
     """Static placeholder for the Delivery tab - populated reactively by
     renderGeoForDeliveryTab() (see build_geo_script), which re-runs whenever the page-wide
-    Monthly/Weekly toggle changes."""
+    Monthly/Weekly toggle changes. Deliberately NOT tagged '.gran-monthly'/'.gran-weekly' -
+    those classes make applyGranularity() hide the element entirely in the other mode, but
+    this section should stay visible and just re-render its own content in both modes."""
     if not _get_geo_dataset(ctx):
         return ""
-    return (f"<div class='gran-monthly'><section><h2>Delayed Order by City &amp; State</h2>"
+    return (f"<section><h2>Delayed Order by City &amp; State</h2>"
             f"<p class=\"desc\">Ranked by how much each area's (delayed-order tickets &divide; that area's orders) rate rose vs the "
             f"previous period. City/state resolved via AWB lookup against the MySQL order DWH; areas with fewer than {_MIN_AREA_ORDERS} "
             f"orders that period are excluded as too small to rank. Follows the Monthly/Weekly toggle above.</p>"
-            f"<div id='geo-delivery-cities'></div><div id='geo-delivery-states'></div></section></div>")
+            f"<div id='geo-delivery-cities'></div><div id='geo-delivery-states'></div></section>")
 
 
 def build_monthly_analysis_geo_containers(ctx):
