@@ -193,6 +193,14 @@ def build_class_period_data(ctx, cls, period):
 
 
 def build_class_period_narrative(cls, data, period, cur_idx, projection=None):
+    """`projection`, when set, only ever scales a TICKET COUNT to project where it's headed
+    by month-end - it must never be mixed into a percentage's numerator while leaving the
+    denominator (sales_cur, itself only a running so-far figure for an in-progress month,
+    not a fixed monthly total - confirmed by checking the sheet directly) unprojected. Doing
+    that inflated every current-month rate (e.g. 0.17% actual-so-far was showing as 0.57%).
+    Every *_actual value below is the real, comparable-in-progress-month rate; the
+    projected value is used only to decide/rank whether a bullet is worth showing and for
+    the explicitly-labeled "on pace for ~N by month end" ticket-count callout."""
     prev_idx = cur_idx - 1
     cur_label = period["label_fn"](cur_idx)
     prev_label = period["label_fn"](prev_idx)
@@ -200,36 +208,36 @@ def build_class_period_narrative(cls, data, period, cur_idx, projection=None):
     sales_prev = period["sales"][prev_idx]
     tot_cur_actual = data["class_period_tot"][cur_idx]
     tot_prev = data["class_period_tot"][prev_idx]
-    tot_cur = round(tot_cur_actual * projection["factor"]) if projection else tot_cur_actual
-    pct_cur = (tot_cur / sales_cur * 100) if sales_cur > 0 else 0
+    tot_cur_proj = round(tot_cur_actual * projection["factor"]) if projection else tot_cur_actual
+    pct_cur = (tot_cur_actual / sales_cur * 100) if sales_cur > 0 else 0
     pct_prev = (tot_prev / sales_prev * 100) if sales_prev > 0 else 0
     if pct_prev > 0:
         rel_change = abs(pct_cur - pct_prev) / pct_prev
     else:
         rel_change = 1 if pct_cur > 0 else 0
-    proj_note = (f" (pace-adjusted for the full month; {n0(tot_cur_actual)} tickets so far, day {projection['days_elapsed']} of {projection['days_total']})"
+    proj_note = (f" &mdash; on pace for ~{n0(tot_cur_proj)} by month end ({n0(tot_cur_actual)} so far, day {projection['days_elapsed']} of {projection['days_total']})"
                  if projection else "")
 
     bullets = []
     for cat in data["cat_order"]:
         cur_c_actual = data["cat_period"][cat][cur_idx]
         prev_c = data["cat_period"][cat][prev_idx]
-        cur_c = round(cur_c_actual * projection["factor"]) if projection else cur_c_actual
-        if cur_c < 3:
+        cur_c_proj = round(cur_c_actual * projection["factor"]) if projection else cur_c_actual
+        if cur_c_proj < 3:
             continue
-        growth = (cur_c / prev_c) if prev_c > 0 else math.inf
-        abs_delta = cur_c - prev_c
-        qualifies = (prev_c == 0 and cur_c >= 3) or (prev_c > 0 and (growth >= 1.3 or abs_delta >= 10))
+        growth = (cur_c_proj / prev_c) if prev_c > 0 else math.inf
+        abs_delta = cur_c_proj - prev_c
+        qualifies = (prev_c == 0 and cur_c_proj >= 3) or (prev_c > 0 and (growth >= 1.3 or abs_delta >= 10))
         if not qualifies:
             continue
-        p_c = (cur_c / sales_cur * 100) if sales_cur > 0 else 0
+        p_c = (cur_c_actual / sales_cur * 100) if sales_cur > 0 else 0
         p_p = (prev_c / sales_prev * 100) if sales_prev > 0 else 0
-        verb = change_verb(prev_c, cur_c)
+        verb = change_verb(prev_c, cur_c_proj)
         if projection:
-            line = (f"<b>{h_enc(cat)}</b>: Complaints, projected for the full month, {verb} from {n0(prev_c)} to ~{n0(cur_c)} "
-                    f"({pct_fmt(p_p)} &rarr; {pct_fmt(p_c)}) &mdash; {n0(cur_c_actual)} so far (day {projection['days_elapsed']} of {projection['days_total']}).")
+            line = (f"<b>{h_enc(cat)}</b>: Complaints {verb} from {n0(prev_c)} to {n0(cur_c_actual)} so far this month "
+                    f"({pct_fmt(p_p)} &rarr; {pct_fmt(p_c)}), on pace for ~{n0(cur_c_proj)} by month end (day {projection['days_elapsed']} of {projection['days_total']}).")
         else:
-            line = f"<b>{h_enc(cat)}</b>: Complaints {verb} from {n0(prev_c)} to {n0(cur_c)} ({pct_fmt(p_p)} &rarr; {pct_fmt(p_c)})."
+            line = f"<b>{h_enc(cat)}</b>: Complaints {verb} from {n0(prev_c)} to {n0(cur_c_actual)} ({pct_fmt(p_p)} &rarr; {pct_fmt(p_c)})."
 
         sub_lines = []
         if data["sub_dim_name"] and cat in data["sub_period"]:
@@ -242,19 +250,20 @@ def build_class_period_narrative(cls, data, period, cur_idx, projection=None):
                 if sv == "(blank)":
                     continue
                 sc_actual, sp = arr[cur_idx], arr[prev_idx]
-                sc = round(sc_actual * projection["factor"]) if projection else sc_actual
-                d = sc - sp
-                if d > 0 and sc >= mover_min:
-                    movers.append({"name": sv, "cur": sc, "prev": sp, "delta": d})
+                sc_proj = round(sc_actual * projection["factor"]) if projection else sc_actual
+                d = sc_proj - sp
+                if d > 0 and sc_proj >= mover_min:
+                    movers.append({"name": sv, "cur_actual": sc_actual, "cur_proj": sc_proj, "prev": sp, "delta": d})
             movers = sorted(movers, key=lambda m: m["delta"], reverse=True)[:mover_top_n]
             for m in movers:
                 if abs_delta > 0 and (m["delta"] / abs_delta) < 0.25:
                     continue
-                mp = (m["cur"] / sales_cur * 100) if sales_cur > 0 else 0
+                mp = (m["cur_actual"] / sales_cur * 100) if sales_cur > 0 else 0
                 mpp = (m["prev"] / sales_prev * 100) if sales_prev > 0 else 0
-                mverb = change_verb(m["prev"], m["cur"])
+                mverb = change_verb(m["prev"], m["cur_proj"])
                 sub_label = _SUB_LABEL[data["sub_dim_name"]]
-                sub_lines.append(f"<li><b>{h_enc(m['name'])}</b> ({sub_label}): complaint rate {mverb} from {pct_fmt(mpp)} to {pct_fmt(mp)} ({n0(m['prev'])} &rarr; {n0(m['cur'])}).")
+                proj_bit = f", on pace for ~{n0(m['cur_proj'])}" if projection and m["cur_proj"] != m["cur_actual"] else ""
+                sub_lines.append(f"<li><b>{h_enc(m['name'])}</b> ({sub_label}): complaint rate {mverb} from {pct_fmt(mpp)} to {pct_fmt(mp)} ({n0(m['prev'])} &rarr; {n0(m['cur_actual'])}{proj_bit}).")
         if sub_lines:
             line += f"<ul class='ma-sub'>{''.join(sub_lines)}</ul>"
         bullets.append({"line": line, "sort_key": abs_delta})
