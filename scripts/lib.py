@@ -120,11 +120,77 @@ def get_sheet_rows_chunked(spreadsheet_id, sheet_name, last_col, chunk_size=1000
         if not chunk:
             break
         all_rows.extend(chunk)
-        print(f"  fetched {sheet_name} rows {start}-{end} ({len(all_rows)} total)")
+        print(f"  fetched {sheet_name} rows {start}-{start + len(chunk) - 1} ({len(all_rows)} total)")
         if len(chunk) < chunk_size:
             break
         start = end + 1
     return all_rows
+
+
+def get_column_letter(index):
+    """0-based column index -> letter, e.g. 0->A, 25->Z, 26->AA."""
+    n = index + 1
+    s = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        s = chr(65 + rem) + s
+    return s
+
+
+def get_last_data_row(spreadsheet_id, sheet_name):
+    """1-based row number of the last row with data in column A (0 if empty)."""
+    try:
+        col_a = get_sheet_values(spreadsheet_id, f"'{sheet_name}'!A:A")
+    except Exception:
+        col_a = None
+    return len(col_a) if col_a else 0
+
+
+def clear_sheet_range(spreadsheet_id, range_):
+    token = get_write_access_token()
+    encoded = urllib.parse.quote(range_, safe="")
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{encoded}:clear"
+    resp = requests.post(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }, timeout=180)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def set_sheet_rows_at_row(spreadsheet_id, sheet_name, rows, start_row, chunk_size=300):
+    """Writes rows starting at an explicit 1-based row number (chunked + retried).
+    Unlike values:append, a PUT to an explicit range is idempotent - retrying after a
+    connection reset just rewrites the same cells instead of risking a duplicate insert."""
+    if not rows:
+        return
+    token = get_write_access_token()
+    max_width = max(len(r) for r in rows)
+    last_col = get_column_letter(max_width - 1)
+
+    for start in range(0, len(rows), chunk_size):
+        end = min(start + chunk_size, len(rows)) - 1
+        chunk = rows[start:end + 1]
+        row_start = start_row + start
+        row_end = start_row + end
+        range_ = urllib.parse.quote(f"'{sheet_name}'!A{row_start}:{last_col}{row_end}", safe="")
+        url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{range_}?valueInputOption=USER_ENTERED"
+        body = {"values": chunk}
+        last_err = None
+        for attempt in range(1, 6):
+            try:
+                resp = requests.put(url, headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json; charset=utf-8",
+                }, json=body, timeout=180)
+                resp.raise_for_status()
+                break
+            except Exception as e:
+                last_err = e
+                print(f"  write rows {row_start}-{row_end} attempt {attempt} failed: {e}")
+                if attempt == 5:
+                    raise
+                time.sleep(5 * attempt)
 
 
 def get_sheet_rows_incremental(spreadsheet_id, sheet_name, last_col, cache_path, month_col_idx, target_months):
