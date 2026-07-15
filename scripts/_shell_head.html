@@ -440,6 +440,7 @@
       title.appendChild(btn);
     });
   }
+  window.injectButtons = injectButtons;
   if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', injectButtons); } else { injectButtons(); }
 })();
 </script>

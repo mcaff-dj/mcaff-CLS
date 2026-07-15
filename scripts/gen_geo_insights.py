@@ -1,30 +1,43 @@
-"""Delayed-order city/state breakdown.
+"""Delayed-order city/state breakdown - reactive to Weekly/Monthly/Yearly granularity.
 
 Joins the sheet's AWB (raw column 9, "Tracking Number" - never named/read anywhere else
 in the pipeline) against the mcaff_prod MySQL DWH's Item_level_data table to resolve each
 "Delayed Order" (Delivery class) ticket's shipping city/state, then ranks the top 10
 cities and top 10 states by how much their (complaints / that area's orders) rate rose
-from last month to this month - a real spike, not just an area that has more complaints
-because it also has more orders. Scoped to "Delayed Order" specifically (not all Delivery
-categories), confirmed with the user.
+between two periods - a real spike, not just an area that has more complaints because it
+also has more orders. Scoped to "Delayed Order" specifically (not all Delivery categories).
+
+Must react to whichever period the user has picked via the existing Monthly/Weekly/Yearly
+selectors (both the Delivery tab's page-wide gran_toolbar and Monthly Analysis's own
+granularity toggle + period dropdown) - pre-rendering a server-side table for every
+possible period pair would mean a per-period round of MySQL queries (there can be a dozen+
+month pairs, more week pairs), which isn't remotely feasible. Instead this fetches the
+FULL history ONCE per brand (complaint counts from the sheet, order counts from MySQL,
+both bucketed per calendar week), embeds it as compact JSON, and does the period-slicing/
+ranking entirely client-side in JS - the embedded renderGeoForDeliveryTab() and
+renderGeoForMonthlyAnalysis() hooks are called from the existing granularity-change
+handlers in gen_panels.py/gen_monthly.py.
+
+Order-count queries: a single query spanning the WHOLE date range (whether grouped by
+month or by week) reliably times out (>90s) against this ~50M-row table - even a plain
+YEAR()/MONTH() grouping with no other computed expression. Only a single CALENDAR MONTH
+date-range filter stays fast (~20-35s, confirmed via EXPLAIN using the Order_Date/Brand
+index). So this runs one query PER MONTH in ctx.months, not one combined query - a real
+increase in report-generation time (roughly 20-35s x months x brands), traded for the
+tables actually working at every granularity.
 
 Requires MYSQL_* credentials (see mysql_lib.py) to reach the DWH. If they're not
 configured (e.g. CI doesn't have the secrets yet) this whole feature quietly returns None
-rather than breaking report generation - confirmed acceptable with the user, since the
-existing report has no dependency on MySQL today.
-
-The two aggregate queries against Item_level_data (~50M rows) take ~15-20s apiece even
-with its Order_Date/Brand indexes, so the result is memoized on ctx - both call sites
-(the Delivery tab and the Monthly Analysis narrative) share one computation.
+rather than breaking report generation.
 """
 import re
 
-from report_context import fnum, h_enc, n0, round1
+from gen_weekly import get_week_num
+from report_context import j_enc, year_of
 
 _MYSQL_BRAND = {"mcaffeine": "mCaffeine", "hyphen": "HYPHEN"}
 _DELAYED_CATEGORY = "Delayed Order"
 _MIN_AREA_ORDERS = 100  # ignore areas too small for a rate to mean anything
-_TOP_N = 10
 
 
 def _month_bounds(month_label):
@@ -42,25 +55,16 @@ def _month_bounds(month_label):
     return start, end
 
 
-def _order_counts_by_geo(brand_db, start, end):
+def _order_counts_by_geo_week(brand_db, start, end):
+    """One calendar month's (city, state, week-of-month 1-5) -> distinct order count."""
     import mysql_lib
-    rows = mysql_lib.query(
-        "SELECT Shipping_Address_City, Shipping_Address_State, COUNT(DISTINCT Sale_Order_Code) FROM Item_level_data "
-        "WHERE Brand = %s AND Order_Date >= %s AND Order_Date < %s GROUP BY Shipping_Address_City, Shipping_Address_State",
+    return mysql_lib.query(
+        "SELECT Shipping_Address_City, Shipping_Address_State, FLOOR((DAYOFMONTH(Order_Date)-1)/7)+1 wk, "
+        "COUNT(DISTINCT Sale_Order_Code) FROM Item_level_data "
+        "WHERE Brand = %s AND Order_Date >= %s AND Order_Date < %s "
+        "GROUP BY Shipping_Address_City, Shipping_Address_State, wk",
         (brand_db, start, end),
     )
-    if rows is None:
-        return None, None
-    city_counts, state_counts = {}, {}
-    for city, state, cnt in rows:
-        cnt = int(cnt)
-        if city and str(city).strip():
-            k = str(city).strip().upper()
-            city_counts[k] = city_counts.get(k, 0) + cnt
-        if state and str(state).strip():
-            k = str(state).strip().upper()
-            state_counts[k] = state_counts.get(k, 0) + cnt
-    return city_counts, state_counts
 
 
 def _awb_geo_map(awbs):
@@ -95,132 +99,255 @@ def _awb_tokens(raw):
     return [t.strip() for t in str(raw).split(",") if t.strip()]
 
 
-def _delayed_rows(ctx, month_label):
+def _delayed_rows_all(ctx):
+    """Every Delivery/'Delayed Order' unique ticket across every month - the tables must
+    react to whichever period is selected, not just the most recent one."""
     col = ctx.col
-    for r in ctx.unique:
-        if (ctx.cell(r, col["cls"]) == "Delivery" and ctx.cell(r, col["cat"]) == _DELAYED_CATEGORY
-                and ctx.cell(r, col["month"]) == month_label):
-            yield r
+    return [r for r in ctx.unique
+            if ctx.cell(r, col["cls"]) == "Delivery" and ctx.cell(r, col["cat"]) == _DELAYED_CATEGORY]
 
 
-def _geo_complaint_counts(ctx, awb_geo, month_label, dim_idx):
+def _global_week_index(ctx, row):
     col = ctx.col
-    counts = {}
-    for r in _delayed_rows(ctx, month_label):
-        seen = set()
-        for tok in _awb_tokens(ctx.cell(r, col["awb"])):
-            geo = awb_geo.get(tok)
-            if geo and geo[dim_idx]:
-                seen.add(geo[dim_idx])
-        for v in seen:
-            counts[v] = counts.get(v, 0) + 1
-    return counts
+    mo = ctx.cell(row, col["month"])
+    wk = ctx.cell(row, col["week"])
+    if not str(wk).strip() or wk == "#N/A":
+        return -1
+    return ctx.ma_week_global_idx.get(f"{mo}||{wk}", -1)
 
 
-def _rank(complaints_this, complaints_prev, orders_this, orders_prev):
-    rows = []
-    for key, cur_cnt in complaints_this.items():
-        cur_orders = orders_this.get(key, 0)
-        if cur_orders < _MIN_AREA_ORDERS:
-            continue
-        prev_cnt = complaints_prev.get(key, 0)
-        prev_orders = orders_prev.get(key, 0)
-        rate_cur = cur_cnt / cur_orders * 100
-        rate_prev = (prev_cnt / prev_orders * 100) if prev_orders > 0 else 0
-        rows.append({"name": key, "cur_cnt": cur_cnt, "cur_orders": cur_orders, "rate_cur": rate_cur,
-                     "prev_cnt": prev_cnt, "prev_orders": prev_orders, "rate_prev": rate_prev,
-                     "delta": rate_cur - rate_prev})
-    rows.sort(key=lambda r: r["delta"], reverse=True)
-    return rows[:_TOP_N]
-
-
-def _compute_delayed_order_geo(ctx):
-    if ctx.n < 2 or "awb" not in ctx.col:
+def _compute_geo_dataset(ctx):
+    if "awb" not in ctx.col or ctx.total_weeks < 2:
         return None
     brand_db = _MYSQL_BRAND.get(ctx.b["brand"])
     if not brand_db:
         return None
-    this_month, prev_month = ctx.months[-1], ctx.months[-2]
-    this_bounds, prev_bounds = _month_bounds(this_month), _month_bounds(prev_month)
-    if not this_bounds or not prev_bounds:
+
+    rows = _delayed_rows_all(ctx)
+    if not rows:
         return None
 
-    city_orders_this, state_orders_this = _order_counts_by_geo(brand_db, *this_bounds)
-    if city_orders_this is None:
-        return None
-    city_orders_prev, state_orders_prev = _order_counts_by_geo(brand_db, *prev_bounds)
-    if city_orders_prev is None:
-        return None
-
+    # ---------- numerator: complaint counts by (city/state, global week index) ----------
     col = ctx.col
     awb_tokens = set()
-    for month_label in (this_month, prev_month):
-        for r in _delayed_rows(ctx, month_label):
-            awb_tokens.update(_awb_tokens(ctx.cell(r, col["awb"])))
+    for r in rows:
+        awb_tokens.update(_awb_tokens(ctx.cell(r, col["awb"])))
     awb_geo = _awb_geo_map(awb_tokens)
     if awb_geo is None:
         return None
 
-    city_complaints_this = _geo_complaint_counts(ctx, awb_geo, this_month, 0)
-    city_complaints_prev = _geo_complaint_counts(ctx, awb_geo, prev_month, 0)
-    state_complaints_this = _geo_complaint_counts(ctx, awb_geo, this_month, 1)
-    state_complaints_prev = _geo_complaint_counts(ctx, awb_geo, prev_month, 1)
+    city_complaints, state_complaints = {}, {}
+    for r in rows:
+        gi = _global_week_index(ctx, r)
+        if gi < 0:
+            continue
+        seen_c, seen_s = set(), set()
+        for tok in _awb_tokens(ctx.cell(r, col["awb"])):
+            geo = awb_geo.get(tok)
+            if not geo:
+                continue
+            city, state = geo
+            if city:
+                seen_c.add(city)
+            if state:
+                seen_s.add(state)
+        for city in seen_c:
+            city_complaints.setdefault(city, {})
+            city_complaints[city][gi] = city_complaints[city].get(gi, 0) + 1
+        for state in seen_s:
+            state_complaints.setdefault(state, {})
+            state_complaints[state][gi] = state_complaints[state].get(gi, 0) + 1
 
-    top_cities = _rank(city_complaints_this, city_complaints_prev, city_orders_this, city_orders_prev)
-    top_states = _rank(state_complaints_this, state_complaints_prev, state_orders_this, state_orders_prev)
-    if not top_cities and not top_states:
+    if not city_complaints and not state_complaints:
         return None
-    return {"month_label": this_month, "cities": top_cities, "states": top_states}
+
+    # ---------- denominator: order counts by (city/state, global week index) ----------
+    # One query per calendar month (see module docstring) - only cities/states that
+    # actually have a complaint at some point are kept, so this stays small regardless of
+    # how many thousands of cities the DWH covers overall.
+    week_num_to_global_idx = {}
+    for wi in range(ctx.total_weeks):
+        mi = ctx.week_month_of[wi]
+        wn = get_week_num(ctx.all_weeks[wi])
+        week_num_to_global_idx[(mi, wn)] = wi
+
+    city_orders, state_orders = {}, {}
+    for mi, month_label in enumerate(ctx.months):
+        bounds = _month_bounds(month_label)
+        if not bounds:
+            continue
+        rows_mo = _order_counts_by_geo_week(brand_db, *bounds)
+        if rows_mo is None:
+            return None
+        for city, state, wk, cnt in rows_mo:
+            gi = week_num_to_global_idx.get((mi, int(wk)))
+            if gi is None:
+                continue
+            cnt = int(cnt)
+            if city and str(city).strip():
+                ck = str(city).strip().upper()
+                if ck in city_complaints:
+                    city_orders.setdefault(ck, {})
+                    city_orders[ck][gi] = city_orders[ck].get(gi, 0) + cnt
+            if state and str(state).strip():
+                sk = str(state).strip().upper()
+                if sk in state_complaints:
+                    state_orders.setdefault(sk, {})
+                    state_orders[sk][gi] = state_orders[sk].get(gi, 0) + cnt
+
+    cities = sorted(city_complaints.keys())
+    states = sorted(state_complaints.keys())
+    n_weeks = ctx.total_weeks
+
+    def to_matrix(complaints, orders, keys):
+        comp = [[complaints.get(k, {}).get(wi, 0) for wi in range(n_weeks)] for k in keys]
+        ordr = [[orders.get(k, {}).get(wi, 0) for wi in range(n_weeks)] for k in keys]
+        return comp, ordr
+
+    city_comp, city_ord = to_matrix(city_complaints, city_orders, cities)
+    state_comp, state_ord = to_matrix(state_complaints, state_orders, states)
+    month_year_idx = [ctx.ma_year_index_of.get(year_of(mo), -1) for mo in ctx.months]
+
+    return {
+        "cities": cities, "states": states,
+        "city_complaints": city_comp, "city_orders": city_ord,
+        "state_complaints": state_comp, "state_orders": state_ord,
+        "week_month_of": list(ctx.week_month_of), "month_year_idx": month_year_idx,
+        "total_weeks": n_weeks, "total_months": ctx.n,
+    }
 
 
-def _get_delayed_geo(ctx):
-    if not hasattr(ctx, "_delayed_order_geo"):
+def _get_geo_dataset(ctx):
+    if not hasattr(ctx, "_geo_dataset"):
         try:
-            ctx._delayed_order_geo = _compute_delayed_order_geo(ctx)
+            ctx._geo_dataset = _compute_geo_dataset(ctx)
         except Exception as e:
-            print(f"[{ctx.b['brand']}] delayed-order geo breakdown skipped: {e}")
-            ctx._delayed_order_geo = None
-    return ctx._delayed_order_geo
+            print(f"[{ctx.b['brand']}] delayed-order geo dataset skipped: {e}")
+            ctx._geo_dataset = None
+    return ctx._geo_dataset
 
 
-def _geo_title(v):
-    return v.title()
+def _aj_num_matrix(m):
+    return "[" + ",".join("[" + ",".join(str(v) for v in row) + "]" for row in m) + "]"
 
 
-def _geo_table_html(title, rows, name_label):
-    if not rows:
-        return f"<p class='note'>No {h_enc(name_label.lower())} had enough order volume to rank.</p>"
-    trs = []
-    for i, r in enumerate(rows, start=1):
-        trs.append(
-            f"<tr><td class='rowlabel'>{i}. {h_enc(_geo_title(r['name']))}</td>"
-            f"<td class='num'>{n0(r['cur_cnt'])}</td><td class='num'>{n0(r['cur_orders'])}</td>"
-            f"<td class='pct'>{fnum(round1(r['rate_cur']))}%</td>"
-            f"<td class='pct'>{fnum(round1(r['rate_prev']))}%</td></tr>"
-        )
-    return (f"<div class='pivot-wrap'><div class='pivot-title'>{h_enc(title)}</div><div class='pivot-scroll'>"
-            f"<table class='pivot-table'><thead><tr><th class='corner'>{h_enc(name_label)}</th>"
-            f"<th>Delayed Tickets</th><th>Orders</th><th>Rate</th><th>Prev Rate</th></tr></thead>"
-            f"<tbody>{''.join(trs)}</tbody></table></div></div>")
+def _aj_str(a):
+    return "[" + ",".join(f'"{j_enc(x)}"' for x in a) + "]"
 
 
-def _geo_block(ctx, heading_extra=""):
-    geo = _get_delayed_geo(ctx)
-    if not geo:
+def _aj_num(a):
+    return "[" + ",".join(str(v) for v in a) + "]"
+
+
+def build_geo_script(ctx):
+    """Embedded once per report (see gen_panels.assemble_report). Provides window.GEO_DATA
+    plus the rendering/aggregation functions both the Delivery tab and the Monthly
+    Analysis tab call into when their granularity/period selectors change."""
+    dataset = _get_geo_dataset(ctx)
+    if not dataset:
+        return "<script>window.GEO_DATA=null;</script>"
+
+    data_js = (
+        "window.GEO_DATA={"
+        f"cities:{_aj_str(dataset['cities'])},states:{_aj_str(dataset['states'])},"
+        f"cityComplaints:{_aj_num_matrix(dataset['city_complaints'])},cityOrders:{_aj_num_matrix(dataset['city_orders'])},"
+        f"stateComplaints:{_aj_num_matrix(dataset['state_complaints'])},stateOrders:{_aj_num_matrix(dataset['state_orders'])},"
+        f"weekMonthOf:{_aj_num(dataset['week_month_of'])},monthYearIdx:{_aj_num(dataset['month_year_idx'])},"
+        f"totalWeeks:{dataset['total_weeks']},totalMonths:{dataset['total_months']},minOrders:{_MIN_AREA_ORDERS}"
+        "};"
+    )
+
+    return f"""<script>
+{data_js}
+(function(){{
+  function titleCase(s){{ return String(s).replace(/\\w\\S*/g, function(t){{ return t.charAt(0).toUpperCase()+t.slice(1).toLowerCase(); }}); }}
+  function fmt(n){{ return n.toLocaleString('en-IN'); }}
+  function fnum1(v){{ v = Math.round(v*10)/10; var s=v.toFixed(1); return s.replace(/\\.0$/,''); }}
+  function weeksForMonth(mi){{ var out=[]; window.GEO_DATA.weekMonthOf.forEach(function(m,wi){{ if(m===mi) out.push(wi); }}); return out; }}
+  function weeksForYear(yi){{ var out=[]; for(var mi=0;mi<window.GEO_DATA.monthYearIdx.length;mi++){{ if(window.GEO_DATA.monthYearIdx[mi]===yi){{ out=out.concat(weeksForMonth(mi)); }} }} return out; }}
+  window.geoWeeksForMonth = weeksForMonth;
+  window.geoWeeksForYear = weeksForYear;
+  function sumOver(arr, weeks){{ var t=0; for(var i=0;i<weeks.length;i++){{ t+=arr[weeks[i]]||0; }} return t; }}
+  function rankGeo(names, complaintsM, ordersM, curWeeks, prevWeeks){{
+    var rows=[];
+    for(var i=0;i<names.length;i++){{
+      var curOrders=sumOver(ordersM[i],curWeeks);
+      if(curOrders<window.GEO_DATA.minOrders) continue;
+      var curCnt=sumOver(complaintsM[i],curWeeks), prevCnt=sumOver(complaintsM[i],prevWeeks), prevOrders=sumOver(ordersM[i],prevWeeks);
+      var rateCur=curOrders>0?(curCnt/curOrders*100):0, ratePrev=prevOrders>0?(prevCnt/prevOrders*100):0;
+      rows.push({{name:names[i],cur:curCnt,curO:curOrders,prev:prevCnt,prevO:prevOrders,rateCur:rateCur,ratePrev:ratePrev,delta:rateCur-ratePrev}});
+    }}
+    rows.sort(function(a,b){{ return b.delta-a.delta; }});
+    return rows.slice(0,10);
+  }}
+  function tableHTML(title,nameLabel,rows){{
+    if(!rows.length) return '<p class="note">No '+nameLabel.toLowerCase()+' had enough order volume to rank for this period.</p>';
+    var trs=rows.map(function(r,i){{
+      return '<tr><td class="rowlabel">'+(i+1)+'. '+titleCase(r.name)+'</td><td class="num">'+fmt(r.cur)+'</td><td class="num">'+fmt(r.curO)+'</td>'
+        +'<td class="pct">'+fnum1(r.rateCur)+'%</td><td class="pct">'+fnum1(r.ratePrev)+'%</td></tr>';
+    }}).join('');
+    return '<div class="pivot-wrap"><div class="pivot-title">'+title+'</div><div class="pivot-scroll"><table class="pivot-table"><thead><tr>'
+      +'<th class="corner">'+nameLabel+'</th><th>Delayed Tickets</th><th>Orders</th><th>Rate</th><th>Prev Rate</th></tr></thead><tbody>'+trs+'</tbody></table></div></div>';
+  }}
+  window.geoRenderTables=function(cityElId,stateElId,curWeeks,prevWeeks){{
+    if(!window.GEO_DATA) return;
+    var cityEl=document.getElementById(cityElId), stateEl=document.getElementById(stateElId);
+    if(cityEl){{ cityEl.innerHTML=tableHTML('Top 10 Cities \\u2014 Delayed Order','City',rankGeo(window.GEO_DATA.cities,window.GEO_DATA.cityComplaints,window.GEO_DATA.cityOrders,curWeeks,prevWeeks)); }}
+    if(stateEl){{ stateEl.innerHTML=tableHTML('Top 10 States \\u2014 Delayed Order','State',rankGeo(window.GEO_DATA.states,window.GEO_DATA.stateComplaints,window.GEO_DATA.stateOrders,curWeeks,prevWeeks)); }}
+    if(window.injectButtons) window.injectButtons();
+  }};
+  window.renderGeoForDeliveryTab=function(){{
+    if(!window.GEO_DATA) return;
+    var activeBtn=document.querySelector('.gran-toggle .gran-btn.active');
+    var g=activeBtn?activeBtn.dataset.gran:'monthly';
+    var curWeeks,prevWeeks;
+    if(g==='weekly'&&window.GEO_DATA.totalWeeks>=2){{
+      curWeeks=[window.GEO_DATA.totalWeeks-1]; prevWeeks=[window.GEO_DATA.totalWeeks-2];
+    }} else {{
+      var lastMi=window.GEO_DATA.totalMonths-1;
+      curWeeks=weeksForMonth(lastMi); prevWeeks=weeksForMonth(lastMi-1);
+    }}
+    window.geoRenderTables('geo-delivery-cities','geo-delivery-states',curWeeks,prevWeeks);
+  }};
+  window.renderGeoForMonthlyAnalysis=function(granularity,curIdx){{
+    if(!window.GEO_DATA) return;
+    var wrap=document.getElementById('geo-ma-wrap');
+    if(granularity==='daily'){{ if(wrap) wrap.style.display='none'; return; }}
+    if(wrap) wrap.style.display='';
+    var curWeeks,prevWeeks;
+    if(granularity==='monthly'){{ curWeeks=weeksForMonth(curIdx); prevWeeks=weeksForMonth(curIdx-1); }}
+    else if(granularity==='weekly'){{ curWeeks=[curIdx]; prevWeeks=[curIdx-1]; }}
+    else if(granularity==='yearly'){{ curWeeks=weeksForYear(curIdx); prevWeeks=weeksForYear(curIdx-1); }}
+    else return;
+    window.geoRenderTables('geo-ma-cities','geo-ma-states',curWeeks,prevWeeks);
+  }};
+  function init(){{ window.renderGeoForDeliveryTab(); }}
+  if(document.readyState==='loading'){{document.addEventListener('DOMContentLoaded',init);}}else{{init();}}
+}})();
+</script>"""
+
+
+def build_delivery_geo_containers(ctx):
+    """Static placeholder for the Delivery tab - populated reactively by
+    renderGeoForDeliveryTab() (see build_geo_script), which re-runs whenever the page-wide
+    Monthly/Weekly toggle changes."""
+    if not _get_geo_dataset(ctx):
         return ""
-    cities_html = _geo_table_html("Top 10 Cities — Delayed Order", geo["cities"], "City")
-    states_html = _geo_table_html("Top 10 States — Delayed Order", geo["states"], "State")
-    return (f"<div class='gran-monthly'><section><h2>Delayed Order by City &amp; State{heading_extra}</h2>"
-            f"<p class=\"desc\">Ranked by how much each area's (delayed-order tickets &divide; that area's orders) rate rose vs last month. "
-            f"City/state resolved via AWB lookup against the MySQL order DWH; areas with fewer than {n0(_MIN_AREA_ORDERS)} orders that month are excluded as too small to rank.</p>"
-            f"{cities_html}{states_html}</section></div>")
+    return (f"<div class='gran-monthly'><section><h2>Delayed Order by City &amp; State</h2>"
+            f"<p class=\"desc\">Ranked by how much each area's (delayed-order tickets &divide; that area's orders) rate rose vs the "
+            f"previous period. City/state resolved via AWB lookup against the MySQL order DWH; areas with fewer than {_MIN_AREA_ORDERS} "
+            f"orders that period are excluded as too small to rank. Follows the Monthly/Weekly toggle above.</p>"
+            f"<div id='geo-delivery-cities'></div><div id='geo-delivery-states'></div></section></div>")
 
 
-def build_delivery_geo_block(ctx):
-    """For the Delivery tab, appended after the Insights card."""
-    return _geo_block(ctx)
-
-
-def build_delivery_geo_narrative(ctx):
-    """For the Monthly Analysis tab's Delivery narrative (current month vs last only)."""
-    return _geo_block(ctx)
+def build_monthly_analysis_geo_containers(ctx):
+    """Static placeholder for the Monthly Analysis tab - one shared container (not one per
+    wrap) since only one of Monthly/Weekly/Yearly is visible at a time; populated/hidden
+    reactively by renderGeoForMonthlyAnalysis() (see build_geo_script)."""
+    if not _get_geo_dataset(ctx):
+        return ""
+    return (f"<div class='ma-class' id='geo-ma-wrap'><h4>Delivery Complaints by City &amp; State "
+            f"<span style='font-weight:400;font-size:12px;color:var(--text-muted);'>(via MySQL AWB lookup, Delayed Order only)</span></h4>"
+            f"<p class=\"desc\">Ranked by how much each area's rate rose vs the previous period; areas with fewer than {_MIN_AREA_ORDERS} "
+            f"orders that period are excluded. Follows the Monthly/Weekly/Yearly selection above.</p>"
+            f"<div id='geo-ma-cities'></div><div id='geo-ma-states'></div></div>")

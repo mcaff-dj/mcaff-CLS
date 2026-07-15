@@ -14,7 +14,7 @@ are built as plain strings with unique `__TOKEN__` placeholders replaced via .re
 deliberately NOT f-strings, since an f-string would require escaping every brace in the
 embedded JS/CSS as `{{`/`}}` (high risk of a missed brace silently corrupting the script).
 """
-from gen_geo_insights import build_delivery_geo_block
+from gen_geo_insights import build_delivery_geo_containers, build_geo_script
 from gen_insights import build_insights_card, get_category_insight_items, get_delivery_partner_insight
 from gen_weekly import build_weekly_class_block, build_weekly_delivery_block
 from gen_monthly import build_monthly_analysis_panel
@@ -303,7 +303,7 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     if cls["id"] == "delivery":
         insights_block = build_insights_card("Insights &mdash; Delivery",
                                               get_category_insight_items(ctx, subset) + [get_delivery_partner_insight(ctx, subset)])
-        insights_block += build_delivery_geo_block(ctx)
+        insights_block += build_delivery_geo_containers(ctx)
         weekly_block = build_weekly_delivery_block(ctx)
     else:
         insights_block = build_insights_card(f"Insights &mdash; {h_enc(cls['label'])}", get_category_insight_items(ctx, subset))
@@ -949,6 +949,7 @@ def assemble_report(ctx, here_dir):
     document.querySelectorAll('.gran-btn').forEach(function(b){{b.classList.toggle('active',b.dataset.gran===g);}});
     var mw=document.getElementById('gran-month-wrap'); if(mw){{mw.style.display=(g==='weekly')?'':'none';}}
     applyGranularity();
+    if(window.renderGeoForDeliveryTab) window.renderGeoForDeliveryTab();
   }};
   window.toggleWeekMonthChip=function(mi){{
     if(selectedWeekMonths.has(mi)){{ if(selectedWeekMonths.size>1){{selectedWeekMonths.delete(mi);}} }}
@@ -1016,4 +1017,5 @@ def assemble_report(ctx, here_dir):
   {build_prod_pkg_panel(ctx)}
   {foot}
 </div>
-{tabjs}"""
+{tabjs}
+{build_geo_script(ctx)}"""

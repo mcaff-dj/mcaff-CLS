@@ -8,7 +8,7 @@ import math
 import re
 from datetime import timedelta
 
-from gen_geo_insights import build_delivery_geo_narrative
+from gen_geo_insights import build_monthly_analysis_geo_containers
 from gen_weekly import get_week_num, is_partial_week
 from report_context import ci_key, fnum, h_enc, n0, pretty_month, round1, year_of
 
@@ -381,11 +381,6 @@ def build_monthly_analysis_panel(ctx):
         projection = month_projection if mi == n - 1 else None
         for c in ctx.b["classes"]:
             html = build_class_period_narrative(c, month_class_data[c["key"]], ctx.ma_month_ctx, mi, projection=projection)
-            if c["key"] == "Delivery" and mi == n - 1:
-                # City-level MySQL/AWB spike is only computed for the most recent month (each
-                # extra month would mean two more ~20s DWH aggregate queries) - see
-                # gen_geo_insights.py.
-                html = (html or "") + build_delivery_geo_narrative(ctx)
             if html:
                 sections.append(html)
         body = "".join(sections) if sections else f"<p class='note'>No notable month-on-month changes crossed the reporting threshold for {h_enc(pretty_month(months[mi]))}.</p>"
@@ -439,12 +434,15 @@ def build_monthly_analysis_panel(ctx):
 (function(){
   window.onMonthlyAnalysisChange=function(v){
     document.querySelectorAll('#ma-monthly-wrap .ma-period').forEach(function(el){ el.style.display = (el.id==='ma-month-'+v) ? '' : 'none'; });
+    if(window.renderGeoForMonthlyAnalysis) window.renderGeoForMonthlyAnalysis('monthly', parseInt(v,10));
   };
   window.onWeeklyAnalysisChange=function(v){
     document.querySelectorAll('#ma-weekly-wrap .ma-period').forEach(function(el){ el.style.display = (el.id==='ma-week-'+v) ? '' : 'none'; });
+    if(window.renderGeoForMonthlyAnalysis) window.renderGeoForMonthlyAnalysis('weekly', parseInt(v,10));
   };
   window.onYearlyAnalysisChange=function(v){
     document.querySelectorAll('#ma-yearly-wrap .ma-period').forEach(function(el){ el.style.display = (el.id==='ma-year-'+v) ? '' : 'none'; });
+    if(window.renderGeoForMonthlyAnalysis) window.renderGeoForMonthlyAnalysis('yearly', parseInt(v,10));
   };
   window.setMaGranularity=function(g){
     document.querySelectorAll('.ma-gran-toggle .gran-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.magran===g); });
@@ -453,6 +451,12 @@ def build_monthly_analysis_panel(ctx):
     if(mw){ mw.style.display = (g==='monthly') ? '' : 'none'; }
     if(ww){ ww.style.display = (g==='weekly') ? '' : 'none'; }
     if(yw){ yw.style.display = (g==='yearly') ? '' : 'none'; }
+    if(window.renderGeoForMonthlyAnalysis){
+      if(g==='monthly'){ var ms=document.getElementById('ma-select'); if(ms) window.renderGeoForMonthlyAnalysis('monthly', parseInt(ms.value,10)); }
+      else if(g==='weekly'){ var ws=document.getElementById('ma-week-select'); if(ws) window.renderGeoForMonthlyAnalysis('weekly', parseInt(ws.value,10)); }
+      else if(g==='yearly'){ var ys=document.getElementById('ma-year-select'); if(ys) window.renderGeoForMonthlyAnalysis('yearly', parseInt(ys.value,10)); }
+      else { window.renderGeoForMonthlyAnalysis('daily', 0); }
+    }
   };
 })();
 </script>
@@ -486,6 +490,16 @@ def build_monthly_analysis_panel(ctx):
         '    </div>\n'
     )
 
+    geo_containers = build_monthly_analysis_geo_containers(ctx)
+    # window.renderGeoForMonthlyAnalysis is defined by build_geo_script's <script>, embedded
+    # later in the page (see gen_panels.assemble_report) - deferring via DOMContentLoaded
+    # (matching this file's established init() pattern elsewhere) guarantees that
+    # non-deferred script has already run by the time this fires, regardless of document
+    # order, since it only defines functions on window (no DOM-ready requirement itself).
+    geo_init_js = (f"<script>(function(){{ function init(){{ if(window.renderGeoForMonthlyAnalysis) window.renderGeoForMonthlyAnalysis('monthly', {n - 1}); }}"
+                   f" if(document.readyState==='loading'){{document.addEventListener('DOMContentLoaded',init);}}else{{init();}} }})();</script>"
+                   if geo_containers else "")
+
     return f"""<div class="tab-panel" id="panel-monthly">
   <section>
     <h2>Monthly Analysis</h2>
@@ -503,6 +517,8 @@ def build_monthly_analysis_panel(ctx):
     </div>
 {weekly_section_html}
 {yearly_section_html}
+{geo_containers}
   </section>
 </div>
-{js}"""
+{js}
+{geo_init_js}"""
