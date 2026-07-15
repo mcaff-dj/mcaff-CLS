@@ -16,7 +16,7 @@ embedded JS/CSS as `{{`/`}}` (high risk of a missed brace silently corrupting th
 """
 from gen_geo_insights import build_delivery_geo_containers, build_geo_script
 from gen_insights import build_insights_card, get_category_insight_items, get_delivery_partner_insight
-from gen_weekly import build_weekly_class_block, build_weekly_delivery_block
+from gen_weekly import build_weekly_class_block, build_weekly_delivery_block, week_col_header
 from gen_monthly import build_monthly_analysis_panel
 from gen_raw_export import raw_download_link
 from report_context import ci_key, fnum, h_enc, j_enc, n0, pretty_month, round1, year_of
@@ -510,41 +510,51 @@ def _norm(v):
     return "(blank)" if not s.strip() else s
 
 
-def build_prod_pkg_panel(ctx):
-    months = ctx.months
-    n = ctx.n
-    ppsub = [r for r in ctx.unique if ctx.cell(r, ctx.col["cls"]) in ("Packaging and Operational", "Product")]
+def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn, prefix, filter_label, year_fn=None):
+    """Shared SKU -> Product -> Query Class -> Query Category -> Batch drill-down engine,
+    used by both the monthly Product & Packaging panel (prefix='ppk') and each month's
+    weekly variant (prefix='ppkw{month index}', one instance per weekly-eligible month -
+    see build_weekly_prod_pkg_block). Every element id and JS entry point is namespaced by
+    `prefix` so many instances can coexist on one page. `period_list`/`period_index_fn`/
+    `period_header_fn` abstract over "months" vs "weeks within one month"; `year_fn`
+    controls whether cells get a data-yr attribute (only the monthly view responds to the
+    page-wide Year filter - weekly tables never have, matching every other weekly table in
+    this report).
+
+    Returns None if the given subset has no data for this period_list (nothing to render).
+    """
+    n = len(period_list)
+    LP = n - 1  # last period index (last month, or last week-of-this-month)
+
     # Shared caches (one per field, reused across both this pass and the combo-building pass
     # below) so a value's casing is resolved the same way everywhere - matching PowerShell's
     # case-insensitive @{}/[ordered]@{} hashtables, where e.g. "Product not Sealed" and
     # "product NOT sealed" collapse into a single bucket under whichever casing was seen first.
     sku_cache, prod_cache, cls_cache, cat_cache, batch_cache = {}, {}, {}, {}, {}
     sku_set, prod_set, cls_set, cat_set, batch_set = {}, {}, {}, {}, {}
-    for r in ppsub:
+    for r in subset:
         sku_set.setdefault(ci_key(_norm(ctx.cell(r, ctx.col["sku"])), sku_cache), True)
         prod_set.setdefault(ci_key(_norm(ctx.cell(r, ctx.col["prod"])), prod_cache), True)
         cls_set.setdefault(ci_key(_norm(ctx.cell(r, ctx.col["cls"])), cls_cache), True)
         cat_set.setdefault(ci_key(_norm(ctx.cell(r, ctx.col["cat"])), cat_cache), True)
         batch_set.setdefault(ci_key(_norm(ctx.cell(r, ctx.col["batch"])), batch_cache), True)
     SKUS, PRODS, CLASSES, CATS, BATCHES = list(sku_set), list(prod_set), list(cls_set), list(cat_set), list(batch_set)
-    LM = n - 1
 
     # "Pro Sales" (raw sheet column, never named/read anywhere else in the pipeline) is a
-    # per-SKU-per-month sales figure - unlike "Total Sales M" (company-wide, one value per
-    # month), this varies by SKU. The panel is titled "...wrt Product Sales" but was
-    # dividing by the company-wide Total Sales M the whole time; this table's percentages
-    # must instead divide each SKU's complaint count by THAT SKU's own Pro Sales for the
-    # same month. Same duplicated-per-row/majority-vote shape as Total Sales M (see
-    # get_sales_m_by_month), just keyed by (SKU, month) instead of month alone.
+    # per-SKU-per-MONTH sales figure - unlike "Total Sales M" (company-wide, one value per
+    # month), this varies by SKU, but it has no weekly equivalent in the sheet. For the
+    # weekly case this naturally still works: every row in a single month's subset carries
+    # the same Pro Sales value regardless of which week it falls in, so the majority-vote
+    # keyed by (sku, period_index) below just reproduces that month's constant across all
+    # its weeks - no special-casing needed.
     prosales_counts = {}
 
     combo_tot, combo_mc, combo_k2i = {}, {}, {}
     combo_list = []
     tickets = []
-    for r in ppsub:
-        mo = ctx.cell(r, ctx.col["month"])
-        mi = months.index(mo) if mo in months else -1
-        if mi < 0:
+    for r in subset:
+        pidx = period_index_fn(r)
+        if pidx < 0 or pidx >= n:
             continue
         sku = ci_key(_norm(ctx.cell(r, ctx.col["sku"])), sku_cache)
         si = SKUS.index(sku)
@@ -556,7 +566,7 @@ def build_prod_pkg_panel(ctx):
         ci = CATS.index(cat)
         bat = ci_key(_norm(ctx.cell(r, ctx.col["batch"])), batch_cache)
         bi = BATCHES.index(bat)
-        tickets.append(f"[{mi},{si},{pi},{li},{ci},{bi}]")
+        tickets.append(f"[{pidx},{si},{pi},{li},{ci},{bi}]")
         ck = f"{si}|{pi}|{li}|{ci}|{bi}"
         if ck not in combo_tot:
             combo_tot[ck] = 0
@@ -564,22 +574,25 @@ def build_prod_pkg_panel(ctx):
             combo_k2i[ck] = len(combo_list)
             combo_list.append({"sku": si, "prod": pi, "cls": li, "cat": ci, "batch": bi})
         combo_tot[ck] += 1
-        combo_mc[ck][mi] += 1
+        combo_mc[ck][pidx] += 1
         ps = str(ctx.cell(r, ctx.col["prosales"])).strip()
         if ps:
-            pk_ = (si, mi)
+            pk_ = (si, pidx)
             prosales_counts.setdefault(pk_, {})
             prosales_counts[pk_][ps] = prosales_counts[pk_].get(ps, 0) + 1
 
+    if not combo_tot:
+        return None
+
     PROSALES = [[0.0] * n for _ in range(len(SKUS))]
-    for (si, mi), counts in prosales_counts.items():
+    for (si, pidx), counts in prosales_counts.items():
         best = max(counts.items(), key=lambda kv: kv[1])
-        PROSALES[si][mi] = float(str(best[0]).replace(",", ""))
+        PROSALES[si][pidx] = float(str(best[0]).replace(",", ""))
 
     def lmk(arr, sku_idx):
-        c = arr[LM]
-        lm_ps = PROSALES[sku_idx][LM]
-        p = (c / lm_ps) if lm_ps > 0 else 0
+        c = arr[LP]
+        lp_ps = PROSALES[sku_idx][LP]
+        p = (c / lp_ps) if lp_ps > 0 else 0
         return {"cnt": c, "pct": p}
 
     MAX_P, MAX_PROD, MAX_CLS, MAX_CAT, MAX_BAT = 60, 10, 5, 15, 20
@@ -644,6 +657,10 @@ def build_prod_pkg_panel(ctx):
     def aj(a):
         return "[" + ",".join(f'"{j_enc(x)}"' for x in a) + "]"
 
+    period_labels = [period_header_fn(p) for p in period_list]
+    period_years = [year_fn(p) if year_fn else None for p in period_list]
+    yr_attrs = [f" data-yr='{y}'" if y else "" for y in period_years]
+
     tickets_json = "[" + ",".join(tickets) + "]"
     rows_json = "[" + ",".join(f"[{r['sku']},{r['prod']},{r['cls']},{r['cat']},{r['batch']}]" for r in rows_out) + "]"
     parents_json = "[" + ",".join(f"[{p['sku']}]" for p in parents_out) + "]"
@@ -651,8 +668,8 @@ def build_prod_pkg_panel(ctx):
     cls_g_json = "[" + ",".join(f"[{g['productGroupIdx']},{g['cls']},{g['sku']}]" for g in cls_groups) + "]"
     cat_g_json = "[" + ",".join(f"[{g['classGroupIdx']},{g['cat']},{g['sku']}]" for g in cat_groups) + "]"
     row_cat_json = "[" + ",".join(str(x) for x in row_cat_idx) + "]"
-    skus_json, prods_json, classes_json, cats_json, batches_json, months_json = aj(SKUS), aj(PRODS), aj(CLASSES), aj(CATS), aj(BATCHES), aj(months)
-    sales_json = "[" + ",".join(str(v) for v in ctx.sales_arr) + "]"
+    skus_json, prods_json, classes_json, cats_json, batches_json = aj(SKUS), aj(PRODS), aj(CLASSES), aj(CATS), aj(BATCHES)
+    periods_json = aj(period_labels)
     prosales_json = "[" + ",".join("[" + ",".join(str(v) for v in row) + "]" for row in PROSALES) + "]"
 
     pg_by_p = {}
@@ -668,83 +685,69 @@ def build_prod_pkg_panel(ctx):
     for i, k in enumerate(row_cat_idx):
         rows_by_cat.setdefault(k, []).append(i)
 
-    t = ["<div class='pivot-scroll ppk-scroll'><table class='pivot-table' id='ppk-pivot-table'><thead><tr>"
+    t = [f"<div class='pivot-scroll ppk-scroll'><table class='pivot-table ppk-pivot-table' id='{prefix}-pivot-table'><thead><tr>"
          "<th class='corner'>SKU</th><th class='corner'>Product Name</th><th class='corner'>Query Class</th>"
          "<th class='corner'>Query Category</th><th class='corner'>Batch Number</th>"]
-    for mo in months:
-        t.append(f"<th colspan='2' class='month-hdr' data-yr='{year_of(mo)}'>{h_enc(mo)}</th>")
+    for i, lbl in enumerate(period_labels):
+        t.append(f"<th colspan='2' class='month-hdr'{yr_attrs[i]}>{h_enc(lbl)}</th>")
     t.append("</tr><tr><th class='corner'></th><th class='corner'></th><th class='corner'></th><th class='corner'></th><th class='corner'></th>")
-    for mo in months:
-        yr = year_of(mo)
-        t.append(f"<th class='sub-hdr' data-yr='{yr}'>complain</th><th class='sub-hdr' data-yr='{yr}'>complain%</th>")
+    for i in range(n):
+        t.append(f"<th class='sub-hdr'{yr_attrs[i]}>complain</th><th class='sub-hdr'{yr_attrs[i]}>complain%</th>")
     t.append("</tr></thead><tbody>")
     for pi, p in enumerate(parents_out):
         z = "zebra" if (pi + 1) % 2 == 1 else ""
-        t.append(f"<tr class='{z} ppk-lvl1' id='ppk-parent-{pi}' style='font-weight:700;'><td class='rowlabel'>"
-                 f"<span id='ppk-icon-1-{pi}' class='ppk-toggle-icon' onclick='ppkToggle(1,{pi},event)' style='cursor:pointer;'>+</span>{h_enc(SKUS[p['sku']])}</td>"
-                 f"<td class='rowlabel'>&mdash;</td><td class='rowlabel'>&mdash;</td><td class='rowlabel'>&mdash;</td><td class='rowlabel'>&mdash;</td>")
+        t.append(f"<tr class='{z} ppk-lvl1' id='{prefix}-parent-{pi}' style='font-weight:700;'><td class='rowlabel'>"
+                 f"<span id='{prefix}-icon-1-{pi}' class='ppk-toggle-icon' onclick=\"ppkToggle('{prefix}',1,{pi},event)\" style='cursor:pointer;'>+</span>{h_enc(SKUS[p['sku']])}</td>"
+                 f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td>")
         for mi in range(n):
-            yr = year_of(months[mi])
-            t.append(f"<td class='num' id='ppk-p-{pi}-{mi}-cnt' data-yr='{yr}'>-</td><td class='pct' id='ppk-p-{pi}-{mi}-pct' data-yr='{yr}'>-</td>")
+            t.append(f"<td class='num' id='{prefix}-p-{pi}-{mi}-cnt'{yr_attrs[mi]}>-</td><td class='pct' id='{prefix}-p-{pi}-{mi}-pct'{yr_attrs[mi]}>-</td>")
         t.append("</tr>")
         for pgi in pg_by_p.get(pi, []):
             pg = prod_groups[pgi]
-            t.append(f"<tr class='ppk-lvl2 ppk-child-of-p{pi}' id='ppk-pg-{pgi}' style='display:none;font-weight:600;background:var(--surface-1);'>"
+            t.append(f"<tr class='ppk-lvl2 {prefix}-child-of-p{pi}' id='{prefix}-pg-{pgi}' style='display:none;font-weight:600;background:var(--surface-1);'>"
                      f"<td class='rowlabel'></td><td class='rowlabel' title=\"{h_enc(PRODS[pg['prod']])}\">"
-                     f"<span id='ppk-icon-2-{pgi}' class='ppk-toggle-icon' onclick='ppkToggle(2,{pgi},event)' style='cursor:pointer;'>+</span>{h_enc(PRODS[pg['prod']])}</td>"
-                     f"<td class='rowlabel'>&mdash;</td><td class='rowlabel'>&mdash;</td><td class='rowlabel'>&mdash;</td>")
+                     f"<span id='{prefix}-icon-2-{pgi}' class='ppk-toggle-icon' onclick=\"ppkToggle('{prefix}',2,{pgi},event)\" style='cursor:pointer;'>+</span>{h_enc(PRODS[pg['prod']])}</td>"
+                     f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td>")
             for mi in range(n):
-                yr = year_of(months[mi])
-                t.append(f"<td class='num' id='ppk-pg-{pgi}-{mi}-cnt' data-yr='{yr}'>-</td><td class='pct' id='ppk-pg-{pgi}-{mi}-pct' data-yr='{yr}'>-</td>")
+                t.append(f"<td class='num' id='{prefix}-pg-{pgi}-{mi}-cnt'{yr_attrs[mi]}>-</td><td class='pct' id='{prefix}-pg-{pgi}-{mi}-pct'{yr_attrs[mi]}>-</td>")
             t.append("</tr>")
             for cgi in cg_by_pg.get(pgi, []):
                 cg = cls_groups[cgi]
-                t.append(f"<tr class='ppk-lvl3 ppk-child-of-pg{pgi}' id='ppk-cg-{cgi}' style='display:none;background:var(--pivot-zebra-bg);'>"
+                t.append(f"<tr class='ppk-lvl3 {prefix}-child-of-pg{pgi}' id='{prefix}-cg-{cgi}' style='display:none;background:var(--pivot-zebra-bg);'>"
                          f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'>"
-                         f"<span id='ppk-icon-3-{cgi}' class='ppk-toggle-icon' onclick='ppkToggle(3,{cgi},event)' style='cursor:pointer;'>+</span>{h_enc(CLASSES[cg['cls']])}</td>"
-                         f"<td class='rowlabel'>&mdash;</td><td class='rowlabel'>&mdash;</td>")
+                         f"<span id='{prefix}-icon-3-{cgi}' class='ppk-toggle-icon' onclick=\"ppkToggle('{prefix}',3,{cgi},event)\" style='cursor:pointer;'>+</span>{h_enc(CLASSES[cg['cls']])}</td>"
+                         f"<td class='rowlabel'></td><td class='rowlabel'></td>")
                 for mi in range(n):
-                    yr = year_of(months[mi])
-                    t.append(f"<td class='num' id='ppk-cg-{cgi}-{mi}-cnt' data-yr='{yr}'>-</td><td class='pct' id='ppk-cg-{cgi}-{mi}-pct' data-yr='{yr}'>-</td>")
+                    t.append(f"<td class='num' id='{prefix}-cg-{cgi}-{mi}-cnt'{yr_attrs[mi]}>-</td><td class='pct' id='{prefix}-cg-{cgi}-{mi}-pct'{yr_attrs[mi]}>-</td>")
                 t.append("</tr>")
                 for catgi in cat_by_cg.get(cgi, []):
                     catg = cat_groups[catgi]
-                    t.append(f"<tr class='ppk-lvl4 ppk-child-of-cg{cgi}' id='ppk-catg-{catgi}' style='display:none;'>"
+                    t.append(f"<tr class='ppk-lvl4 {prefix}-child-of-cg{cgi}' id='{prefix}-catg-{catgi}' style='display:none;'>"
                              f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'>"
-                             f"<span id='ppk-icon-4-{catgi}' class='ppk-toggle-icon' onclick='ppkToggle(4,{catgi},event)' style='cursor:pointer;'>+</span>{h_enc(CATS[catg['cat']])}</td>"
-                             f"<td class='rowlabel'>&mdash;</td>")
+                             f"<span id='{prefix}-icon-4-{catgi}' class='ppk-toggle-icon' onclick=\"ppkToggle('{prefix}',4,{catgi},event)\" style='cursor:pointer;'>+</span>{h_enc(CATS[catg['cat']])}</td>"
+                             f"<td class='rowlabel'></td>")
                     for mi in range(n):
-                        yr = year_of(months[mi])
-                        t.append(f"<td class='num' id='ppk-catg-{catgi}-{mi}-cnt' data-yr='{yr}'>-</td><td class='pct' id='ppk-catg-{catgi}-{mi}-pct' data-yr='{yr}'>-</td>")
+                        t.append(f"<td class='num' id='{prefix}-catg-{catgi}-{mi}-cnt'{yr_attrs[mi]}>-</td><td class='pct' id='{prefix}-catg-{catgi}-{mi}-pct'{yr_attrs[mi]}>-</td>")
                     t.append("</tr>")
                     for ri in rows_by_cat.get(catgi, []):
                         c = rows_out[ri]
-                        t.append(f"<tr class='ppk-lvl5 ppk-child-of-catg{catgi}' id='ppk-row-{ri}' style='display:none;background:var(--surface-card);'>"
+                        t.append(f"<tr class='ppk-lvl5 {prefix}-child-of-catg{catgi}' id='{prefix}-row-{ri}' style='display:none;background:var(--surface-card);'>"
                                  f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td>"
                                  f"<td class='rowlabel'>{h_enc(BATCHES[c['batch']])}</td>")
                         for mi in range(n):
-                            yr = year_of(months[mi])
-                            t.append(f"<td class='num' id='ppk-{ri}-{mi}-cnt' data-yr='{yr}'>-</td><td class='pct' id='ppk-{ri}-{mi}-pct' data-yr='{yr}'>-</td>")
+                            t.append(f"<td class='num' id='{prefix}-row-{ri}-{mi}-cnt'{yr_attrs[mi]}>-</td><td class='pct' id='{prefix}-row-{ri}-{mi}-pct'{yr_attrs[mi]}>-</td>")
                         t.append("</tr>")
     t.append("</tbody></table></div>")
-
-    ppk_css = ("<style>.ppk-scroll{max-height:640px;overflow-y:auto;}#ppk-pivot-table thead th{position:sticky;top:0;z-index:4;}"
-               "#ppk-pivot-table thead tr:nth-child(2) th{top:28px;}.ppk-toggle-icon{display:inline-block;width:14px;font-weight:700;color:var(--s1);}"
-               "#ppk-pivot-table td.rowlabel{position:sticky;z-index:3;background:var(--surface-card);}#ppk-pivot-table th.corner{z-index:6;}"
-               "#ppk-pivot-table th.corner:nth-child(1),#ppk-pivot-table td.rowlabel:nth-child(1){left:0;width:90px;min-width:90px;max-width:90px;}"
-               "#ppk-pivot-table th.corner:nth-child(2),#ppk-pivot-table td.rowlabel:nth-child(2){left:90px;width:190px;min-width:190px;max-width:190px;}"
-               "#ppk-pivot-table th.corner:nth-child(3),#ppk-pivot-table td.rowlabel:nth-child(3){left:280px;width:130px;min-width:130px;max-width:130px;}"
-               "#ppk-pivot-table th.corner:nth-child(4),#ppk-pivot-table td.rowlabel:nth-child(4){left:410px;width:170px;min-width:170px;max-width:170px;}"
-               "#ppk-pivot-table th.corner:nth-child(5),#ppk-pivot-table td.rowlabel:nth-child(5){left:580px;width:110px;min-width:110px;max-width:110px;box-shadow:2px 0 4px -2px rgba(0,0,0,0.25);}</style>")
 
     js = """
 <script>
 (function(){
-  var TICKETS=__TICKETS_JSON__,SKUS=__SKUS_JSON__,PRODS=__PRODS_JSON__,CLASSES=__CLASSES_JSON__,CATS=__CATS_JSON__,BATCHES=__BATCHES_JSON__,MONTHS=__MONTHS_JSON__,SALES=__SALES_JSON__,PROSALES=__PROSALES_JSON__;
-  var ROWS=__ROWS_JSON__,ROW_CATGROUP=__ROW_CAT_JSON__,PARENTS=__PARENTS_JSON__,PRODUCT_GROUPS=__PROD_G_JSON__,CLASS_GROUPS=__CLS_G_JSON__,CATEGORY_GROUPS=__CAT_G_JSON__,N=MONTHS.length;
+  var PFX='__PFX__';
+  var TICKETS=__TICKETS_JSON__,SKUS=__SKUS_JSON__,PRODS=__PRODS_JSON__,CLASSES=__CLASSES_JSON__,CATS=__CATS_JSON__,BATCHES=__BATCHES_JSON__,PERIODS=__PERIODS_JSON__,PROSALES=__PROSALES_JSON__;
+  var ROWS=__ROWS_JSON__,ROW_CATGROUP=__ROW_CAT_JSON__,PARENTS=__PARENTS_JSON__,PRODUCT_GROUPS=__PROD_G_JSON__,CLASS_GROUPS=__CLS_G_JSON__,CATEGORY_GROUPS=__CAT_G_JSON__,N=PERIODS.length;
   var e1={},e2={},e3={},e4={},EB={1:e1,2:e2,3:e3,4:e4};
+  function eid(s){return PFX+s;}
   function fmt(n){return n.toLocaleString('en-IN');}
-  window.ppkToggle=function(lv,idx,ev){ if(ev)ev.stopPropagation(); var s=EB[lv]; s[idx]=!s[idx]; var ic=document.getElementById('ppk-icon-'+lv+'-'+idx); if(ic)ic.textContent=s[idx]?'−':'+'; render(); };
   function leafCounts(f){ var c=[]; for(var ri=0;ri<ROWS.length;ri++){c.push(new Array(N).fill(0));} var idx={}; for(var r2=0;r2<ROWS.length;r2++){idx[ROWS[r2].join('|')]=r2;}
     for(var i=0;i<TICKETS.length;i++){ var t=TICKETS[i],mo=t[0],sku=t[1],pr=t[2],cl=t[3],ca=t[4],ba=t[5];
       if(mo<0||mo>=N||sku<0||sku>=SKUS.length||pr<0||pr>=PRODS.length||cl<0||cl>=CLASSES.length||ca<0||ca>=CATS.length||ba<0||ba>=BATCHES.length)continue;
@@ -752,9 +755,9 @@ def build_prod_pkg_panel(ctx):
       var k=sku+'|'+pr+'|'+cl+'|'+ca+'|'+ba; var ri=idx[k]; if(ri===undefined)continue; c[ri][mo]++; } return c; }
   function sm(a,b){var o=new Array(a.length);for(var i=0;i<a.length;i++){o[i]=a[i]+b[i];}return o;}
   function has(a){for(var i=0;i<a.length;i++){if(a[i]>0)return true;}return false;}
-  function wc(pfx,idx,arr,skuIdx){ var psRow=(skuIdx!=null&&PROSALES[skuIdx])?PROSALES[skuIdx]:null; for(var mi=0;mi<N;mi++){ var v=arr[mi],s=psRow?psRow[mi]:0,p=s>0?Math.round(v/s*100000)/1000:0; var cc=document.getElementById(pfx+'-'+idx+'-'+mi+'-cnt'),pc=document.getElementById(pfx+'-'+idx+'-'+mi+'-pct'); if(cc)cc.textContent=v>0?fmt(v):'-'; if(pc)pc.textContent=v>0?(p+'%'):'-'; } }
-  var DIMS=['month','product','sku','cls','category'],SIDS={month:'ppk-filter-month',product:'ppk-filter-product',sku:'ppk-filter-sku',cls:'ppk-filter-class',category:'ppk-filter-category'},TP={month:0,sku:1,product:2,cls:3,category:4};
-  function rf(){ var g=function(id){var e=document.getElementById(id);return e?e.value:'';}; return {month:g(SIDS.month)?MONTHS.indexOf(g(SIDS.month)):null,product:g(SIDS.product)?PRODS.indexOf(g(SIDS.product)):null,sku:g(SIDS.sku)?SKUS.indexOf(g(SIDS.sku)):null,cls:g(SIDS.cls)?CLASSES.indexOf(g(SIDS.cls)):null,category:g(SIDS.category)?CATS.indexOf(g(SIDS.category)):null}; }
+  function wc(sub,idx,arr,skuIdx){ var psRow=(skuIdx!=null&&PROSALES[skuIdx])?PROSALES[skuIdx]:null; for(var mi=0;mi<N;mi++){ var v=arr[mi],s=psRow?psRow[mi]:0,p=s>0?Math.round(v/s*100000)/1000:0; var cc=document.getElementById(eid(sub+'-'+idx+'-'+mi+'-cnt')),pc=document.getElementById(eid(sub+'-'+idx+'-'+mi+'-pct')); if(cc)cc.textContent=v>0?fmt(v):'-'; if(pc)pc.textContent=v>0?(p+'%'):'-'; } }
+  var DIMS=['month','product','sku','cls','category'],SIDS={month:eid('-filter-month'),product:eid('-filter-product'),sku:eid('-filter-sku'),cls:eid('-filter-class'),category:eid('-filter-category')},TP={month:0,sku:1,product:2,cls:3,category:4};
+  function rf(){ var g=function(fid){var e=document.getElementById(fid);return e?e.value:'';}; return {month:g(SIDS.month)?PERIODS.indexOf(g(SIDS.month)):null,product:g(SIDS.product)?PRODS.indexOf(g(SIDS.product)):null,sku:g(SIDS.sku)?SKUS.indexOf(g(SIDS.sku)):null,cls:g(SIDS.cls)?CLASSES.indexOf(g(SIDS.cls)):null,category:g(SIDS.category)?CATS.indexOf(g(SIDS.category)):null}; }
   function tmatch(t,f,ex){ for(var d=0;d<DIMS.length;d++){var dim=DIMS[d]; if(dim===ex)continue; var w=f[dim]; if(w===null)continue; if(t[TP[dim]]!==w)return false;} return true; }
   function ssRefresh(input,list){ var q=(input.value||'').toLowerCase();
     list.querySelectorAll('.ss-opt').forEach(function(o){ var invalid=o.getAttribute('data-invalid')==='1'; var matches=q===''||o.textContent.toLowerCase().indexOf(q)!==-1; o.style.display=(matches&&!invalid)?'':'none'; }); }
@@ -765,61 +768,49 @@ def build_prod_pkg_panel(ctx):
     if(!curStillValid){ input.value=''; input.dataset.confirmed=''; }
     ssRefresh(input,list);
   }); }
-  function sk(a,skuIdx){var LM=N-1,c=a[LM],ps=(skuIdx!=null&&PROSALES[skuIdx])?PROSALES[skuIdx][LM]:0,p=ps>0?c/ps:0;return {c:c,p:p};}
-  function cmp(a,b,skuA,skuB){var ka=sk(a,skuA),kb=sk(b,skuB); if(kb.c!==ka.c)return kb.c-ka.c; return kb.p-ka.p;}
+  function sk_(a,skuIdx){var LP=N-1,c=a[LP],ps=(skuIdx!=null&&PROSALES[skuIdx])?PROSALES[skuIdx][LP]:0,p=ps>0?c/ps:0;return {c:c,p:p};}
+  function cmp(a,b,skuA,skuB){var ka=sk_(a,skuA),kb=sk_(b,skuB); if(kb.c!==ka.c)return kb.c-ka.c; return kb.p-ka.p;}
   function render(){ try{ var f=rf(); upd(f); f=rf(); var lc=leafCounts(f);
       var catgC=CATEGORY_GROUPS.map(function(){return new Array(N).fill(0);});
-      for(var ri=0;ri<ROWS.length;ri++){var ci=ROW_CATGROUP[ri]; if(ci!==undefined&&catgC[ci]){catgC[ci]=sm(catgC[ci],lc[ri]);} wc('ppk',ri,lc[ri],ROWS[ri][0]);}
+      for(var ri=0;ri<ROWS.length;ri++){var ci=ROW_CATGROUP[ri]; if(ci!==undefined&&catgC[ci]){catgC[ci]=sm(catgC[ci],lc[ri]);} wc('-row',ri,lc[ri],ROWS[ri][0]);}
       var clsC=CLASS_GROUPS.map(function(){return new Array(N).fill(0);});
-      for(var cg=0;cg<CATEGORY_GROUPS.length;cg++){var k=CATEGORY_GROUPS[cg][0]; if(clsC[k]){clsC[k]=sm(clsC[k],catgC[cg]);} wc('ppk-catg',cg,catgC[cg],CATEGORY_GROUPS[cg][2]);}
+      for(var cg=0;cg<CATEGORY_GROUPS.length;cg++){var k=CATEGORY_GROUPS[cg][0]; if(clsC[k]){clsC[k]=sm(clsC[k],catgC[cg]);} wc('-catg',cg,catgC[cg],CATEGORY_GROUPS[cg][2]);}
       var pgC=PRODUCT_GROUPS.map(function(){return new Array(N).fill(0);});
-      for(var c2=0;c2<CLASS_GROUPS.length;c2++){var k2=CLASS_GROUPS[c2][0]; if(pgC[k2]){pgC[k2]=sm(pgC[k2],clsC[c2]);} wc('ppk-cg',c2,clsC[c2],CLASS_GROUPS[c2][2]);}
+      for(var c2=0;c2<CLASS_GROUPS.length;c2++){var k2=CLASS_GROUPS[c2][0]; if(pgC[k2]){pgC[k2]=sm(pgC[k2],clsC[c2]);} wc('-cg',c2,clsC[c2],CLASS_GROUPS[c2][2]);}
       var pC=PARENTS.map(function(){return new Array(N).fill(0);});
-      for(var p2=0;p2<PRODUCT_GROUPS.length;p2++){var k3=PRODUCT_GROUPS[p2][0]; if(pC[k3]){pC[k3]=sm(pC[k3],pgC[p2]);} wc('ppk-pg',p2,pgC[p2],PRODUCT_GROUPS[p2][2]);}
-      for(var pi=0;pi<PARENTS.length;pi++){wc('ppk-p',pi,pC[pi],PARENTS[pi][0]);}
+      for(var p2=0;p2<PRODUCT_GROUPS.length;p2++){var k3=PRODUCT_GROUPS[p2][0]; if(pC[k3]){pC[k3]=sm(pC[k3],pgC[p2]);} wc('-pg',p2,pgC[p2],PRODUCT_GROUPS[p2][2]);}
+      for(var pi=0;pi<PARENTS.length;pi++){wc('-p',pi,pC[pi],PARENTS[pi][0]);}
       var withData=0;
-      for(var p3=0;p3<PARENTS.length;p3++){var hd=has(pC[p3]),el=document.getElementById('ppk-parent-'+p3); if(el)el.style.display=hd?'':'none'; if(hd)withData++;}
-      for(var pg3=0;pg3<PRODUCT_GROUPS.length;pg3++){var hd2=has(pgC[pg3]),par=PRODUCT_GROUPS[pg3][0],el2=document.getElementById('ppk-pg-'+pg3); if(el2)el2.style.display=(!!e1[par]&&hd2)?'':'none';}
-      for(var cg3=0;cg3<CLASS_GROUPS.length;cg3++){var hd3=has(clsC[cg3]),par2=CLASS_GROUPS[cg3][0],el3=document.getElementById('ppk-cg-'+cg3); if(el3)el3.style.display=(!!e2[par2]&&hd3)?'':'none';}
-      for(var ca3=0;ca3<CATEGORY_GROUPS.length;ca3++){var hd4=has(catgC[ca3]),par3=CATEGORY_GROUPS[ca3][0],el4=document.getElementById('ppk-catg-'+ca3); if(el4)el4.style.display=(!!e3[par3]&&hd4)?'':'none';}
-      for(var r4=0;r4<ROWS.length;r4++){var hd5=has(lc[r4]),par4=ROW_CATGROUP[r4],el5=document.getElementById('ppk-row-'+r4); if(el5)el5.style.display=(!!e4[par4]&&hd5)?'':'none';}
-      var tb=document.querySelector('#ppk-pivot-table tbody');
+      for(var p3=0;p3<PARENTS.length;p3++){var hd=has(pC[p3]),el=document.getElementById(eid('-parent-'+p3)); if(el)el.style.display=hd?'':'none'; if(hd)withData++;}
+      for(var pg3=0;pg3<PRODUCT_GROUPS.length;pg3++){var hd2=has(pgC[pg3]),par=PRODUCT_GROUPS[pg3][0],el2=document.getElementById(eid('-pg-'+pg3)); if(el2)el2.style.display=(!!e1[par]&&hd2)?'':'none';}
+      for(var cg3=0;cg3<CLASS_GROUPS.length;cg3++){var hd3=has(clsC[cg3]),par2=CLASS_GROUPS[cg3][0],el3=document.getElementById(eid('-cg-'+cg3)); if(el3)el3.style.display=(!!e2[par2]&&hd3)?'':'none';}
+      for(var ca3=0;ca3<CATEGORY_GROUPS.length;ca3++){var hd4=has(catgC[ca3]),par3=CATEGORY_GROUPS[ca3][0],el4=document.getElementById(eid('-catg-'+ca3)); if(el4)el4.style.display=(!!e3[par3]&&hd4)?'':'none';}
+      for(var r4=0;r4<ROWS.length;r4++){var hd5=has(lc[r4]),par4=ROW_CATGROUP[r4],el5=document.getElementById(eid('-row-'+r4)); if(el5)el5.style.display=(!!e4[par4]&&hd5)?'':'none';}
+      var tb=document.querySelector('#'+eid('-pivot-table')+' tbody');
       if(tb){ var po=PARENTS.map(function(_,i){return i;}); po.sort(function(a,b){return cmp(pC[a],pC[b],PARENTS[a][0],PARENTS[b][0]);});
         var pgBy={};PRODUCT_GROUPS.forEach(function(x,i){var k=x[0];(pgBy[k]=pgBy[k]||[]).push(i);});
         var cgBy={};CLASS_GROUPS.forEach(function(x,i){var k=x[0];(cgBy[k]=cgBy[k]||[]).push(i);});
         var caBy={};CATEGORY_GROUPS.forEach(function(x,i){var k=x[0];(caBy[k]=caBy[k]||[]).push(i);});
         var rBy={};ROWS.forEach(function(_,i){var k=ROW_CATGROUP[i];(rBy[k]=rBy[k]||[]).push(i);});
-        po.forEach(function(pi){ var pe=document.getElementById('ppk-parent-'+pi); if(pe)tb.appendChild(pe); var pSku=PARENTS[pi][0];
-          (pgBy[pi]||[]).slice().sort(function(a,b){return cmp(pgC[a],pgC[b],pSku,pSku);}).forEach(function(pgi){ var pge=document.getElementById('ppk-pg-'+pgi); if(pge)tb.appendChild(pge); var pgSku=PRODUCT_GROUPS[pgi][2];
-            (cgBy[pgi]||[]).slice().sort(function(a,b){return cmp(clsC[a],clsC[b],pgSku,pgSku);}).forEach(function(cgi){ var cge=document.getElementById('ppk-cg-'+cgi); if(cge)tb.appendChild(cge); var cgSku=CLASS_GROUPS[cgi][2];
-              (caBy[cgi]||[]).slice().sort(function(a,b){return cmp(catgC[a],catgC[b],cgSku,cgSku);}).forEach(function(cai){ var cae=document.getElementById('ppk-catg-'+cai); if(cae)tb.appendChild(cae); var caSku=CATEGORY_GROUPS[cai][2];
-                (rBy[cai]||[]).slice().sort(function(a,b){return cmp(lc[a],lc[b],caSku,caSku);}).forEach(function(ri){ var re=document.getElementById('ppk-row-'+ri); if(re)tb.appendChild(re); }); }); }); }); }); }
-      var note=document.getElementById('ppk-filter-note'); if(note){note.textContent=withData+' of '+PARENTS.length+' SKUs have complaints for the selected filters, sorted by '+MONTHS[N-1]+' complaints. Expand SKU → Product → Query Class → Query Category to drill down.'; note.style.color='';}
-    }catch(e){ var n2=document.getElementById('ppk-filter-note'); if(n2){n2.textContent='Filter error: '+e.message;n2.style.color='var(--s6)';} if(window.console)console.error('ProdPkg error',e); } }
-  window.onProdPkgFilterChange=render;
-  function ssCloseAll(except){ document.querySelectorAll('.ss-list').forEach(function(l){ if(l!==except) l.style.display='none'; }); }
-  document.addEventListener('focusin', function(e){ if(e.target.classList && e.target.classList.contains('ss-input')){ var list=document.getElementById(e.target.id+'-list'); if(list){ ssCloseAll(list); list.style.display='block'; ssRefresh(e.target,list); } } });
-  document.addEventListener('input', function(e){ if(e.target.classList && e.target.classList.contains('ss-input')){ var list=document.getElementById(e.target.id+'-list'); if(list){ list.style.display='block'; ssRefresh(e.target,list); } } });
-  document.addEventListener('mousedown', function(e){
-    var opt = e.target.closest ? e.target.closest('.ss-opt') : null;
-    if(opt){ e.preventDefault(); var list=opt.closest('.ss-list'); var input=document.getElementById(list.id.replace(/-list$/,''));
-      var val=opt.getAttribute('data-value'); input.value=val; input.dataset.confirmed=val; list.style.display='none';
-      input.dispatchEvent(new Event('change',{bubbles:true})); return; }
-    if(!(e.target.classList && e.target.classList.contains('ss-input'))){ ssCloseAll(null); }
-  });
-  document.addEventListener('focusout', function(e){ if(e.target.classList && e.target.classList.contains('ss-input')){ var input=e.target;
-    setTimeout(function(){ var list=document.getElementById(input.id+'-list'); if(list)list.style.display='none';
-      if(input.value!==(input.dataset.confirmed||'')){ input.value=input.dataset.confirmed||''; } },150); } });
+        po.forEach(function(pi){ var pe=document.getElementById(eid('-parent-'+pi)); if(pe)tb.appendChild(pe); var pSku=PARENTS[pi][0];
+          (pgBy[pi]||[]).slice().sort(function(a,b){return cmp(pgC[a],pgC[b],pSku,pSku);}).forEach(function(pgi){ var pge=document.getElementById(eid('-pg-'+pgi)); if(pge)tb.appendChild(pge); var pgSku=PRODUCT_GROUPS[pgi][2];
+            (cgBy[pgi]||[]).slice().sort(function(a,b){return cmp(clsC[a],clsC[b],pgSku,pgSku);}).forEach(function(cgi){ var cge=document.getElementById(eid('-cg-'+cgi)); if(cge)tb.appendChild(cge); var cgSku=CLASS_GROUPS[cgi][2];
+              (caBy[cgi]||[]).slice().sort(function(a,b){return cmp(catgC[a],catgC[b],cgSku,cgSku);}).forEach(function(cai){ var cae=document.getElementById(eid('-catg-'+cai)); if(cae)tb.appendChild(cae); var caSku=CATEGORY_GROUPS[cai][2];
+                (rBy[cai]||[]).slice().sort(function(a,b){return cmp(lc[a],lc[b],caSku,caSku);}).forEach(function(ri){ var re=document.getElementById(eid('-row-'+ri)); if(re)tb.appendChild(re); }); }); }); }); }); }
+      var note=document.getElementById(eid('-filter-note')); if(note){note.textContent=withData+' of '+PARENTS.length+' SKUs have complaints for the selected filters, sorted by '+PERIODS[N-1]+' complaints. Expand SKU → Product → Query Class → Query Category to drill down.'; note.style.color='';}
+    }catch(e){ var n2=document.getElementById(eid('-filter-note')); if(n2){n2.textContent='Filter error: '+e.message;n2.style.color='var(--s6)';} if(window.console)console.error('ProdPkg error ('+PFX+')',e); } }
+  window.PPK_INSTANCES = window.PPK_INSTANCES || {};
+  window.PPK_INSTANCES[PFX] = { render: render, toggle: function(lv,idx,ev){ if(ev)ev.stopPropagation(); var s=EB[lv]; s[idx]=!s[idx]; var ic=document.getElementById(eid('-icon-'+lv+'-'+idx)); if(ic)ic.textContent=s[idx]?'−':'+'; render(); } };
   function init(){render();}
   if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',init);}else{init();}
 })();
 </script>
 """
-    js = (js.replace("__TICKETS_JSON__", tickets_json).replace("__SKUS_JSON__", skus_json)
+    js = (js.replace("__PFX__", prefix)
+            .replace("__TICKETS_JSON__", tickets_json).replace("__SKUS_JSON__", skus_json)
             .replace("__PRODS_JSON__", prods_json).replace("__CLASSES_JSON__", classes_json)
             .replace("__CATS_JSON__", cats_json).replace("__BATCHES_JSON__", batches_json)
-            .replace("__MONTHS_JSON__", months_json).replace("__SALES_JSON__", sales_json)
-            .replace("__PROSALES_JSON__", prosales_json)
+            .replace("__PERIODS_JSON__", periods_json).replace("__PROSALES_JSON__", prosales_json)
             .replace("__ROWS_JSON__", rows_json).replace("__ROW_CAT_JSON__", row_cat_json)
             .replace("__PARENTS_JSON__", parents_json).replace("__PROD_G_JSON__", prod_g_json)
             .replace("__CLS_G_JSON__", cls_g_json).replace("__CAT_G_JSON__", cat_g_json))
@@ -827,7 +818,7 @@ def build_prod_pkg_panel(ctx):
     def dd(id_, lbl, opts):
         s = [f"<div style='display:flex;flex-direction:column;gap:4px;min-width:150px;position:relative;'>"
              f"<label for='{id_}' style='font-size:11px;color:var(--text-muted);'>{h_enc(lbl)}</label>"]
-        s.append(f"<div style='position:relative;'><input type='text' id='{id_}' class='ss-input' data-confirmed='' placeholder='All' autocomplete='off' onchange='onProdPkgFilterChange()' "
+        s.append(f"<div style='position:relative;'><input type='text' id='{id_}' class='ss-input' data-confirmed='' placeholder='All' autocomplete='off' onchange=\"onProdPkgFilterChange('{prefix}')\" "
                  f"style='font-size:12.5px;padding:7px 26px 7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;max-width:220px;width:100%;box-sizing:border-box;'>"
                  f"<span style='position:absolute;right:9px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--text-muted);font-size:10px;'>&#9662;</span></div>")
         s.append(f"<div class='ss-list' id='{id_}-list'><div class='ss-opt' data-value='' data-idx=''>All</div>")
@@ -837,49 +828,136 @@ def build_prod_pkg_panel(ctx):
         return "".join(s)
 
     filter_html = ("<div style='display:flex;gap:14px;flex-wrap:wrap;margin-bottom:16px;align-items:flex-end;'>"
-                   + dd("ppk-filter-month", "Month", months) + dd("ppk-filter-product", "Product Name", PRODS)
-                   + dd("ppk-filter-sku", "SKU", SKUS) + dd("ppk-filter-class", "Query Class", CLASSES)
-                   + dd("ppk-filter-category", "Query Category", CATS)
-                   + "</div><div id='ppk-filter-note' style='font-size:12px;color:var(--text-muted);margin-bottom:14px;'></div>")
+                   + dd(f"{prefix}-filter-month", filter_label, period_labels) + dd(f"{prefix}-filter-product", "Product Name", PRODS)
+                   + dd(f"{prefix}-filter-sku", "SKU", SKUS) + dd(f"{prefix}-filter-class", "Query Class", CLASSES)
+                   + dd(f"{prefix}-filter-category", "Query Category", CATS)
+                   + f"</div><div id='{prefix}-filter-note' style='font-size:12px;color:var(--text-muted);margin-bottom:14px;'></div>")
+
+    return {
+        "table_html": "".join(t), "filter_html": filter_html, "js": js,
+        "combo_tot": combo_tot, "combo_mc": combo_mc, "LP": LP,
+        "SKUS": SKUS, "PRODS": PRODS, "CLASSES": CLASSES, "CATS": CATS, "BATCHES": BATCHES,
+        "sku_tree": sku_tree, "top_sku": top_sku, "PROSALES": PROSALES, "lmk": lmk,
+    }
+
+
+_PPK_DISPATCH_JS = """<script>
+window.ppkToggle=function(prefix,lv,idx,ev){ var inst=window.PPK_INSTANCES&&window.PPK_INSTANCES[prefix]; if(inst)inst.toggle(lv,idx,ev); };
+window.onProdPkgFilterChange=function(prefix){ var inst=window.PPK_INSTANCES&&window.PPK_INSTANCES[prefix]; if(inst)inst.render(); };
+</script>"""
+
+_PPK_CSS = ("<style>.ppk-scroll{max-height:640px;overflow-y:auto;}.ppk-pivot-table thead th{position:sticky;top:0;z-index:4;}"
+            ".ppk-pivot-table thead tr:nth-child(2) th{top:28px;}.ppk-toggle-icon{display:inline-block;width:14px;font-weight:700;color:var(--s1);}"
+            ".ppk-pivot-table td.rowlabel{position:sticky;z-index:3;background:var(--surface-card);}.ppk-pivot-table th.corner{z-index:6;}"
+            ".ppk-pivot-table th.corner:nth-child(1),.ppk-pivot-table td.rowlabel:nth-child(1){left:0;width:90px;min-width:90px;max-width:90px;}"
+            ".ppk-pivot-table th.corner:nth-child(2),.ppk-pivot-table td.rowlabel:nth-child(2){left:90px;width:190px;min-width:190px;max-width:190px;}"
+            ".ppk-pivot-table th.corner:nth-child(3),.ppk-pivot-table td.rowlabel:nth-child(3){left:280px;width:130px;min-width:130px;max-width:130px;}"
+            ".ppk-pivot-table th.corner:nth-child(4),.ppk-pivot-table td.rowlabel:nth-child(4){left:410px;width:170px;min-width:170px;max-width:170px;}"
+            ".ppk-pivot-table th.corner:nth-child(5),.ppk-pivot-table td.rowlabel:nth-child(5){left:580px;width:110px;min-width:110px;max-width:110px;box-shadow:2px 0 4px -2px rgba(0,0,0,0.25);}</style>")
+
+
+def build_prod_pkg_panel(ctx):
+    months = ctx.months
+    ppsub = [r for r in ctx.unique if ctx.cell(r, ctx.col["cls"]) in ("Packaging and Operational", "Product")]
+
+    def month_index_fn(r):
+        mo = ctx.cell(r, ctx.col["month"])
+        return months.index(mo) if mo in months else -1
+
+    core = _build_ppk_core(ctx, ppsub, months, month_index_fn, lambda mo: mo, "ppk", "Month", year_fn=year_of)
+
+    weekly_block = build_weekly_prod_pkg_block(ctx)
+
+    if core is None:
+        return (f'  <div class="tab-panel" id="panel-prodpkg"><section><h2>Product Packaging and Operational Complaints wrt Product Sales</h2>'
+                f'<p class="note">No Product/Packaging tickets found.</p></section></div>')
+
+    LP = core["LP"]
+    combo_tot, combo_mc, PROSALES = core["combo_tot"], core["combo_mc"], core["PROSALES"]
+    SKUS, PRODS, CLASSES, CATS, BATCHES = core["SKUS"], core["PRODS"], core["CLASSES"], core["CATS"], core["BATCHES"]
+    sku_tree, top_sku, lmk = core["sku_tree"], core["top_sku"], core["lmk"]
 
     # ---- insights: sharpest single combo + top SKU overall, both by last month volume ----
     ppk_items = []
     top_key = None
     top_combo_val = -1
     for ck in combo_tot:
-        cval = combo_mc[ck][LM]
+        cval = combo_mc[ck][LP]
         if cval > top_combo_val:
             top_combo_val, top_key = cval, ck
     if top_key and top_combo_val > 0:
         si, tpi, tli, tci, tbi = (int(x) for x in top_key.split("|"))
-        combo_lm_ps = PROSALES[si][LM]
+        combo_lm_ps = PROSALES[si][LP]
         pct = round1(top_combo_val / combo_lm_ps * 100) if combo_lm_ps > 0 else 0
         from gen_insights import insight_item
-        ppk_items.append(insight_item("watch", f"Sharpest single pain point in {pretty_month(months[LM])}: <b>{h_enc(SKUS[si])}</b> / {h_enc(PRODS[tpi])} "
+        ppk_items.append(insight_item("watch", f"Sharpest single pain point in {pretty_month(months[LP])}: <b>{h_enc(SKUS[si])}</b> / {h_enc(PRODS[tpi])} "
                                                  f"&mdash; {h_enc(CLASSES[tli])} &rarr; {h_enc(CATS[tci])} (batch {h_enc(BATCHES[tbi])}), {n0(top_combo_val)} tickets ({fnum(pct)}% of that SKU's sales last month)."))
     if top_sku:
         ts_idx = int(top_sku[0])
         ts_val = lmk(sku_tree[top_sku[0]]["mc"], ts_idx)["cnt"]
         if ts_val > 0:
-            ts_lm_ps = PROSALES[ts_idx][LM]
+            ts_lm_ps = PROSALES[ts_idx][LP]
             ts_pct = round1(ts_val / ts_lm_ps * 100) if ts_lm_ps > 0 else 0
             from gen_insights import insight_item
-            ppk_items.append(insight_item("info", f"SKU with the most product/packaging complaints overall in {pretty_month(months[LM])}: "
+            ppk_items.append(insight_item("info", f"SKU with the most product/packaging complaints overall in {pretty_month(months[LP])}: "
                                                      f"<b>{h_enc(SKUS[ts_idx])}</b> &mdash; {n0(ts_val)} tickets ({fnum(ts_pct)}% of that SKU's sales last month)."))
     ppk_insights = build_insights_card("Insights &mdash; Product &amp; Packaging", ppk_items)
 
     return f"""  <div class="tab-panel" id="panel-prodpkg">
     <section>
       <h2>Product Packaging and Operational Complaints wrt Product Sales</h2>
-      <p class="desc">Combines "Product" and "Packaging and Operational" tickets by SKU &rarr; Product &rarr; Query Class &rarr; Query Category &rarr; Batch. Click the + at each level to drill down; percent = complaints &divide; that SKU's own product sales that month (not the company-wide sales figure used elsewhere in this report).</p>
+      <p class="desc">Combines "Product" and "Packaging and Operational" tickets by SKU &rarr; Product &rarr; Query Class &rarr; Query Category &rarr; Batch. Click the + at each level to drill down; percent = complaints &divide; that SKU's own product sales that period (not the company-wide sales figure used elsewhere in this report). Weekly follows the Monthly/Weekly toggle and month picker above.</p>
       {raw_download_link(ctx, "prodpkg")}
-      {filter_html}
-      <div class='pivot-wrap'><div class='pivot-title'>Product Packaging and Operational Complaints wrt Product Sales</div>{''.join(t)}</div>
+      <div class="gran-monthly">
+        {core["filter_html"]}
+        <div class='pivot-wrap'><div class='pivot-title'>Product Packaging and Operational Complaints wrt Product Sales</div>{core["table_html"]}</div>
+      </div>
+      {weekly_block}
     </section>
     {ppk_insights}
   </div>
-{ppk_css}
-{js}"""
+{_PPK_CSS}
+{_PPK_DISPATCH_JS}
+{core["js"]}"""
+
+
+def build_weekly_prod_pkg_block(ctx):
+    """One full drill-down instance per weekly-eligible month, shown/hidden by the existing
+    page-wide gran_toolbar's Weekly mode + month-chip picker (same '.gran-weekly
+    data-month=...' mechanism every other weekly table already uses) - no new toggle JS
+    needed here, just correctly-tagged HTML per month."""
+    if not ctx.weekly_eligible_months:
+        return ""
+    ppsub_all = [r for r in ctx.unique if ctx.cell(r, ctx.col["cls"]) in ("Packaging and Operational", "Product")]
+    parts = []
+    for mi in ctx.weekly_eligible_months:
+        week_list = ctx.weeks_by_month_idx[mi]
+        month_label = ctx.months[mi]
+        if not week_list:
+            continue
+        subset = [r for r in ppsub_all if ctx.cell(r, ctx.col["month"]) == month_label]
+        prefix = f"ppkw{mi}"
+
+        def week_index_fn(r, week_list=week_list):
+            wk = ctx.cell(r, ctx.col["week"])
+            if not str(wk).strip() or wk == "#N/A":
+                return -1
+            return week_list.index(wk) if wk in week_list else -1
+
+        def week_header_fn(wk, mi=mi):
+            return week_col_header(ctx, wk, mi)
+
+        core = _build_ppk_core(ctx, subset, week_list, week_index_fn, week_header_fn, prefix, "Week")
+        if core is None:
+            parts.append(f"<div class='gran-weekly' data-month='{mi}' style='display:none;'>"
+                         f"<p class='note'>No Product/Packaging tickets in {h_enc(pretty_month(month_label))}.</p></div>")
+            continue
+        parts.append(f"<div class='gran-weekly' data-month='{mi}' style='display:none;'>"
+                     f"<p class='note'>Weekly view for {h_enc(pretty_month(month_label))}.</p>"
+                     f"{core['filter_html']}"
+                     f"<div class='pivot-wrap'><div class='pivot-title'>Product Packaging and Operational Complaints wrt Product Sales (Weekly)</div>{core['table_html']}</div>"
+                     f"</div>{core['js']}")
+    return "".join(parts)
 
 
 def assemble_report(ctx, here_dir):
