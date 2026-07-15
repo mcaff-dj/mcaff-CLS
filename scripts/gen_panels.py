@@ -17,7 +17,7 @@ embedded JS/CSS as `{{`/`}}` (high risk of a missed brace silently corrupting th
 from gen_insights import build_insights_card, get_category_insight_items, get_delivery_partner_insight
 from gen_weekly import build_weekly_class_block, build_weekly_delivery_block
 from gen_monthly import build_monthly_analysis_panel
-from report_context import ci_key, fnum, h_enc, j_enc, n0, nice_max, pretty_month, round1, year_of
+from report_context import ci_key, fnum, h_enc, j_enc, n0, pretty_month, round1, year_of
 
 
 def _batch_table(ctx, subset, title):
@@ -157,6 +157,7 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     cats_json = "[" + ",".join(f'"{j_enc(c)}"' for c in cat_order) + "]"
     dim2s_json = "[" + ",".join(f'"{j_enc(d)}"' for d in dim2_order) + "]"
     months_json = "[" + ",".join(f'"{j_enc(m)}"' for m in months) + "]"
+    month_labels_json = "[" + ",".join(f'"{j_enc(pretty_month(m))}"' for m in months) + "]"
     sales_json = "[" + ",".join(str(v) for v in ctx.sales_arr) + "]"
     alloc_json = "[]"
     if pct_mode == "alloc":
@@ -171,9 +172,6 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
         alloc_json = "[" + ",".join(rows) + "]"
 
     W, H, pad_l, pad_r, pad_t, pad_b = 1200, 380, 55, 55, 40, 55
-    plot_w, plot_h = W - pad_l - pad_r, H - pad_t - pad_b
-    slot = plot_w / n
-    bar_w = slot * 0.55
     bar_color = cls["color"]
     line_color = "var(--s3)" if cls["color"] == "var(--s1)" else "var(--s1)"
 
@@ -224,32 +222,21 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     sb3 = [f"<div class='card'><div class='pivot-title' style='margin-bottom:18px;'>{h_enc(cls['label'])} Complaints wrt Sales</div>"
            f"<div class='legend-row' style='justify-content:center;'><div class='legend-item'><span class='swatch' style='background:{bar_color};'></span><span class='lname'>Complaints</span></div>"
            f"<div class='legend-item'><span class='swatch' style='background:{line_color};border-radius:50%;'></span><span class='lname'>wrt sales %</span></div></div>"]
-    sb3.append(f"<svg viewBox='0 0 {W} {H}' width='100%' height='{H}' role='img'>"
-               f"<line x1='{pad_l}' y1='{pad_t+plot_h}' x2='{W-pad_r}' y2='{pad_t+plot_h}' stroke='var(--baseline)' stroke-width='1'/>")
-    for i in range(n):
-        cx = pad_l + slot * i + slot / 2
-        bx = cx - bar_w / 2
-        ml = pretty_month(months[i])
-        yr = year_of(months[i])
-        sb3.append(f"<g data-yr='{yr}'><rect id='xf-{pfx}-bar-{i}' x='{fnum(bx)}' y='{pad_t+plot_h}' width='{fnum(bar_w)}' height='0' fill='{bar_color}' rx='2'/>"
-                   f"<text id='xf-{pfx}-barval-{i}' x='{fnum(cx)}' y='{pad_t+plot_h-8}' text-anchor='middle' font-size='10.5' fill='var(--text-primary)' font-weight='600'></text>"
-                   f"<text x='{fnum(cx)}' y='{H-pad_b+18}' text-anchor='middle' font-size='10.5' fill='var(--text-muted)'>{ml}</text></g>")
-    sb3.append(f"<polyline id='xf-{pfx}-polyline' points='' fill='none' stroke='{line_color}' stroke-width='2'/>")
-    for i in range(n):
-        yr = year_of(months[i])
-        sb3.append(f"<g data-yr='{yr}'><circle id='xf-{pfx}-dot-{i}' cx='0' cy='0' r='3' fill='{line_color}' visibility='hidden'/>"
-                   f"<text id='xf-{pfx}-dotval-{i}' x='0' y='0' text-anchor='middle' font-size='10.5' font-weight='600' fill='{line_color}'></text></g>")
-    sb3.append("</svg></div>")
+    # Bars/line are drawn entirely client-side (renderPctChart in _shell_head.html), same
+    # as _build_combo_chart - here that renderer is fed vals recomputed by filteredTotals()
+    # (the existing cross-filter click logic) each time, so both the cross-filter click AND
+    # the Year toggle can trigger a redraw that re-spaces bars and rescales both axes
+    # instead of just hiding elements and leaving gaps.
+    sb3.append(f"<svg id='xf-{pfx}-chart' viewBox='0 0 {W} {H}' width='100%' height='{H}' role='img'></svg></div>")
 
     filter_note = f"<div class='filter-row' style='display:flex;align-items:center;gap:10px;margin:0 0 4px;flex-wrap:wrap;'><span id='xf-{pfx}-filter-note' style='font-size:12px;color:var(--text-muted);'></span></div>"
 
     js = """
 <script>
 (function(){
-  var DT=__TICKETS_JSON__, CATS=__CATS_JSON__, DIMS=__DIM2S_JSON__, MONTHS=__MONTHS_JSON__, SALES=__SALES_JSON__, ALLOC=__ALLOC_JSON__, N=MONTHS.length;
-  var padL=__PADL__,padT=__PADT__,plotH=__PLOTH__,slot=__SLOT__,barW=__BARW__, BAR=null,PCT=null, pctMode='__PCTMODE__', filter=null;
+  var DT=__TICKETS_JSON__, CATS=__CATS_JSON__, DIMS=__DIM2S_JSON__, MONTHS=__MONTHS_JSON__, MONTH_LABELS=__MONTHLABELS_JSON__, SALES=__SALES_JSON__, ALLOC=__ALLOC_JSON__, N=MONTHS.length;
+  var chartEl=document.getElementById('xf-__PFX__-chart'), pctMode='__PCTMODE__', filter=null;
   function fmt(n){return n.toLocaleString('en-IN');}
-  function nice(v){ if(v<=0)return 10; var m=Math.pow(10,Math.floor(Math.log10(v))); var s=[1,2,2.5,5,10]; for(var i=0;i<s.length;i++){var c=s[i]*m; if(c>=v)return c;} return 10*m; }
   function passOther(t, exceptAxis){ var mo=t[0],c=t[1],d=t[2]; if(mo<0||mo>=N||c<0||c>=CATS.length||d<0||d>=DIMS.length)return false;
     if(filter && filter.axis!==exceptAxis){ if(filter.axis==='cat'&&c!==filter.idx)return false; if(filter.axis==='dim2'&&d!==filter.idx)return false; }
     return true; }
@@ -275,15 +262,10 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
       var ce2=document.getElementById('xf-__PFX__-dim-total-mo-'+m+'-cnt'); if(ce2)ce2.textContent=fmt(tot[m]);
       var pe2=document.getElementById('xf-__PFX__-dim-total-mo-'+m+'-pct');
       if(pe2){ if(pctMode==='alloc'){ pe2.textContent='-'; } else { var sm3=SALES[m],p3=sm3>0?Math.round(tot[m]/sm3*1000)/10:0; pe2.textContent=p3+'%'; } } } }
-  function rch(){ var r=filteredTotals(); var vals=r.tot, pcts=vals.map(function(v,i){var sm=SALES[i];return sm>0?Math.round(v/sm*10000)/100:0;});
-    BAR=nice(Math.max.apply(null,vals)*1.15); PCT=nice(Math.max.apply(null,pcts)*1.2); var pts=[];
-    for(var i=0;i<N;i++){ var cx=padL+slot*i+slot/2,bx=cx-barW/2,bh=plotH*(vals[i]/BAR),by=padT+plotH-bh;
-      var rEl=document.getElementById('xf-__PFX__-bar-'+i); rEl.setAttribute('y',by); rEl.setAttribute('height',bh);
-      var bv=document.getElementById('xf-__PFX__-barval-'+i); bv.setAttribute('y',by-8); bv.textContent=vals[i]>0?fmt(vals[i]):'';
-      var ly=padT+plotH-(plotH*(pcts[i]/PCT)); pts.push(cx+','+ly);
-      var d=document.getElementById('xf-__PFX__-dot-'+i); d.setAttribute('cx',cx); d.setAttribute('cy',ly); d.setAttribute('visibility','visible');
-      var dv=document.getElementById('xf-__PFX__-dotval-'+i); dv.setAttribute('x',cx); dv.setAttribute('y',ly-10); dv.textContent=pcts[i]+'%'; }
-    document.getElementById('xf-__PFX__-polyline').setAttribute('points',pts.join(' ')); return r; }
+  function rch(){ var r=filteredTotals();
+    window.renderPctChart(chartEl, { vals:r.tot, months:MONTHS, monthLabels:MONTH_LABELS, sales:SALES,
+      barColor:'__BARCOLOR__', lineColor:'__LINECOLOR__', W:__W__, H:__H__, padL:__PADL__, padR:__PADR__, padT:__PADT__, padB:__PADB__ });
+    return r; }
   function render(){ try{ rct(); rdt(); var r=rch();
       var note=document.getElementById('xf-__PFX__-filter-note');
       if(note){
@@ -300,16 +282,19 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     render();
   }};
   window.onXfClick = window.onXfClick || function(pfx, axis, idx){ if(window._xfPanels[pfx])window._xfPanels[pfx].onClick(axis, idx); };
-  function init(){ render(); }
+  function init(){ window.registerYearChart(render); }
   if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',init);}else{init();}
 })();
 </script>
 """
     js = (js.replace("__TICKETS_JSON__", tickets_json).replace("__CATS_JSON__", cats_json)
             .replace("__DIM2S_JSON__", dim2s_json).replace("__MONTHS_JSON__", months_json)
+            .replace("__MONTHLABELS_JSON__", month_labels_json)
             .replace("__SALES_JSON__", sales_json).replace("__ALLOC_JSON__", alloc_json)
-            .replace("__PADL__", str(pad_l)).replace("__PADT__", str(pad_t)).replace("__PLOTH__", str(plot_h))
-            .replace("__SLOT__", str(slot)).replace("__BARW__", str(bar_w)).replace("__PCTMODE__", pct_mode)
+            .replace("__W__", str(W)).replace("__H__", str(H))
+            .replace("__PADL__", str(pad_l)).replace("__PADR__", str(pad_r)).replace("__PADT__", str(pad_t)).replace("__PADB__", str(pad_b))
+            .replace("__BARCOLOR__", bar_color).replace("__LINECOLOR__", line_color)
+            .replace("__PCTMODE__", pct_mode)
             .replace("__CLSLABEL__", h_enc(cls["label"])).replace("__DIM2LABEL__", h_enc(dim2_label))
             .replace("__PFX__", pfx))
 
@@ -390,45 +375,38 @@ def _build_category_pivot(ctx, subset, title):
     return "".join(parts), month_totals
 
 
+_chart_id_counter = [0]
+
+
+def _next_chart_id(prefix):
+    _chart_id_counter[0] += 1
+    return f"{prefix}-{_chart_id_counter[0]}"
+
+
 def _build_combo_chart(ctx, vals, title, bar_color, line_color):
+    # Bars/line are drawn entirely client-side (renderPctChart in _shell_head.html) rather
+    # than pre-rendered here, so the Year filter can redraw against only the active years
+    # (re-spacing bars, rescaling both axes) instead of just hiding elements and leaving
+    # gaps - see registerYearChart. Python's only job is to embed the raw per-month values.
     months = ctx.months
-    n = ctx.n
-    pcts = []
-    for i in range(n):
-        sm = ctx.sales_arr[i]
-        p = round(vals[i] / sm * 100, 2) if sm > 0 else 0
-        pcts.append(p)
-    bar_max = nice_max(max(vals) * 1.15 if vals else 0)
-    pct_max = nice_max(max(pcts) * 1.2 if pcts else 0)
     W, H, pad_l, pad_r, pad_t, pad_b = 1200, 380, 55, 55, 40, 55
-    plot_w, plot_h = W - pad_l - pad_r, H - pad_t - pad_b
-    slot = plot_w / n
-    bar_w = slot * 0.55
+    chart_id = _next_chart_id("chart")
+    vals_json = "[" + ",".join(str(v) for v in vals) + "]"
+    months_json = "[" + ",".join(f'"{j_enc(m)}"' for m in months) + "]"
+    month_labels_json = "[" + ",".join(f'"{j_enc(pretty_month(m))}"' for m in months) + "]"
+    sales_json = "[" + ",".join(str(v) for v in ctx.sales_arr) + "]"
     parts = [f"<div class='card'><div class='pivot-title' style='margin-bottom:18px;'>{h_enc(title)}</div>"
              f"<div class='legend-row' style='justify-content:center;'><div class='legend-item'><span class='swatch' style='background:{bar_color};'></span><span class='lname'>Complaints</span></div>"
              f"<div class='legend-item'><span class='swatch' style='background:{line_color};border-radius:50%;'></span><span class='lname'>wrt sales %</span></div></div>"]
-    parts.append(f"<svg viewBox='0 0 {W} {H}' width='100%' height='{H}' role='img'>"
-                 f"<line x1='{pad_l}' y1='{pad_t+plot_h}' x2='{W-pad_r}' y2='{pad_t+plot_h}' stroke='var(--baseline)' stroke-width='1'/>")
-    pts = []
-    for i in range(n):
-        cx = pad_l + slot * i + slot / 2
-        bx = cx - bar_w / 2
-        bh = plot_h * (vals[i] / bar_max)
-        by = pad_t + plot_h - bh
-        yr = year_of(months[i])
-        parts.append(f"<g data-yr='{yr}'><rect x='{fnum(bx)}' y='{fnum(by)}' width='{fnum(bar_w)}' height='{fnum(bh)}' fill='{bar_color}' rx='2'/>"
-                     f"<text x='{fnum(cx)}' y='{fnum(by-8)}' text-anchor='middle' font-size='10.5' fill='var(--text-primary)' font-weight='600'>{n0(vals[i])}</text>")
-        ly = pad_t + plot_h - (plot_h * (pcts[i] / pct_max))
-        pts.append(f"{fnum(cx)},{fnum(ly)}")
-        ml = pretty_month(months[i])
-        parts.append(f"<text x='{fnum(cx)}' y='{H-pad_b+18}' text-anchor='middle' font-size='10.5' fill='var(--text-muted)'>{ml}</text></g>")
-    parts.append(f"<polyline points='{' '.join(pts)}' fill='none' stroke='{line_color}' stroke-width='2'/>")
-    for i in range(n):
-        cx_s, cy_s = pts[i].split(",")
-        yr = year_of(months[i])
-        parts.append(f"<g data-yr='{yr}'><circle cx='{cx_s}' cy='{cy_s}' r='3' fill='{line_color}'/>"
-                     f"<text x='{cx_s}' y='{fnum(float(cy_s)-10)}' text-anchor='middle' font-size='10.5' font-weight='600' fill='{line_color}'>{fnum(pcts[i])}%</text></g>")
-    parts.append("</svg></div>")
+    parts.append(f"<svg id='{chart_id}' viewBox='0 0 {W} {H}' width='100%' height='{H}' role='img'></svg></div>")
+    parts.append(f"""<script>
+(function(){{
+  var svg = document.getElementById('{chart_id}');
+  var opts = {{ vals:{vals_json}, months:{months_json}, monthLabels:{month_labels_json}, sales:{sales_json},
+    barColor:'{bar_color}', lineColor:'{line_color}', W:{W}, H:{H}, padL:{pad_l}, padR:{pad_r}, padT:{pad_t}, padB:{pad_b}}};
+  window.registerYearChart(function(){{ window.renderPctChart(svg, opts); }});
+}})();
+</script>""")
     return "".join(parts)
 
 
@@ -479,42 +457,28 @@ def build_combo2(rows, title, score_label, score_max):
             carry_year = str(int(carry_year) - 1)
         yrs[i] = carry_year
 
-    bar_max = nice_max(max(vals) * 1.12 if vals else 0)
+    # Bars/line/grid are drawn entirely client-side (renderScoreChart in _shell_head.html)
+    # so the Year filter can redraw against only the active years instead of just hiding
+    # elements and leaving gaps - see registerYearChart. Python's only job is to embed the
+    # raw per-row values (including the backfilled years computed above).
     W, H, pad_l, pad_r, pad_t, pad_b = 1120, 420, 55, 55, 40, 55
-    plot_w, plot_h = W - pad_l - pad_r, H - pad_t - pad_b
-    slot = plot_w / n
-    bar_w = slot * 0.55
+    chart_id = _next_chart_id("chart")
+    vals_json = "[" + ",".join(str(v) for v in vals) + "]"
+    sc_json = "[" + ",".join(str(v) for v in sc) + "]"
+    labels_json = "[" + ",".join(f'"{j_enc(m)}"' for m in mos) + "]"
+    years_json = "[" + ",".join(f'"{j_enc(y)}"' if y else "null" for y in yrs) + "]"
     parts = [f"<div class='card'><div class='pivot-title' style='margin-bottom:18px;'>{h_enc(title)}</div>"
              f"<div class='legend-row' style='justify-content:center;'><div class='legend-item'><span class='swatch' style='background:var(--s1);border-radius:50%;'></span><span class='lname'>{score_label}</span></div>"
              f"<div class='legend-item'><span class='swatch' style='background:var(--s2);'></span><span class='lname'>Total Responses</span></div></div>"]
-    parts.append(f"<svg viewBox='0 0 {W} {H}' width='100%' height='{H}' role='img'>")
-    for g in range(6):
-        fr = g / 5.0
-        y = pad_t + plot_h * (1 - fr)
-        st = round1(score_max * fr)
-        rl = round(bar_max * fr)
-        rs = f"{fnum(round(rl/1000, 1))}K" if rl >= 1000 else f"{rl}"
-        parts.append(f"<line x1='{pad_l}' y1='{fnum(y)}' x2='{W-pad_r}' y2='{fnum(y)}' stroke='var(--grid)' stroke-width='1'/>"
-                     f"<text x='{pad_l-10}' y='{fnum(y+4)}' text-anchor='end' font-size='11' fill='var(--text-muted)'>{fnum(st)}</text>"
-                     f"<text x='{W-pad_r+10}' y='{fnum(y+4)}' text-anchor='start' font-size='11' fill='var(--text-muted)'>{rs}</text>")
-    parts.append(f"<line x1='{pad_l}' y1='{pad_t+plot_h}' x2='{W-pad_r}' y2='{pad_t+plot_h}' stroke='var(--baseline)' stroke-width='1'/>")
-    pts = []
-    for i in range(n):
-        cx = pad_l + slot * i + slot / 2
-        bx = cx - bar_w / 2
-        bh = plot_h * (vals[i] / bar_max)
-        by = pad_t + plot_h - bh
-        parts.append(f"<g data-yr='{yrs[i]}'><rect x='{fnum(bx)}' y='{fnum(by)}' width='{fnum(bar_w)}' height='{fnum(bh)}' fill='var(--s2)' rx='2'/>"
-                     f"<text x='{fnum(cx)}' y='{fnum(by-8)}' text-anchor='middle' font-size='12' font-weight='700' fill='var(--text-primary)'>{n0(vals[i])}</text>")
-        ly = pad_t + plot_h * (1 - sc[i] / score_max)
-        pts.append(f"{fnum(cx)},{fnum(ly)}")
-        parts.append(f"<text x='{fnum(cx)}' y='{H-pad_b+20}' text-anchor='middle' font-size='11' fill='var(--text-muted)'>{mos[i]}</text></g>")
-    parts.append(f"<polyline points='{' '.join(pts)}' fill='none' stroke='var(--s1)' stroke-width='2.5'/>")
-    for i in range(n):
-        cx_s, cy_s = pts[i].split(",")
-        parts.append(f"<g data-yr='{yrs[i]}'><circle cx='{cx_s}' cy='{cy_s}' r='4' fill='var(--s1)'/>"
-                     f"<text x='{cx_s}' y='{fnum(float(cy_s)-12)}' text-anchor='middle' font-size='12' font-weight='700' fill='var(--s1)'>{fnum(sc[i])}</text></g>")
-    parts.append("</svg></div>")
+    parts.append(f"<svg id='{chart_id}' viewBox='0 0 {W} {H}' width='100%' height='{H}' role='img'></svg></div>")
+    parts.append(f"""<script>
+(function(){{
+  var svg = document.getElementById('{chart_id}');
+  var opts = {{ vals:{vals_json}, sc:{sc_json}, labels:{labels_json}, years:{years_json}, scoreMax:{score_max},
+    W:{W}, H:{H}, padL:{pad_l}, padR:{pad_r}, padT:{pad_t}, padB:{pad_b}}};
+  window.registerYearChart(function(){{ window.renderScoreChart(svg, opts); }});
+}})();
+</script>""")
     return "".join(parts)
 
 
@@ -987,11 +951,13 @@ def assemble_report(ctx, here_dir):
 <script>
 (function(){{
   var activeYears = new Set([{year_set_js}]);
+  window.REPORT_ACTIVE_YEARS = activeYears;
   window.toggleYearChip=function(yr){{
     if(activeYears.has(yr)){{ if(activeYears.size>1){{ activeYears.delete(yr); }} }}
     else {{ activeYears.add(yr); }}
     document.querySelectorAll('.year-chip').forEach(function(b){{ b.classList.toggle('active', activeYears.has(b.dataset.yr)); }});
     document.querySelectorAll('[data-yr]:not(.year-chip)').forEach(function(el){{ el.style.display = activeYears.has(el.getAttribute('data-yr')) ? '' : 'none'; }});
+    (window.REPORT_CHARTS||[]).forEach(function(fn){{ fn(); }});
   }};
 }})();
 </script>

@@ -222,6 +222,124 @@
 <script defer src="/_vercel/insights/script.js"></script>
 <script>
 (function(){
+  // Shared bar+line chart renderers used by every "Complaints wrt Sales" / NPS / CSAT
+  // chart. The Year filter chips (see the toolbar's own script) hide table cells via a
+  // plain CSS data-yr sweep, which works fine for tables (the browser just reflows the
+  // row), but charts are absolutely-positioned SVG - hiding a bar leaves a blank gap
+  // instead of the remaining bars re-spacing to fill the width. These renderers redraw a
+  // chart's bars/line from scratch against only the currently-active years, so gaps close
+  // up and the value/percent axes rescale to the visible subset. window.REPORT_CHARTS
+  // holds one render function per chart on the page; toggleYearChip() (below) calls all
+  // of them after updating the active-year set.
+  window.REPORT_CHARTS = window.REPORT_CHARTS || [];
+  window.registerYearChart = function(renderFn){ window.REPORT_CHARTS.push(renderFn); renderFn(); };
+
+  window.niceMax = function(v){
+    if (v <= 0) return 10;
+    var m = Math.pow(10, Math.floor(Math.log10(v)));
+    var steps = [1, 2, 2.5, 5, 10];
+    for (var i = 0; i < steps.length; i++) { var c = steps[i] * m; if (c >= v) return c; }
+    return 10 * m;
+  };
+  window.fmtN0 = function(v){
+    v = Math.round(v);
+    var neg = v < 0; v = Math.abs(v);
+    var s = String(v);
+    if (s.length <= 3) return (neg ? '-' : '') + s;
+    var last3 = s.slice(-3), rest = s.slice(0, -3), parts = [];
+    while (rest.length > 2) { parts.unshift(rest.slice(-2)); rest = rest.slice(0, -2); }
+    if (rest) parts.unshift(rest);
+    return (neg ? '-' : '') + parts.join(',') + ',' + last3;
+  };
+  window.yearOfLabel = function(mo){ var m = /['\s](\d{2})$/.exec(mo || ''); return m ? ('20' + m[1]) : ''; };
+  function escXml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  // Mode used by every per-class "Complaints wrt Sales" chart: bars = raw counts, line =
+  // count/monthSales*100 ("wrt sales %"), both axes independently niceMax()'d.
+  window.renderPctChart = function(svg, opts){
+    var active = window.REPORT_ACTIVE_YEARS;
+    var idx = [];
+    for (var i = 0; i < opts.months.length; i++) {
+      if (!active || active.has(window.yearOfLabel(opts.months[i]))) idx.push(i);
+    }
+    var W = opts.W, H = opts.H, padL = opts.padL, padR = opts.padR, padT = opts.padT, padB = opts.padB;
+    var plotW = W - padL - padR, plotH = H - padT - padB;
+    var n = idx.length || 1;
+    var slot = plotW / n, barW = slot * 0.55;
+    var vals = idx.map(function(i){ return opts.vals[i]; });
+    var pcts = idx.map(function(i){ var sm = opts.sales[i]; return sm > 0 ? Math.round(opts.vals[i] / sm * 10000) / 100 : 0; });
+    var barMax = window.niceMax(Math.max.apply(null, vals.concat([0])) * 1.15);
+    var pctMax = window.niceMax(Math.max.apply(null, pcts.concat([0])) * 1.2);
+    var out = ['<line x1="' + padL + '" y1="' + (padT + plotH) + '" x2="' + (W - padR) + '" y2="' + (padT + plotH) + '" stroke="var(--baseline)" stroke-width="1"/>'];
+    var pts = [];
+    idx.forEach(function(origI, k){
+      var cx = padL + slot * k + slot / 2, bx = cx - barW / 2;
+      var bh = plotH * (vals[k] / barMax), by = padT + plotH - bh;
+      out.push('<rect x="' + bx + '" y="' + by + '" width="' + barW + '" height="' + bh + '" fill="' + opts.barColor + '" rx="2"/>');
+      out.push('<text x="' + cx + '" y="' + (by - 8) + '" text-anchor="middle" font-size="10.5" fill="var(--text-primary)" font-weight="600">' + window.fmtN0(vals[k]) + '</text>');
+      var ly = padT + plotH - (plotH * (pcts[k] / pctMax));
+      pts.push(cx + ',' + ly);
+      out.push('<text x="' + cx + '" y="' + (H - padB + 18) + '" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">' + escXml(opts.monthLabels[origI]) + '</text>');
+    });
+    out.push('<polyline points="' + pts.join(' ') + '" fill="none" stroke="' + opts.lineColor + '" stroke-width="2"/>');
+    idx.forEach(function(origI, k){
+      var p = pts[k].split(',');
+      out.push('<circle cx="' + p[0] + '" cy="' + p[1] + '" r="3" fill="' + opts.lineColor + '"/>');
+      out.push('<text x="' + p[0] + '" y="' + (parseFloat(p[1]) - 10) + '" text-anchor="middle" font-size="10.5" font-weight="600" fill="' + opts.lineColor + '">' + pcts[k] + '%</text>');
+    });
+    svg.innerHTML = out.join('');
+  };
+
+  // Mode used by NPS/CSAT charts: bars = response counts (own niceMax'd axis), line = a
+  // given score with a FIXED axis max (100 for NPS, 5 for CSAT) - plus the 6-line grid
+  // with dual-axis labels those charts show that the plain pct-mode charts don't.
+  window.renderScoreChart = function(svg, opts){
+    var active = window.REPORT_ACTIVE_YEARS;
+    var idx = [];
+    for (var i = 0; i < opts.labels.length; i++) {
+      if (!active || !opts.years[i] || active.has(opts.years[i])) idx.push(i);
+    }
+    if (idx.length === 0) { idx = opts.labels.map(function(_, i){ return i; }); }
+    var W = opts.W, H = opts.H, padL = opts.padL, padR = opts.padR, padT = opts.padT, padB = opts.padB;
+    var plotW = W - padL - padR, plotH = H - padT - padB;
+    var n = idx.length || 1;
+    var slot = plotW / n, barW = slot * 0.55;
+    var vals = idx.map(function(i){ return opts.vals[i]; });
+    var scoreMax = opts.scoreMax;
+    var barMax = window.niceMax(Math.max.apply(null, vals.concat([0])) * 1.12);
+    var out = [];
+    for (var g = 0; g <= 5; g++) {
+      var fr = g / 5.0, y = padT + plotH * (1 - fr);
+      var st = Math.round(scoreMax * fr * 10) / 10;
+      var rl = Math.round(barMax * fr);
+      var rs = rl >= 1000 ? (Math.round(rl / 100) / 10) + 'K' : String(rl);
+      out.push('<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="var(--grid)" stroke-width="1"/>');
+      out.push('<text x="' + (padL - 10) + '" y="' + (y + 4) + '" text-anchor="end" font-size="11" fill="var(--text-muted)">' + st + '</text>');
+      out.push('<text x="' + (W - padR + 10) + '" y="' + (y + 4) + '" text-anchor="start" font-size="11" fill="var(--text-muted)">' + rs + '</text>');
+    }
+    out.push('<line x1="' + padL + '" y1="' + (padT + plotH) + '" x2="' + (W - padR) + '" y2="' + (padT + plotH) + '" stroke="var(--baseline)" stroke-width="1"/>');
+    var pts = [];
+    idx.forEach(function(origI, k){
+      var cx = padL + slot * k + slot / 2, bx = cx - barW / 2;
+      var bh = plotH * (vals[k] / barMax), by = padT + plotH - bh;
+      out.push('<rect x="' + bx + '" y="' + by + '" width="' + barW + '" height="' + bh + '" fill="var(--s2)" rx="2"/>');
+      out.push('<text x="' + cx + '" y="' + (by - 8) + '" text-anchor="middle" font-size="12" font-weight="700" fill="var(--text-primary)">' + window.fmtN0(vals[k]) + '</text>');
+      var ly = padT + plotH * (1 - opts.sc[origI] / scoreMax);
+      pts.push(cx + ',' + ly);
+      out.push('<text x="' + cx + '" y="' + (H - padB + 20) + '" text-anchor="middle" font-size="11" fill="var(--text-muted)">' + escXml(opts.labels[origI]) + '</text>');
+    });
+    out.push('<polyline points="' + pts.join(' ') + '" fill="none" stroke="var(--s1)" stroke-width="2.5"/>');
+    idx.forEach(function(origI, k){
+      var p = pts[k].split(',');
+      out.push('<circle cx="' + p[0] + '" cy="' + p[1] + '" r="4" fill="var(--s1)"/>');
+      out.push('<text x="' + p[0] + '" y="' + (parseFloat(p[1]) - 12) + '" text-anchor="middle" font-size="12" font-weight="700" fill="var(--s1)">' + opts.sc[origI] + '</text>');
+    });
+    svg.innerHTML = out.join('');
+  };
+})();
+</script>
+<script>
+(function(){
   // Generic CSV export, added once here rather than per table-builder: every table in
   // this report shares the same .pivot-wrap > .pivot-title + .pivot-scroll > table
   // structure, so scanning for that pattern covers every pivot, cross-filter, batch and
