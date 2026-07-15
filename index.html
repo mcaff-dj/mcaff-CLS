@@ -1,10 +1,14 @@
 <!doctype html>
 <html lang="en">
-
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Customer Query Segment Reports</title>
+  <title>Customer Query Unified Dashboard</title>
+  
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+
   <style>
     :root {
       --page: #f9f9f7;
@@ -12,25 +16,35 @@
       --text-primary: #0b0b0b;
       --text-secondary: #52514e;
       --text-muted: #898781;
-      --border: rgba(11, 11, 11, 0.10);
+      --border: rgba(11, 11, 11, 0.08);
       --grid: #e1e0d9;
       --mcaff: #4a3aa7;
       --hyphen: #1baf7a;
       --pkyc: #c2740c;
+      
+      --sidebar-bg: rgba(249, 249, 247, 0.85);
+      --active-bg: rgba(74, 58, 167, 0.08);
+      --active-fg: var(--mcaff);
+      --brand-accent: var(--mcaff);
+      --sidebar-width: 280px;
     }
 
     @media (prefers-color-scheme: dark) {
       :root {
         --page: #0d0d0d;
-        --surface-card: #1a1a19;
+        --surface-card: #161615;
         --text-primary: #ffffff;
         --text-secondary: #c3c2b7;
         --text-muted: #898781;
-        --border: rgba(255, 255, 255, 0.10);
+        --border: rgba(255, 255, 255, 0.08);
         --grid: #2c2c2a;
         --mcaff: #9085e9;
         --hyphen: #199e70;
         --pkyc: #e0993d;
+        
+        --sidebar-bg: rgba(22, 22, 21, 0.85);
+        --active-bg: rgba(144, 133, 233, 0.12);
+        --active-fg: var(--mcaff);
       }
     }
 
@@ -40,411 +54,605 @@
 
     body {
       margin: 0;
+      padding: 0;
       min-height: 100vh;
       background: var(--page);
       color: var(--text-primary);
-      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* Sidebar Styling */
+    .sidebar {
+      width: var(--sidebar-width);
+      flex-shrink: 0;
+      background: var(--sidebar-bg);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      z-index: 10;
+      transition: transform 0.3s ease;
+    }
+
+    .sidebar-header {
+      padding: 24px 20px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .home-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 16px;
+      transition: color 0.15s ease;
+    }
+
+    .home-link:hover {
+      color: var(--brand-accent);
+    }
+
+    .logo-container {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .logo-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 19px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0;
+      color: var(--text-primary);
+    }
+
+    .logo-subtitle {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+    }
+
+    /* Sidebar Sections */
+    .sidebar-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .section {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .section-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+      padding-left: 8px;
+    }
+
+    /* Brand Selector */
+    .brand-select-wrapper {
+      position: relative;
+    }
+
+    .brand-select {
+      width: 100%;
+      appearance: none;
+      background: var(--surface-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 32px 10px 12px;
+      font-family: inherit;
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text-primary);
+      cursor: pointer;
+      outline: none;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .brand-select:focus {
+      border-color: var(--brand-accent);
+      box-shadow: 0 0 0 3px rgba(74, 58, 167, 0.15);
+    }
+
+    .brand-select-wrapper::after {
+      content: "▼";
+      font-size: 8px;
+      color: var(--text-muted);
+      position: absolute;
+      right: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      pointer-events: none;
+    }
+
+    /* Granularity Toggle Buttons */
+    .gran-toggle {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      background: var(--surface-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 3px;
+    }
+
+    .gran-btn {
+      appearance: none;
+      background: transparent;
+      border: none;
+      border-radius: 8px;
+      padding: 8px;
+      font-family: inherit;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: background 0.15s ease, color 0.15s ease;
+    }
+
+    .gran-btn:hover {
+      color: var(--text-primary);
+    }
+
+    .gran-btn.active {
+      background: var(--brand-accent);
+      color: #ffffff;
+    }
+
+    /* Dynamic Navigation List */
+    .nav-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .nav-btn {
+      appearance: none;
+      background: transparent;
+      border: none;
+      border-radius: 8px;
+      padding: 9px 12px;
+      text-align: left;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      transition: background 0.15s ease, color 0.15s ease, padding-left 0.15s ease;
+    }
+
+    .nav-btn:hover {
+      background: var(--border);
+      color: var(--text-primary);
+      padding-left: 15px;
+    }
+
+    .nav-btn.active {
+      background: var(--active-bg);
+      color: var(--active-fg);
+      font-weight: 600;
+    }
+
+    /* Sidebar Footer */
+    .sidebar-footer {
+      padding: 16px 20px 24px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .user-profile {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .user-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .user-role {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .footer-actions {
+      display: flex;
+      gap: 12px;
+      font-size: 12px;
+    }
+
+    .footer-actions a {
+      color: var(--text-secondary);
+      text-decoration: none;
+      font-weight: 600;
+      transition: color 0.15s ease;
+    }
+
+    .footer-actions a:hover {
+      color: var(--brand-accent);
+    }
+
+    /* Main Area Styling */
+    .main-content {
+      flex: 1;
+      height: 100vh;
+      position: relative;
+      background: var(--page);
+    }
+
+    /* Report Iframe */
+    .report-iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+      display: block;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .report-iframe.loaded {
+      opacity: 1;
+    }
+
+    /* Loading Overlay */
+    .loading-overlay {
+      position: absolute;
+      inset: 0;
+      background: var(--page);
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: 32px 20px;
+      gap: 16px;
+      z-index: 5;
+      transition: opacity 0.3s ease, visibility 0.3s ease;
     }
 
-    .wrap {
-      width: 100%;
-      max-width: 820px;
-    }
-
-    header {
-      margin-bottom: 28px;
-      text-align: center;
-    }
-
-    .eyebrow {
-      font-size: 12px;
-      font-weight: 600;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      color: var(--text-muted);
-      margin-bottom: 8px;
-    }
-
-    h1 {
-      font-size: clamp(22px, 4vw, 30px);
-      margin: 0 0 8px;
-      letter-spacing: -0.01em;
-    }
-
-    header p {
-      margin: 0;
-      color: var(--text-secondary);
-      font-size: 14px;
-    }
-
-    .cards {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 18px;
-    }
-
-    @media (max-width:640px) {
-      .cards {
-        grid-template-columns: 1fr;
-      }
-    }
-
-    .cards a.card:last-child:nth-child(odd) {
-      grid-column: 1 / -1;
-    }
-
-    a.card {
-      display: block;
-      text-decoration: none;
-      color: inherit;
-      background: var(--surface-card);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 24px 22px;
-      transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
-    }
-
-    a.card:hover {
-      transform: translateY(-3px);
-      box-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.35);
-    }
-
-    a.card.mcaff:hover {
-      border-color: var(--mcaff);
-    }
-
-    a.card.hyphen:hover {
-      border-color: var(--hyphen);
-    }
-
-    a.card.pkyc:hover {
-      border-color: var(--pkyc);
-    }
-
-    .dot {
-      display: inline-block;
-      width: 10px;
-      height: 10px;
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid var(--border);
+      border-top-color: var(--brand-accent);
       border-radius: 50%;
-      margin-right: 8px;
-      vertical-align: middle;
+      animation: spin 0.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
     }
 
-    .card h2 {
-      font-size: 18px;
-      margin: 0 0 6px;
-      display: flex;
-      align-items: center;
-    }
-
-    .card p {
-      margin: 0 0 14px;
-      font-size: 13px;
+    .loading-text {
+      font-size: 13.5px;
+      font-weight: 500;
       color: var(--text-secondary);
-      line-height: 1.5;
-    }
-
-    .open {
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--text-primary);
-    }
-
-    .open .arrow {
-      transition: transform .15s ease;
-      display: inline-block;
-    }
-
-    a.card:hover .arrow {
-      transform: translateX(4px);
-    }
-
-    .toolbar {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 12px;
-      flex-wrap: wrap;
-      margin: 0 0 24px;
-    }
-
-    .refresh-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 7px;
-      text-decoration: none;
-      font-size: 13px;
-      font-weight: 600;
-      color: #fff;
-      background: var(--mcaff);
-      border: none;
-      border-radius: 10px;
-      padding: 10px 16px;
-      cursor: pointer;
-      transition: opacity .15s ease;
-      font-family: inherit;
-    }
-
-    .refresh-btn:hover:not(:disabled) {
-      opacity: .88;
-    }
-
-    .refresh-btn:disabled {
-      opacity: .55;
-      cursor: default;
-    }
-
-    .refresh-btn .spin {
-      display: inline-block;
-      animation: spin 1s linear infinite;
     }
 
     @keyframes spin {
-      to {
-        transform: rotate(360deg);
-      }
+      to { transform: rotate(360deg); }
     }
 
-    .refresh-note {
-      font-size: 12px;
-      color: var(--text-muted);
-    }
-
-    .refresh-note.ok {
-      color: #1a9c5c;
-    }
-
-    .refresh-note.err {
-      color: #d6503f;
-    }
-
-    footer {
-      margin-top: 28px;
-      text-align: center;
-      font-size: 11.5px;
-      color: var(--text-muted);
-      line-height: 1.6;
-    }
-
-    .acct-row {
-      display: flex;
+    /* Mobile Toggle */
+    .mobile-menu-toggle {
+      display: none;
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      z-index: 20;
+      width: 50px;
+      height: 50px;
+      border-radius: 25px;
+      background: var(--brand-accent);
+      border: none;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
       align-items: center;
       justify-content: center;
-      gap: 12px;
-      flex-wrap: wrap;
-      margin: 0 0 20px;
-      font-size: 12.5px;
-      color: var(--text-secondary);
+      cursor: pointer;
+      color: #fff;
+      font-size: 20px;
     }
 
-    .acct-row a {
-      color: var(--text-secondary);
-      text-decoration: none;
-      font-weight: 600;
-    }
-
-    .acct-row a:hover {
-      color: var(--text-primary);
-    }
-
-    .signin-card {
-      background: var(--surface-card);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 36px 28px;
-      text-align: center;
-    }
-
-    .signin-card p {
-      margin: 0 0 18px;
-      color: var(--text-secondary);
-      font-size: 13.5px;
-    }
-
-    .g-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      text-decoration: none;
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--text-primary);
-      background: var(--page);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 11px 20px;
-    }
-
-    .g-btn:hover {
-      border-color: var(--mcaff);
-    }
-
-    .g-btn svg {
-      width: 18px;
-      height: 18px;
-    }
-
-    .empty-note {
-      text-align: center;
-      color: var(--text-muted);
-      font-size: 13px;
-      padding: 20px;
+    @media (max-width: 768px) {
+      .sidebar {
+        position: fixed;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        transform: translateX(-100%);
+      }
+      .sidebar.open {
+        transform: translateX(0);
+      }
+      .mobile-menu-toggle {
+        display: flex;
+      }
     }
   </style>
-  <script>
-    window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
-  </script>
-  <script defer src="/_vercel/insights/script.js"></script>
 </head>
-
 <body>
-  <div class="wrap">
-    <header>
-      <div class="eyebrow">Customer Experience</div>
-      <h1>Customer Query Segment Reports</h1>
-      <p>Monthly ticket analysis by query class, delivery partner, product &amp; batch.</p>
-    </header>
-    <div id="signedOut" style="display:none;">
-      <div class="signin-card">
-        <p>Sign in with your Google account to view the reports you've been granted access to.</p>
-        <a class="g-btn" id="signInBtn" href="#">
-          <svg viewBox="0 0 48 48">
-            <path fill="#FFC107"
-              d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.6 6.1 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.7-.4-3.5z" />
-            <path fill="#FF3D00"
-              d="M6.3 14.7l6.6 4.8C14.7 15.1 18.9 12 24 12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.6 6.1 29.6 4 24 4c-7.7 0-14.3 4.4-17.7 10.7z" />
-            <path fill="#4CAF50"
-              d="M24 44c5.5 0 10.5-2.1 14.3-5.6l-6.6-5.6C29.6 34.7 26.9 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.6 39.5 16.2 44 24 44z" />
-            <path fill="#1976D2"
-              d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.3-4.2 5.8l6.6 5.6C41.9 36.8 44 31.1 44 24c0-1.3-.1-2.7-.4-3.5z" />
-          </svg>
-          Sign in with Google
-        </a>
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo-container">
+        <h1 class="logo-title">Query Segment</h1>
+        <span class="logo-subtitle">Unified Reports</span>
       </div>
     </div>
-    <div id="signedIn" style="display:none;">
-      <div class="acct-row">
-        <span id="acctEmail"></span>
-        <a href="/dashboard.html" id="dashboardLink" style="color: var(--mcaff);">Unified Dashboard</a>
-        <a href="/admin.html" id="adminLink" style="display:none;">Admin</a>
-        <a href="/api/auth/logout">Sign out</a>
+
+    <div class="sidebar-scroll">
+      <!-- Brand Selection -->
+      <div class="section">
+        <span class="section-title">Brand Report</span>
+        <div class="brand-select-wrapper">
+          <select id="brandSelect" class="brand-select" onchange="onBrandChange(this.value)">
+            <!-- Populated via API -->
+          </select>
+        </div>
       </div>
-      <div class="toolbar">
-        <button class="refresh-btn" id="refreshBtn" type="button" title="Refreshes the last 30 days of the primary sheet only; older data and the KYC/small-tab sheets are not re-pulled.">&#8635; Refresh data now</button>
-        <span class="refresh-note" id="refreshNote">Auto-refreshes daily at 2:00 PM IST</span>
+
+      <!-- Time Granularity Selector -->
+      <div class="section" id="granularitySection" style="display: none;">
+        <span class="section-title">Time Resolution</span>
+        <div class="gran-toggle">
+          <button type="button" class="gran-btn active" id="granMonthly" onclick="setGranularity('monthly')">Monthly</button>
+          <button type="button" class="gran-btn" id="granWeekly" onclick="setGranularity('weekly')">Weekly</button>
+        </div>
       </div>
-      <div class="cards" id="cardsWrap"></div>
+
+      <!-- Dynamics Report Panels / Tabs -->
+      <div class="section">
+        <span class="section-title" id="panelsSectionTitle">Report Views</span>
+        <nav class="nav-list" id="navList">
+          <!-- Populated from iframe loaded tabs -->
+        </nav>
+      </div>
     </div>
-    <footer>
-      Figures are aggregated segment counts computed from the Master KYC Raw Dump workbooks.<br>
-      No raw ticket-level or customer PII data is included.
-    </footer>
-  </div>
+
+    <div class="sidebar-footer">
+      <div class="user-profile">
+        <span class="user-name" id="userName">Loading profile...</span>
+        <span class="user-role" id="userRole">Viewer</span>
+      </div>
+      <div class="footer-actions">
+        <a href="/admin.html" id="adminLink" style="display: none;">Admin Panel</a>
+        <a href="/api/auth/logout">Sign Out</a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content Area -->
+  <main class="main-content">
+    <div class="loading-overlay" id="loadingOverlay">
+      <div class="spinner"></div>
+      <div class="loading-text" id="loadingText">Fetching report data...</div>
+    </div>
+    
+    <iframe class="report-iframe" id="reportIframe" name="reportIframe"></iframe>
+  </main>
+
+  <!-- Mobile Toggle Button -->
+  <button class="mobile-menu-toggle" id="menuToggle" onclick="toggleMobileSidebar()">☰</button>
+
   <script>
-    (function () {
-      var CARD_META = {
-        mcaffeine: { cls: 'mcaff', color: 'var(--mcaff)', title: 'mCaffeine KYC', desc: 'Segment report across Delivery, Warehouse, Technical, Packaging, Product, plus NPS, CSAT and a Product &amp; Packaging drill-down.' },
-        hyphen: { cls: 'hyphen', color: 'var(--hyphen)', title: 'Hyphen KYC', desc: 'Segment report across Delivery, Warehouse, Technical, Packaging, Product, plus NPS, CSAT and a Product &amp; Packaging drill-down.' },
-        productkyc: { cls: 'pkyc', color: 'var(--pkyc)', title: 'Product Calling Feedback', desc: 'Product feedback analysis by category &mdash; comparison tables and customer feedback themes.' }
-      };
-      fetch('/api/auth/me').then(function (r) { return r.json(); }).then(function (d) {
-        if (!d.authenticated) {
-          document.getElementById('signedOut').style.display = '';
-          document.getElementById('signInBtn').href = '/api/auth/login?next=' + encodeURIComponent(location.pathname);
-          return;
-        }
-        document.getElementById('signedIn').style.display = '';
-        document.getElementById('acctEmail').textContent = d.name || d.email;
-        if (d.isAdmin) { document.getElementById('adminLink').style.display = ''; }
-        var wrap = document.getElementById('cardsWrap');
-        if (!d.cards || d.cards.length === 0) {
-          wrap.innerHTML = '<div class="empty-note">No reports have been shared with you yet. Contact your admin.</div>';
-          return;
-        }
-        wrap.innerHTML = d.cards.map(function (c) {
-          var m = CARD_META[c.key] || { cls: '', color: 'var(--text-muted)', title: c.label, desc: '' };
-          return '<a class="card ' + m.cls + '" href="/api/report/' + encodeURIComponent(c.key) + '">'
-            + '<h2><span class="dot" style="background:' + m.color + '"></span>' + m.title + '</h2>'
-            + '<p>' + m.desc + '</p>'
-            + '<span class="open">Open report <span class="arrow">&rarr;</span></span></a>';
+    var currentBrand = "";
+    var currentTabId = "";
+    var userCards = [];
+    var brandColors = {
+      mcaffeine: { accent: 'var(--mcaff)', bg: 'rgba(74, 58, 167, 0.08)', fg: 'var(--mcaff)' },
+      hyphen: { accent: 'var(--hyphen)', bg: 'rgba(25, 156, 92, 0.08)', fg: 'var(--hyphen)' },
+      productkyc: { accent: 'var(--pkyc)', bg: 'rgba(194, 116, 12, 0.08)', fg: 'var(--pkyc)' }
+    };
+
+    function toggleMobileSidebar() {
+      var sidebar = document.querySelector('.sidebar');
+      var toggle = document.getElementById('menuToggle');
+      sidebar.classList.toggle('open');
+      toggle.innerHTML = sidebar.classList.contains('open') ? '✕' : '☰';
+    }
+
+    // On Load Check Authentication
+    window.addEventListener('DOMContentLoaded', function() {
+      fetch('/api/auth/me')
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+          if (!d.authenticated) {
+            window.location.href = '/login.html?next=' + encodeURIComponent(window.location.pathname);
+            return;
+          }
+
+          document.getElementById('userName').textContent = d.name || d.email;
+          if (d.isAdmin) {
+            document.getElementById('userRole').textContent = 'Administrator';
+            document.getElementById('adminLink').style.display = 'inline';
+          }
+
+          userCards = d.cards || [];
+          if (userCards.length === 0) {
+            document.getElementById('loadingText').textContent = 'No reports shared with you yet. Contact your admin.';
+            return;
+          }
+
+          // Populate select list
+          var brandSelect = document.getElementById('brandSelect');
+          brandSelect.innerHTML = userCards.map(function(c) {
+            return '<option value="' + c.key + '">' + c.label + '</option>';
+          }).join('');
+
+          // Select first brand
+          onBrandChange(userCards[0].key);
+        })
+        .catch(function() {
+          window.location.href = '/login.html?next=' + encodeURIComponent(window.location.pathname);
+        });
+
+      // Hook iframe load event
+      var iframe = document.getElementById('reportIframe');
+      iframe.addEventListener('load', onIframeLoaded);
+    });
+
+    // Handle Brand Switch
+    function onBrandChange(brandKey) {
+      currentBrand = brandKey;
+      var config = brandColors[brandKey] || brandColors.mcaffeine;
+      
+      // Update Brand accent colors in UI
+      var root = document.documentElement;
+      root.style.setProperty('--brand-accent', config.accent);
+      root.style.setProperty('--active-bg', config.bg);
+      root.style.setProperty('--active-fg', config.fg);
+
+      // Hide/Show Granularity switcher (Only mcaffeine and hyphen have weekly data)
+      var hasWeekly = (brandKey === 'mcaffeine' || brandKey === 'hyphen');
+      document.getElementById('granularitySection').style.display = hasWeekly ? 'flex' : 'none';
+
+      // Load Report in iframe
+      var iframe = document.getElementById('reportIframe');
+      iframe.classList.remove('loaded');
+      document.getElementById('loadingOverlay').style.opacity = '1';
+      document.getElementById('loadingOverlay').style.visibility = 'visible';
+      document.getElementById('loadingText').textContent = 'Loading ' + brandKey + ' report...';
+      
+      iframe.src = '/api/report/' + encodeURIComponent(brandKey);
+    }
+
+    // Handles Iframe loaded event
+    function onIframeLoaded() {
+      var iframe = document.getElementById('reportIframe');
+      if (!iframe.src || iframe.src.indexOf('about:blank') !== -1) return;
+
+      var doc = iframe.contentDocument || iframe.contentWindow.document;
+      
+      // Inject CSS into iframe to hide header, home link, tabs and footer
+      var style = doc.createElement('style');
+      style.textContent = `
+        header.hero, nav.tab-nav, footer, .home-link { display: none !important; }
+        .wrap { max-width: 100% !important; padding: 0 !important; margin: 0 !important; }
+        body { padding: 8px 16px 40px !important; background: transparent !important; }
+        section { border-radius: 12px !important; box-shadow: none !important; border: 1px solid var(--border) !important; margin-bottom: 20px !important; }
+      `;
+      doc.head.appendChild(style);
+
+      // Extract tabs from iframe
+      var tabBtns = doc.querySelectorAll('.tab-nav .tab-btn');
+      var navList = document.getElementById('navList');
+      
+      if (tabBtns.length > 0) {
+        navList.innerHTML = Array.prototype.slice.call(tabBtns).map(function(btn) {
+          var id = btn.getAttribute('data-tab');
+          var label = btn.textContent.trim();
+          var isActive = btn.classList.contains('active');
+          if (isActive) currentTabId = id;
+          
+          return '<button class="nav-btn' + (isActive ? ' active' : '') + '" data-tab="' + id + '" onclick="selectTab(\'' + id + '\')">' 
+            + label + ' <span style="font-size: 10px; opacity: 0.6;">&rarr;</span></button>';
         }).join('');
-      }).catch(function () {
-        document.getElementById('signedOut').style.display = '';
-        document.getElementById('signInBtn').href = '/api/auth/login';
+      } else {
+        navList.innerHTML = '<span style="font-size:12px; color:var(--text-muted); padding-left:8px;">General View</span>';
+      }
+
+      // Sync active granularity
+      syncGranularityUI();
+
+      // Show iframe
+      iframe.classList.add('loaded');
+      document.getElementById('loadingOverlay').style.opacity = '0';
+      document.getElementById('loadingOverlay').style.visibility = 'hidden';
+
+      // Auto close mobile sidebar
+      document.querySelector('.sidebar').classList.remove('open');
+      document.getElementById('menuToggle').innerHTML = '☰';
+    }
+
+    // Switch tab inside iframe
+    function selectTab(tabId) {
+      currentTabId = tabId;
+      var iframe = document.getElementById('reportIframe');
+      var doc = iframe.contentDocument || iframe.contentWindow.document;
+
+      // Click the tab button inside the iframe
+      var innerBtn = doc.querySelector('.tab-nav .tab-btn[data-tab="' + tabId + '"]');
+      if (innerBtn) {
+        innerBtn.click();
+      }
+
+      // Update Active Navigation Button in Sidebar
+      var btns = document.querySelectorAll('#navList .nav-btn');
+      btns.forEach(function(b) {
+        b.classList.toggle('active', b.getAttribute('data-tab') === tabId);
       });
-    })();
-  </script>
-  <script>
-    (function () {
-      var btn = document.getElementById('refreshBtn');
-      var note = document.getElementById('refreshNote');
-      var defaultNote = note.textContent;
-      var pollTimer = null;
 
-      function setNote(text, cls) {
-        note.textContent = text;
-        note.className = 'refresh-note' + (cls ? ' ' + cls : '');
+      // Sync time granularity if weekly is selected and tab is switched
+      var activeGranBtn = document.querySelector('.gran-toggle .gran-btn.active');
+      if (activeGranBtn) {
+        var gran = activeGranBtn.getAttribute('id') === 'granWeekly' ? 'weekly' : 'monthly';
+        setGranularity(gran);
       }
-      function setBusy(busy) {
-        btn.disabled = busy;
-        btn.innerHTML = busy ? '<span class="spin">&#8635;</span> Refreshing&hellip;' : '&#8635; Refresh data now';
-      }
-      function stopPoll() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
+    }
 
-      function poll(startedAt) {
-        fetch('/api/refresh-status').then(function (r) { return r.json(); }).then(function (d) {
-          if (d.status === 'completed') {
-            stopPoll(); setBusy(false);
-            if (d.conclusion === 'success') { setNote('Data refreshed just now.', 'ok'); }
-            else { setNote('Refresh finished with an issue (' + (d.conclusion || 'unknown') + ').', 'err'); }
-            setTimeout(function () { setNote(defaultNote); }, 8000);
-          } else {
-            // still queued/in_progress
-            if (Date.now() - startedAt > 6 * 60 * 1000) {
-              stopPoll(); setBusy(false);
-              setNote('Still running in the background — check back shortly.', '');
-              setTimeout(function () { setNote(defaultNote); }, 8000);
-              return;
-            }
-            pollTimer = setTimeout(function () { poll(startedAt); }, 5000);
-          }
-        }).catch(function () {
-          pollTimer = setTimeout(function () { poll(startedAt); }, 8000);
-        });
+    // Set Time Granularity in Iframe
+    function setGranularity(mode) {
+      // Update UI active state
+      document.getElementById('granMonthly').classList.toggle('active', mode === 'monthly');
+      document.getElementById('granWeekly').classList.toggle('active', mode === 'weekly');
+
+      var iframe = document.getElementById('reportIframe');
+      if (!iframe || !iframe.contentWindow) return;
+
+      // Call report's native granularity switches
+      if (iframe.contentWindow.setGranularity) {
+        iframe.contentWindow.setGranularity(mode);
+      }
+      if (iframe.contentWindow.setMaGranularity) {
+        iframe.contentWindow.setMaGranularity(mode);
+      }
+    }
+
+    // Sync current granularity buttons to match iframe
+    function syncGranularityUI() {
+      var iframe = document.getElementById('reportIframe');
+      if (!iframe) return;
+      
+      var doc = iframe.contentDocument || iframe.contentWindow.document;
+      
+      // See if active class contains monthly/weekly controls
+      var activeGranBtn = doc.querySelector('.gran-toggle .gran-btn.active');
+      var activeMaGranBtn = doc.querySelector('.ma-gran-toggle .gran-btn.active');
+      
+      var isWeekly = false;
+      if (activeGranBtn) {
+        isWeekly = activeGranBtn.getAttribute('data-gran') === 'weekly';
+      } else if (activeMaGranBtn) {
+        isWeekly = activeMaGranBtn.getAttribute('data-magran') === 'weekly';
       }
 
-      btn.addEventListener('click', function () {
-        setBusy(true);
-        setNote('Requesting refresh…');
-        fetch('/api/refresh', { method: 'POST' }).then(function (r) { return r.json(); }).then(function (d) {
-          if (d.status === 'started') {
-            setNote('Refresh started — usually takes 2–4 minutes.');
-            poll(Date.now());
-          } else if (d.status === 'already_running') {
-            setNote('A refresh is already in progress…');
-            poll(Date.now());
-          } else if (d.status === 'cooldown') {
-            setBusy(false);
-            setNote(d.message, 'err');
-            setTimeout(function () { setNote(defaultNote); }, 6000);
-          } else {
-            setBusy(false);
-            setNote(d.message || 'Could not start refresh.', 'err');
-            setTimeout(function () { setNote(defaultNote); }, 6000);
-          }
-        }).catch(function () {
-          setBusy(false);
-          setNote('Network error — could not reach the refresh service.', 'err');
-          setTimeout(function () { setNote(defaultNote); }, 6000);
-        });
-      });
-    })();
+      document.getElementById('granMonthly').classList.toggle('active', !isWeekly);
+      document.getElementById('granWeekly').classList.toggle('active', isWeekly);
+    }
   </script>
 </body>
-
 </html>
