@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Leads - CRM-PEP{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Leads</h1>
+  <form method="post" action="{{ url_for('trigger_sync') }}" onsubmit="return confirm('Sync leads from Shiprocket now?');">
+    <button type="submit" class="secondary">Sync now</button>
+  </form>
+</div>
+
+<form method="get" class="filters">
+  <select name="source">
+    <option value="" {{ 'selected' if not filters.source }}>All sources</option>
+    <option value="ndr" {{ 'selected' if filters.source == 'ndr' }}>NDR</option>
+    <option value="rto" {{ 'selected' if filters.source == 'rto' }}>RTO</option>
+  </select>
+  <select name="lead_status">
+    <option value="">All statuses</option>
+    {% for code, label in LEAD_STATUS_LABELS.items() %}
+    <option value="{{ code }}" {{ 'selected' if filters.lead_status == code }}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <select name="assigned">
+    <option value="all" {{ 'selected' if filters.assigned == 'all' }}>Everyone's leads</option>
+    <option value="me" {{ 'selected' if filters.assigned == 'me' }}>Assigned to me</option>
+    {% for member in team %}
+    <option value="{{ member.id }}" {{ 'selected' if filters.assigned == member.id }}>{{ member.email }}</option>
+    {% endfor %}
+  </select>
+  <input type="text" name="search" placeholder="Search AWB / order id / phone" value="{{ filters.search }}">
+  <button type="submit">Filter</button>
+</form>
+
+<table class="leads-table">
+  <thead>
+    <tr>
+      <th>Source</th>
+      <th>AWB</th>
+      <th>Order</th>
+      <th>Customer</th>
+      <th>Phone</th>
+      <th>Status</th>
+      <th>Lead status</th>
+      <th>Assigned</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for lead in leads %}
+    <tr onclick="window.location='{{ url_for('lead_detail', lead_id=lead.id) }}'">
+      <td><span class="badge badge-{{ lead.source }}">{{ lead.source|upper }}</span></td>
+      <td>{{ lead.awb }}</td>
+      <td>{{ lead.channel_order_id or lead.shiprocket_order_id }}</td>
+      <td>{{ lead.customer_name or '-' }}</td>
+      <td>{{ lead.customer_phone or '-' }}</td>
+      <td>{{ lead.status or '-' }}</td>
+      <td>{{ LEAD_STATUS_LABELS.get(lead.lead_status, lead.lead_status) }}</td>
+      <td>{{ team_by_id.get(lead.assigned_to, 'Unassigned') if lead.assigned_to else 'Unassigned' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8" class="muted">No leads match these filters yet. Try "Sync now" to pull from Shiprocket.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
