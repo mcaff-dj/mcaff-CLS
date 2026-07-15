@@ -528,7 +528,15 @@ def build_prod_pkg_panel(ctx):
         batch_set.setdefault(ci_key(_norm(ctx.cell(r, ctx.col["batch"])), batch_cache), True)
     SKUS, PRODS, CLASSES, CATS, BATCHES = list(sku_set), list(prod_set), list(cls_set), list(cat_set), list(batch_set)
     LM = n - 1
-    lm_sales = ctx.sales_arr[LM]
+
+    # "Pro Sales" (raw sheet column, never named/read anywhere else in the pipeline) is a
+    # per-SKU-per-month sales figure - unlike "Total Sales M" (company-wide, one value per
+    # month), this varies by SKU. The panel is titled "...wrt Product Sales" but was
+    # dividing by the company-wide Total Sales M the whole time; this table's percentages
+    # must instead divide each SKU's complaint count by THAT SKU's own Pro Sales for the
+    # same month. Same duplicated-per-row/majority-vote shape as Total Sales M (see
+    # get_sales_m_by_month), just keyed by (SKU, month) instead of month alone.
+    prosales_counts = {}
 
     combo_tot, combo_mc, combo_k2i = {}, {}, {}
     combo_list = []
@@ -557,10 +565,21 @@ def build_prod_pkg_panel(ctx):
             combo_list.append({"sku": si, "prod": pi, "cls": li, "cat": ci, "batch": bi})
         combo_tot[ck] += 1
         combo_mc[ck][mi] += 1
+        ps = str(ctx.cell(r, ctx.col["prosales"])).strip()
+        if ps:
+            pk_ = (si, mi)
+            prosales_counts.setdefault(pk_, {})
+            prosales_counts[pk_][ps] = prosales_counts[pk_].get(ps, 0) + 1
 
-    def lmk(arr):
+    PROSALES = [[0.0] * n for _ in range(len(SKUS))]
+    for (si, mi), counts in prosales_counts.items():
+        best = max(counts.items(), key=lambda kv: kv[1])
+        PROSALES[si][mi] = float(str(best[0]).replace(",", ""))
+
+    def lmk(arr, sku_idx):
         c = arr[LM]
-        p = (c / lm_sales) if lm_sales > 0 else 0
+        lm_ps = PROSALES[sku_idx][LM]
+        p = (c / lm_ps) if lm_ps > 0 else 0
         return {"cnt": c, "pct": p}
 
     MAX_P, MAX_PROD, MAX_CLS, MAX_CAT, MAX_BAT = 60, 10, 5, 15, 20
@@ -595,28 +614,29 @@ def build_prod_pkg_panel(ctx):
     # meaningful within this run's own SKUS/PRODS/etc list, built by first-encounter order
     # while scanning rows - the actual name string is the only value guaranteed to mean the
     # same real-world thing in both this port and the PowerShell original.
-    top_sku = sorted(sku_tree.keys(), key=lambda sk: (lmk(sku_tree[sk]["mc"])["cnt"], lmk(sku_tree[sk]["mc"])["pct"], SKUS[int(sk)]), reverse=True)[:MAX_P]
+    top_sku = sorted(sku_tree.keys(), key=lambda sk: (lmk(sku_tree[sk]["mc"], int(sk))["cnt"], lmk(sku_tree[sk]["mc"], int(sk))["pct"], SKUS[int(sk)]), reverse=True)[:MAX_P]
     parents_out, prod_groups, cls_groups, cat_groups, rows_out, row_cat_idx = [], [], [], [], [], []
     for sk in top_sku:
         sn = sku_tree[sk]
+        sk_idx = int(sk)
         pidx = len(parents_out)
         parents_out.append({"sku": sn["sku"]})
-        tp = sorted(sn["products"].keys(), key=lambda pk: (lmk(sn["products"][pk]["mc"])["cnt"], lmk(sn["products"][pk]["mc"])["pct"], PRODS[int(pk)]), reverse=True)[:MAX_PROD]
+        tp = sorted(sn["products"].keys(), key=lambda pk: (lmk(sn["products"][pk]["mc"], sk_idx)["cnt"], lmk(sn["products"][pk]["mc"], sk_idx)["pct"], PRODS[int(pk)]), reverse=True)[:MAX_PROD]
         for pk in tp:
             pn = sn["products"][pk]
             pgi = len(prod_groups)
-            prod_groups.append({"parentIdx": pidx, "prod": pn["prod"]})
-            tc = sorted(pn["classes"].keys(), key=lambda lk: (lmk(pn["classes"][lk]["mc"])["cnt"], lmk(pn["classes"][lk]["mc"])["pct"], CLASSES[int(lk)]), reverse=True)[:MAX_CLS]
+            prod_groups.append({"parentIdx": pidx, "prod": pn["prod"], "sku": sk_idx})
+            tc = sorted(pn["classes"].keys(), key=lambda lk: (lmk(pn["classes"][lk]["mc"], sk_idx)["cnt"], lmk(pn["classes"][lk]["mc"], sk_idx)["pct"], CLASSES[int(lk)]), reverse=True)[:MAX_CLS]
             for lk in tc:
                 ln = pn["classes"][lk]
                 cgi = len(cls_groups)
-                cls_groups.append({"productGroupIdx": pgi, "cls": ln["cls"]})
-                tcat = sorted(ln["cats"].keys(), key=lambda ck: (lmk(ln["cats"][ck]["mc"])["cnt"], lmk(ln["cats"][ck]["mc"])["pct"], CATS[int(ck)]), reverse=True)[:MAX_CAT]
+                cls_groups.append({"productGroupIdx": pgi, "cls": ln["cls"], "sku": sk_idx})
+                tcat = sorted(ln["cats"].keys(), key=lambda ck: (lmk(ln["cats"][ck]["mc"], sk_idx)["cnt"], lmk(ln["cats"][ck]["mc"], sk_idx)["pct"], CATS[int(ck)]), reverse=True)[:MAX_CAT]
                 for catk in tcat:
                     cn = ln["cats"][catk]
                     catgi = len(cat_groups)
-                    cat_groups.append({"classGroupIdx": cgi, "cat": cn["cat"]})
-                    tb = sorted(cn["batches"], key=lambda b: (lmk(b["mc"])["cnt"], lmk(b["mc"])["pct"], BATCHES[b["combo"]["batch"]]), reverse=True)[:MAX_BAT]
+                    cat_groups.append({"classGroupIdx": cgi, "cat": cn["cat"], "sku": sk_idx})
+                    tb = sorted(cn["batches"], key=lambda b: (lmk(b["mc"], sk_idx)["cnt"], lmk(b["mc"], sk_idx)["pct"], BATCHES[b["combo"]["batch"]]), reverse=True)[:MAX_BAT]
                     for b in tb:
                         rows_out.append(b["combo"])
                         row_cat_idx.append(catgi)
@@ -627,12 +647,13 @@ def build_prod_pkg_panel(ctx):
     tickets_json = "[" + ",".join(tickets) + "]"
     rows_json = "[" + ",".join(f"[{r['sku']},{r['prod']},{r['cls']},{r['cat']},{r['batch']}]" for r in rows_out) + "]"
     parents_json = "[" + ",".join(f"[{p['sku']}]" for p in parents_out) + "]"
-    prod_g_json = "[" + ",".join(f"[{g['parentIdx']},{g['prod']}]" for g in prod_groups) + "]"
-    cls_g_json = "[" + ",".join(f"[{g['productGroupIdx']},{g['cls']}]" for g in cls_groups) + "]"
-    cat_g_json = "[" + ",".join(f"[{g['classGroupIdx']},{g['cat']}]" for g in cat_groups) + "]"
+    prod_g_json = "[" + ",".join(f"[{g['parentIdx']},{g['prod']},{g['sku']}]" for g in prod_groups) + "]"
+    cls_g_json = "[" + ",".join(f"[{g['productGroupIdx']},{g['cls']},{g['sku']}]" for g in cls_groups) + "]"
+    cat_g_json = "[" + ",".join(f"[{g['classGroupIdx']},{g['cat']},{g['sku']}]" for g in cat_groups) + "]"
     row_cat_json = "[" + ",".join(str(x) for x in row_cat_idx) + "]"
     skus_json, prods_json, classes_json, cats_json, batches_json, months_json = aj(SKUS), aj(PRODS), aj(CLASSES), aj(CATS), aj(BATCHES), aj(months)
     sales_json = "[" + ",".join(str(v) for v in ctx.sales_arr) + "]"
+    prosales_json = "[" + ",".join("[" + ",".join(str(v) for v in row) + "]" for row in PROSALES) + "]"
 
     pg_by_p = {}
     for i, g in enumerate(prod_groups):
@@ -719,7 +740,7 @@ def build_prod_pkg_panel(ctx):
     js = """
 <script>
 (function(){
-  var TICKETS=__TICKETS_JSON__,SKUS=__SKUS_JSON__,PRODS=__PRODS_JSON__,CLASSES=__CLASSES_JSON__,CATS=__CATS_JSON__,BATCHES=__BATCHES_JSON__,MONTHS=__MONTHS_JSON__,SALES=__SALES_JSON__;
+  var TICKETS=__TICKETS_JSON__,SKUS=__SKUS_JSON__,PRODS=__PRODS_JSON__,CLASSES=__CLASSES_JSON__,CATS=__CATS_JSON__,BATCHES=__BATCHES_JSON__,MONTHS=__MONTHS_JSON__,SALES=__SALES_JSON__,PROSALES=__PROSALES_JSON__;
   var ROWS=__ROWS_JSON__,ROW_CATGROUP=__ROW_CAT_JSON__,PARENTS=__PARENTS_JSON__,PRODUCT_GROUPS=__PROD_G_JSON__,CLASS_GROUPS=__CLS_G_JSON__,CATEGORY_GROUPS=__CAT_G_JSON__,N=MONTHS.length;
   var e1={},e2={},e3={},e4={},EB={1:e1,2:e2,3:e3,4:e4};
   function fmt(n){return n.toLocaleString('en-IN');}
@@ -731,7 +752,7 @@ def build_prod_pkg_panel(ctx):
       var k=sku+'|'+pr+'|'+cl+'|'+ca+'|'+ba; var ri=idx[k]; if(ri===undefined)continue; c[ri][mo]++; } return c; }
   function sm(a,b){var o=new Array(a.length);for(var i=0;i<a.length;i++){o[i]=a[i]+b[i];}return o;}
   function has(a){for(var i=0;i<a.length;i++){if(a[i]>0)return true;}return false;}
-  function wc(pfx,idx,arr){ for(var mi=0;mi<N;mi++){ var v=arr[mi],s=SALES[mi],p=s>0?Math.round(v/s*100000)/1000:0; var cc=document.getElementById(pfx+'-'+idx+'-'+mi+'-cnt'),pc=document.getElementById(pfx+'-'+idx+'-'+mi+'-pct'); if(cc)cc.textContent=v>0?fmt(v):'-'; if(pc)pc.textContent=v>0?(p+'%'):'-'; } }
+  function wc(pfx,idx,arr,skuIdx){ var psRow=(skuIdx!=null&&PROSALES[skuIdx])?PROSALES[skuIdx]:null; for(var mi=0;mi<N;mi++){ var v=arr[mi],s=psRow?psRow[mi]:0,p=s>0?Math.round(v/s*100000)/1000:0; var cc=document.getElementById(pfx+'-'+idx+'-'+mi+'-cnt'),pc=document.getElementById(pfx+'-'+idx+'-'+mi+'-pct'); if(cc)cc.textContent=v>0?fmt(v):'-'; if(pc)pc.textContent=v>0?(p+'%'):'-'; } }
   var DIMS=['month','product','sku','cls','category'],SIDS={month:'ppk-filter-month',product:'ppk-filter-product',sku:'ppk-filter-sku',cls:'ppk-filter-class',category:'ppk-filter-category'},TP={month:0,sku:1,product:2,cls:3,category:4};
   function rf(){ var g=function(id){var e=document.getElementById(id);return e?e.value:'';}; return {month:g(SIDS.month)?MONTHS.indexOf(g(SIDS.month)):null,product:g(SIDS.product)?PRODS.indexOf(g(SIDS.product)):null,sku:g(SIDS.sku)?SKUS.indexOf(g(SIDS.sku)):null,cls:g(SIDS.cls)?CLASSES.indexOf(g(SIDS.cls)):null,category:g(SIDS.category)?CATS.indexOf(g(SIDS.category)):null}; }
   function tmatch(t,f,ex){ for(var d=0;d<DIMS.length;d++){var dim=DIMS[d]; if(dim===ex)continue; var w=f[dim]; if(w===null)continue; if(t[TP[dim]]!==w)return false;} return true; }
@@ -744,18 +765,18 @@ def build_prod_pkg_panel(ctx):
     if(!curStillValid){ input.value=''; input.dataset.confirmed=''; }
     ssRefresh(input,list);
   }); }
-  function sk(a){var LM=N-1,c=a[LM],p=SALES[LM]>0?c/SALES[LM]:0;return {c:c,p:p};}
-  function cmp(a,b){var ka=sk(a),kb=sk(b); if(kb.c!==ka.c)return kb.c-ka.c; return kb.p-ka.p;}
+  function sk(a,skuIdx){var LM=N-1,c=a[LM],ps=(skuIdx!=null&&PROSALES[skuIdx])?PROSALES[skuIdx][LM]:0,p=ps>0?c/ps:0;return {c:c,p:p};}
+  function cmp(a,b,skuA,skuB){var ka=sk(a,skuA),kb=sk(b,skuB); if(kb.c!==ka.c)return kb.c-ka.c; return kb.p-ka.p;}
   function render(){ try{ var f=rf(); upd(f); f=rf(); var lc=leafCounts(f);
       var catgC=CATEGORY_GROUPS.map(function(){return new Array(N).fill(0);});
-      for(var ri=0;ri<ROWS.length;ri++){var ci=ROW_CATGROUP[ri]; if(ci!==undefined&&catgC[ci]){catgC[ci]=sm(catgC[ci],lc[ri]);} wc('ppk',ri,lc[ri]);}
+      for(var ri=0;ri<ROWS.length;ri++){var ci=ROW_CATGROUP[ri]; if(ci!==undefined&&catgC[ci]){catgC[ci]=sm(catgC[ci],lc[ri]);} wc('ppk',ri,lc[ri],ROWS[ri][0]);}
       var clsC=CLASS_GROUPS.map(function(){return new Array(N).fill(0);});
-      for(var cg=0;cg<CATEGORY_GROUPS.length;cg++){var k=CATEGORY_GROUPS[cg][0]; if(clsC[k]){clsC[k]=sm(clsC[k],catgC[cg]);} wc('ppk-catg',cg,catgC[cg]);}
+      for(var cg=0;cg<CATEGORY_GROUPS.length;cg++){var k=CATEGORY_GROUPS[cg][0]; if(clsC[k]){clsC[k]=sm(clsC[k],catgC[cg]);} wc('ppk-catg',cg,catgC[cg],CATEGORY_GROUPS[cg][2]);}
       var pgC=PRODUCT_GROUPS.map(function(){return new Array(N).fill(0);});
-      for(var c2=0;c2<CLASS_GROUPS.length;c2++){var k2=CLASS_GROUPS[c2][0]; if(pgC[k2]){pgC[k2]=sm(pgC[k2],clsC[c2]);} wc('ppk-cg',c2,clsC[c2]);}
+      for(var c2=0;c2<CLASS_GROUPS.length;c2++){var k2=CLASS_GROUPS[c2][0]; if(pgC[k2]){pgC[k2]=sm(pgC[k2],clsC[c2]);} wc('ppk-cg',c2,clsC[c2],CLASS_GROUPS[c2][2]);}
       var pC=PARENTS.map(function(){return new Array(N).fill(0);});
-      for(var p2=0;p2<PRODUCT_GROUPS.length;p2++){var k3=PRODUCT_GROUPS[p2][0]; if(pC[k3]){pC[k3]=sm(pC[k3],pgC[p2]);} wc('ppk-pg',p2,pgC[p2]);}
-      for(var pi=0;pi<PARENTS.length;pi++){wc('ppk-p',pi,pC[pi]);}
+      for(var p2=0;p2<PRODUCT_GROUPS.length;p2++){var k3=PRODUCT_GROUPS[p2][0]; if(pC[k3]){pC[k3]=sm(pC[k3],pgC[p2]);} wc('ppk-pg',p2,pgC[p2],PRODUCT_GROUPS[p2][2]);}
+      for(var pi=0;pi<PARENTS.length;pi++){wc('ppk-p',pi,pC[pi],PARENTS[pi][0]);}
       var withData=0;
       for(var p3=0;p3<PARENTS.length;p3++){var hd=has(pC[p3]),el=document.getElementById('ppk-parent-'+p3); if(el)el.style.display=hd?'':'none'; if(hd)withData++;}
       for(var pg3=0;pg3<PRODUCT_GROUPS.length;pg3++){var hd2=has(pgC[pg3]),par=PRODUCT_GROUPS[pg3][0],el2=document.getElementById('ppk-pg-'+pg3); if(el2)el2.style.display=(!!e1[par]&&hd2)?'':'none';}
@@ -763,16 +784,16 @@ def build_prod_pkg_panel(ctx):
       for(var ca3=0;ca3<CATEGORY_GROUPS.length;ca3++){var hd4=has(catgC[ca3]),par3=CATEGORY_GROUPS[ca3][0],el4=document.getElementById('ppk-catg-'+ca3); if(el4)el4.style.display=(!!e3[par3]&&hd4)?'':'none';}
       for(var r4=0;r4<ROWS.length;r4++){var hd5=has(lc[r4]),par4=ROW_CATGROUP[r4],el5=document.getElementById('ppk-row-'+r4); if(el5)el5.style.display=(!!e4[par4]&&hd5)?'':'none';}
       var tb=document.querySelector('#ppk-pivot-table tbody');
-      if(tb){ var po=PARENTS.map(function(_,i){return i;}); po.sort(function(a,b){return cmp(pC[a],pC[b]);});
+      if(tb){ var po=PARENTS.map(function(_,i){return i;}); po.sort(function(a,b){return cmp(pC[a],pC[b],PARENTS[a][0],PARENTS[b][0]);});
         var pgBy={};PRODUCT_GROUPS.forEach(function(x,i){var k=x[0];(pgBy[k]=pgBy[k]||[]).push(i);});
         var cgBy={};CLASS_GROUPS.forEach(function(x,i){var k=x[0];(cgBy[k]=cgBy[k]||[]).push(i);});
         var caBy={};CATEGORY_GROUPS.forEach(function(x,i){var k=x[0];(caBy[k]=caBy[k]||[]).push(i);});
         var rBy={};ROWS.forEach(function(_,i){var k=ROW_CATGROUP[i];(rBy[k]=rBy[k]||[]).push(i);});
-        po.forEach(function(pi){ var pe=document.getElementById('ppk-parent-'+pi); if(pe)tb.appendChild(pe);
-          (pgBy[pi]||[]).slice().sort(function(a,b){return cmp(pgC[a],pgC[b]);}).forEach(function(pgi){ var pge=document.getElementById('ppk-pg-'+pgi); if(pge)tb.appendChild(pge);
-            (cgBy[pgi]||[]).slice().sort(function(a,b){return cmp(clsC[a],clsC[b]);}).forEach(function(cgi){ var cge=document.getElementById('ppk-cg-'+cgi); if(cge)tb.appendChild(cge);
-              (caBy[cgi]||[]).slice().sort(function(a,b){return cmp(catgC[a],catgC[b]);}).forEach(function(cai){ var cae=document.getElementById('ppk-catg-'+cai); if(cae)tb.appendChild(cae);
-                (rBy[cai]||[]).slice().sort(function(a,b){return cmp(lc[a],lc[b]);}).forEach(function(ri){ var re=document.getElementById('ppk-row-'+ri); if(re)tb.appendChild(re); }); }); }); }); }); }
+        po.forEach(function(pi){ var pe=document.getElementById('ppk-parent-'+pi); if(pe)tb.appendChild(pe); var pSku=PARENTS[pi][0];
+          (pgBy[pi]||[]).slice().sort(function(a,b){return cmp(pgC[a],pgC[b],pSku,pSku);}).forEach(function(pgi){ var pge=document.getElementById('ppk-pg-'+pgi); if(pge)tb.appendChild(pge); var pgSku=PRODUCT_GROUPS[pgi][2];
+            (cgBy[pgi]||[]).slice().sort(function(a,b){return cmp(clsC[a],clsC[b],pgSku,pgSku);}).forEach(function(cgi){ var cge=document.getElementById('ppk-cg-'+cgi); if(cge)tb.appendChild(cge); var cgSku=CLASS_GROUPS[cgi][2];
+              (caBy[cgi]||[]).slice().sort(function(a,b){return cmp(catgC[a],catgC[b],cgSku,cgSku);}).forEach(function(cai){ var cae=document.getElementById('ppk-catg-'+cai); if(cae)tb.appendChild(cae); var caSku=CATEGORY_GROUPS[cai][2];
+                (rBy[cai]||[]).slice().sort(function(a,b){return cmp(lc[a],lc[b],caSku,caSku);}).forEach(function(ri){ var re=document.getElementById('ppk-row-'+ri); if(re)tb.appendChild(re); }); }); }); }); }); }
       var note=document.getElementById('ppk-filter-note'); if(note){note.textContent=withData+' of '+PARENTS.length+' SKUs have complaints for the selected filters, sorted by '+MONTHS[N-1]+' complaints. Expand SKU → Product → Query Class → Query Category to drill down.'; note.style.color='';}
     }catch(e){ var n2=document.getElementById('ppk-filter-note'); if(n2){n2.textContent='Filter error: '+e.message;n2.style.color='var(--s6)';} if(window.console)console.error('ProdPkg error',e); } }
   window.onProdPkgFilterChange=render;
@@ -798,6 +819,7 @@ def build_prod_pkg_panel(ctx):
             .replace("__PRODS_JSON__", prods_json).replace("__CLASSES_JSON__", classes_json)
             .replace("__CATS_JSON__", cats_json).replace("__BATCHES_JSON__", batches_json)
             .replace("__MONTHS_JSON__", months_json).replace("__SALES_JSON__", sales_json)
+            .replace("__PROSALES_JSON__", prosales_json)
             .replace("__ROWS_JSON__", rows_json).replace("__ROW_CAT_JSON__", row_cat_json)
             .replace("__PARENTS_JSON__", parents_json).replace("__PROD_G_JSON__", prod_g_json)
             .replace("__CLS_G_JSON__", cls_g_json).replace("__CAT_G_JSON__", cat_g_json))
@@ -830,24 +852,26 @@ def build_prod_pkg_panel(ctx):
             top_combo_val, top_key = cval, ck
     if top_key and top_combo_val > 0:
         si, tpi, tli, tci, tbi = (int(x) for x in top_key.split("|"))
-        pct = round1(top_combo_val / lm_sales * 100) if lm_sales > 0 else 0
+        combo_lm_ps = PROSALES[si][LM]
+        pct = round1(top_combo_val / combo_lm_ps * 100) if combo_lm_ps > 0 else 0
         from gen_insights import insight_item
         ppk_items.append(insight_item("watch", f"Sharpest single pain point in {pretty_month(months[LM])}: <b>{h_enc(SKUS[si])}</b> / {h_enc(PRODS[tpi])} "
-                                                 f"&mdash; {h_enc(CLASSES[tli])} &rarr; {h_enc(CATS[tci])} (batch {h_enc(BATCHES[tbi])}), {n0(top_combo_val)} tickets ({fnum(pct)}% of last month's sales)."))
+                                                 f"&mdash; {h_enc(CLASSES[tli])} &rarr; {h_enc(CATS[tci])} (batch {h_enc(BATCHES[tbi])}), {n0(top_combo_val)} tickets ({fnum(pct)}% of that SKU's sales last month)."))
     if top_sku:
         ts_idx = int(top_sku[0])
-        ts_val = lmk(sku_tree[top_sku[0]]["mc"])["cnt"]
+        ts_val = lmk(sku_tree[top_sku[0]]["mc"], ts_idx)["cnt"]
         if ts_val > 0:
-            ts_pct = round1(ts_val / lm_sales * 100) if lm_sales > 0 else 0
+            ts_lm_ps = PROSALES[ts_idx][LM]
+            ts_pct = round1(ts_val / ts_lm_ps * 100) if ts_lm_ps > 0 else 0
             from gen_insights import insight_item
             ppk_items.append(insight_item("info", f"SKU with the most product/packaging complaints overall in {pretty_month(months[LM])}: "
-                                                     f"<b>{h_enc(SKUS[ts_idx])}</b> &mdash; {n0(ts_val)} tickets ({fnum(ts_pct)}% of last month's sales)."))
+                                                     f"<b>{h_enc(SKUS[ts_idx])}</b> &mdash; {n0(ts_val)} tickets ({fnum(ts_pct)}% of that SKU's sales last month)."))
     ppk_insights = build_insights_card("Insights &mdash; Product &amp; Packaging", ppk_items)
 
     return f"""  <div class="tab-panel" id="panel-prodpkg">
     <section>
       <h2>Product Packaging and Operational Complaints wrt Product Sales</h2>
-      <p class="desc">Combines "Product" and "Packaging and Operational" tickets by SKU &rarr; Product &rarr; Query Class &rarr; Query Category &rarr; Batch. Click the + at each level to drill down; percent = complaints &divide; that month's total order volume.</p>
+      <p class="desc">Combines "Product" and "Packaging and Operational" tickets by SKU &rarr; Product &rarr; Query Class &rarr; Query Category &rarr; Batch. Click the + at each level to drill down; percent = complaints &divide; that SKU's own product sales that month (not the company-wide sales figure used elsewhere in this report).</p>
       {raw_download_link(ctx, "prodpkg")}
       {filter_html}
       <div class='pivot-wrap'><div class='pivot-title'>Product Packaging and Operational Complaints wrt Product Sales</div>{''.join(t)}</div>
