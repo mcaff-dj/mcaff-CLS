@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const { getSession } = require('../_lib/session');
-const { CARD_KEYS, logAccess } = require('../_lib/db');
+const { CARD_KEYS, logEvent } = require('../_lib/db');
 
 const RAW_CARD_KEYS = CARD_KEYS.filter((k) => k !== 'productkyc');
 const VALID_TABS = new Set(['overview', 'delivery', 'warehouse', 'technical', 'packaging', 'product', 'suggestion', 'prodpkg']);
@@ -39,7 +39,7 @@ module.exports = async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.status(200).send(csv);
     const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
-    logAccess(session.uid, session.email, card, ip).catch(() => {});
+    logEvent(session.uid, session.email, card, 'raw_download', tab, ip).catch(() => {});
   } catch (e) {
     res.status(404).send('Raw data not available for this tab yet.');
   }

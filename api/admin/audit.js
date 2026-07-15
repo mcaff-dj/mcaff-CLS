@@ -9,6 +9,6 @@ module.exports = async (req, res) => {
     return;
   }
   await ensureSchema();
-  const { rows } = await sql`SELECT email, card_key, accessed_at, ip FROM audit_log ORDER BY accessed_at DESC LIMIT 200`;
-  res.status(200).json({ entries: rows.map((r) => ({ ...r, cardLabel: CARD_LABELS[r.card_key] || r.card_key })) });
+  const { rows } = await sql`SELECT email, card_key, action, detail, accessed_at, ip FROM audit_log ORDER BY accessed_at DESC LIMIT 200`;
+  res.status(200).json({ entries: rows.map((r) => ({ ...r, cardLabel: r.card_key ? (CARD_LABELS[r.card_key] || r.card_key) : '' })) });
 };

@@ -89,7 +89,7 @@
     <section>
       <h2>Recent access (last 200)</h2>
       <table>
-        <thead><tr><th>Email</th><th>Report</th><th>When</th><th>IP</th></tr></thead>
+        <thead><tr><th>Email</th><th>Action</th><th>Report</th><th>Detail</th><th>When</th><th>IP</th></tr></thead>
         <tbody id="audit-body"></tbody>
       </table>
     </section>
@@ -156,11 +156,13 @@
       });
     }
 
+    var ACTION_LABELS = { view: 'View', login: 'Login', csv_export: 'CSV export', raw_download: 'Raw download' };
     function loadAudit(){
       fetch('/api/admin/audit').then(function(r){ return r.json(); }).then(function(d){
         var body = document.getElementById('audit-body');
         body.innerHTML = (d.entries || []).map(function(e){
-          return '<tr><td>'+esc(e.email)+'</td><td>'+esc(e.cardLabel)+'</td><td>'+esc(new Date(e.accessed_at).toLocaleString())+'</td><td>'+esc(e.ip||'')+'</td></tr>';
+          var action = ACTION_LABELS[e.action] || e.action || 'View';
+          return '<tr><td>'+esc(e.email)+'</td><td>'+esc(action)+'</td><td>'+esc(e.cardLabel)+'</td><td>'+esc(e.detail||'')+'</td><td>'+esc(new Date(e.accessed_at).toLocaleString())+'</td><td>'+esc(e.ip||'')+'</td></tr>';
         }).join('');
       });
     }

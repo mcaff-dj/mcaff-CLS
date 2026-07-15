@@ -970,6 +970,7 @@ def assemble_report(ctx, here_dir):
 """
 
     return f"""<title>{h_enc(ctx.b['title'])} Customer Query &mdash; Segment Report</title>
+<script>window.REPORT_CARD = '{j_enc(ctx.b['brand'])}';</script>
 {head}
 <div class="wrap">
   <header class="hero">

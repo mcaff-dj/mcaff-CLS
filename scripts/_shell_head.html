@@ -410,6 +410,16 @@
     var titleText = titleEl ? (titleEl.querySelector('.pivot-title-text') || titleEl).textContent.trim() : 'table';
     var name = titleText.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,60) || 'table';
     downloadCSV(name + '.csv', gridToCSV(tableToGrid(table)));
+    try {
+      var panel = btn.closest('.tab-panel');
+      var tabId = panel ? panel.id.replace(/^panel-/,'') : '';
+      fetch('/api/log-export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ card: window.REPORT_CARD || '', tab: tabId, table: titleText }),
+        keepalive: true
+      });
+    } catch (e) { /* logging must never block or break the export itself */ }
   };
 
   function injectButtons(){

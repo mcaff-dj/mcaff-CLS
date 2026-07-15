@@ -48,6 +48,13 @@ async function ensureSchema() {
       ip TEXT
     )
   `;
+  // card_key was NOT NULL - login events aren't tied to a report, so it needs to allow
+  // NULL. action/detail distinguish what actually happened (view / login / csv_export /
+  // raw_download) since previously every row was implicitly a "view". Both ALTERs are
+  // idempotent - safe to run on every cold start alongside the CREATE TABLE above.
+  await sql`ALTER TABLE audit_log ALTER COLUMN card_key DROP NOT NULL`;
+  await sql`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'view'`;
+  await sql`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS detail TEXT`;
   schemaReady = true;
 }
 
@@ -94,9 +101,15 @@ async function bootstrapAdminIfNeeded(email, name) {
   return user;
 }
 
-async function logAccess(userId, email, cardKey, ip) {
+// action: 'view' | 'login' | 'csv_export' | 'raw_download'. detail is free text (e.g. the
+// tab/table that was exported) - null where there's nothing more specific to record.
+async function logEvent(userId, email, cardKey, action, detail, ip) {
   await ensureSchema();
-  await sql`INSERT INTO audit_log (user_id, email, card_key, ip) VALUES (${userId}, ${email}, ${cardKey}, ${ip})`;
+  await sql`INSERT INTO audit_log (user_id, email, card_key, action, detail, ip) VALUES (${userId}, ${email}, ${cardKey}, ${action}, ${detail}, ${ip})`;
 }
 
-module.exports = { sql, ensureSchema, CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, bootstrapAdminIfNeeded, logAccess };
+async function logAccess(userId, email, cardKey, ip) {
+  return logEvent(userId, email, cardKey, 'view', null, ip);
+}
+
+module.exports = { sql, ensureSchema, CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, bootstrapAdminIfNeeded, logAccess, logEvent };

@@ -1,7 +1,7 @@
 // Handles Google's OAuth redirect: exchanges the code, verifies the ID token, checks
 // whether this email has been granted access (or matches ADMIN_EMAILS for bootstrap),
 // and issues a session cookie. No self-serve signup - unrecognized emails are rejected.
-const { getUserByEmail, getUserPermissions, bootstrapAdminIfNeeded } = require('../_lib/db');
+const { getUserByEmail, getUserPermissions, bootstrapAdminIfNeeded, logEvent } = require('../_lib/db');
 const { setSessionCookie } = require('../_lib/session');
 
 module.exports = async (req, res) => {
@@ -73,6 +73,9 @@ module.exports = async (req, res) => {
       isAdmin: !!user.is_admin,
       perms: permissions,
     });
+
+    const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
+    logEvent(user.id, user.email, null, 'login', null, ip).catch(() => {});
 
     let next = '/';
     try {
