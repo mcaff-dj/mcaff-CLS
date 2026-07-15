@@ -3,9 +3,6 @@
   "private": true,
   "version": "1.0.0",
   "description": "Static customer-query segment reports + access-gated report serving.",
-  "scripts": {
-    "dev": "node server.js"
-  },
   "dependencies": {
     "@vercel/postgres": "^0.10.0"
   }
