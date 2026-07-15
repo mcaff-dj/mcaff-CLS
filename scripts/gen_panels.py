@@ -999,7 +999,8 @@ def assemble_report(ctx, here_dir):
     tabjs = ("<script>document.querySelectorAll('.tab-btn').forEach(function(b){b.addEventListener('click',function(){"
              "document.querySelectorAll('.tab-btn').forEach(function(x){x.classList.remove('active');});"
              "document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.remove('active');});"
-             "b.classList.add('active');document.getElementById('panel-'+b.dataset.tab).classList.add('active');});});</script>")
+             "b.classList.add('active');document.getElementById('panel-'+b.dataset.tab).classList.add('active');"
+             "var t=document.getElementById('active-tab-title'); if(t)t.textContent=b.textContent;});});</script>")
 
     month_chips = []
     last_eligible = ctx.weekly_eligible_months[-1] if ctx.weekly_eligible_months else -1
@@ -1087,6 +1088,7 @@ def assemble_report(ctx, here_dir):
     <p>Source: "{h_enc(ctx.b['sheet_name'])}" tab &middot; {n0(ctx.total_rows)} raw ticket rows, deduplicated to {n0(ctx.total_unique)} unique tickets</p>
   </header>
   <nav class="tab-nav">{nav}</nav>
+  <h2 id="active-tab-title" style="text-align:center;font-size:19px;margin:22px 0 4px;">CSAT</h2>
   {gran_toolbar.rstrip()}
   {year_toolbar.rstrip()}
   {build_csat_panel(ctx)}
