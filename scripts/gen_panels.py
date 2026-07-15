@@ -17,6 +17,7 @@ embedded JS/CSS as `{{`/`}}` (high risk of a missed brace silently corrupting th
 from gen_insights import build_insights_card, get_category_insight_items, get_delivery_partner_insight
 from gen_weekly import build_weekly_class_block, build_weekly_delivery_block
 from gen_monthly import build_monthly_analysis_panel
+from gen_raw_export import raw_download_link
 from report_context import ci_key, fnum, h_enc, j_enc, n0, pretty_month, round1, year_of
 
 
@@ -309,7 +310,8 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     if cls["key"] in ("Product", "Product Suggestion/Recommendation"):
         batch = _batch_table(ctx, subset, cls["label"])
 
-    return f"""<div class="gran-monthly">
+    return f"""{raw_download_link(ctx, pfx)}
+<div class="gran-monthly">
 {filter_note}
 <section><h2>{h_enc(cls['label'])} Complaints by Issue Category</h2><p class="desc">Percent = complaints &divide; that month's total order volume ("Total Sales M"). Click a row in either table below to cross-filter.</p>{''.join(sb1)}</section>
 <section><h2>{h_enc(dim2_title)}</h2>{coverage_note}{capped_note}{''.join(sb2)}</section>
@@ -417,7 +419,8 @@ def build_class_panel(ctx, cls):
     batch = _batch_table(ctx, subset, cls["label"])
     insights = build_insights_card(f"Insights &mdash; {h_enc(cls['label'])}", get_category_insight_items(ctx, subset))
     weekly = build_weekly_class_block(ctx, cls)
-    return f"""<div class="gran-monthly">
+    return f"""{raw_download_link(ctx, cls["id"])}
+<div class="gran-monthly">
 <section><h2>{h_enc(cls['label'])} Complaints by Issue Category</h2><p class="desc">Percent = complaints &divide; that month's total order volume ("Total Sales M").</p>{pivot}</section>
 <section><h2>{h_enc(cls['label'])} Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line).</p>{chart}</section>
 </div>
@@ -843,6 +846,7 @@ def build_prod_pkg_panel(ctx):
     <section>
       <h2>Product Packaging and Operational Complaints wrt Product Sales</h2>
       <p class="desc">Combines "Product" and "Packaging and Operational" tickets by SKU &rarr; Product &rarr; Query Class &rarr; Query Category &rarr; Batch. Click the + at each level to drill down; percent = complaints &divide; that month's total order volume.</p>
+      {raw_download_link(ctx, "prodpkg")}
       {filter_html}
       <div class='pivot-wrap'><div class='pivot-title'>Product Packaging and Operational Complaints wrt Product Sales</div>{''.join(t)}</div>
     </section>
@@ -885,7 +889,9 @@ def assemble_report(ctx, here_dir):
     foot = (f'<footer><p><strong>Methodology:</strong> Aggregated from the raw "{ctx.b["sheet_name"]}" tab. '
             f'Rows flagged "Duplicate" are excluded from per-class drill-downs (Overview shows both). '
             f'Percentages use the sheet\'s own "Total Sales M" / "Partner Allocation" figures.</p>'
-            f'<p>Auto-refreshed daily at 2 PM IST. Last updated {now_str}. No raw ticket-level PII is stored &mdash; all figures are aggregated segment counts.</p></footer>')
+            f'<p>Auto-refreshed daily at 2 PM IST. Last updated {now_str}. No customer PII (name, phone, email, etc.) is ever stored or exposed &mdash; '
+            f'the tables/charts above are aggregated segment counts, and the optional "Download Raw Data" export on each tab is limited to non-PII ticket fields '
+            f'(dates, category, product/SKU/batch, partner, month/week, sales figure, unique flag).</p></footer>')
     tabjs = ("<script>document.querySelectorAll('.tab-btn').forEach(function(b){b.addEventListener('click',function(){"
              "document.querySelectorAll('.tab-btn').forEach(function(x){x.classList.remove('active');});"
              "document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.remove('active');});"

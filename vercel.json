@@ -17,6 +17,9 @@
   "functions": {
     "api/report/[card].js": {
       "includeFiles": "api/_reports/**"
+    },
+    "api/report/raw.js": {
+      "includeFiles": "api/_reports/**"
     }
   }
 }

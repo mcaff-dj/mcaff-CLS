@@ -12,6 +12,7 @@ from pathlib import Path
 
 import gen_monthly
 import gen_panels
+import gen_raw_export
 import gen_weekly
 import lib
 from brands import BRANDS
@@ -231,6 +232,7 @@ def main():
           f'<div class="kpi"><div class="label">Unique Tickets</div><div class="value">{n0(ctx.total_unique)}</div></div>'
           f'<div class="kpi"><div class="label">Duplicate Rows</div><div class="value">{n0(total_dup)}</div></div>'
           f'<div class="kpi"><div class="label">Overall Duplicate Rate</div><div class="value">{fnum(round1(total_dup/ctx.total_rows*100) if ctx.total_rows else 0)}%</div></div></div>']
+    ov.append(gen_raw_export.raw_download_link(ctx, "overview"))
     uniq_class_month = build_class_month_counts(ctx, ctx.unique)
     ov.append("<div class='gran-monthly'>")
     ov.append(build_pivot(ctx, "Overall Query Class-Wise Comparison", build_class_month_counts(ctx, data_rows)))
@@ -260,8 +262,11 @@ def main():
 
     gen_monthly.setup(ctx)
 
-    html = gen_panels.assemble_report(ctx, HERE)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[{b['brand']}] building raw-data exports...")
+    gen_raw_export.build_raw_exports(ctx, out_path.parent)
+
+    html = gen_panels.assemble_report(ctx, HERE)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
     size_kb = round(out_path.stat().st_size / 1024)
