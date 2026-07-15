@@ -6,6 +6,7 @@ Python port of gen-monthly.ps1. Depends on gen_weekly.setup(ctx) having already 
 import math
 from datetime import timedelta
 
+from gen_geo_insights import build_delivery_geo_narrative
 from gen_weekly import get_week_num
 from report_context import ci_key, fnum, h_enc, n0, pretty_month, round1, year_of
 
@@ -332,6 +333,11 @@ def build_monthly_analysis_panel(ctx):
         sections = []
         for c in ctx.b["classes"]:
             html = build_class_period_narrative(c, month_class_data[c["key"]], ctx.ma_month_ctx, mi)
+            if c["key"] == "Delivery" and mi == n - 1:
+                # City-level MySQL/AWB spike is only computed for the most recent month (each
+                # extra month would mean two more ~20s DWH aggregate queries) - see
+                # gen_geo_insights.py.
+                html = (html or "") + build_delivery_geo_narrative(ctx)
             if html:
                 sections.append(html)
         body = "".join(sections) if sections else f"<p class='note'>No notable month-on-month changes crossed the reporting threshold for {h_enc(pretty_month(months[mi]))}.</p>"
