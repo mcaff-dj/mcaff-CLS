@@ -233,6 +233,10 @@ def build_class_period_narrative(cls, data, period, cur_idx, projection=None):
 
         sub_lines = []
         if data["sub_dim_name"] and cat in data["sub_period"]:
+            # Product/Packaging get a wider net (min 4 complaints, top 5 product names
+            # shown) than the default (min 3, top 2) used for Delivery/Warehouse/
+            # Suggestion movers - requested specifically for these two classes.
+            mover_min, mover_top_n = (4, 5) if cls["id"] in ("product", "packaging") else (3, 2)
             movers = []
             for sv, arr in data["sub_period"][cat].items():
                 if sv == "(blank)":
@@ -240,9 +244,9 @@ def build_class_period_narrative(cls, data, period, cur_idx, projection=None):
                 sc_actual, sp = arr[cur_idx], arr[prev_idx]
                 sc = round(sc_actual * projection["factor"]) if projection else sc_actual
                 d = sc - sp
-                if d > 0 and sc >= 3:
+                if d > 0 and sc >= mover_min:
                     movers.append({"name": sv, "cur": sc, "prev": sp, "delta": d})
-            movers = sorted(movers, key=lambda m: m["delta"], reverse=True)[:2]
+            movers = sorted(movers, key=lambda m: m["delta"], reverse=True)[:mover_top_n]
             for m in movers:
                 if abs_delta > 0 and (m["delta"] / abs_delta) < 0.25:
                     continue
