@@ -9,7 +9,7 @@ import re
 from datetime import timedelta
 
 from gen_geo_insights import build_delivery_geo_narrative
-from gen_weekly import get_week_num
+from gen_weekly import get_week_num, is_partial_week
 from report_context import ci_key, fnum, h_enc, n0, pretty_month, round1, year_of
 
 
@@ -91,7 +91,7 @@ def setup(ctx):
         mi = ctx.week_month_of[week_idx]
         wn = get_week_num(ctx.all_weeks[week_idx])
         lbl = f"{pretty_month(ctx.months[mi])} W{wn}"
-        if week_idx == ctx.last_week_idx:
+        if is_partial_week(ctx, ctx.all_weeks[week_idx], mi):
             lbl += " (partial)"
         return lbl
     ctx.ma_pretty_week_full = pretty_week_full

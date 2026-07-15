@@ -11,9 +11,10 @@ picker (built in gen_panels.py) shows/hides the right one client-side.
 Bucketing is done in a single pass per dataset (not once per month) to avoid an
 O(months x rows) rescan - important since row counts run into the 100k range.
 """
+import calendar
 import re
 
-from report_context import ci_key, fnum, h_enc, n0, nice_max, pretty_month, round1
+from report_context import ci_key, fnum, h_enc, n0, nice_max, parse_month_label, pretty_month, round1
 
 _week_num_re = re.compile(r"Week\s*(\d+)")
 
@@ -21,6 +22,21 @@ _week_num_re = re.compile(r"Week\s*(\d+)")
 def get_week_num(week_label):
     m = _week_num_re.search(str(week_label))
     return int(m.group(1)) if m else 999
+
+
+def _week_end_day(month_label, week_val):
+    """The sheet buckets tickets into fixed day-ranges per week (confirmed empirically:
+    Week 1 = days 1-7, Week 2 = 8-14, Week 3 = 15-21, Week 4 = 22-28, a trailing Week 5
+    picks up any days beyond that) - returns (year, month, end_day) for the week's actual
+    last calendar day, or None if the month label can't be parsed."""
+    parsed = parse_month_label(month_label)
+    if not parsed:
+        return None
+    year, month = parsed
+    wn = get_week_num(week_val)
+    days_in_month = calendar.monthrange(year, month)[1]
+    end_day = min(wn * 7, days_in_month)
+    return year, month, end_day
 
 
 def _get_sales_w_by_week(ctx):
@@ -105,9 +121,22 @@ def is_partial_week(ctx, week_val, month_idx):
     if month_idx != ctx.n - 1:
         return False
     last_month_weeks = ctx.weeks_by_month_idx[month_idx]
-    if not last_month_weeks:
+    if not last_month_weeks or week_val != last_month_weeks[-1]:
         return False
-    return week_val == last_month_weeks[-1]
+    # It's the last week bucket the sheet happens to have data for - but that only means
+    # "still in progress" if the week's actual day-range hasn't elapsed yet. The sheet can
+    # lag a day or more behind on logging (see gen_monthly's Daily Analysis safeguard for
+    # the same issue), which previously made an already-complete week ("Jul Week 2", days
+    # 8-14, checked on the 15th) show as "(partial)" just because Week 3 hadn't been
+    # logged yet.
+    rng = _week_end_day(ctx.months[month_idx], week_val)
+    if rng is None:
+        return True  # can't verify the date range - keep the old conservative behavior
+    year, month, end_day = rng
+    now = ctx.now_ist
+    if (now.year, now.month) != (year, month):
+        return (now.year, now.month) < (year, month)
+    return now.day <= end_day
 
 
 def week_col_header(ctx, week_val, month_idx):

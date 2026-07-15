@@ -120,6 +120,19 @@ def year_of(mo):
     return y
 
 
+_month_num_re = re.compile(r"^(\d+)_")
+
+
+def parse_month_label(mo):
+    """'7_Jul'26' -> (2026, 7), or None if unparseable. Sheet month labels always start
+    with the month number and end with a 2-digit year (see year_of)."""
+    m = _month_num_re.match(mo)
+    yr = year_of(mo)
+    if not m or not yr:
+        return None
+    return int(yr), int(m.group(1))
+
+
 def nice_max(v):
     if v <= 0:
         return 10
