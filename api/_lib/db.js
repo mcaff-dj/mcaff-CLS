@@ -58,8 +58,8 @@ async function ensureSchema() {
   schemaReady = true;
 }
 
-const CARD_KEYS = ['mcaffeine', 'hyphen', 'productkyc'];
-const CARD_LABELS = { mcaffeine: 'mCaffeine', hyphen: 'Hyphen', productkyc: 'Product Calling KYC' };
+const CARD_KEYS = ['mcaffeine', 'hyphen', 'productkyc', 'calling'];
+const CARD_LABELS = { mcaffeine: 'mCaffeine', hyphen: 'Hyphen', productkyc: 'Product Calling KYC', calling: 'Calling Vertical' };
 
 async function getUserByEmail(email) {
   await ensureSchema();

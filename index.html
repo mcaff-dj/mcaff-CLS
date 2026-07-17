@@ -21,7 +21,8 @@
       --mcaff: #4a3aa7;
       --hyphen: #1baf7a;
       --pkyc: #c2740c;
-      
+      --calling: #2563eb;
+
       --sidebar-bg: rgba(249, 249, 247, 0.85);
       --active-bg: rgba(74, 58, 167, 0.08);
       --active-fg: var(--mcaff);
@@ -41,7 +42,8 @@
         --mcaff: #9085e9;
         --hyphen: #199e70;
         --pkyc: #e0993d;
-        
+        --calling: #5b8def;
+
         --sidebar-bg: rgba(22, 22, 21, 0.85);
         --active-bg: rgba(144, 133, 233, 0.12);
         --active-fg: var(--mcaff);
@@ -356,6 +358,48 @@
       to { transform: rotate(360deg); }
     }
 
+    /* Calling Vertical panel (opens CRM-PEP in a new tab instead of the report iframe) */
+    .calling-panel {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: var(--page);
+    }
+
+    .calling-card {
+      max-width: 380px;
+      text-align: center;
+      background: var(--surface-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 32px 28px;
+    }
+
+    .calling-card h2 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      color: var(--text-primary);
+    }
+
+    .calling-card p {
+      margin: 0 0 20px;
+      font-size: 13.5px;
+      color: var(--text-secondary);
+    }
+
+    .calling-open-btn {
+      display: inline-block;
+      background: var(--brand-accent);
+      color: #fff;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 13.5px;
+      padding: 10px 20px;
+      border-radius: 8px;
+    }
+
     /* Mobile Toggle */
     .mobile-menu-toggle {
       display: none;
@@ -408,7 +452,7 @@
       <div class="section">
         <span class="section-title">Brand Report</span>
         <div class="brand-select-wrapper">
-          <select id="brandSelect" class="brand-select" onchange="onBrandChange(this.value)">
+          <select id="brandSelect" class="brand-select" onchange="onBrandChange(this.value, true)">
             <!-- Populated via API -->
           </select>
         </div>
@@ -452,6 +496,14 @@
     </div>
     
     <iframe class="report-iframe" id="reportIframe" name="reportIframe"></iframe>
+
+    <div class="calling-panel" id="callingPanel">
+      <div class="calling-card">
+        <h2>Calling Vertical</h2>
+        <p>CRM-PEP &mdash; the team's calling tool for Shiprocket NDR/RTO leads. Opens in a new tab.</p>
+        <a id="callingLink" class="calling-open-btn" href="#" target="_blank" rel="noopener">Open CRM-PEP &rarr;</a>
+      </div>
+    </div>
   </main>
 
   <!-- Mobile Toggle Button -->
@@ -464,8 +516,12 @@
     var brandColors = {
       mcaffeine: { accent: 'var(--mcaff)', bg: 'rgba(74, 58, 167, 0.08)', fg: 'var(--mcaff)' },
       hyphen: { accent: 'var(--hyphen)', bg: 'rgba(25, 156, 92, 0.08)', fg: 'var(--hyphen)' },
-      productkyc: { accent: 'var(--pkyc)', bg: 'rgba(194, 116, 12, 0.08)', fg: 'var(--pkyc)' }
+      productkyc: { accent: 'var(--pkyc)', bg: 'rgba(194, 116, 12, 0.08)', fg: 'var(--pkyc)' },
+      calling: { accent: 'var(--calling)', bg: 'rgba(37, 99, 235, 0.08)', fg: 'var(--calling)' }
     };
+
+    // TODO: point this at CRM-PEP's deployed URL once it's hosted somewhere reachable by the team.
+    var CALLING_APP_URL = 'http://localhost:5000';
 
     function toggleMobileSidebar() {
       var sidebar = document.querySelector('.sidebar');
@@ -503,7 +559,7 @@
           }).join('');
 
           // Select first brand
-          onBrandChange(userCards[0].key);
+          onBrandChange(userCards[0].key, false);
         })
         .catch(function() {
           window.location.href = '/login.html?next=' + encodeURIComponent(window.location.pathname);
@@ -514,28 +570,44 @@
       iframe.addEventListener('load', onIframeLoaded);
     });
 
-    // Handle Brand Switch
-    function onBrandChange(brandKey) {
+    // Handle Brand Switch. isUserAction is true only when triggered by an actual
+    // dropdown selection (not the initial auto-select on page load) - it gates the
+    // auto-popup below so we never spawn a tab the user didn't ask for.
+    function onBrandChange(brandKey, isUserAction) {
       currentBrand = brandKey;
       var config = brandColors[brandKey] || brandColors.mcaffeine;
-      
+
       // Update Brand accent colors in UI
       var root = document.documentElement;
       root.style.setProperty('--brand-accent', config.accent);
       root.style.setProperty('--active-bg', config.bg);
       root.style.setProperty('--active-fg', config.fg);
 
-      // Hide/Show Granularity switcher (Only mcaffeine and hyphen have weekly data)
-      var hasWeekly = (brandKey === 'mcaffeine' || brandKey === 'hyphen');
-      document.getElementById('granularitySection').style.display = hasWeekly ? 'flex' : 'none';
-
-      // Load Report in iframe
       var iframe = document.getElementById('reportIframe');
+      var callingPanel = document.getElementById('callingPanel');
+      callingPanel.style.display = 'none';
+      iframe.style.display = 'block';
+
+      // Calling Vertical (CRM-PEP) is hosted the same way as every other report now -
+      // loaded straight into the same iframe - just with no monthly/weekly toggle and a
+      // simpler sidebar nav placeholder, since it's a separate app with no tab structure
+      // to mirror and (being cross-origin) no DOM we're allowed to read from this page.
+      document.getElementById('granularitySection').style.display =
+        (brandKey === 'mcaffeine' || brandKey === 'hyphen') ? 'flex' : 'none';
+
       iframe.classList.remove('loaded');
       document.getElementById('loadingOverlay').style.opacity = '1';
       document.getElementById('loadingOverlay').style.visibility = 'visible';
+
+      if (brandKey === 'calling') {
+        document.getElementById('loadingText').textContent = 'Loading Calling Vertical...';
+        document.getElementById('navList').innerHTML =
+          '<a href="' + CALLING_APP_URL + '" target="_blank" rel="noopener" style="font-size:12px;color:var(--text-muted);padding-left:8px;text-decoration:none;">Open in new tab &#8599;</a>';
+        iframe.src = CALLING_APP_URL;
+        return;
+      }
+
       document.getElementById('loadingText').textContent = 'Loading ' + brandKey + ' report...';
-      
       iframe.src = '/api/report/' + encodeURIComponent(brandKey);
     }
 
@@ -543,6 +615,19 @@
     function onIframeLoaded() {
       var iframe = document.getElementById('reportIframe');
       if (!iframe.src || iframe.src.indexOf('about:blank') !== -1) return;
+
+      // CRM-PEP is hosted on a different origin - browsers block reading a cross-origin
+      // iframe's DOM entirely (contentDocument throws), and there's no shared tab markup
+      // to extract anyway, so just reveal it plainly instead of the same-origin-only CSS
+      // injection / tab-extraction below.
+      if (currentBrand === 'calling') {
+        iframe.classList.add('loaded');
+        document.getElementById('loadingOverlay').style.opacity = '0';
+        document.getElementById('loadingOverlay').style.visibility = 'hidden';
+        document.querySelector('.sidebar').classList.remove('open');
+        document.getElementById('menuToggle').innerHTML = '☰';
+        return;
+      }
 
       var doc = iframe.contentDocument || iframe.contentWindow.document;
       
