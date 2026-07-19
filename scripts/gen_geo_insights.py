@@ -37,8 +37,20 @@ tables actually working at every granularity.
 Requires MYSQL_* credentials (see mysql_lib.py) to reach the DWH. If they're not
 configured (e.g. CI doesn't have the secrets yet) this whole feature quietly returns None
 rather than breaking report generation.
+
+Both MySQL round-trips are persistently cached in data/ (committed to the repo, same
+convention as the sheet's own primary/secondary/smalltabs caches) so a full-history re-scan
+only ever happens once:
+  - data/<brand>_awb_geo_cache.json: AWB -> [city, state] (or null if that AWB has no
+    matching row at all). A tracking number's shipping destination never changes once
+    resolved, so this is append-only - only AWBs not already in the cache get queried.
+  - data/<brand>_geo_orders_cache.json: month label -> that month's full (city, state,
+    week-of-month, order count) rows. Only the single most recent calendar month can still
+    be accumulating orders; every earlier month is settled and reused from cache forever.
 """
+import json
 import re
+from pathlib import Path
 
 from gen_weekly import get_week_num
 from report_context import ci_key, j_enc, year_of
@@ -46,6 +58,7 @@ from report_context import ci_key, j_enc, year_of
 _MYSQL_BRAND = {"mcaffeine": "mCaffeine", "hyphen": "HYPHEN"}
 _DELAYED_CATEGORY = "Delayed Order"
 _MIN_AREA_ORDERS = 100  # ignore areas too small for a rate to mean anything
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _month_bounds(month_label):
@@ -75,31 +88,116 @@ def _order_counts_by_geo_week(brand_db, start, end):
     )
 
 
-def _awb_geo_map(awbs):
-    import mysql_lib
+def _orders_cache_path(ctx):
+    return _REPO_ROOT / "data" / f"{ctx.b['brand']}_geo_orders_cache.json"
+
+
+def _load_json_cache(path):
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8-sig") as f:
+        return json.load(f)
+
+
+def _save_json_cache(path, cache):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cache, f, separators=(",", ":"))
+
+
+def _order_counts_by_month_cached(ctx, brand_db):
+    """Every month's full (unfiltered) order-count rows, keyed by month label - cached
+    indefinitely except the single most recent month, which can still be accumulating
+    orders and is always re-queried live. Kept unfiltered by city/state (unlike the
+    in-memory city_orders/state_orders dicts built from this) so the cache stays valid
+    regardless of which areas happen to have complaints in any given run."""
+    cache_path = _orders_cache_path(ctx)
+    cache = _load_json_cache(cache_path)
+    refresh_months = set(ctx.months[-1:])
+    result = {}
+    changed = False
+    for month_label in ctx.months:
+        if month_label in cache and month_label not in refresh_months:
+            result[month_label] = cache[month_label]
+            continue
+        bounds = _month_bounds(month_label)
+        if not bounds:
+            continue
+        rows_mo = _order_counts_by_geo_week(brand_db, *bounds)
+        if rows_mo is None:
+            if month_label in cache:
+                result[month_label] = cache[month_label]
+                continue
+            return None
+        rows_mo = [list(r) for r in rows_mo]
+        result[month_label] = rows_mo
+        cache[month_label] = rows_mo
+        changed = True
+    if changed:
+        _save_json_cache(cache_path, cache)
+    return result
+
+
+def _awb_cache_path(ctx):
+    return _REPO_ROOT / "data" / f"{ctx.b['brand']}_awb_geo_cache.json"
+
+
+def _awb_geo_map(ctx, awbs):
+    """AWB -> (city, state), backed by a persistent append-only cache (an AWB's shipping
+    destination never changes once resolved). Only tokens not already in the cache incur a
+    MySQL round-trip; a cache entry of null means "queried, no matching row" so unmatchable
+    AWBs (typos, pre-DWH tickets) aren't re-queried forever either."""
     if not awbs:
         return {}
+    cache_path = _awb_cache_path(ctx)
+    cache = _load_json_cache(cache_path)
+
     out = {}
-    batch_size = 800
-    awbs = sorted(awbs)
-    for i in range(0, len(awbs), batch_size):
-        batch = awbs[i:i + batch_size]
-        placeholders = ",".join(["%s"] * len(batch))
-        # Deliberately NOT wrapping Tracking_Number in TRIM()/UPPER() - doing so on this
-        # ~50M-row table forces a full scan (confirmed: hung >60s) instead of using its
-        # index. Matching on the raw indexed value costs some recall (rows with incidental
-        # whitespace in Tracking_Number won't match) but stays fast.
-        rows = mysql_lib.query(
-            f"SELECT Tracking_Number, Shipping_Address_City, Shipping_Address_State FROM Item_level_data WHERE Tracking_Number IN ({placeholders})",
-            batch,
-        )
-        if rows is None:
-            return None
-        for awb, city, state in rows:
-            city = str(city).strip().upper() if city and str(city).strip() else None
-            state = str(state).strip().upper() if state and str(state).strip() else None
-            if city or state:
-                out[str(awb).strip()] = (city, state)
+    to_fetch = []
+    for a in awbs:
+        if a in cache:
+            v = cache[a]
+            if v:
+                out[a] = (v[0], v[1])
+        else:
+            to_fetch.append(a)
+
+    if to_fetch:
+        import mysql_lib
+        batch_size = 800
+        to_fetch.sort()
+        cache_changed = False
+        for i in range(0, len(to_fetch), batch_size):
+            batch = to_fetch[i:i + batch_size]
+            placeholders = ",".join(["%s"] * len(batch))
+            # Deliberately NOT wrapping Tracking_Number in TRIM()/UPPER() - doing so on this
+            # ~50M-row table forces a full scan (confirmed: hung >60s) instead of using its
+            # index. Matching on the raw indexed value costs some recall (rows with incidental
+            # whitespace in Tracking_Number won't match) but stays fast.
+            rows = mysql_lib.query(
+                f"SELECT Tracking_Number, Shipping_Address_City, Shipping_Address_State FROM Item_level_data WHERE Tracking_Number IN ({placeholders})",
+                batch,
+            )
+            if rows is None:
+                if cache_changed:
+                    _save_json_cache(cache_path, cache)
+                return None
+            found = set()
+            for awb, city, state in rows:
+                awb_key = str(awb).strip()
+                found.add(awb_key)
+                city = str(city).strip().upper() if city and str(city).strip() else None
+                state = str(state).strip().upper() if state and str(state).strip() else None
+                if city or state:
+                    out[awb_key] = (city, state)
+                    cache[awb_key] = [city, state]
+                else:
+                    cache[awb_key] = None
+            for a in batch:
+                if a not in found:
+                    cache[a] = None
+            cache_changed = True
+        if cache_changed:
+            _save_json_cache(cache_path, cache)
     return out
 
 
@@ -147,7 +245,7 @@ def _compute_geo_dataset(ctx):
     awb_tokens = set()
     for r in rows:
         awb_tokens.update(_awb_tokens(ctx.cell(r, col["awb"])))
-    awb_geo = _awb_geo_map(awb_tokens)
+    awb_geo = _awb_geo_map(ctx, awb_tokens)
     if awb_geo is None:
         return None
 
@@ -192,10 +290,12 @@ def _compute_geo_dataset(ctx):
         return None
 
     # ---------- denominator: order counts by (city/state, global week index) ----------
-    # One query per calendar month (see module docstring) - only cities/states that appear
-    # in at least one Delivery category's complaints are kept (all_cities/all_states, a
-    # superset of the Delayed-Order-only city_complaints/state_complaints), so this stays
-    # small regardless of how many thousands of cities the DWH covers overall. An area's
+    # One query per calendar month (see module docstring), cached per month (see
+    # _order_counts_by_month_cached) so only the most recent month is ever re-queried live.
+    # Only cities/states that appear in at least one Delivery category's complaints are kept
+    # in the in-memory dicts below (all_cities/all_states, a superset of the Delayed-Order-
+    # only city_complaints/state_complaints) - the cache itself stays unfiltered/full so it
+    # doesn't need invalidating just because a new area starts having complaints. An area's
     # order volume doesn't depend on complaint category, so this one denominator serves
     # every category's rate calc.
     week_num_to_global_idx = {}
@@ -204,14 +304,15 @@ def _compute_geo_dataset(ctx):
         wn = get_week_num(ctx.all_weeks[wi])
         week_num_to_global_idx[(mi, wn)] = wi
 
+    order_counts_by_month = _order_counts_by_month_cached(ctx, brand_db)
+    if order_counts_by_month is None:
+        return None
+
     city_orders, state_orders = {}, {}
     for mi, month_label in enumerate(ctx.months):
-        bounds = _month_bounds(month_label)
-        if not bounds:
+        rows_mo = order_counts_by_month.get(month_label)
+        if not rows_mo:
             continue
-        rows_mo = _order_counts_by_geo_week(brand_db, *bounds)
-        if rows_mo is None:
-            return None
         for city, state, wk, cnt in rows_mo:
             gi = week_num_to_global_idx.get((mi, int(wk)))
             if gi is None:

@@ -56,10 +56,16 @@ jobs:
             "api/_reports/mcaffeine.html", "api/_reports/hyphen.html",
             "data/mcaffeine_primary_cache.json", "data/hyphen_primary_cache.json",
             "data/mcaffeine_secondary_cache.json",
-            "data/mcaffeine_smalltabs_cache.json", "data/hyphen_smalltabs_cache.json"
+            "data/mcaffeine_smalltabs_cache.json", "data/hyphen_smalltabs_cache.json",
+            "data/mcaffeine_awb_geo_cache.json", "data/hyphen_awb_geo_cache.json",
+            "data/mcaffeine_geo_orders_cache.json", "data/hyphen_geo_orders_cache.json"
           ) | Where-Object { Test-Path $_ }
+          # raw.js serves these straight from disk (see api/report/raw.js) - without this,
+          # an auto-refresh updates the report HTML but leaves raw CSV downloads stale.
+          $rawPaths = Get-ChildItem -Path api/_reports -Filter "*_raw_*.csv.gz" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
           git add $paths
-          $changed = git status --porcelain $paths
+          if ($rawPaths) { git add $rawPaths }
+          $changed = git status --porcelain ($paths + $rawPaths)
           if ($changed) {
             $stamp = (Get-Date).ToUniversalTime().AddHours(5.5).ToString('yyyy-MM-dd HH:mm')
             git commit -m "Auto-refresh reports ($stamp IST)"
