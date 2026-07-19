@@ -1,11 +1,18 @@
-"""Delayed-order city/state breakdown - reactive to Weekly/Monthly/Yearly granularity.
+"""Delivery city/state breakdown - reactive to Weekly/Monthly/Yearly granularity.
 
 Joins the sheet's AWB (raw column 9, "Tracking Number" - never named/read anywhere else
-in the pipeline) against the mcaff_prod MySQL DWH's Item_level_data table to resolve each
-"Delayed Order" (Delivery class) ticket's shipping city/state, then ranks the top 10
-cities and top 10 states by how much their (complaints / that area's orders) rate rose
-between two periods - a real spike, not just an area that has more complaints because it
-also has more orders. Scoped to "Delayed Order" specifically (not all Delivery categories).
+in the pipeline) against the mcaff_prod MySQL DWH's Item_level_data table to resolve every
+Delivery-class ticket's shipping city/state (any category, not just "Delayed Order" - the
+AWB lookup itself covers the whole class). Two consumers read the result:
+  1. The aggregate Delayed-Order-only top-10-cities/top-10-states tables (Delivery tab +
+     Monthly Analysis's "Delivery Complaints by City & State" section) - ranks by how much
+     an area's (complaints / that area's orders) rate rose between two periods, a real
+     spike rather than just an area that has more complaints because it also has more
+     orders. Embedded as JSON, sliced/ranked client-side in JS (see build_geo_script).
+  2. Per-category real state-name movers embedded directly in each Delivery category's
+     Monthly Analysis narrative bullet, alongside the courier movers - see
+     get_category_state_movers, called from gen_monthly.build_class_period_narrative.
+     Computed and rendered server-side (Python), never sent to the browser as JSON.
 
 Must react to whichever period the user has picked via the existing Monthly/Weekly/Yearly
 selectors (both the Delivery tab's page-wide gran_toolbar and Monthly Analysis's own
@@ -13,10 +20,11 @@ granularity toggle + period dropdown) - pre-rendering a server-side table for ev
 possible period pair would mean a per-period round of MySQL queries (there can be a dozen+
 month pairs, more week pairs), which isn't remotely feasible. Instead this fetches the
 FULL history ONCE per brand (complaint counts from the sheet, order counts from MySQL,
-both bucketed per calendar week), embeds it as compact JSON, and does the period-slicing/
-ranking entirely client-side in JS - the embedded renderGeoForDeliveryTab() and
-renderGeoForMonthlyAnalysis() hooks are called from the existing granularity-change
-handlers in gen_panels.py/gen_monthly.py.
+both bucketed per calendar week). Consumer 1 embeds it as compact JSON and does the
+period-slicing/ranking entirely client-side in JS - the embedded renderGeoForDeliveryTab()
+and renderGeoForMonthlyAnalysis() hooks are called from the existing granularity-change
+handlers in gen_panels.py/gen_monthly.py. Consumer 2 does the equivalent slicing in Python
+at narrative-build time instead, since those bullets are plain pre-rendered HTML.
 
 Order-count queries: a single query spanning the WHOLE date range (whether grouped by
 month or by week) reliably times out (>90s) against this ~50M-row table - even a plain
@@ -33,7 +41,7 @@ rather than breaking report generation.
 import re
 
 from gen_weekly import get_week_num
-from report_context import j_enc, year_of
+from report_context import ci_key, j_enc, year_of
 
 _MYSQL_BRAND = {"mcaffeine": "mCaffeine", "hyphen": "HYPHEN"}
 _DELAYED_CATEGORY = "Delayed Order"
@@ -99,12 +107,13 @@ def _awb_tokens(raw):
     return [t.strip() for t in str(raw).split(",") if t.strip()]
 
 
-def _delayed_rows_all(ctx):
-    """Every Delivery/'Delayed Order' unique ticket across every month - the tables must
-    react to whichever period is selected, not just the most recent one."""
+def _delivery_rows_all(ctx):
+    """Every Delivery-class unique ticket (any category) across every month - the tables
+    must react to whichever period is selected, not just the most recent one. Covers every
+    category (not just 'Delayed Order') so per-category state movers can be computed for
+    Monthly Analysis's narrative bullets - see get_category_state_movers."""
     col = ctx.col
-    return [r for r in ctx.unique
-            if ctx.cell(r, col["cls"]) == "Delivery" and ctx.cell(r, col["cat"]) == _DELAYED_CATEGORY]
+    return [r for r in ctx.unique if ctx.cell(r, col["cls"]) == "Delivery"]
 
 
 def _global_week_index(ctx, row):
@@ -123,11 +132,17 @@ def _compute_geo_dataset(ctx):
     if not brand_db:
         return None
 
-    rows = _delayed_rows_all(ctx)
+    rows = _delivery_rows_all(ctx)
     if not rows:
         return None
 
-    # ---------- numerator: complaint counts by (city/state, global week index) ----------
+    # ---------- numerator: complaint counts by (category, city/state, global week index) ----------
+    # Tallied per-category (cat_city_complaints/cat_state_complaints) so Monthly Analysis can
+    # show real state-name movers for EVERY Delivery category (see get_category_state_movers),
+    # not just Delayed Order. The aggregate city_complaints/state_complaints dicts below stay
+    # scoped to Delayed Order only, unchanged - they still feed the two existing city/state
+    # tables (Delivery tab + MA "Delivery Complaints by City & State"), sent to the browser as
+    # JSON; the per-category dicts are only ever consumed server-side and never embedded.
     col = ctx.col
     awb_tokens = set()
     for r in rows:
@@ -136,11 +151,18 @@ def _compute_geo_dataset(ctx):
     if awb_geo is None:
         return None
 
+    cat_cache = {}
     city_complaints, state_complaints = {}, {}
+    cat_city_complaints, cat_state_complaints = {}, {}
+    all_cities, all_states = set(), set()
     for r in rows:
         gi = _global_week_index(ctx, r)
         if gi < 0:
             continue
+        cat = ctx.cell(r, col["cat"])
+        if not str(cat).strip():
+            cat = "(blank)"
+        cat = ci_key(cat, cat_cache)
         seen_c, seen_s = set(), set()
         for tok in _awb_tokens(ctx.cell(r, col["awb"])):
             geo = awb_geo.get(tok)
@@ -152,19 +174,30 @@ def _compute_geo_dataset(ctx):
             if state:
                 seen_s.add(state)
         for city in seen_c:
-            city_complaints.setdefault(city, {})
-            city_complaints[city][gi] = city_complaints[city].get(gi, 0) + 1
+            all_cities.add(city)
+            cat_city_complaints.setdefault(cat, {}).setdefault(city, {})
+            cat_city_complaints[cat][city][gi] = cat_city_complaints[cat][city].get(gi, 0) + 1
+            if cat == _DELAYED_CATEGORY:
+                city_complaints.setdefault(city, {})
+                city_complaints[city][gi] = city_complaints[city].get(gi, 0) + 1
         for state in seen_s:
-            state_complaints.setdefault(state, {})
-            state_complaints[state][gi] = state_complaints[state].get(gi, 0) + 1
+            all_states.add(state)
+            cat_state_complaints.setdefault(cat, {}).setdefault(state, {})
+            cat_state_complaints[cat][state][gi] = cat_state_complaints[cat][state].get(gi, 0) + 1
+            if cat == _DELAYED_CATEGORY:
+                state_complaints.setdefault(state, {})
+                state_complaints[state][gi] = state_complaints[state].get(gi, 0) + 1
 
-    if not city_complaints and not state_complaints:
+    if not all_cities and not all_states:
         return None
 
     # ---------- denominator: order counts by (city/state, global week index) ----------
-    # One query per calendar month (see module docstring) - only cities/states that
-    # actually have a complaint at some point are kept, so this stays small regardless of
-    # how many thousands of cities the DWH covers overall.
+    # One query per calendar month (see module docstring) - only cities/states that appear
+    # in at least one Delivery category's complaints are kept (all_cities/all_states, a
+    # superset of the Delayed-Order-only city_complaints/state_complaints), so this stays
+    # small regardless of how many thousands of cities the DWH covers overall. An area's
+    # order volume doesn't depend on complaint category, so this one denominator serves
+    # every category's rate calc.
     week_num_to_global_idx = {}
     for wi in range(ctx.total_weeks):
         mi = ctx.week_month_of[wi]
@@ -186,12 +219,12 @@ def _compute_geo_dataset(ctx):
             cnt = int(cnt)
             if city and str(city).strip():
                 ck = str(city).strip().upper()
-                if ck in city_complaints:
+                if ck in all_cities:
                     city_orders.setdefault(ck, {})
                     city_orders[ck][gi] = city_orders[ck].get(gi, 0) + cnt
             if state and str(state).strip():
                 sk = str(state).strip().upper()
-                if sk in state_complaints:
+                if sk in all_states:
                     state_orders.setdefault(sk, {})
                     state_orders[sk][gi] = state_orders[sk].get(gi, 0) + cnt
 
@@ -214,6 +247,8 @@ def _compute_geo_dataset(ctx):
         "state_complaints": state_comp, "state_orders": state_ord,
         "week_month_of": list(ctx.week_month_of), "month_year_idx": month_year_idx,
         "total_weeks": n_weeks, "total_months": ctx.n,
+        "cat_state_complaints": cat_state_complaints, "cat_city_complaints": cat_city_complaints,
+        "state_orders_raw": state_orders,
     }
 
 
@@ -222,9 +257,46 @@ def _get_geo_dataset(ctx):
         try:
             ctx._geo_dataset = _compute_geo_dataset(ctx)
         except Exception as e:
-            print(f"[{ctx.b['brand']}] delayed-order geo dataset skipped: {e}")
+            print(f"[{ctx.b['brand']}] delivery geo dataset skipped: {e}")
             ctx._geo_dataset = None
     return ctx._geo_dataset
+
+
+def get_category_state_movers(ctx, category, cur_weeks, prev_weeks, proj_factor=None, min_cur=3, top_n=2):
+    """Real state-name movers (via MySQL AWB lookup) for one Delivery category, for an
+    already-resolved (cur_weeks, prev_weeks) global-week-index pair - see gen_monthly's
+    period 'weeks_fn' callbacks. Mirrors the sheet-column courier-mover format/semantics
+    (gen_monthly.build_class_period_narrative) but sourced from the geo dataset instead,
+    since state name isn't a sheet column. Returns [] if geo data isn't available (MySQL
+    not configured, or nothing resolved for this category)."""
+    dataset = _get_geo_dataset(ctx)
+    if not dataset:
+        return []
+    cat_states = dataset["cat_state_complaints"].get(category)
+    if not cat_states:
+        return []
+    state_orders = dataset["state_orders_raw"]
+
+    movers = []
+    for state, weekmap in cat_states.items():
+        cur = sum(weekmap.get(wi, 0) for wi in cur_weeks)
+        cur_proj = round(cur * proj_factor) if proj_factor else cur
+        if cur_proj < min_cur:
+            continue
+        prev = sum(weekmap.get(wi, 0) for wi in prev_weeks)
+        delta = cur_proj - prev
+        if delta <= 0:
+            continue
+        cur_orders = sum(state_orders.get(state, {}).get(wi, 0) for wi in cur_weeks)
+        prev_orders = sum(state_orders.get(state, {}).get(wi, 0) for wi in prev_weeks)
+        if cur_orders < _MIN_AREA_ORDERS:
+            continue
+        rate_cur = (cur / cur_orders * 100) if cur_orders > 0 else 0
+        rate_prev = (prev / prev_orders * 100) if prev_orders > 0 else 0
+        movers.append({"name": state, "cur": cur, "cur_proj": cur_proj, "prev": prev,
+                        "rate_cur": rate_cur, "rate_prev": rate_prev, "delta": delta})
+    movers.sort(key=lambda m: m["delta"], reverse=True)
+    return movers[:top_n]
 
 
 def _aj_num_matrix(m):

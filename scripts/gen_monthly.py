@@ -8,7 +8,7 @@ import math
 import re
 from datetime import timedelta
 
-from gen_geo_insights import build_monthly_analysis_geo_containers
+from gen_geo_insights import build_monthly_analysis_geo_containers, get_category_state_movers
 from gen_weekly import get_week_num, is_partial_week
 from report_context import ci_key, fnum, h_enc, n0, pretty_month, round1, year_of
 
@@ -39,7 +39,10 @@ def _current_month_projection(ctx):
         return None
     return {"days_elapsed": days_elapsed, "days_total": days_total, "factor": days_total / days_elapsed}
 
-_SUB_DIM = {"delivery": "partner", "warehouse": "wh", "packaging": "prod", "product": "prod", "suggestion": "prod"}
+# Each class can drill into more than one dimension - every entry is a list, even where
+# there's only one. Delivery's state movers come from gen_geo_insights (MySQL AWB lookup,
+# real state names), not from this sheet-column mechanism - see build_class_period_narrative.
+_SUB_DIM = {"delivery": ["partner"], "warehouse": ["wh"], "packaging": ["prod"], "product": ["prod"], "suggestion": ["prod"]}
 _SUB_LABEL = {"partner": "courier", "wh": "warehouse", "prod": "product"}
 
 
@@ -99,11 +102,19 @@ def setup(ctx):
     def get_global_week_index(mo_lbl, wk_val):
         return week_global_idx.get(f"{mo_lbl}||{wk_val}", -1)
 
+    # weeks_fn(period_idx) -> list of global week indices covered by that period index -
+    # used only to look up real state-name movers from the geo dataset (see
+    # gen_geo_insights.get_category_state_movers), which is bucketed by global week
+    # regardless of which granularity the narrative bullet is being built for.
+    def weeks_for_month(mi):
+        return [wi for wi in range(ctx.total_weeks) if ctx.week_month_of[wi] == mi]
+
     ctx.ma_month_ctx = {
         "n": ctx.n,
         "sales": ctx.sales_arr,
         "index_fn": lambda r: ctx.months.index(ctx.cell(r, ctx.col["month"])) if ctx.cell(r, ctx.col["month"]) in ctx.months else -1,
         "label_fn": lambda idx: pretty_month(ctx.months[idx]),
+        "weeks_fn": weeks_for_month,
     }
     ctx.ma_week_ctx = {
         "n": ctx.total_weeks,
@@ -113,6 +124,7 @@ def setup(ctx):
             else get_global_week_index(ctx.cell(r, ctx.col["month"]), ctx.cell(r, ctx.col["week"]))
         ),
         "label_fn": pretty_week_full,
+        "weeks_fn": lambda wi: [wi],
     }
 
     year_index_of = {yr: i for i, yr in enumerate(ctx.distinct_years)}
@@ -123,11 +135,20 @@ def setup(ctx):
         if yr in year_index_of:
             year_sales_arr[year_index_of[yr]] += ctx.sales_arr[mi]
     ctx.ma_year_sales_arr = year_sales_arr
+
+    def weeks_for_year(yi):
+        out = []
+        for mi in range(ctx.n):
+            if year_index_of.get(year_of(ctx.months[mi])) == yi:
+                out.extend(weeks_for_month(mi))
+        return out
+
     ctx.ma_year_ctx = {
         "n": len(ctx.distinct_years),
         "sales": year_sales_arr,
         "index_fn": lambda r: year_index_of.get(year_of(ctx.cell(r, ctx.col["month"])), -1),
         "label_fn": lambda idx: ctx.distinct_years[idx],
+        "weeks_fn": weeks_for_year,
     }
 
     # ---------- Daily (yesterday vs the day before) ----------
@@ -156,15 +177,15 @@ def setup(ctx):
 
 def build_class_period_data(ctx, cls, period):
     subset = [r for r in ctx.unique if ctx.cell(r, ctx.col["cls"]) == cls["key"]]
-    sub_dim_name = _SUB_DIM.get(cls["id"])
-    sub_col = ctx.col[sub_dim_name] if sub_dim_name else None
+    sub_dims = [d for d in _SUB_DIM.get(cls["id"], []) if d in ctx.col]
 
     cat_period = {}
     cat_tot = {}
-    sub_period = {}
+    sub_period = {}  # {dim_name: {cat: {sub_value: [counts]}}}
     class_period_tot = [0] * period["n"]
     cat_cache = {}
-    sub_caches = {}
+    sub_caches = {}  # {dim_name: {cat: {}}} - per-dim ci_key caches, kept separate so the
+                      # same raw string can normalize independently per dimension/category.
 
     for r in subset:
         p_idx = period["index_fn"](r)
@@ -178,21 +199,21 @@ def build_class_period_data(ctx, cls, period):
         cat_period[cat][p_idx] += 1
         cat_tot[cat] = cat_tot.get(cat, 0) + 1
         class_period_tot[p_idx] += 1
-        if sub_col is not None:
-            sv = ctx.cell(r, sub_col)
+        for dim_name in sub_dims:
+            sv = ctx.cell(r, ctx.col[dim_name])
             if not str(sv).strip():
                 sv = "(blank)"
-            sv = ci_key(sv, sub_caches.setdefault(cat, {}))
-            sub_period.setdefault(cat, {})
-            sub_period[cat].setdefault(sv, [0] * period["n"])
-            sub_period[cat][sv][p_idx] += 1
+            sv = ci_key(sv, sub_caches.setdefault(dim_name, {}).setdefault(cat, {}))
+            sub_period.setdefault(dim_name, {}).setdefault(cat, {})
+            sub_period[dim_name][cat].setdefault(sv, [0] * period["n"])
+            sub_period[dim_name][cat][sv][p_idx] += 1
 
     cat_order = [k for k, _ in sorted(cat_tot.items(), key=lambda kv: kv[1], reverse=True)]
     return {"cat_period": cat_period, "cat_order": cat_order, "sub_period": sub_period,
-            "sub_dim_name": sub_dim_name, "class_period_tot": class_period_tot}
+            "sub_dims": sub_dims, "class_period_tot": class_period_tot}
 
 
-def build_class_period_narrative(cls, data, period, cur_idx, projection=None):
+def build_class_period_narrative(ctx, cls, data, period, cur_idx, projection=None):
     """`projection`, when set, only ever scales a TICKET COUNT to project where it's headed
     by month-end - it must never be mixed into a percentage's numerator while leaving the
     denominator (sales_cur, itself only a running so-far figure for an in-progress month,
@@ -240,13 +261,16 @@ def build_class_period_narrative(cls, data, period, cur_idx, projection=None):
             line = f"<b>{h_enc(cat)}</b>: Complaints {verb} from {n0(prev_c)} to {n0(cur_c_actual)} ({pct_fmt(p_p)} &rarr; {pct_fmt(p_c)})."
 
         sub_lines = []
-        if data["sub_dim_name"] and cat in data["sub_period"]:
-            # Product/Packaging get a wider net (min 4 complaints, top 5 product names
-            # shown) than the default (min 3, top 2) used for Delivery/Warehouse/
-            # Suggestion movers - requested specifically for these two classes.
-            mover_min, mover_top_n = (4, 5) if cls["id"] in ("product", "packaging") else (3, 2)
+        # Product/Packaging get a wider net (min 4 complaints, top 5 names shown) than the
+        # default (min 3, top 2) used for Delivery/Warehouse/Suggestion movers - requested
+        # specifically for these two classes. Each sub-dimension (e.g. Delivery's courier
+        # and state) gets its own top-N ranked independently, then all are listed together.
+        mover_min, mover_top_n = (4, 5) if cls["id"] in ("product", "packaging") else (3, 2)
+        for dim_name in data["sub_dims"]:
+            if cat not in data["sub_period"].get(dim_name, {}):
+                continue
             movers = []
-            for sv, arr in data["sub_period"][cat].items():
+            for sv, arr in data["sub_period"][dim_name][cat].items():
                 if sv == "(blank)":
                     continue
                 sc_actual, sp = arr[cur_idx], arr[prev_idx]
@@ -261,9 +285,27 @@ def build_class_period_narrative(cls, data, period, cur_idx, projection=None):
                 mp = (m["cur_actual"] / sales_cur * 100) if sales_cur > 0 else 0
                 mpp = (m["prev"] / sales_prev * 100) if sales_prev > 0 else 0
                 mverb = change_verb(m["prev"], m["cur_proj"])
-                sub_label = _SUB_LABEL[data["sub_dim_name"]]
+                sub_label = _SUB_LABEL[dim_name]
                 proj_bit = f", on pace for ~{n0(m['cur_proj'])}" if projection and m["cur_proj"] != m["cur_actual"] else ""
                 sub_lines.append(f"<li><b>{h_enc(m['name'])}</b> ({sub_label}): complaint rate {mverb} from {pct_fmt(mpp)} to {pct_fmt(mp)} ({n0(m['prev'])} &rarr; {n0(m['cur_actual'])}{proj_bit}).")
+
+        # Real state-name movers (via MySQL AWB lookup) - Delivery only, since state isn't
+        # a sheet column for any other class. Ranked/gated the same way as the courier
+        # movers above (same mover_min/mover_top_n, same "explains >=25% of the category's
+        # overall change" abs_delta filter) so both read as one consistent list.
+        if cls["id"] == "delivery" and period.get("weeks_fn"):
+            cur_weeks = period["weeks_fn"](cur_idx)
+            prev_weeks = period["weeks_fn"](prev_idx)
+            proj_factor = projection["factor"] if projection else None
+            state_movers = get_category_state_movers(ctx, cat, cur_weeks, prev_weeks,
+                                                       proj_factor=proj_factor, min_cur=mover_min, top_n=mover_top_n)
+            for m in state_movers:
+                if abs_delta > 0 and (m["delta"] / abs_delta) < 0.25:
+                    continue
+                mverb = change_verb(m["prev"], m["cur_proj"])
+                proj_bit = f", on pace for ~{n0(m['cur_proj'])}" if proj_factor and m["cur_proj"] != m["cur"] else ""
+                sub_lines.append(f"<li><b>{h_enc(m['name'].title())}</b> (state): complaint rate {mverb} from {pct_fmt(m['rate_prev'])} to {pct_fmt(m['rate_cur'])} ({n0(m['prev'])} &rarr; {n0(m['cur'])}{proj_bit}).")
+
         if sub_lines:
             line += f"<ul class='ma-sub'>{''.join(sub_lines)}</ul>"
         bullets.append({"line": line, "sort_key": abs_delta})
@@ -311,9 +353,11 @@ def build_daily_narrative(cls, data):
         line = f"<b>{h_enc(cat)}</b>: Complaints {verb} from {n0(prev_c)} to {n0(cur_c)} tickets{pct_change(cur_c, prev_c)}."
 
         sub_lines = []
-        if data["sub_dim_name"] and cat in data["sub_period"]:
+        for dim_name in data["sub_dims"]:
+            if cat not in data["sub_period"].get(dim_name, {}):
+                continue
             movers = []
-            for sv, arr in data["sub_period"][cat].items():
+            for sv, arr in data["sub_period"][dim_name][cat].items():
                 if sv == "(blank)":
                     continue
                 sc, sp = arr[cur_idx], arr[prev_idx]
@@ -325,7 +369,7 @@ def build_daily_narrative(cls, data):
                 if abs_delta > 0 and (m["delta"] / abs_delta) < 0.25:
                     continue
                 mverb = change_verb(m["prev"], m["cur"])
-                sub_label = _SUB_LABEL[data["sub_dim_name"]]
+                sub_label = _SUB_LABEL[dim_name]
                 sub_lines.append(f"<li><b>{h_enc(m['name'])}</b> ({sub_label}): tickets {mverb} from {n0(m['prev'])} to {n0(m['cur'])}{pct_change(m['cur'], m['prev'])}.</li>")
         if sub_lines:
             line += f"<ul class='ma-sub'>{''.join(sub_lines)}</ul>"
@@ -380,7 +424,7 @@ def build_monthly_analysis_panel(ctx):
         sections = []
         projection = month_projection if mi == n - 1 else None
         for c in ctx.b["classes"]:
-            html = build_class_period_narrative(c, month_class_data[c["key"]], ctx.ma_month_ctx, mi, projection=projection)
+            html = build_class_period_narrative(ctx, c, month_class_data[c["key"]], ctx.ma_month_ctx, mi, projection=projection)
             if html:
                 sections.append(html)
         body = "".join(sections) if sections else f"<p class='note'>No notable month-on-month changes crossed the reporting threshold for {h_enc(pretty_month(months[mi]))}.</p>"
@@ -400,7 +444,7 @@ def build_monthly_analysis_panel(ctx):
         for wi in range(1, total_weeks):
             sections = []
             for c in ctx.b["classes"]:
-                html = build_class_period_narrative(c, week_class_data[c["key"]], ctx.ma_week_ctx, wi)
+                html = build_class_period_narrative(ctx, c, week_class_data[c["key"]], ctx.ma_week_ctx, wi)
                 if html:
                     sections.append(html)
             body = "".join(sections) if sections else f"<p class='note'>No notable week-on-week changes crossed the reporting threshold for {h_enc(ctx.ma_pretty_week_full(wi))}.</p>"
@@ -419,7 +463,7 @@ def build_monthly_analysis_panel(ctx):
         for yi in range(1, n_years):
             sections = []
             for c in ctx.b["classes"]:
-                html = build_class_period_narrative(c, year_class_data[c["key"]], ctx.ma_year_ctx, yi)
+                html = build_class_period_narrative(ctx, c, year_class_data[c["key"]], ctx.ma_year_ctx, yi)
                 if html:
                     sections.append(html)
             body = "".join(sections) if sections else f"<p class='note'>No notable year-on-year changes crossed the reporting threshold for {h_enc(ctx.distinct_years[yi])}.</p>"
