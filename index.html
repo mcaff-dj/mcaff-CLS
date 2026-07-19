@@ -23,8 +23,6 @@
       --pkyc: #c2740c;
       --calling: #2563eb;
       --mom: #9333ea;
-      --ndr: #dc2626;
-      --rto: #ea580c;
 
       --sidebar-bg: rgba(249, 249, 247, 0.85);
       --active-bg: rgba(74, 58, 167, 0.08);
@@ -47,8 +45,6 @@
         --pkyc: #e0993d;
         --calling: #5b8def;
         --mom: #c084fc;
-        --ndr: #f87171;
-        --rto: #fb923c;
 
         --sidebar-bg: rgba(22, 22, 21, 0.85);
         --active-bg: rgba(144, 133, 233, 0.12);
@@ -513,9 +509,7 @@
       hyphen: { accent: 'var(--hyphen)', bg: 'rgba(25, 156, 92, 0.08)', fg: 'var(--hyphen)' },
       productkyc: { accent: 'var(--pkyc)', bg: 'rgba(194, 116, 12, 0.08)', fg: 'var(--pkyc)' },
       calling: { accent: 'var(--calling)', bg: 'rgba(37, 99, 235, 0.08)', fg: 'var(--calling)' },
-      mom: { accent: 'var(--mom)', bg: 'rgba(147, 51, 234, 0.08)', fg: 'var(--mom)' },
-      ndr: { accent: 'var(--ndr)', bg: 'rgba(220, 38, 38, 0.08)', fg: 'var(--ndr)' },
-      rto: { accent: 'var(--rto)', bg: 'rgba(234, 88, 12, 0.08)', fg: 'var(--rto)' }
+      mom: { accent: 'var(--mom)', bg: 'rgba(147, 51, 234, 0.08)', fg: 'var(--mom)' }
     };
 
     // TODO: point this at CRM-PEP's deployed URL once it's hosted somewhere reachable by the team.
@@ -525,7 +519,14 @@
     // of pointing the iframe at /api/report/{key} (which would 404/500, since there's no
     // api/_reports/{key}.html for these). Remove an entry here once its report exists.
     var COMING_SOON = {
-      mom: 'MOM report is coming soon.',
+      mom: 'MOM report is coming soon.'
+    };
+
+    // NDR/RTO aren't separate cards - they're sub-items nested under Calling Vertical's
+    // nav (CRM-PEP already manages Shiprocket NDR/RTO leads, just with no distinct view
+    // per type yet). Clicking one shows the same placeholder panel as a top-level
+    // "coming soon" card would, just reached via the nested nav instead of the dropdown.
+    var CALLING_SUBITEMS = {
       ndr: 'NDR report is coming soon.',
       rto: 'RTO report is coming soon.'
     };
@@ -625,13 +626,36 @@
       if (brandKey === 'calling') {
         document.getElementById('loadingText').textContent = 'Loading Calling Vertical...';
         document.getElementById('navList').innerHTML =
-          '<a href="' + CALLING_APP_URL + '" target="_blank" rel="noopener" style="font-size:12px;color:var(--text-muted);padding-left:8px;text-decoration:none;">Open in new tab &#8599;</a>';
+          '<button class="nav-btn active" data-calling-view="dashboard" onclick="selectCallingView(\'dashboard\')">Dashboard</button>' +
+          '<button class="nav-btn" data-calling-view="ndr" onclick="selectCallingView(\'ndr\')">NDR</button>' +
+          '<button class="nav-btn" data-calling-view="rto" onclick="selectCallingView(\'rto\')">RTO</button>' +
+          '<a href="' + CALLING_APP_URL + '" target="_blank" rel="noopener" style="font-size:12px;color:var(--text-muted);padding:6px 12px;display:block;text-decoration:none;">Open in new tab &#8599;</a>';
         iframe.src = CALLING_APP_URL;
         return;
       }
 
       document.getElementById('loadingText').textContent = 'Loading ' + brandKey + ' report...';
       iframe.src = '/api/report/' + encodeURIComponent(brandKey);
+    }
+
+    // Switches between Calling Vertical's own iframe (the CRM-PEP dashboard) and its NDR/
+    // RTO nav sub-items, which have no distinct view yet and just show the same "coming
+    // soon" placeholder used for top-level cards (see COMING_SOON).
+    function selectCallingView(view) {
+      var iframe = document.getElementById('reportIframe');
+      var placeholderPanel = document.getElementById('placeholderPanel');
+      Array.prototype.slice.call(document.querySelectorAll('#navList .nav-btn[data-calling-view]')).forEach(function(b) {
+        b.classList.toggle('active', b.getAttribute('data-calling-view') === view);
+      });
+      if (view === 'dashboard') {
+        placeholderPanel.style.display = 'none';
+        iframe.style.display = 'block';
+        return;
+      }
+      iframe.style.display = 'none';
+      document.getElementById('placeholderTitle').textContent = view.toUpperCase();
+      document.getElementById('placeholderDesc').textContent = CALLING_SUBITEMS[view];
+      placeholderPanel.style.display = 'flex';
     }
 
     // Handles Iframe loaded event

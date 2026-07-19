@@ -58,10 +58,13 @@ async function ensureSchema() {
   schemaReady = true;
 }
 
-const CARD_KEYS = ['mcaffeine', 'hyphen', 'productkyc', 'calling', 'mom', 'ndr', 'rto'];
+// NDR/RTO are not separate top-level cards - they're sub-items nested under Calling
+// Vertical in the sidebar nav (see index.html's onBrandChange 'calling' branch), since
+// they're just facets of the same CRM-PEP tool, not their own permission/data domain.
+const CARD_KEYS = ['mcaffeine', 'hyphen', 'productkyc', 'calling', 'mom'];
 const CARD_LABELS = {
   mcaffeine: 'mCaffeine', hyphen: 'Hyphen', productkyc: 'Product Calling KYC', calling: 'Calling Vertical',
-  mom: 'MOM', ndr: 'NDR', rto: 'RTO',
+  mom: 'MOM',
 };
 
 async function getUserByEmail(email) {
