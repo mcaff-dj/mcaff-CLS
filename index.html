@@ -628,8 +628,7 @@
         document.getElementById('navList').innerHTML =
           '<button class="nav-btn active" data-calling-view="dashboard" onclick="selectCallingView(\'dashboard\')">Dashboard</button>' +
           '<button class="nav-btn" data-calling-view="ndr" onclick="selectCallingView(\'ndr\')">NDR</button>' +
-          '<button class="nav-btn" data-calling-view="rto" onclick="selectCallingView(\'rto\')">RTO</button>' +
-          '<a href="' + CALLING_APP_URL + '" target="_blank" rel="noopener" style="font-size:12px;color:var(--text-muted);padding:6px 12px;display:block;text-decoration:none;">Open in new tab &#8599;</a>';
+          '<button class="nav-btn" data-calling-view="rto" onclick="selectCallingView(\'rto\')">RTO</button>';
         iframe.src = CALLING_APP_URL;
         return;
       }
