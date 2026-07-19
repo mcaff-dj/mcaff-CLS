@@ -1,7 +1,7 @@
 // Handles Google's OAuth redirect: exchanges the code, verifies the ID token, checks
 // whether this email has been granted access (or matches ADMIN_EMAILS for bootstrap),
 // and issues a session cookie. No self-serve signup - unrecognized emails are rejected.
-const { getUserByEmail, getUserPermissions, bootstrapAdminIfNeeded, logEvent } = require('../_lib/db');
+const { CARD_KEYS, getUserByEmail, getUserPermissions, bootstrapAdminIfNeeded, logEvent } = require('../_lib/db');
 const { setSessionCookie } = require('../_lib/session');
 
 module.exports = async (req, res) => {
@@ -65,7 +65,10 @@ module.exports = async (req, res) => {
       return;
     }
 
-    const permissions = await getUserPermissions(user.id);
+    // Admins always get every card, regardless of what's in the permissions table - so a
+    // newly-added card (e.g. today's mom/ndr/rto) is automatically visible to admins on
+    // their next login, with no manual grant/backfill step needed.
+    const permissions = user.is_admin ? CARD_KEYS : await getUserPermissions(user.id);
     setSessionCookie(res, {
       uid: user.id,
       email: user.email,

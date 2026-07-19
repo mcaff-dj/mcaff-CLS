@@ -22,6 +22,9 @@
       --hyphen: #1baf7a;
       --pkyc: #c2740c;
       --calling: #2563eb;
+      --mom: #9333ea;
+      --ndr: #dc2626;
+      --rto: #ea580c;
 
       --sidebar-bg: rgba(249, 249, 247, 0.85);
       --active-bg: rgba(74, 58, 167, 0.08);
@@ -43,6 +46,9 @@
         --hyphen: #199e70;
         --pkyc: #e0993d;
         --calling: #5b8def;
+        --mom: #c084fc;
+        --ndr: #f87171;
+        --rto: #fb923c;
 
         --sidebar-bg: rgba(22, 22, 21, 0.85);
         --active-bg: rgba(144, 133, 233, 0.12);
@@ -358,8 +364,9 @@
       to { transform: rotate(360deg); }
     }
 
-    /* Calling Vertical panel (opens CRM-PEP in a new tab instead of the report iframe) */
-    .calling-panel {
+    /* Generic placeholder panel - shown in place of the report iframe for cards that have
+       no report wired up yet (see COMING_SOON in the script below). */
+    .placeholder-panel {
       position: absolute;
       inset: 0;
       display: none;
@@ -368,7 +375,7 @@
       background: var(--page);
     }
 
-    .calling-card {
+    .placeholder-card {
       max-width: 380px;
       text-align: center;
       background: var(--surface-card);
@@ -377,27 +384,16 @@
       padding: 32px 28px;
     }
 
-    .calling-card h2 {
+    .placeholder-card h2 {
       margin: 0 0 8px;
       font-size: 18px;
       color: var(--text-primary);
     }
 
-    .calling-card p {
-      margin: 0 0 20px;
+    .placeholder-card p {
+      margin: 0;
       font-size: 13.5px;
       color: var(--text-secondary);
-    }
-
-    .calling-open-btn {
-      display: inline-block;
-      background: var(--brand-accent);
-      color: #fff;
-      text-decoration: none;
-      font-weight: 600;
-      font-size: 13.5px;
-      padding: 10px 20px;
-      border-radius: 8px;
     }
 
     /* Mobile Toggle */
@@ -497,11 +493,10 @@
     
     <iframe class="report-iframe" id="reportIframe" name="reportIframe"></iframe>
 
-    <div class="calling-panel" id="callingPanel">
-      <div class="calling-card">
-        <h2>Calling Vertical</h2>
-        <p>CRM-PEP &mdash; the team's calling tool for Shiprocket NDR/RTO leads. Opens in a new tab.</p>
-        <a id="callingLink" class="calling-open-btn" href="#" target="_blank" rel="noopener">Open CRM-PEP &rarr;</a>
+    <div class="placeholder-panel" id="placeholderPanel">
+      <div class="placeholder-card">
+        <h2 id="placeholderTitle"></h2>
+        <p id="placeholderDesc"></p>
       </div>
     </div>
   </main>
@@ -517,11 +512,23 @@
       mcaffeine: { accent: 'var(--mcaff)', bg: 'rgba(74, 58, 167, 0.08)', fg: 'var(--mcaff)' },
       hyphen: { accent: 'var(--hyphen)', bg: 'rgba(25, 156, 92, 0.08)', fg: 'var(--hyphen)' },
       productkyc: { accent: 'var(--pkyc)', bg: 'rgba(194, 116, 12, 0.08)', fg: 'var(--pkyc)' },
-      calling: { accent: 'var(--calling)', bg: 'rgba(37, 99, 235, 0.08)', fg: 'var(--calling)' }
+      calling: { accent: 'var(--calling)', bg: 'rgba(37, 99, 235, 0.08)', fg: 'var(--calling)' },
+      mom: { accent: 'var(--mom)', bg: 'rgba(147, 51, 234, 0.08)', fg: 'var(--mom)' },
+      ndr: { accent: 'var(--ndr)', bg: 'rgba(220, 38, 38, 0.08)', fg: 'var(--ndr)' },
+      rto: { accent: 'var(--rto)', bg: 'rgba(234, 88, 12, 0.08)', fg: 'var(--rto)' }
     };
 
     // TODO: point this at CRM-PEP's deployed URL once it's hosted somewhere reachable by the team.
     var CALLING_APP_URL = 'http://localhost:5000';
+
+    // Cards with no report wired up yet - onBrandChange shows a plain placeholder instead
+    // of pointing the iframe at /api/report/{key} (which would 404/500, since there's no
+    // api/_reports/{key}.html for these). Remove an entry here once its report exists.
+    var COMING_SOON = {
+      mom: 'MOM report is coming soon.',
+      ndr: 'NDR report is coming soon.',
+      rto: 'RTO report is coming soon.'
+    };
 
     function toggleMobileSidebar() {
       var sidebar = document.querySelector('.sidebar');
@@ -584,8 +591,24 @@
       root.style.setProperty('--active-fg', config.fg);
 
       var iframe = document.getElementById('reportIframe');
-      var callingPanel = document.getElementById('callingPanel');
-      callingPanel.style.display = 'none';
+      var placeholderPanel = document.getElementById('placeholderPanel');
+      document.getElementById('navList').innerHTML = '';
+
+      // Cards with no report behind them yet (see COMING_SOON) show a plain placeholder
+      // card instead of the iframe - nothing to fetch, so the loading overlay never shows.
+      if (COMING_SOON[brandKey]) {
+        iframe.style.display = 'none';
+        iframe.src = 'about:blank';
+        document.getElementById('granularitySection').style.display = 'none';
+        document.getElementById('loadingOverlay').style.opacity = '0';
+        document.getElementById('loadingOverlay').style.visibility = 'hidden';
+        var label = (userCards.filter(function(c) { return c.key === brandKey; })[0] || {}).label || brandKey;
+        document.getElementById('placeholderTitle').textContent = label;
+        document.getElementById('placeholderDesc').textContent = COMING_SOON[brandKey];
+        placeholderPanel.style.display = 'flex';
+        return;
+      }
+      placeholderPanel.style.display = 'none';
       iframe.style.display = 'block';
 
       // Calling Vertical (CRM-PEP) is hosted the same way as every other report now -
