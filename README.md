@@ -12,6 +12,8 @@ brands.
 | `login.html` | Google sign-in page |
 | `admin.html` | Admin-only: invite users, grant/revoke per-report access, view audit log |
 | `api/_reports/*.html` | The actual generated reports (mCaffeine, Hyphen, Product Calling KYC) — not publicly servable, only readable by `api/report/[card].js` after an auth + permission check |
+| `CRM-PEP/` | RTO calling tool (Calling Vertical → RTO/Dashboard in the sidebar): a separate Python/Flask app, own login, own `CRM-PEP/README.md` — admins assign RTO leads from the "RTO Calling" Google Sheet to agents, agents call from their own phone and log the outcome straight back to the sheet |
+| `CRM-PEP-shiprocket-archive/` | An earlier, Shiprocket/Supabase-based version of CRM-PEP, superseded by the Google Sheet-based one above — kept for reference only, not wired up anywhere |
 | `vercel.json` | Vercel static-hosting config (clean URLs, function file bundling) |
 
 Each report is a single self-contained HTML file (inline CSS/JS, no external
@@ -51,8 +53,16 @@ project environment variables:
 | `RESEND_API_KEY` | [Resend](https://resend.com) API key — sends the "you've been invited / your access changed" email when an admin invites/updates a user at `/admin.html`. Optional: invites still work without it, just silently skip the email. |
 | `FROM_EMAIL` | Optional sender address for invite emails (defaults to Resend's shared `onboarding@resend.dev` sandbox sender). Set this to an address on a domain you've verified in Resend for better deliverability. |
 
+The RTO calling tool (`CRM-PEP/`) is a separate Flask app with its own login and its own
+env vars — see [`CRM-PEP/README.md`](CRM-PEP/README.md), not this file.
+
 ## Data & privacy
 
 Reports contain **aggregated segment counts only** — no raw ticket rows,
 order numbers, or customer PII. The Google service-account key and the raw
 data dumps are excluded via `.gitignore` and are never committed.
+
+The RTO calling tool is the one exception: it necessarily shows agents raw
+customer name/mobile/address so they can place the call. It reads/writes the
+"RTO Calling" sheet live (never stored in our own DB) and is gated behind its
+own Google sign-in — see `CRM-PEP/README.md`.

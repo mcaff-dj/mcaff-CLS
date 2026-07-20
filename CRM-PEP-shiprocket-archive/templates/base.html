@@ -3,20 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}CRM-PEP - RTO Calling{% endblock %}</title>
+  <title>{% block title %}CRM-PEP{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   {% if session.get('user') %}
   <header class="topbar">
-    <a class="brand" href="{{ url_for('queue') }}">CRM-PEP &middot; RTO Calling</a>
-    {% if session['user']['is_admin'] %}
-      <nav class="topnav">
-        <a href="{{ url_for('queue') }}">My Leads</a>
-        <a href="{{ url_for('assign_view') }}">Assign Leads</a>
-      </nav>
-    {% endif %}
-    <span class="user">{{ session['user']['name'] or session['user']['email'] }}{% if session['user']['is_admin'] %} &middot; Admin{% endif %}</span>
+    <a class="brand" href="{{ url_for('dashboard') }}">CRM-PEP</a>
+    <span class="user">{{ session['user']['email'] }}</span>
     <a class="logout" href="{{ url_for('logout') }}">Log out</a>
   </header>
   {% endif %}

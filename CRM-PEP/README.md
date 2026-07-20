@@ -1,33 +1,45 @@
-# CRM-PEP
+# CRM-PEP - RTO Calling Tool
 
-Internal CRM for the team to call up Shiprocket **NDR** (failed delivery attempts) and
-**RTO** (return-to-origin) leads and log call outcomes. Pure Python backend (Flask) +
-Supabase (Postgres + Auth) for storage, no JavaScript build step.
+Internal tool for the team to call up RTO (return-to-origin) leads from the **"RTO
+Calling"** Google Sheet and log outcomes. Pure Python (Flask), no JavaScript build step,
+no separate lead database - the sheet stays the only source of truth; this app reads and
+writes it live.
 
 ## How it works
 
-1. `sync_leads.py` calls the Shiprocket API, pulls NDR shipments and RTO-status orders,
-   and upserts them into a `leads` table in Supabase (dedup key: `source` + `awb`).
-2. `app.py` is a small Flask app the team logs into (Supabase Auth) to see the lead list,
-   filter/search, assign leads to teammates, and log calls (outcome + notes) against a lead.
-3. Calling itself is manual: the app shows the customer's phone number, your team dials
-   from their own phone, then records the outcome in the CRM.
+1. Admins open **Assign Leads**, filter the sheet's `Data` tab (by city, unassigned-only,
+   search), select rows, and assign them to an agent - this writes that agent's email into
+   the sheet's `Agent Name` column.
+2. Agents open **My Leads** to see the leads assigned to them that haven't been called yet.
+3. Calling itself is manual: the agent sees the customer's phone number, dials from their
+   own phone, then logs the outcome (Connected / Attempt status / RTO reason / etc.) on
+   the lead's page - this writes straight back to the same sheet row.
+
+Because neither the sheet's `Key` column (it's a loyalty tier, not a unique ID) nor Order
+ID/AWB Code alone are reliably unique, writes are addressed by the sheet row number
+captured at read time, double-checked against a fresh read of that row's Order ID + AWB
+Code immediately before writing (see `rto_sheet.py`'s `verify_rows()`) - if the sheet
+changed underneath (someone sorted it, edited it directly, etc.) the write is refused
+instead of risking the wrong row.
 
 ## One-time setup
 
-### 1. Supabase project
-1. Create a project at [supabase.com](https://supabase.com) (or reuse an existing org project).
-2. Open **SQL Editor** and run [`schema.sql`](schema.sql) once - creates `leads`, `call_logs`, and RLS policies.
-3. Under **Authentication > Users**, add one user per team member (email + password) -
-   these are the CRM logins. No public sign-up is exposed.
-4. Under **Project Settings > API**, copy the Project URL and the **service_role** key
-   (not the anon key - the Flask backend needs it to read/write leads and list users).
+### 1. Google OAuth client
+This app needs its own login separate from the main mcaff-CLS site (different
+origin/port, so it can't read that site's session cookie). In
+[Google Cloud Console](https://console.cloud.google.com/) → APIs & Services →
+Credentials, either reuse mcaff-CLS's existing OAuth client (add the redirect URI below
+to it) or create a new one, then add as an **Authorized redirect URI**:
+```
+http://127.0.0.1:5000/auth/callback
+```
+(add the production URL too, once this is hosted somewhere).
 
-### 2. Shiprocket API user
-1. In the Shiprocket dashboard: **Settings > API > Create API User** (a dedicated API
-   login, not your regular Shiprocket login - keeps this integration's access auditable
-   and revocable on its own).
-2. Note the email/password you set for that API user.
+### 2. Service-account sheet access
+The Google service account already used for reports (see `scripts/lib.py`) needs
+**Editor** access on the RTO Calling sheet (not just Viewer) - the reports only ever read;
+this app writes assignments and dispositions back. Share the sheet with the service
+account's email (`client_email` in its key JSON) as an Editor.
 
 ### 3. Local config
 ```
@@ -37,57 +49,28 @@ python -m venv .venv
 pip install -r requirements.txt
 copy .env.example .env.local
 ```
-Edit `.env.local` with your Supabase URL/service key, Shiprocket API user credentials,
-and a random `FLASK_SECRET_KEY`. `.env.local` is already covered by the repo's `.gitignore`
-(`.env.*`) - it will never be committed.
+Fill in `.env.local` - see the comments in `.env.example` for each variable
+(`FLASK_SECRET_KEY`, `GOOGLE_CLIENT_ID`/`SECRET`, `ADMIN_EMAILS`, `RTO_SHEET_ID`, and the
+service-account credential, which defaults to whatever `scripts/lib.py` already uses if
+left blank here).
 
-### 4. First sync (verify field mapping)
-Shiprocket's public docs don't publish a full response schema for the NDR/orders
-endpoints, so `shiprocket_client.py` tries several likely field names per value and
-keeps the **entire raw record** in `raw_data` regardless. Before relying on the UI, run:
-```
-python sync_leads.py --dry-run
-```
-This prints one sample NDR record and one sample RTO-filtered order record without
-writing anything. Compare the printed JSON against what's shown in the app (customer
-name/phone/address columns) - if a column comes back empty but the raw JSON clearly has
-the value under a different key, add that key to the relevant `_pick(...)` call in
-`shiprocket_client.py`.
-
-Once it looks right:
-```
-python sync_leads.py
-```
-
-### 5. Run the app
+### 4. Run it
 ```
 python app.py
 ```
-Visit http://127.0.0.1:5000 and log in with one of the Supabase Auth users you created.
-
-## Keeping leads fresh
-
-`sync_leads.py` is a plain script - schedule it (Windows Task Scheduler, or a cron job
-wherever this ends up hosted) to run every 30-60 minutes, or click **Sync now** on the
-dashboard to run it on demand. `--lookback-days N` controls how far back the RTO order
-scan looks (default 30).
-
-## Lead & call statuses
-
-- **Lead status**: new -> attempted -> callback_scheduled / resolved_reattempt /
-  resolved_cancelled / unreachable -> closed.
-- **Call outcome**: connected (reattempt confirmed / customer refused / wrong address),
-  no answer, switched off, invalid number, already resolved, other.
-
-Both are plain Python dicts in `app.py` (`LEAD_STATUS_LABELS`, `CALL_OUTCOME_LABELS`) -
-edit those plus the corresponding `check (...)` constraint in `schema.sql` to add options.
+Visit http://127.0.0.1:5000 and sign in with a `@mcaffeine.com` Google account. Anyone on
+the domain can sign in and use **My Leads**; only emails listed in `ADMIN_EMAILS` see
+**Assign Leads**.
 
 ## Notes / things to revisit
 
-- **RTO detection** is a case-insensitive `"rto" in status` match on the orders list,
-  since Shiprocket doesn't document a dedicated RTO endpoint or a confirmed filter
-  param value for it. If that ever over/under-matches, tighten it in
-  `ShiprocketClient.get_rto_leads`.
-- **Deployment**: this currently only runs locally (`python app.py`). If the team needs
-  it reachable outside your machine, it'll need hosting (e.g. a small VM, Render, or
-  similar) - ask before setting that up since it's a new piece of shared infrastructure.
+- **Access model**: any `@mcaffeine.com` Google account can log in (gated on the
+  `hd`/domain claim, not a per-user invite list). `ADMIN_EMAILS` is the only thing gating
+  the Assign view. Tighten this later with a proper allowlist if that's ever a problem.
+- **Deployment**: this currently only runs locally (`python app.py`). The main site's
+  `index.html` (Calling Vertical → RTO) is wired to load it at whatever `CALLING_APP_URL`/
+  RTO URL is configured there - update that once this is hosted somewhere reachable by
+  the whole team, and ask before standing up new hosting since that's shared
+  infrastructure.
+- **`crm_pep.db`** (SQLite, created automatically on first run) holds only this app's own
+  user list (email, name, is_admin) - never lead data.

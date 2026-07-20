@@ -607,13 +607,13 @@
       mom: 'MOM report is coming soon.'
     };
 
-    // NDR/RTO aren't separate cards - they're sub-items nested under Calling Vertical's
-    // nav (CRM-PEP already manages Shiprocket NDR/RTO leads, just with no distinct view
-    // per type yet). Clicking one shows the same placeholder panel as a top-level
-    // "coming soon" card would, just reached via the nested nav instead of the dropdown.
+    // NDR isn't a separate card - it's a sub-item nested under Calling Vertical's nav
+    // (CRM-PEP will eventually manage it too, just with no distinct view yet). Clicking it
+    // shows the same placeholder panel as a top-level "coming soon" card would, just
+    // reached via the nested nav instead of the dropdown. RTO now points at CRM-PEP's real
+    // calling/dispose tool instead of a placeholder - see selectCallingView().
     var CALLING_SUBITEMS = {
-      ndr: 'NDR report is coming soon.',
-      rto: 'RTO report is coming soon.'
+      ndr: 'NDR report is coming soon.'
     };
 
     function toggleMobileSidebar() {
@@ -816,18 +816,20 @@
       iframe.src = '/api/report/' + encodeURIComponent(brandKey);
     }
 
-    // Switches between Calling Vertical's own iframe (the CRM-PEP dashboard) and its NDR/
-    // RTO nav sub-items, which have no distinct view yet and just show the same "coming
-    // soon" placeholder used for top-level cards (see COMING_SOON).
+    // Switches between Calling Vertical's own iframe (CRM-PEP - both "Dashboard" and "RTO"
+    // point at it, since CRM-PEP's own nav inside the iframe is the RTO calling/assign
+    // tool) and the NDR nav sub-item, which has no distinct view yet and shows the same
+    // "coming soon" placeholder used for top-level cards (see COMING_SOON).
     function selectCallingView(view) {
       var iframe = document.getElementById('reportIframe');
       var placeholderPanel = document.getElementById('placeholderPanel');
       Array.prototype.slice.call(document.querySelectorAll('#navList .nav-btn[data-calling-view]')).forEach(function(b) {
         b.classList.toggle('active', b.getAttribute('data-calling-view') === view);
       });
-      if (view === 'dashboard') {
+      if (view === 'dashboard' || view === 'rto') {
         placeholderPanel.style.display = 'none';
         iframe.style.display = 'block';
+        if (iframe.src !== CALLING_APP_URL) iframe.src = CALLING_APP_URL;
         return;
       }
       iframe.style.display = 'none';

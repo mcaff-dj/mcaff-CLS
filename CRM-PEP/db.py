@@ -1,104 +1,56 @@
-"""Supabase data access layer. Uses the service-role key (backend-only, never sent to the
-browser) so Flask's own @login_required is what gates access - see schema.sql for the
-RLS baseline that would apply to any other (non-service-role) client.
+"""CRM-PEP's own tiny user store - just who's allowed in and who's an admin.
+SQLite (stdlib only, no new dependency, no shared infra) since this app owns nothing
+else: lead data lives in the Google Sheet (see rto_sheet.py), never mirrored here.
 """
-from supabase import create_client
+import sqlite3
+from pathlib import Path
 
-import config
-
-LEAD_STATUSES = [
-    "new", "attempted", "callback_scheduled",
-    "resolved_reattempt", "resolved_cancelled", "unreachable", "closed",
-]
-
-CALL_OUTCOMES = [
-    "connected_reattempt_confirmed",
-    "connected_customer_refused",
-    "connected_wrong_address",
-    "no_answer",
-    "switched_off",
-    "invalid_number",
-    "already_resolved",
-    "other",
-]
-
-_client = None
+DB_PATH = Path(__file__).resolve().parent / "crm_pep.db"
 
 
-def get_client():
-    global _client
-    if _client is None:
-        url = config.get("SUPABASE_URL", required=True)
-        key = config.get("SUPABASE_SERVICE_KEY", required=True)
-        _client = create_client(url, key)
-    return _client
+def get_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-# -- auth ------------------------------------------------------------------
-def sign_in(email, password):
-    """Returns the Supabase auth session dict on success, raises on failure."""
-    result = get_client().auth.sign_in_with_password({"email": email, "password": password})
-    return result
-
-
-def list_team_members():
-    """Admin-listing of Supabase Auth users, for the assignment dropdown."""
-    resp = get_client().auth.admin.list_users()
-    users = resp if isinstance(resp, list) else getattr(resp, "users", [])
-    return sorted(
-        [{"id": u.id, "email": u.email} for u in users if u.email],
-        key=lambda u: u["email"],
+def init_db():
+    conn = get_conn()
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            name TEXT,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )"""
     )
+    conn.commit()
+    conn.close()
 
 
-# -- leads -------------------------------------------------------------------
-def upsert_leads(leads):
-    """leads: list of dicts matching the `leads` table columns. Upserts on (source, awb)."""
-    if not leads:
-        return
-    get_client().table("leads").upsert(leads, on_conflict="source,awb").execute()
-
-
-def list_leads(source=None, lead_status=None, assigned_to=None, search=None, limit=200):
-    query = get_client().table("leads").select("*")
-    if source:
-        query = query.eq("source", source)
-    if lead_status:
-        query = query.eq("lead_status", lead_status)
-    if assigned_to:
-        query = query.eq("assigned_to", assigned_to)
-    if search:
-        like = f"%{search}%"
-        query = query.or_(f"awb.ilike.{like},channel_order_id.ilike.{like},customer_phone.ilike.{like}")
-    resp = query.order("created_at", desc=True).limit(limit).execute()
-    return resp.data
-
-
-def get_lead(lead_id):
-    resp = get_client().table("leads").select("*").eq("id", lead_id).single().execute()
-    return resp.data
-
-
-def update_lead(lead_id, fields):
-    get_client().table("leads").update(fields).eq("id", lead_id).execute()
-
-
-# -- call logs -----------------------------------------------------------
-def add_call_log(lead_id, called_by, call_outcome, notes):
-    get_client().table("call_logs").insert({
-        "lead_id": lead_id,
-        "called_by": called_by,
-        "call_outcome": call_outcome,
-        "notes": notes,
-    }).execute()
-
-
-def list_call_logs(lead_id):
-    resp = (
-        get_client().table("call_logs")
-        .select("*")
-        .eq("lead_id", lead_id)
-        .order("called_at", desc=True)
-        .execute()
+def upsert_user(email, name, admin_emails):
+    """Creates the user on first login (or updates their name), and promotes them to
+    admin if their email is in ADMIN_EMAILS - never demotes, so removing an email from
+    ADMIN_EMAILS later doesn't silently strip an admin who was already granted it."""
+    email = email.lower()
+    is_admin = 1 if email in admin_emails else 0
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO users (email, name, is_admin) VALUES (?, ?, ?)
+           ON CONFLICT(email) DO UPDATE SET
+             name = excluded.name,
+             is_admin = MAX(users.is_admin, excluded.is_admin)""",
+        (email, name, is_admin),
     )
-    return resp.data
+    conn.commit()
+    row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+def list_agents():
+    conn = get_conn()
+    rows = conn.execute("SELECT email, name, is_admin FROM users ORDER BY email ASC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

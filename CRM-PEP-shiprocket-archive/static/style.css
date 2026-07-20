@@ -24,9 +24,6 @@ body {
   color: white;
 }
 .topbar .brand { color: white; font-weight: 700; text-decoration: none; font-size: 1.1rem; }
-.topnav { display: flex; gap: 1rem; }
-.topnav a { color: #93c5fd; text-decoration: none; font-size: 0.9rem; }
-.topnav a:hover { color: white; }
 .topbar .user { margin-left: auto; opacity: 0.8; font-size: 0.9rem; }
 .topbar .logout { color: #93c5fd; text-decoration: none; font-size: 0.9rem; }
 
@@ -43,21 +40,8 @@ body {
   padding: 2rem;
   border-radius: 10px;
   box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-  text-align: center;
 }
 .login-box h1 { margin-top: 0; }
-.google-btn {
-  display: inline-block;
-  margin-top: 1rem;
-  background: var(--accent);
-  color: white;
-  text-decoration: none;
-  padding: 0.6rem 1.2rem;
-  border-radius: 6px;
-  font-size: 0.9rem;
-  font-weight: 600;
-}
-.google-btn:hover { opacity: 0.9; }
 
 label { display: block; margin-bottom: 0.9rem; font-size: 0.85rem; color: var(--muted); }
 input, select, textarea {
@@ -69,8 +53,6 @@ input, select, textarea {
   border-radius: 6px;
   font-size: 0.95rem;
   font-family: inherit;
-  background: white;
-  color: #1a1d21;
 }
 
 button {
@@ -87,11 +69,8 @@ button:hover { opacity: 0.9; }
 
 .page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
 
-.filters { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
+.filters { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 1rem; }
 .filters select, .filters input { width: auto; margin-top: 0; }
-
-.tab-link { padding: 0.4rem 0.9rem; border-radius: 999px; border: 1px solid var(--border); text-decoration: none; color: var(--muted); font-size: 0.85rem; }
-.tab-link.active { background: var(--accent); border-color: transparent; color: white; }
 
 table.leads-table {
   width: 100%;
@@ -133,5 +112,11 @@ table.leads-table {
 dl { display: grid; grid-template-columns: auto 1fr; gap: 0.3rem 1rem; margin: 0; }
 dt { color: var(--muted); font-size: 0.85rem; }
 dd { margin: 0; }
+
+.assign-form { margin-top: 1rem; }
+
+.call-history { list-style: none; padding: 0; }
+.call-history li { border-bottom: 1px solid var(--border); padding: 0.6rem 0; }
+.call-history p { margin: 0.3rem 0 0; }
 
 .muted { color: var(--muted); }

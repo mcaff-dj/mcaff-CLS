@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}{{ lead.awb }} - CRM-PEP{% endblock %}
+{% block content %}
+<a href="{{ url_for('dashboard') }}" class="back-link">&larr; Back to leads</a>
+
+<div class="lead-grid">
+  <section class="lead-info">
+    <h1><span class="badge badge-{{ lead.source }}">{{ lead.source|upper }}</span> {{ lead.awb }}</h1>
+    <dl>
+      <dt>Order</dt><dd>{{ lead.channel_order_id or lead.shiprocket_order_id or '-' }}</dd>
+      <dt>Customer</dt><dd>{{ lead.customer_name or '-' }}</dd>
+      <dt>Phone</dt><dd>{{ lead.customer_phone or '-' }}</dd>
+      <dt>Address</dt><dd>{{ lead.customer_address or '-' }}</dd>
+      <dt>Courier</dt><dd>{{ lead.courier_name or '-' }}</dd>
+      <dt>Order value</dt><dd>{{ lead.order_value or '-' }}</dd>
+      <dt>Shiprocket status</dt><dd>{{ lead.status or '-' }}</dd>
+      <dt>Reason</dt><dd>{{ lead.reason or '-' }}</dd>
+      <dt>Attempts</dt><dd>{{ lead.attempts or 0 }}</dd>
+      <dt>Last synced</dt><dd>{{ lead.last_synced_at }}</dd>
+    </dl>
+
+    <form method="post" action="{{ url_for('assign_lead', lead_id=lead.id) }}" class="assign-form">
+      <label>Assigned to
+        <select name="assigned_to" onchange="this.form.submit()">
+          <option value="">Unassigned</option>
+          {% for member in team %}
+          <option value="{{ member.id }}" {{ 'selected' if lead.assigned_to == member.id }}>{{ member.email }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </form>
+  </section>
+
+  <section class="call-panel">
+    <h2>Log a call</h2>
+    <form method="post" action="{{ url_for('log_call', lead_id=lead.id) }}">
+      <label>Outcome
+        <select name="call_outcome" required>
+          <option value="" disabled selected>Choose outcome</option>
+          {% for code, label in CALL_OUTCOME_LABELS.items() %}
+          <option value="{{ code }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Notes
+        <textarea name="notes" rows="3" placeholder="What did the customer say?"></textarea>
+      </label>
+      <label>Update lead status
+        <select name="lead_status">
+          <option value="">Leave unchanged</option>
+          {% for code, label in LEAD_STATUS_LABELS.items() %}
+          <option value="{{ code }}" {{ 'selected' if lead.lead_status == code }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit">Save call</button>
+    </form>
+
+    <h2>Call history</h2>
+    {% if calls %}
+    <ul class="call-history">
+      {% for call in calls %}
+      <li>
+        <strong>{{ CALL_OUTCOME_LABELS.get(call.call_outcome, call.call_outcome) }}</strong>
+        <span class="muted">{{ call.called_at }} - {{ team_by_id.get(call.called_by, 'Unknown') }}</span>
+        {% if call.notes %}<p>{{ call.notes }}</p>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">No calls logged yet.</p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

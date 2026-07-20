@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}My Leads - CRM-PEP{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>My Leads</h1>
+</div>
+<div class="filters">
+  <a href="{{ url_for('queue', mode='pending') }}" class="tab-link {{ 'active' if mode != 'disposed' }}">Pending</a>
+  <a href="{{ url_for('queue', mode='disposed') }}" class="tab-link {{ 'active' if mode == 'disposed' }}">Already disposed by me</a>
+</div>
+<p class="muted">{{ rows|length }} lead(s)</p>
+
+{% if rows %}
+<table class="leads-table">
+  <thead><tr>
+    <th>Order ID</th><th>Customer</th><th>Mobile</th><th>City</th><th>RTO Reason</th><th>Courier</th><th>Calling Date</th>
+  </tr></thead>
+  <tbody>
+    {% for r in rows %}
+    <tr onclick="window.location='{{ url_for('lead_detail', row_number=r.row_number, order_id=r.order_id, awb_code=r.awb_code) }}'">
+      <td>{{ r.order_id }}</td>
+      <td>{{ r.cust_name }}</td>
+      <td>{{ r.cust_mobile }}</td>
+      <td>{{ r.city }}</td>
+      <td>{{ r.rto_reason_original }}</td>
+      <td>{{ r.courier }}</td>
+      <td>{{ r.calling_date }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">Nothing here right now.</p>
+{% endif %}
+{% endblock %}
