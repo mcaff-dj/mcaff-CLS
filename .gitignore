@@ -8,8 +8,7 @@ node_modules/
 .env
 .env.*
 !.env.example
-CRM-PEP-shiprocket-archive/.shiprocket_token.json
-CRM-PEP/*.db
+CRM-PEP/.shiprocket_token.json
 
 __pycache__/
 *.pyc
