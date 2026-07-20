@@ -16,11 +16,6 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.2/dist/confetti.browser.min.js"></script>
-  
-  <!-- Supabase JS Client -->
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <!-- Google Identity Services -->
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
 
   <script>
     tailwind.config = {
@@ -83,7 +78,6 @@
     /* ── Defaults ─────────────────────────────────────── */
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI/edit?usp=sharing';
     const DEFAULT_SHEET_RANGE = 'Data';
-    const DEFAULT_SUPABASE_URL = 'https://yzvqkboikvbkriccrhjk.supabase.co';
 
     // High Priority RTO Refusal Reasons list
     const HIGH_PRIORITY_RTO_REASONS = [
@@ -170,44 +164,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const data = await res.json();
       if (!data.access_token) throw new Error(data.error_description || 'Token error');
       return data.access_token;
-    }
-
-    // Decode OAuth JWT Token
-    function decodeJwt(token) {
-      try {
-        const base64Url = token.split('.')[1];
-        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-        const jsonPayload = decodeURIComponent(atob(base64).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));
-        return JSON.parse(jsonPayload);
-      } catch (e) { return null; }
-    }
-
-    // Parse OAuth Hash Synchronously on Boot
-    function parseOAuthHashOnBoot() {
-      const hash = window.location.hash;
-      if (hash && hash.includes('access_token=')) {
-        try {
-          const params = new URLSearchParams(hash.substring(1));
-          const accessToken = params.get('access_token');
-          if (accessToken) {
-            const payload = decodeJwt(accessToken);
-            if (payload) {
-              const userMeta = payload.user_metadata || {};
-              const userObj = {
-                name: userMeta.full_name || userMeta.name || payload.email,
-                email: payload.email,
-                picture: userMeta.avatar_url || userMeta.picture || `https://api.dicebear.com/7.x/avataaars/svg?seed=${payload.email}`
-              };
-              localStorage.setItem('rto_google_user', JSON.stringify(userObj));
-              if (window.history.replaceState) {
-                window.history.replaceState(null, '', window.location.pathname + window.location.search);
-              }
-              return userObj;
-            }
-          }
-        } catch (e) { console.warn('Boot hash error', e); }
-      }
-      return null;
     }
 
     async function fetchSheetData(spreadsheetId, range = 'Data') {
@@ -366,11 +322,28 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         localStorage.setItem('rto_theme', theme);
       }, [theme]);
 
-      const [googleUser, setGoogleUser] = useState(() => {
-        const bootUser = parseOAuthHashOnBoot();
-        if (bootUser) return bootUser;
-        try { const s = localStorage.getItem('rto_google_user'); return s ? JSON.parse(s) : null; } catch { return null; }
-      });
+      // Auth comes from the site's session cookie (same login as index.html) rather than a
+      // separate sign-in flow, since this page is loaded same-origin (directly or in an iframe).
+      const [googleUser, setGoogleUser] = useState(null);
+      const [authChecked, setAuthChecked] = useState(false);
+
+      useEffect(() => {
+        fetch('/api/auth/me')
+          .then((r) => r.json())
+          .then((d) => {
+            if (!d.authenticated) {
+              setAuthChecked(true);
+              return;
+            }
+            setGoogleUser({
+              name: d.name || d.email,
+              email: d.email,
+              picture: `https://api.dicebear.com/7.x/avataaars/svg?seed=${d.email}`,
+            });
+            setAuthChecked(true);
+          })
+          .catch(() => setAuthChecked(true));
+      }, []);
 
       // Default Agent Status to 'Offline' on first load!
       const [agentStatus, setAgentStatus] = useState(() => localStorage.getItem('rto_agent_status') || 'Offline');
@@ -413,42 +386,16 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         setTimeout(() => setToast(null), 3000);
       }, []);
 
-      const handleGoogleSignIn = async () => {
-        if (window.supabase) {
-          const client = window.supabase.createClient(DEFAULT_SUPABASE_URL, 'placeholder');
-          const isInIframe = window.self !== window.top;
-          let targetRedirect = window.location.origin + window.location.pathname;
-          try {
-            if (isInIframe && window.top) {
-              targetRedirect = window.top.location.href.split('#')[0];
-            }
-          } catch (e) {
-            targetRedirect = window.location.href.split('#')[0];
-          }
-
-          try {
-            const { data, error } = await client.auth.signInWithOAuth({
-              provider: 'google',
-              options: {
-                redirectTo: targetRedirect,
-                skipBrowserRedirect: isInIframe
-              }
-            });
-            if (error) throw error;
-
-            if (isInIframe && data && data.url) {
-              window.top.location.href = data.url;
-            }
-          } catch (err) {
-            showToast(err.message || 'Google Auth Error');
-          }
-        }
+      const handleGoogleSignIn = () => {
+        const isInIframe = window.self !== window.top;
+        const targetWindow = isInIframe ? window.top : window;
+        const currentPath = isInIframe ? '/' : (window.location.pathname + window.location.search);
+        targetWindow.location.href = '/login.html?next=' + encodeURIComponent(currentPath);
       };
 
       const handleLogout = () => {
-        setGoogleUser(null);
-        localStorage.removeItem('rto_google_user');
-        showToast('Logged out');
+        const isInIframe = window.self !== window.top;
+        (isInIframe ? window.top : window).location.href = '/api/auth/logout';
       };
 
       // Live Google Sheets Fetch
@@ -583,6 +530,9 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
          SCREEN 1: LOGIN PAGE (Clean Google Auth Only)
          ────────────────────────────────────────────────── */
       if (!googleUser) {
+        if (!authChecked) {
+          return <div className="min-h-screen bg-slate-950" />;
+        }
         return (
           <div className="min-h-screen flex items-center justify-center p-6 bg-slate-950 text-slate-100">
             <div className="w-full max-w-md bg-zinc-900 border border-zinc-800/80 rounded-2xl p-8 shadow-2xl space-y-6 text-center animate-fadeIn">
