@@ -603,30 +603,22 @@
 
     // Calling Team has its own three nested nav sub-items instead of one blanket
     // "coming soon" card - each is its own placeholder for now until a real report/tool
-    // is wired up behind it. RTO-Calling is real now (see api/calling.py, same-origin
-    // Python/Flask function) - it loads straight into the iframe instead of a placeholder.
+    // is wired up behind it.
     var CALLING_TEAM_SUBITEMS = {
       overview: { label: 'Overview', text: 'Overview report is coming soon.' },
-      ndr: { label: 'NDR-Calling', text: 'NDR-Calling report is coming soon.' }
+      ndr: { label: 'NDR-Calling', text: 'NDR-Calling report is coming soon.' },
+      rto: { label: 'RTO-Calling', text: 'RTO-Calling report is coming soon.' }
     };
 
     function selectCallingTeamView(view) {
       Array.prototype.slice.call(document.querySelectorAll('#navList .nav-btn[data-calling-team-view]')).forEach(function(b) {
         b.classList.toggle('active', b.getAttribute('data-calling-team-view') === view);
       });
-      var iframe = document.getElementById('reportIframe');
-      var placeholderPanel = document.getElementById('placeholderPanel');
-      if (view === 'rto') {
-        placeholderPanel.style.display = 'none';
-        iframe.style.display = 'block';
-        iframe.src = '/calling';
-        return;
-      }
       var sub = CALLING_TEAM_SUBITEMS[view];
-      iframe.style.display = 'none';
+      document.getElementById('reportIframe').style.display = 'none';
       document.getElementById('placeholderTitle').textContent = sub.label;
       document.getElementById('placeholderDesc').textContent = sub.text;
-      placeholderPanel.style.display = 'flex';
+      document.getElementById('placeholderPanel').style.display = 'flex';
     }
 
     function toggleMobileSidebar() {

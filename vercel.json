@@ -12,9 +12,7 @@
   "rewrites": [
     { "source": "/mcaffeine.html", "destination": "/api/report/mcaffeine" },
     { "source": "/hyphen.html", "destination": "/api/report/hyphen" },
-    { "source": "/product-kyc.html", "destination": "/api/report/productkyc" },
-    { "source": "/calling", "destination": "/api/calling" },
-    { "source": "/calling/:path*", "destination": "/api/calling" }
+    { "source": "/product-kyc.html", "destination": "/api/report/productkyc" }
   ],
   "functions": {
     "api/report/[card].js": {
