@@ -353,60 +353,103 @@ def build_daily_narrative(cls, data):
 _BATCH_ANALYSIS_CLASSES = ("Packaging and Operational", "Product")
 
 
-def build_batch_recurring_section(ctx, period, cur_idx):
-    """New Monthly Analysis section: products with more than 5 Packaging & Operational or
-    Product complaints in the selected period, broken down by batch number - surfaces
-    which batches are driving a product's volume and what the most common issue is for
-    each, to spot a recurring, batch-specific defect vs. a product-wide one."""
-    subset = [r for r in ctx.unique
-              if ctx.cell(r, ctx.col["cls"]) in _BATCH_ANALYSIS_CLASSES and period["index_fn"](r) == cur_idx]
-    if not subset:
+def build_batch_recurring_section(ctx):
+    """New Monthly Analysis section (period-independent - always looks at the trailing 3
+    calendar months, regardless of which period the Daily/Monthly/Weekly/Yearly selectors
+    are on): for products with more than 5 Packaging & Operational or Product complaints
+    across that 3-month window, writes a narrative comparing the first vs. last month's
+    volume (rising/falling/stable, via the same change_verb used elsewhere) and identifies
+    whether one batch is driving most of any increase (a batch-specific defect) or the
+    rise is spread across batches (more likely a product-wide issue) - prose, not a raw
+    per-batch table, matching every other Monthly Analysis section's style."""
+    months_window = ctx.months[-3:]
+    if len(months_window) < 2:
         return ""
+    window_set = set(months_window)
     prod_cache = {}
-    prod_rows = {}
-    for r in subset:
+    prod_month_tot = {}
+    prod_rows_window = {}
+    for r in ctx.unique:
+        if ctx.cell(r, ctx.col["cls"]) not in _BATCH_ANALYSIS_CLASSES:
+            continue
+        mo = ctx.cell(r, ctx.col["month"])
+        if mo not in window_set:
+            continue
         prod = ctx.cell(r, ctx.col["prod"])
         if not str(prod).strip():
-            continue  # can't attribute to a product, so not part of a "which product" breakdown
+            continue
         prod = ci_key(prod, prod_cache)
-        prod_rows.setdefault(prod, []).append(r)
-    qualifying = sorted(((p, rs) for p, rs in prod_rows.items() if len(rs) > 5),
+        prod_month_tot.setdefault(prod, {mo2: 0 for mo2 in months_window})
+        prod_month_tot[prod][mo] += 1
+        prod_rows_window.setdefault(prod, []).append(r)
+
+    qualifying = sorted(((p, rs) for p, rs in prod_rows_window.items() if len(rs) > 5),
                          key=lambda x: len(x[1]), reverse=True)
     if not qualifying:
         return ""
 
-    blocks = []
+    first_mo, last_mo = months_window[0], months_window[-1]
+    bullets = []
     for prod, rows in qualifying:
+        month_counts = prod_month_tot[prod]
+        first_c, last_c = month_counts[first_mo], month_counts[last_mo]
+        trend_str = " &rarr; ".join(f"{n0(month_counts[mo])} in {h_enc(pretty_month(mo))}" for mo in months_window)
+        verb = change_verb(first_c, last_c)
+        line = f"<b>{h_enc(prod)}</b>: complaints {verb} ({trend_str})."
+
         batch_cache = {}
-        batch_cat = {}
-        batch_tot = {}
+        batch_month = {}
+        batch_cat_tot = {}
         cat_caches = {}
         for r in rows:
             batch = ctx.cell(r, ctx.col["batch"])
             if not str(batch).strip():
                 batch = "(blank)"
             batch = ci_key(batch, batch_cache)
+            batch_month.setdefault(batch, {mo2: 0 for mo2 in months_window})
+            batch_month[batch][ctx.cell(r, ctx.col["month"])] += 1
             cat = ctx.cell(r, ctx.col["cat"])
             if not str(cat).strip():
                 cat = "(blank)"
             cat = ci_key(cat, cat_caches.setdefault(batch, {}))
-            batch_cat.setdefault(batch, {})
-            batch_cat[batch][cat] = batch_cat[batch].get(cat, 0) + 1
-            batch_tot[batch] = batch_tot.get(batch, 0) + 1
-        batch_order = sorted(batch_tot.items(), key=lambda kv: kv[1], reverse=True)[:15]
-        rows_html = []
-        for batch, cnt in batch_order:
-            top_cat, top_cnt = max(batch_cat[batch].items(), key=lambda kv: kv[1])
-            rows_html.append(f"<tr><td class='rowlabel'>{h_enc(batch)}</td><td class='num'>{n0(cnt)}</td><td class='rowlabel'>{h_enc(top_cat)} ({n0(top_cnt)})</td></tr>")
-        blocks.append(
-            f"<div style='margin:0 0 14px;'><p style='font-weight:600;font-size:13px;margin:0 0 6px;'>{h_enc(prod)} &mdash; {n0(len(rows))} complaints</p>"
-            f"<div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner'>Batch Number</th><th>Complaints</th><th>Most Common Issue</th></tr></thead>"
-            f"<tbody>{''.join(rows_html)}</tbody></table></div></div>"
-        )
-    return (f"<div class='ma-class'><h4>Packaging &amp; Product Complaints &mdash; Batch-Wise Analysis</h4>"
-            f"<p class='ma-overall'>{n0(len(qualifying))} product(s) with more than 5 Packaging &amp; Operational or Product complaints "
-            f"this period, broken down by batch number to spot recurring issues and affected batches.</p>"
-            f"{''.join(blocks)}</div>")
+            batch_cat_tot.setdefault(batch, {})
+            batch_cat_tot[batch][cat] = batch_cat_tot[batch].get(cat, 0) + 1
+
+        overall_delta = last_c - first_c
+        # Only attempt to name a "driving batch" once the rise itself is non-trivial
+        # (>=3) - otherwise a product edging up by 1-2 tickets can spuriously credit a
+        # batch that itself only moved 0->1, which is noise, not a finding.
+        if overall_delta >= 3 and batch_month:
+            top_batch, top_first, top_last = max(
+                ((b, mc[first_mo], mc[last_mo]) for b, mc in batch_month.items()),
+                key=lambda x: x[2] - x[1],
+            )
+            top_delta = top_last - top_first
+            # Require the batch's OWN increase to be non-trivial too, not just its share
+            # of a small overall rise.
+            if top_delta >= 3:
+                share = round1(top_delta / overall_delta * 100)
+                top_cat_name = max(batch_cat_tot[top_batch].items(), key=lambda kv: kv[1])[0]
+                if share > 100:
+                    # The top batch's own increase exceeds the product's net rise - only
+                    # possible if other batches improved enough to partly offset it. A
+                    # real, distinct finding worth naming rather than a bug to hide.
+                    line += (f" Batch <b>{h_enc(top_batch)}</b> alone rose from {n0(top_first)} to {n0(top_last)} &mdash; more than the "
+                             f"product's entire net increase, meaning other batches actually improved even as this one worsened "
+                             f"&mdash; mostly &quot;{h_enc(top_cat_name)}&quot;, pointing at a batch-specific defect rather than a product-wide one.")
+                elif share >= 50:
+                    line += (f" Batch <b>{h_enc(top_batch)}</b> is driving most of this rise, up from {n0(top_first)} to {n0(top_last)} "
+                             f"({fnum(share)}% of the increase) &mdash; mostly &quot;{h_enc(top_cat_name)}&quot;, pointing at a batch-specific "
+                             f"defect rather than a product-wide one.")
+                else:
+                    line += " No single batch accounts for most of the increase - complaints look spread across batches, more likely a product-wide issue than one bad batch."
+        bullets.append(f"<li>{line}</li>")
+
+    return (f"<div class='ma-class'><h4>Packaging &amp; Product Complaints &mdash; Batch Trend (last {len(months_window)} months)</h4>"
+            f"<p class='ma-overall'>{n0(len(qualifying))} product(s) with more than 5 Packaging &amp; Operational or Product complaints across "
+            f"{h_enc(pretty_month(first_mo))}&ndash;{h_enc(pretty_month(last_mo))} combined, comparing {h_enc(pretty_month(first_mo))} to "
+            f"{h_enc(pretty_month(last_mo))} and calling out which batch (if any) is driving a rise.</p>"
+            f"<ul class='ma-list'>{''.join(bullets)}</ul></div>")
 
 
 def build_new_products_section(ctx):
@@ -502,9 +545,6 @@ def build_monthly_analysis_panel(ctx):
             html = build_daily_narrative(c, day_class_data[c["key"]])
             if html:
                 day_sections.append(html)
-        batch_html = build_batch_recurring_section(ctx, ctx.ma_day_ctx, 1)
-        if batch_html:
-            day_sections.append(batch_html)
         day_body = "".join(day_sections) if day_sections else f"<p class='note'>No notable day-on-day changes crossed the reporting threshold for {h_enc(ctx.ma_yesterday_label)}.</p>"
 
     # ---------- Monthly narrative ----------
@@ -516,9 +556,6 @@ def build_monthly_analysis_panel(ctx):
             html = build_class_period_narrative(ctx, c, month_class_data[c["key"]], ctx.ma_month_ctx, mi)
             if html:
                 sections.append(html)
-        batch_html = build_batch_recurring_section(ctx, ctx.ma_month_ctx, mi)
-        if batch_html:
-            sections.append(batch_html)
         body = "".join(sections) if sections else f"<p class='note'>No notable month-on-month changes crossed the reporting threshold for {h_enc(pretty_month(months[mi]))}.</p>"
         disp = "" if mi == n - 1 else " style='display:none;'"
         month_divs.append(f"<div class='ma-period' id='ma-month-{mi}'{disp}>{body}</div>")
@@ -539,9 +576,6 @@ def build_monthly_analysis_panel(ctx):
                 html = build_class_period_narrative(ctx, c, week_class_data[c["key"]], ctx.ma_week_ctx, wi)
                 if html:
                     sections.append(html)
-            batch_html = build_batch_recurring_section(ctx, ctx.ma_week_ctx, wi)
-            if batch_html:
-                sections.append(batch_html)
             body = "".join(sections) if sections else f"<p class='note'>No notable week-on-week changes crossed the reporting threshold for {h_enc(ctx.ma_pretty_week_full(wi))}.</p>"
             disp = "" if wi == total_weeks - 1 else " style='display:none;'"
             week_divs.append(f"<div class='ma-period' id='ma-week-{wi}'{disp}>{body}</div>")
@@ -561,9 +595,6 @@ def build_monthly_analysis_panel(ctx):
                 html = build_class_period_narrative(ctx, c, year_class_data[c["key"]], ctx.ma_year_ctx, yi)
                 if html:
                     sections.append(html)
-            batch_html = build_batch_recurring_section(ctx, ctx.ma_year_ctx, yi)
-            if batch_html:
-                sections.append(batch_html)
             body = "".join(sections) if sections else f"<p class='note'>No notable year-on-year changes crossed the reporting threshold for {h_enc(ctx.distinct_years[yi])}.</p>"
             disp = "" if yi == n_years - 1 else " style='display:none;'"
             year_divs.append(f"<div class='ma-period' id='ma-year-{yi}'{disp}>{body}</div>")
@@ -632,6 +663,7 @@ def build_monthly_analysis_panel(ctx):
         '    </div>\n'
     )
 
+    batch_trend_html = build_batch_recurring_section(ctx)
     new_products_html = build_new_products_section(ctx)
     geo_containers = build_monthly_analysis_geo_containers(ctx)
     # window.renderGeoForMonthlyAnalysis is defined by build_geo_script's <script>, embedded
@@ -647,7 +679,6 @@ def build_monthly_analysis_panel(ctx):
   <section>
     <h2>Monthly Analysis</h2>
     <p class="desc">Auto-generated from ticket data &mdash; compares the selected period to the one before it. Figures are wrt that period's total sales; drill-downs show the courier/warehouse/product driving most of a category's change. Root-cause context (e.g. a specific coupon bug) isn't captured in the data and is not inferred here.</p>
-{new_products_html}
     <div class="ma-gran-toggle">
       <button type="button" class="gran-btn" data-magran="daily" onclick="setMaGranularity('daily')">Daily</button>
       <button type="button" class="gran-btn active" data-magran="monthly" onclick="setMaGranularity('monthly')">Monthly</button>
@@ -662,6 +693,8 @@ def build_monthly_analysis_panel(ctx):
 {weekly_section_html}
 {yearly_section_html}
 {geo_containers}
+{batch_trend_html}
+{new_products_html}
   </section>
 </div>
 {js}
