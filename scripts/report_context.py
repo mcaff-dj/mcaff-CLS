@@ -228,3 +228,30 @@ class Ctx:
     def top_n(d, n):
         items = sorted(d.items(), key=lambda kv: kv[1], reverse=True)[:n]
         return [{"key": k, "value": v} for k, v in items]
+
+
+def sort_keys_by_last_period(by_key, tot_by_key, period_order):
+    """Row order for a pivot table: descending by each key's value in the LAST period
+    (from period_order - a month/week list, chronological) that has ANY data across all
+    keys, rather than by cumulative total across every period - so a row's position
+    reflects what's currently happening, not stale historical volume that may not even
+    be visible anymore (e.g. after empty leading months are hidden). Ties within that
+    period fall back to descending-by-total, for a stable order among rows that are all
+    zero (or equal) in the current period. Matches the ProdPkg drill-down's existing
+    lmk()/LP convention (gen_panels.py), just generalized for any {key: {period: count}}
+    breakdown.
+    by_key: {key: {period: count}}. tot_by_key: {key: total} - defines the key set/tiebreak.
+    period_order: chronological list of periods (e.g. ctx.months or a month's week_list).
+    """
+    last_period = None
+    for p in reversed(period_order):
+        if any(by_key.get(k, {}).get(p, 0) for k in tot_by_key):
+            last_period = p
+            break
+    if last_period is None:
+        return [k for k, _ in sorted(tot_by_key.items(), key=lambda kv: kv[1], reverse=True)]
+    return [k for k, _ in sorted(
+        tot_by_key.items(),
+        key=lambda kv: (by_key.get(kv[0], {}).get(last_period, 0), kv[1]),
+        reverse=True,
+    )]

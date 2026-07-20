@@ -14,7 +14,7 @@ O(months x rows) rescan - important since row counts run into the 100k range.
 import calendar
 import re
 
-from report_context import ci_key, fnum, h_enc, n0, nice_max, parse_month_label, pretty_month, round1
+from report_context import ci_key, fnum, h_enc, n0, nice_max, parse_month_label, pretty_month, round1, sort_keys_by_last_period
 
 _week_num_re = re.compile(r"Week\s*(\d+)")
 
@@ -277,7 +277,7 @@ def build_weekly_class_block(ctx, cls):
             parts.append(f"<div class='gran-weekly' data-month='{mi}' style='display:none;'>"
                          f"<p class='note'>No {h_enc(cls['label'])} tickets in {h_enc(pretty_month(ctx.months[mi]))}.</p></div>")
             continue
-        cat_order = [k for k, _ in sorted(bkt["key_tot"].items(), key=lambda kv: kv[1], reverse=True)]
+        cat_order = sort_keys_by_last_period(bkt["by_key"], bkt["key_tot"], week_list)
         row_defs = [{"key": k, "label": k} for k in cat_order]
         vals = [sum(bkt["by_key"][k].get(wk, 0) for k in cat_order) for wk in week_list]
         parts.append(f"<div class='gran-weekly' data-month='{mi}' style='display:none;'>")
@@ -342,7 +342,7 @@ def build_weekly_delivery_block(ctx):
         if not cat_bkt["key_tot"]:
             parts.append(f"<p class='note'>No Delivery tickets in {h_enc(pretty_month(ctx.months[mi]))}.</p></div>")
             continue
-        cat_order = [k for k, _ in sorted(cat_bkt["key_tot"].items(), key=lambda kv: kv[1], reverse=True)]
+        cat_order = sort_keys_by_last_period(cat_bkt["by_key"], cat_bkt["key_tot"], week_list)
         row_defs = [{"key": k, "label": k} for k in cat_order]
         vals = [sum(cat_bkt["by_key"][k].get(wk, 0) for k in cat_order) for wk in week_list]
 
@@ -353,7 +353,7 @@ def build_weekly_delivery_block(ctx):
 
         p_bkt = partner_by_month[mi]
         if p_bkt["key_tot"]:
-            partner_order = [k for k, _ in sorted(p_bkt["key_tot"].items(), key=lambda kv: kv[1], reverse=True)]
+            partner_order = sort_keys_by_last_period(p_bkt["by_key"], p_bkt["key_tot"], week_list)
             am = alloc_by_month[mi]
             tparts = ["<div class='pivot-wrap'><div class='pivot-title'>Delivery Complaints wrt Delivery Partners (Weekly)</div>"
                       "<div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Delivery Partner Name</th>"]

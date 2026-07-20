@@ -19,7 +19,7 @@ from gen_insights import build_insights_card, get_category_insight_items, get_de
 from gen_weekly import build_weekly_class_block, build_weekly_delivery_block, week_col_header
 from gen_monthly import build_monthly_analysis_panel
 from gen_raw_export import raw_download_link
-from report_context import ci_key, fnum, h_enc, j_enc, n0, pretty_month, round1, year_of
+from report_context import ci_key, fnum, h_enc, j_enc, n0, pretty_month, round1, sort_keys_by_last_period, year_of
 
 
 def _batch_table(ctx, subset, title):
@@ -40,7 +40,7 @@ def _batch_table(ctx, subset, title):
         pm.setdefault(prod, {})
         pm[prod][mo] = pm[prod].get(mo, 0) + 1
         pt[prod] = pt.get(prod, 0) + 1
-    order = [k for k, _ in sorted(pt.items(), key=lambda kv: kv[1], reverse=True)[:25]]
+    order = sort_keys_by_last_period(pm, pt, ctx.months)[:25]
     if not order:
         return ""
     parts = [f"<div class='pivot-wrap'><div class='pivot-title'>{h_enc(title)} Batch Numberwise Complaints - Monthly</div>"
@@ -89,22 +89,32 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     dim2_cache = {}
 
     cat_tot = {}
+    cat_month = {}
     for r in subset:
         c = ctx.cell(r, ctx.col["cat"])
         if not str(c).strip():
             c = "(blank)"
         c = ci_key(c, cat_cache)
         cat_tot[c] = cat_tot.get(c, 0) + 1
-    cat_order = [k for k, _ in sorted(cat_tot.items(), key=lambda kv: kv[1], reverse=True)]
+        mo = ctx.cell(r, ctx.col["month"])
+        if mo in months:
+            cat_month.setdefault(c, {})
+            cat_month[c][mo] = cat_month[c].get(mo, 0) + 1
+    cat_order = sort_keys_by_last_period(cat_month, cat_tot, months)
 
     dim2_tot_all = {}
+    dim2_month = {}
     for r in subset:
         v = ctx.cell(r, dim2_col)
         if not str(v).strip():
             v = "(blank)"
         v = ci_key(v, dim2_cache)
         dim2_tot_all[v] = dim2_tot_all.get(v, 0) + 1
-    dim2_order_full = [k for k, _ in sorted(dim2_tot_all.items(), key=lambda kv: kv[1], reverse=True)]
+        mo = ctx.cell(r, ctx.col["month"])
+        if mo in months:
+            dim2_month.setdefault(v, {})
+            dim2_month[v][mo] = dim2_month[v].get(mo, 0) + 1
+    dim2_order_full = sort_keys_by_last_period(dim2_month, dim2_tot_all, months)
     dim2_capped = len(dim2_order_full) > dim2_cap
     if dim2_capped:
         top_vals = dim2_order_full[:dim2_cap - 1]
@@ -367,7 +377,7 @@ def _build_category_pivot(ctx, subset, title):
         cat_month.setdefault(cat, {})
         cat_month[cat][mo] = cat_month[cat].get(mo, 0) + 1
         cat_tot[cat] = cat_tot.get(cat, 0) + 1
-    cat_order = [k for k, _ in sorted(cat_tot.items(), key=lambda kv: kv[1], reverse=True)]
+    cat_order = sort_keys_by_last_period(cat_month, cat_tot, months)
     parts = [f"<div class='pivot-wrap'><div class='pivot-title'>{h_enc(title)}</div><div class='pivot-scroll'>"
              f"<table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Query Category</th>"]
     for mo in months:
