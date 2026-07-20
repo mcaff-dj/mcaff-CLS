@@ -356,15 +356,18 @@ _BATCH_ANALYSIS_CLASSES = ("Packaging and Operational", "Product")
 def build_batch_recurring_section(ctx):
     """New Monthly Analysis section (period-independent - always looks at the trailing 3
     calendar months, regardless of which period the Daily/Monthly/Weekly/Yearly selectors
-    are on): for products with more than 5 Packaging & Operational or Product complaints
-    across that 3-month window, writes a narrative comparing the first vs. last month's
-    volume (rising/falling/stable, via the same change_verb used elsewhere) and identifies
-    whether one batch is driving most of any increase (a batch-specific defect) or the
-    rise is spread across batches (more likely a product-wide issue) - prose, not a raw
-    per-batch table, matching every other Monthly Analysis section's style."""
+    are on): for products with at least 5 Packaging & Operational or Product complaints
+    in the LATEST of those 3 months specifically (not the 3-month combined total - a
+    product could accumulate 5+ across 3 quiet months without anything currently active),
+    writes a narrative comparing the first vs. last month's volume (rising/falling/stable,
+    via the same change_verb used elsewhere) and identifies whether one batch is driving
+    most of any increase (a batch-specific defect) or the rise is spread across batches
+    (more likely a product-wide issue) - prose, not a raw per-batch table, matching every
+    other Monthly Analysis section's style."""
     months_window = ctx.months[-3:]
     if len(months_window) < 2:
         return ""
+    first_mo, last_mo = months_window[0], months_window[-1]
     window_set = set(months_window)
     prod_cache = {}
     prod_month_tot = {}
@@ -383,12 +386,13 @@ def build_batch_recurring_section(ctx):
         prod_month_tot[prod][mo] += 1
         prod_rows_window.setdefault(prod, []).append(r)
 
-    qualifying = sorted(((p, rs) for p, rs in prod_rows_window.items() if len(rs) > 5),
-                         key=lambda x: len(x[1]), reverse=True)
+    qualifying = sorted(
+        ((p, rs) for p, rs in prod_rows_window.items() if prod_month_tot[p][last_mo] >= 5),
+        key=lambda x: prod_month_tot[x[0]][last_mo], reverse=True,
+    )
     if not qualifying:
         return ""
 
-    first_mo, last_mo = months_window[0], months_window[-1]
     bullets = []
     for prod, rows in qualifying:
         month_counts = prod_month_tot[prod]
@@ -446,9 +450,9 @@ def build_batch_recurring_section(ctx):
         bullets.append(f"<li>{line}</li>")
 
     return (f"<div class='ma-class'><h4>Packaging &amp; Product Complaints &mdash; Batch Trend (last {len(months_window)} months)</h4>"
-            f"<p class='ma-overall'>{n0(len(qualifying))} product(s) with more than 5 Packaging &amp; Operational or Product complaints across "
-            f"{h_enc(pretty_month(first_mo))}&ndash;{h_enc(pretty_month(last_mo))} combined, comparing {h_enc(pretty_month(first_mo))} to "
-            f"{h_enc(pretty_month(last_mo))} and calling out which batch (if any) is driving a rise.</p>"
+            f"<p class='ma-overall'>{n0(len(qualifying))} product(s) with at least 5 Packaging &amp; Operational or Product complaints in "
+            f"{h_enc(pretty_month(last_mo))} specifically, trended back to {h_enc(pretty_month(first_mo))} and calling out which batch (if any) "
+            f"is driving a rise.</p>"
             f"<ul class='ma-list'>{''.join(bullets)}</ul></div>")
 
 
