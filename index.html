@@ -598,9 +598,28 @@
     // of pointing the iframe at /api/report/{key} (which would 404/500, since there's no
     // api/_reports/{key}.html for these). Remove an entry here once its report exists.
     var COMING_SOON = {
-      mom: 'MOM report is coming soon.',
-      calling: 'Calling Team report is coming soon.'
+      mom: 'MOM report is coming soon.'
     };
+
+    // Calling Team has its own three nested nav sub-items instead of one blanket
+    // "coming soon" card - each is its own placeholder for now until a real report/tool
+    // is wired up behind it.
+    var CALLING_TEAM_SUBITEMS = {
+      overview: { label: 'Overview', text: 'Overview report is coming soon.' },
+      ndr: { label: 'NDR-Calling', text: 'NDR-Calling report is coming soon.' },
+      rto: { label: 'RTO-Calling', text: 'RTO-Calling report is coming soon.' }
+    };
+
+    function selectCallingTeamView(view) {
+      Array.prototype.slice.call(document.querySelectorAll('#navList .nav-btn[data-calling-team-view]')).forEach(function(b) {
+        b.classList.toggle('active', b.getAttribute('data-calling-team-view') === view);
+      });
+      var sub = CALLING_TEAM_SUBITEMS[view];
+      document.getElementById('reportIframe').style.display = 'none';
+      document.getElementById('placeholderTitle').textContent = sub.label;
+      document.getElementById('placeholderDesc').textContent = sub.text;
+      document.getElementById('placeholderPanel').style.display = 'flex';
+    }
 
     function toggleMobileSidebar() {
       var sidebar = document.querySelector('.sidebar');
@@ -759,6 +778,22 @@
       var iframe = document.getElementById('reportIframe');
       var placeholderPanel = document.getElementById('placeholderPanel');
       document.getElementById('navList').innerHTML = '';
+
+      // Calling Team: three nested nav sub-items (Overview / NDR-Calling / RTO-Calling),
+      // each its own placeholder for now - see CALLING_TEAM_SUBITEMS/selectCallingTeamView.
+      if (brandKey === 'calling') {
+        iframe.style.display = 'none';
+        iframe.src = 'about:blank';
+        document.getElementById('granularitySection').style.display = 'none';
+        document.getElementById('loadingOverlay').style.opacity = '0';
+        document.getElementById('loadingOverlay').style.visibility = 'hidden';
+        document.getElementById('navList').innerHTML =
+          '<button class="nav-btn active" data-calling-team-view="overview" onclick="selectCallingTeamView(\'overview\')">Overview</button>' +
+          '<button class="nav-btn" data-calling-team-view="ndr" onclick="selectCallingTeamView(\'ndr\')">NDR-Calling</button>' +
+          '<button class="nav-btn" data-calling-team-view="rto" onclick="selectCallingTeamView(\'rto\')">RTO-Calling</button>';
+        selectCallingTeamView('overview');
+        return;
+      }
 
       // Cards with no report behind them yet (see COMING_SOON) show a plain placeholder
       // card instead of the iframe - nothing to fetch, so the loading overlay never shows.
