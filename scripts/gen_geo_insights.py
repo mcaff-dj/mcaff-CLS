@@ -363,7 +363,7 @@ def _get_geo_dataset(ctx):
     return ctx._geo_dataset
 
 
-def get_category_state_movers(ctx, category, cur_weeks, prev_weeks, proj_factor=None, min_cur=3, top_n=2):
+def get_category_state_movers(ctx, category, cur_weeks, prev_weeks, min_cur=3, top_n=2):
     """Real state-name movers (via MySQL AWB lookup) for one Delivery category, for an
     already-resolved (cur_weeks, prev_weeks) global-week-index pair - see gen_monthly's
     period 'weeks_fn' callbacks. Mirrors the sheet-column courier-mover format/semantics
@@ -381,11 +381,10 @@ def get_category_state_movers(ctx, category, cur_weeks, prev_weeks, proj_factor=
     movers = []
     for state, weekmap in cat_states.items():
         cur = sum(weekmap.get(wi, 0) for wi in cur_weeks)
-        cur_proj = round(cur * proj_factor) if proj_factor else cur
-        if cur_proj < min_cur:
+        if cur < min_cur:
             continue
         prev = sum(weekmap.get(wi, 0) for wi in prev_weeks)
-        delta = cur_proj - prev
+        delta = cur - prev
         if delta <= 0:
             continue
         cur_orders = sum(state_orders.get(state, {}).get(wi, 0) for wi in cur_weeks)
@@ -394,7 +393,7 @@ def get_category_state_movers(ctx, category, cur_weeks, prev_weeks, proj_factor=
             continue
         rate_cur = (cur / cur_orders * 100) if cur_orders > 0 else 0
         rate_prev = (prev / prev_orders * 100) if prev_orders > 0 else 0
-        movers.append({"name": state, "cur": cur, "cur_proj": cur_proj, "prev": prev,
+        movers.append({"name": state, "cur": cur, "prev": prev,
                         "rate_cur": rate_cur, "rate_prev": rate_prev, "delta": delta})
     movers.sort(key=lambda m: m["delta"], reverse=True)
     return movers[:top_n]

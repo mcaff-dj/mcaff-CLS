@@ -118,6 +118,53 @@
       color: var(--text-primary);
     }
 
+    .refresh-btn {
+      appearance: none;
+      margin-top: 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-family: inherit;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: border-color 0.15s ease, color 0.15s ease;
+    }
+
+    .refresh-btn:hover:not(:disabled) {
+      border-color: var(--brand-accent);
+      color: var(--brand-accent);
+    }
+
+    .refresh-btn:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+
+    .refresh-btn .spin {
+      display: inline-block;
+    }
+
+    .refresh-btn.spinning .spin {
+      animation: spin 1s linear infinite;
+    }
+
+    .refresh-status {
+      margin-top: 6px;
+      font-size: 11.5px;
+      color: var(--text-muted);
+      min-height: 14px;
+    }
+
+    .refresh-status.error {
+      color: #dc2626;
+    }
+
     .logo-subtitle {
       font-size: 11px;
       font-weight: 600;
@@ -437,6 +484,10 @@
       <div class="logo-container">
         <h1 class="logo-title">CX Unified Dashboard</h1>
       </div>
+      <button type="button" class="refresh-btn" id="refreshBtn" onclick="triggerRefresh()">
+        <span class="spin">&#8635;</span> Refresh Data
+      </button>
+      <div class="refresh-status" id="refreshStatus"></div>
     </div>
 
     <div class="sidebar-scroll">
@@ -536,6 +587,68 @@
       var toggle = document.getElementById('menuToggle');
       sidebar.classList.toggle('open');
       toggle.innerHTML = sidebar.classList.contains('open') ? '✕' : '☰';
+    }
+
+    // "Refresh Data" button - calls the existing /api/refresh (dispatches the refresh.yml
+    // GitHub Actions workflow server-side) and /api/refresh-status (polled until the run
+    // finishes) endpoints; both already existed for this exact purpose, just had no button
+    // wired up since the dashboard's sidebar redesign.
+    var refreshPollTimer = null;
+
+    function setRefreshStatus(text, isError) {
+      var el = document.getElementById('refreshStatus');
+      el.textContent = text || '';
+      el.classList.toggle('error', !!isError);
+    }
+
+    function setRefreshBusy(busy) {
+      var btn = document.getElementById('refreshBtn');
+      btn.disabled = busy;
+      btn.classList.toggle('spinning', busy);
+    }
+
+    function pollRefreshStatus() {
+      fetch('/api/refresh-status').then(function(r) { return r.json(); }).then(function(d) {
+        if (d.status === 'completed') {
+          clearInterval(refreshPollTimer);
+          refreshPollTimer = null;
+          setRefreshBusy(false);
+          if (d.conclusion === 'success') {
+            setRefreshStatus('Refresh complete - reloading...');
+            setTimeout(function() {
+              var iframe = document.getElementById('reportIframe');
+              if (iframe && iframe.src && iframe.src.indexOf('/api/report/') !== -1) {
+                iframe.src = iframe.src;
+              }
+              setRefreshStatus('');
+            }, 1200);
+          } else {
+            setRefreshStatus('Refresh finished with issues - try again or check the workflow run.', true);
+          }
+        } else if (d.status === 'in_progress' || d.status === 'queued') {
+          setRefreshStatus('Refreshing data... (' + d.status.replace('_', ' ') + ')');
+        }
+      }).catch(function() { /* keep polling silently through a transient network blip */ });
+    }
+
+    function triggerRefresh() {
+      setRefreshBusy(true);
+      setRefreshStatus('Starting refresh...');
+      fetch('/api/refresh', { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+          if (d.status === 'started' || d.status === 'already_running') {
+            setRefreshStatus(d.message);
+            if (!refreshPollTimer) refreshPollTimer = setInterval(pollRefreshStatus, 10000);
+          } else {
+            setRefreshBusy(false);
+            setRefreshStatus(d.message || 'Could not start refresh.', true);
+          }
+        })
+        .catch(function() {
+          setRefreshBusy(false);
+          setRefreshStatus('Could not reach the server - try again.', true);
+        });
     }
 
     // On Load Check Authentication

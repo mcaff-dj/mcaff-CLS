@@ -68,6 +68,18 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     pfx = cls["id"]
     dim2_col = ctx.col[dim2_key]
 
+    # Months this class has zero tickets for (e.g. a query category introduced only
+    # partway through the sheet's history) get their header/data cells skipped entirely
+    # in sb1/sb2 below, rather than rendering an all-"-" column. The embedded JS (rct/rdt
+    # in the script block further down) already no-ops via `if(ce)` when a cell id doesn't
+    # exist, so simply not emitting these <th>/<td> elements is enough - no JS changes
+    # needed, and MONTHS/tickets_json stay in the original full-month index space.
+    month_has_data = [False] * n
+    for r in subset:
+        mo = ctx.cell(r, ctx.col["month"])
+        if mo in months:
+            month_has_data[months.index(mo)] = True
+
     # Shared caches so every pass below resolves the same raw value (e.g. "Product not
     # Sealed" vs "product NOT sealed") to the same first-seen-cased key - matching
     # PowerShell's case-insensitive @{} hashtables. Without sharing these across passes,
@@ -179,44 +191,56 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
 
     sb1 = [f"<div class='pivot-wrap'><div class='pivot-title'>{h_enc(cls['label'])} Complaints by Issue Category</div>"
            f"<div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>Query Category</th>"]
-    for mo in months:
-        sb1.append(f"<th colspan='2' class='month-hdr' data-yr='{year_of(mo)}'>{h_enc(mo)}</th>")
+    for mi, mo in enumerate(months):
+        if month_has_data[mi]:
+            sb1.append(f"<th colspan='2' class='month-hdr' data-yr='{year_of(mo)}'>{h_enc(mo)}</th>")
     sb1.append("</tr><tr>")
-    for mo in months:
-        yr = year_of(mo)
-        sb1.append(f"<th class='sub-hdr' data-yr='{yr}'>Complaints</th><th class='sub-hdr' data-yr='{yr}'>wrt sales</th>")
+    for mi, mo in enumerate(months):
+        if month_has_data[mi]:
+            yr = year_of(mo)
+            sb1.append(f"<th class='sub-hdr' data-yr='{yr}'>Complaints</th><th class='sub-hdr' data-yr='{yr}'>wrt sales</th>")
     sb1.append("</tr></thead><tbody>")
     for ci, cat in enumerate(cat_order):
         z = "zebra" if (ci + 1) % 2 == 1 else ""
         sb1.append(f"<tr class='{z} xf-row' id='xf-{pfx}-catrow-{ci}' onclick='onXfClick(\"{pfx}\",\"cat\",{ci})'><td class='rowlabel'>{h_enc(cat)}</td>")
         for mi in range(n):
+            if not month_has_data[mi]:
+                continue
             yr = year_of(months[mi])
             sb1.append(f"<td class='num' id='xf-{pfx}-cat-{ci}-mo-{mi}-cnt' data-yr='{yr}'>-</td><td class='pct' id='xf-{pfx}-cat-{ci}-mo-{mi}-pct' data-yr='{yr}'>-</td>")
         sb1.append("</tr>")
     sb1.append("<tr class='total-row'><td class='rowlabel'>Grand Total</td>")
     for mi in range(n):
+        if not month_has_data[mi]:
+            continue
         yr = year_of(months[mi])
         sb1.append(f"<td class='num' id='xf-{pfx}-cat-total-mo-{mi}-cnt' data-yr='{yr}'>-</td><td class='pct' id='xf-{pfx}-cat-total-mo-{mi}-pct' data-yr='{yr}'>-</td>")
     sb1.append("</tr></tbody></table></div></div>")
 
     sb2 = [f"<div class='pivot-wrap'><div class='pivot-title'>{h_enc(dim2_title)}</div>"
            f"<div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>{h_enc(dim2_label)}</th>"]
-    for mo in months:
-        sb2.append(f"<th colspan='2' class='month-hdr' data-yr='{year_of(mo)}'>{h_enc(mo)}</th>")
+    for mi, mo in enumerate(months):
+        if month_has_data[mi]:
+            sb2.append(f"<th colspan='2' class='month-hdr' data-yr='{year_of(mo)}'>{h_enc(mo)}</th>")
     sb2.append("</tr><tr>")
-    for mo in months:
-        yr = year_of(mo)
-        sb2.append(f"<th class='sub-hdr' data-yr='{yr}'>Complaints</th><th class='sub-hdr' data-yr='{yr}'>{h_enc(dim2_pct_label)}</th>")
+    for mi, mo in enumerate(months):
+        if month_has_data[mi]:
+            yr = year_of(mo)
+            sb2.append(f"<th class='sub-hdr' data-yr='{yr}'>Complaints</th><th class='sub-hdr' data-yr='{yr}'>{h_enc(dim2_pct_label)}</th>")
     sb2.append("</tr></thead><tbody>")
     for di, dv in enumerate(dim2_order):
         z = "zebra" if (di + 1) % 2 == 1 else ""
         sb2.append(f"<tr class='{z} xf-row' id='xf-{pfx}-dimrow-{di}' onclick='onXfClick(\"{pfx}\",\"dim2\",{di})'><td class='rowlabel'>{h_enc(dv)}</td>")
         for mi in range(n):
+            if not month_has_data[mi]:
+                continue
             yr = year_of(months[mi])
             sb2.append(f"<td class='num' id='xf-{pfx}-dim-{di}-mo-{mi}-cnt' data-yr='{yr}'>-</td><td class='pct' id='xf-{pfx}-dim-{di}-mo-{mi}-pct' data-yr='{yr}'>-</td>")
         sb2.append("</tr>")
     sb2.append("<tr class='total-row'><td class='rowlabel'>Grand Total</td>")
     for mi in range(n):
+        if not month_has_data[mi]:
+            continue
         yr = year_of(months[mi])
         sb2.append(f"<td class='num' id='xf-{pfx}-dim-total-mo-{mi}-cnt' data-yr='{yr}'>-</td><td class='pct' id='xf-{pfx}-dim-total-mo-{mi}-pct' data-yr='{yr}'>-</td>")
     sb2.append("</tr></tbody></table></div></div>")
@@ -418,7 +442,6 @@ def build_class_panel(ctx, cls):
     subset = [r for r in ctx.unique if ctx.cell(r, ctx.col["cls"]) == cls["key"]]
     pivot, month_totals = _build_category_pivot(ctx, subset, f"{cls['label']} Complaints")
     chart = _build_combo_chart(ctx, month_totals, f"{cls['label']} Complaints wrt Sales", cls["color"], "var(--s1)")
-    batch = _batch_table(ctx, subset, cls["label"])
     insights = build_insights_card(f"Insights &mdash; {h_enc(cls['label'])}", get_category_insight_items(ctx, subset))
     weekly = build_weekly_class_block(ctx, cls)
     return f"""{raw_download_link(ctx, cls["id"])}
@@ -427,7 +450,6 @@ def build_class_panel(ctx, cls):
 <section><h2>{h_enc(cls['label'])} Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line).</p>{chart}</section>
 </div>
 {weekly}
-{batch}
 {insights}"""
 
 

@@ -3,9 +3,7 @@ the one before it, mirroring the manual "segmented KYC" write-up style. Stats-on
 root-cause text is inferred, since that isn't present in any structured column.
 Python port of gen-monthly.ps1. Depends on gen_weekly.setup(ctx) having already run.
 """
-import calendar
 import math
-import re
 from datetime import timedelta
 
 from gen_geo_insights import build_monthly_analysis_geo_containers, get_category_state_movers
@@ -16,28 +14,6 @@ from report_context import ci_key, fnum, h_enc, n0, pretty_month, round1, year_o
 def _sheet_date_str(d):
     """Matches the sheet's own Created Date format: M/D/YYYY, no leading zeros."""
     return f"{d.month}/{d.day}/{d.year}"
-
-
-def _current_month_projection(ctx):
-    """If the most recent sheet month is still in progress (matches ctx.now_ist's own
-    year/month), returns a days-elapsed/days-total factor so the Monthly narrative can
-    compare a projected full-month pace instead of a partial month's raw total against a
-    completed previous month - otherwise a genuinely-rising category can look flat or down
-    just because the month isn't over yet. Returns None once that month has fully elapsed
-    (nothing to project) or the label can't be parsed."""
-    last_label = ctx.months[-1]
-    m = re.match(r"^(\d+)_", last_label)
-    yr = year_of(last_label)
-    if not m or not yr:
-        return None
-    month, year = int(m.group(1)), int(yr)
-    if (ctx.now_ist.year, ctx.now_ist.month) != (year, month):
-        return None
-    days_elapsed = ctx.now_ist.day
-    days_total = calendar.monthrange(year, month)[1]
-    if days_elapsed <= 0 or days_elapsed >= days_total:
-        return None
-    return {"days_elapsed": days_elapsed, "days_total": days_total, "factor": days_total / days_elapsed}
 
 # Each class can drill into more than one dimension - every entry is a list, even where
 # there's only one. Delivery's state movers come from gen_geo_insights (MySQL AWB lookup,
@@ -213,52 +189,39 @@ def build_class_period_data(ctx, cls, period):
             "sub_dims": sub_dims, "class_period_tot": class_period_tot}
 
 
-def build_class_period_narrative(ctx, cls, data, period, cur_idx, projection=None):
-    """`projection`, when set, only ever scales a TICKET COUNT to project where it's headed
-    by month-end - it must never be mixed into a percentage's numerator while leaving the
-    denominator (sales_cur, itself only a running so-far figure for an in-progress month,
-    not a fixed monthly total - confirmed by checking the sheet directly) unprojected. Doing
-    that inflated every current-month rate (e.g. 0.17% actual-so-far was showing as 0.57%).
-    Every *_actual value below is the real, comparable-in-progress-month rate; the
-    projected value is used only to decide/rank whether a bullet is worth showing and for
-    the explicitly-labeled "on pace for ~N by month end" ticket-count callout."""
+def build_class_period_narrative(ctx, cls, data, period, cur_idx):
+    """Compares cur_idx's actual figures to the period before it - no projection/
+    prediction of where an in-progress period is "on pace" to end up, just what's
+    actually happened so far."""
     prev_idx = cur_idx - 1
     cur_label = period["label_fn"](cur_idx)
     prev_label = period["label_fn"](prev_idx)
     sales_cur = period["sales"][cur_idx]
     sales_prev = period["sales"][prev_idx]
-    tot_cur_actual = data["class_period_tot"][cur_idx]
+    tot_cur = data["class_period_tot"][cur_idx]
     tot_prev = data["class_period_tot"][prev_idx]
-    tot_cur_proj = round(tot_cur_actual * projection["factor"]) if projection else tot_cur_actual
-    pct_cur = (tot_cur_actual / sales_cur * 100) if sales_cur > 0 else 0
+    pct_cur = (tot_cur / sales_cur * 100) if sales_cur > 0 else 0
     pct_prev = (tot_prev / sales_prev * 100) if sales_prev > 0 else 0
     if pct_prev > 0:
         rel_change = abs(pct_cur - pct_prev) / pct_prev
     else:
         rel_change = 1 if pct_cur > 0 else 0
-    proj_note = (f" &mdash; on pace for ~{n0(tot_cur_proj)} by month end ({n0(tot_cur_actual)} so far, day {projection['days_elapsed']} of {projection['days_total']})"
-                 if projection else "")
 
     bullets = []
     for cat in data["cat_order"]:
-        cur_c_actual = data["cat_period"][cat][cur_idx]
+        cur_c = data["cat_period"][cat][cur_idx]
         prev_c = data["cat_period"][cat][prev_idx]
-        cur_c_proj = round(cur_c_actual * projection["factor"]) if projection else cur_c_actual
-        if cur_c_proj < 3:
+        if cur_c < 3:
             continue
-        growth = (cur_c_proj / prev_c) if prev_c > 0 else math.inf
-        abs_delta = cur_c_proj - prev_c
-        qualifies = (prev_c == 0 and cur_c_proj >= 3) or (prev_c > 0 and (growth >= 1.3 or abs_delta >= 10))
+        growth = (cur_c / prev_c) if prev_c > 0 else math.inf
+        abs_delta = cur_c - prev_c
+        qualifies = (prev_c == 0 and cur_c >= 3) or (prev_c > 0 and (growth >= 1.3 or abs_delta >= 10))
         if not qualifies:
             continue
-        p_c = (cur_c_actual / sales_cur * 100) if sales_cur > 0 else 0
+        p_c = (cur_c / sales_cur * 100) if sales_cur > 0 else 0
         p_p = (prev_c / sales_prev * 100) if sales_prev > 0 else 0
-        verb = change_verb(prev_c, cur_c_proj)
-        if projection:
-            line = (f"<b>{h_enc(cat)}</b>: Complaints {verb} from {n0(prev_c)} to {n0(cur_c_actual)} so far this month "
-                    f"({pct_fmt(p_p)} &rarr; {pct_fmt(p_c)}), on pace for ~{n0(cur_c_proj)} by month end (day {projection['days_elapsed']} of {projection['days_total']}).")
-        else:
-            line = f"<b>{h_enc(cat)}</b>: Complaints {verb} from {n0(prev_c)} to {n0(cur_c_actual)} ({pct_fmt(p_p)} &rarr; {pct_fmt(p_c)})."
+        verb = change_verb(prev_c, cur_c)
+        line = f"<b>{h_enc(cat)}</b>: Complaints {verb} from {n0(prev_c)} to {n0(cur_c)} ({pct_fmt(p_p)} &rarr; {pct_fmt(p_c)})."
 
         sub_lines = []
         # Product/Packaging get a wider net (min 4 complaints, top 5 names shown) than the
@@ -273,21 +236,19 @@ def build_class_period_narrative(ctx, cls, data, period, cur_idx, projection=Non
             for sv, arr in data["sub_period"][dim_name][cat].items():
                 if sv == "(blank)":
                     continue
-                sc_actual, sp = arr[cur_idx], arr[prev_idx]
-                sc_proj = round(sc_actual * projection["factor"]) if projection else sc_actual
-                d = sc_proj - sp
-                if d > 0 and sc_proj >= mover_min:
-                    movers.append({"name": sv, "cur_actual": sc_actual, "cur_proj": sc_proj, "prev": sp, "delta": d})
+                sc, sp = arr[cur_idx], arr[prev_idx]
+                d = sc - sp
+                if d > 0 and sc >= mover_min:
+                    movers.append({"name": sv, "cur": sc, "prev": sp, "delta": d})
             movers = sorted(movers, key=lambda m: m["delta"], reverse=True)[:mover_top_n]
             for m in movers:
                 if abs_delta > 0 and (m["delta"] / abs_delta) < 0.25:
                     continue
-                mp = (m["cur_actual"] / sales_cur * 100) if sales_cur > 0 else 0
+                mp = (m["cur"] / sales_cur * 100) if sales_cur > 0 else 0
                 mpp = (m["prev"] / sales_prev * 100) if sales_prev > 0 else 0
-                mverb = change_verb(m["prev"], m["cur_proj"])
+                mverb = change_verb(m["prev"], m["cur"])
                 sub_label = _SUB_LABEL[dim_name]
-                proj_bit = f", on pace for ~{n0(m['cur_proj'])}" if projection and m["cur_proj"] != m["cur_actual"] else ""
-                sub_lines.append(f"<li><b>{h_enc(m['name'])}</b> ({sub_label}): complaint rate {mverb} from {pct_fmt(mpp)} to {pct_fmt(mp)} ({n0(m['prev'])} &rarr; {n0(m['cur_actual'])}{proj_bit}).")
+                sub_lines.append(f"<li><b>{h_enc(m['name'])}</b> ({sub_label}): complaint rate {mverb} from {pct_fmt(mpp)} to {pct_fmt(mp)} ({n0(m['prev'])} &rarr; {n0(m['cur'])}).")
 
         # Real state-name movers (via MySQL AWB lookup) - Delivery only, since state isn't
         # a sheet column for any other class. Ranked/gated the same way as the courier
@@ -296,15 +257,12 @@ def build_class_period_narrative(ctx, cls, data, period, cur_idx, projection=Non
         if cls["id"] == "delivery" and period.get("weeks_fn"):
             cur_weeks = period["weeks_fn"](cur_idx)
             prev_weeks = period["weeks_fn"](prev_idx)
-            proj_factor = projection["factor"] if projection else None
-            state_movers = get_category_state_movers(ctx, cat, cur_weeks, prev_weeks,
-                                                       proj_factor=proj_factor, min_cur=mover_min, top_n=mover_top_n)
+            state_movers = get_category_state_movers(ctx, cat, cur_weeks, prev_weeks, min_cur=mover_min, top_n=mover_top_n)
             for m in state_movers:
                 if abs_delta > 0 and (m["delta"] / abs_delta) < 0.25:
                     continue
-                mverb = change_verb(m["prev"], m["cur_proj"])
-                proj_bit = f", on pace for ~{n0(m['cur_proj'])}" if proj_factor and m["cur_proj"] != m["cur"] else ""
-                sub_lines.append(f"<li><b>{h_enc(m['name'].title())}</b> (state): complaint rate {mverb} from {pct_fmt(m['rate_prev'])} to {pct_fmt(m['rate_cur'])} ({n0(m['prev'])} &rarr; {n0(m['cur'])}{proj_bit}).")
+                mverb = change_verb(m["prev"], m["cur"])
+                sub_lines.append(f"<li><b>{h_enc(m['name'].title())}</b> (state): complaint rate {mverb} from {pct_fmt(m['rate_prev'])} to {pct_fmt(m['rate_cur'])} ({n0(m['prev'])} &rarr; {n0(m['cur'])}).")
 
         if sub_lines:
             line += f"<ul class='ma-sub'>{''.join(sub_lines)}</ul>"
@@ -316,7 +274,7 @@ def build_class_period_narrative(ctx, cls, data, period, cur_idx, projection=Non
 
     overall_verb = change_verb(pct_prev, pct_cur)
     parts = [f"<div class='ma-class'><h4>{h_enc(cls['label'])} Complaints</h4>"]
-    parts.append(f"<p class='ma-overall'>Overall {h_enc(cls['label'].lower())} complaints {overall_verb} from {pct_fmt(pct_prev)} in {prev_label} to {pct_fmt(pct_cur)} in {cur_label}{proj_note}.</p>")
+    parts.append(f"<p class='ma-overall'>Overall {h_enc(cls['label'].lower())} complaints {overall_verb} from {pct_fmt(pct_prev)} in {prev_label} to {pct_fmt(pct_cur)} in {cur_label}.</p>")
     if bullets:
         parts.append("<ul class='ma-list'>")
         for b in bullets:
@@ -419,12 +377,10 @@ def build_monthly_analysis_panel(ctx):
     # ---------- Monthly narrative ----------
     month_class_data = {c["key"]: build_class_period_data(ctx, c, ctx.ma_month_ctx) for c in ctx.b["classes"]}
     month_divs = []
-    month_projection = _current_month_projection(ctx)
     for mi in range(1, n):
         sections = []
-        projection = month_projection if mi == n - 1 else None
         for c in ctx.b["classes"]:
-            html = build_class_period_narrative(ctx, c, month_class_data[c["key"]], ctx.ma_month_ctx, mi, projection=projection)
+            html = build_class_period_narrative(ctx, c, month_class_data[c["key"]], ctx.ma_month_ctx, mi)
             if html:
                 sections.append(html)
         body = "".join(sections) if sections else f"<p class='note'>No notable month-on-month changes crossed the reporting threshold for {h_enc(pretty_month(months[mi]))}.</p>"
