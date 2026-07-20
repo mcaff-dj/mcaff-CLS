@@ -834,6 +834,31 @@
       iframe.src = '/api/report/' + encodeURIComponent(brandKey);
     }
 
+    // Mirrors the report's own .tab-nav .tab-btn tabs (CSAT/NPS/Overview/...) into the
+    // sidebar's Report Views list, then hides the in-report tab bar so the sidebar is the
+    // only place to switch tabs. Reports with no tab bar (e.g. onboarding) leave navList
+    // untouched (already cleared by onBrandChange).
+    function populateNavListFromIframe() {
+      var iframe = document.getElementById('reportIframe');
+      var doc;
+      try {
+        doc = iframe.contentDocument || iframe.contentWindow.document;
+      } catch (e) {
+        return;
+      }
+      var tabBtns = doc.querySelectorAll('.tab-nav .tab-btn');
+      if (!tabBtns.length) return;
+
+      document.getElementById('navList').innerHTML = Array.prototype.map.call(tabBtns, function(btn) {
+        var tabId = btn.getAttribute('data-tab');
+        var activeClass = btn.classList.contains('active') ? ' active' : '';
+        return '<button class="nav-btn' + activeClass + '" data-tab="' + tabId + '" onclick="selectTab(\'' + tabId + '\')">' + btn.textContent + '</button>';
+      }).join('');
+
+      var tabNav = doc.querySelector('.tab-nav');
+      if (tabNav) tabNav.style.display = 'none';
+    }
+
     // Handles Iframe loaded event
     function onIframeLoaded() {
       var iframe = document.getElementById('reportIframe');
@@ -841,6 +866,9 @@
 
       // Sync active granularity
       syncGranularityUI();
+
+      // Mirror report tabs into the sidebar
+      populateNavListFromIframe();
 
       // Show iframe
       iframe.classList.add('loaded');
