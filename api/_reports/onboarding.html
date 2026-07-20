@@ -8,19 +8,19 @@
   :root{
     --page:#f9f9f7; --surface-card:#ffffff; --text-primary:#0b0b0b; --text-secondary:#52514e;
     --text-muted:#898781; --border:rgba(11,11,11,0.10); --grid:#e1e0d9;
-    --onboarding:#2b7de0;
+    --onboarding:#2b7de0; --good:#1a9c5c; --warn:#c2740c; --bad:#dc2626;
   }
   @media (prefers-color-scheme: dark){
     :root{
       --page:#0d0d0d; --surface-card:#1a1a19; --text-primary:#ffffff; --text-secondary:#c3c2b7;
       --text-muted:#898781; --border:rgba(255,255,255,0.10); --grid:#2c2c2a;
-      --onboarding:#5b9cf0;
+      --onboarding:#5b9cf0; --good:#34d399; --warn:#e0993d; --bad:#f87171;
     }
   }
   *{box-sizing:border-box;}
   body{margin:0;min-height:100vh;background:var(--page);color:var(--text-primary);
     font-family:system-ui,-apple-system,"Segoe UI",sans-serif;padding:32px 20px;}
-  .wrap{width:100%;max-width:900px;margin:0 auto;}
+  .wrap{width:100%;max-width:820px;margin:0 auto;}
   .home-link{display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-size:13px;font-weight:600;
     color:var(--text-secondary);margin-bottom:20px;}
   .home-link:hover{color:var(--text-primary);}
@@ -30,81 +30,194 @@
   h1{font-size:clamp(22px,4vw,28px);margin:0 0 12px;letter-spacing:-0.01em;}
   header p{margin:0;color:var(--text-secondary);font-size:14px;line-height:1.6;}
 
-  .search-wrap{margin-bottom:20px;}
-  #searchBox{width:100%;padding:11px 16px;font-size:14px;font-family:inherit;color:var(--text-primary);
-    background:var(--surface-card);border:1px solid var(--grid);border-radius:10px;outline:none;}
-  #searchBox:focus{border-color:var(--onboarding);}
-  #resultCount{margin:8px 2px 0;font-size:12px;color:var(--text-muted);}
-
   .qa-card{background:var(--surface-card);border:1px solid var(--border);border-radius:12px;
     padding:16px 18px;margin-bottom:12px;}
-  .qa-q{display:flex;gap:10px;align-items:baseline;font-size:14px;font-weight:600;margin:0 0 8px;}
+  .qa-q{display:flex;gap:10px;align-items:baseline;font-size:14px;font-weight:600;margin:0 0 10px;}
   .qa-num{color:var(--onboarding);font-weight:700;flex-shrink:0;}
-  .qa-a{margin:0;padding-left:24px;font-size:13.5px;line-height:1.6;color:var(--text-secondary);
-    border-left:2px solid var(--grid);}
-  .qa-a-label{display:block;font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
-    color:var(--text-muted);margin-bottom:4px;}
-  .no-results{text-align:center;color:var(--text-muted);font-size:13px;padding:30px 0;display:none;}
+  .qa-answer{width:100%;min-height:70px;padding:10px 12px;font-family:inherit;font-size:13.5px;
+    color:var(--text-primary);background:var(--page);border:1px solid var(--grid);border-radius:8px;
+    resize:vertical;outline:none;}
+  .qa-answer:focus{border-color:var(--onboarding);}
+  .qa-answer:disabled{opacity:.65;}
+
+  .submit-bar{position:sticky;bottom:16px;display:flex;justify-content:center;margin-top:22px;}
+  #submitBtn{appearance:none;border:none;border-radius:10px;padding:12px 28px;font-family:inherit;
+    font-size:14px;font-weight:700;color:#fff;background:var(--onboarding);cursor:pointer;
+    box-shadow:0 4px 16px rgba(0,0,0,.18);}
+  #submitBtn:disabled{opacity:.6;cursor:default;}
+  #submitStatus{text-align:center;font-size:12.5px;color:var(--text-muted);margin-top:8px;}
+
+  .score-card{background:var(--surface-card);border:1px solid var(--border);border-radius:14px;
+    padding:28px 24px;text-align:center;margin-bottom:20px;}
+  .score-big{font-size:42px;font-weight:800;letter-spacing:-0.02em;margin:0 0 4px;}
+  .score-label{font-size:13px;color:var(--text-muted);margin:0;}
+  .breakdown{display:grid;grid-template-columns:repeat(auto-fill,minmax(70px,1fr));gap:8px;margin-top:20px;}
+  .b-item{border:1px solid var(--grid);border-radius:8px;padding:8px 4px;text-align:center;font-size:11.5px;}
+  .b-item .b-q{color:var(--text-muted);margin-bottom:3px;}
+  .b-item .b-s{font-weight:700;font-size:13px;}
+  .b-full .b-s{color:var(--good);}
+  .b-partial .b-s{color:var(--warn);}
+  .b-zero .b-s{color:var(--bad);}
+  .error-banner{background:color-mix(in srgb, var(--bad) 12%, transparent);color:var(--bad);
+    border-radius:10px;padding:12px 16px;font-size:13px;margin-bottom:16px;}
 </style>
 </head>
 <body>
   <div class="wrap">
     <a class="home-link" href="/">&larr; Home</a>
     <header>
-      <div><span class="badge">Reference guide</span></div>
+      <div><span class="badge">Test</span></div>
       <h1>Onboarding Test</h1>
-      <p>Customer support scenarios and the expected course of action for each &mdash; use this as a reference while handling calls/tickets, or to test your understanding of process during onboarding.</p>
+      <p id="introText">Write how you'd handle each scenario in your own words, then submit to see your score. Questions are in a randomized order &mdash; expected answers aren't shown.</p>
     </header>
 
-    <div class="search-wrap">
-      <input type="text" id="searchBox" placeholder="Search a scenario (e.g. RTO, coupon, refund, Blinkit)...">
-      <div id="resultCount"></div>
-    </div>
+    <div id="errorBanner" class="error-banner" style="display:none;"></div>
+    <form id="testForm"></form>
+    <div class="submit-bar"><button id="submitBtn" type="button">Submit Test</button></div>
+    <div id="submitStatus"></div>
 
-    <div id="qaList">
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">1.</span> A customer added only one product during a &quot;Buy 1 Get 1&quot; offer. It is her birthday and her first order. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should clear how B1G1 works, and since this is a birthday gift, we should give them one product.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">2.</span> A customer claims a delivery boy abused and misbehaved with her. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Call needed, then mail the delivery team about this, and we can provide a 50% refund for such cases as an exception.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">3.</span> A customer is unable to apply the coupon &quot;B2799&quot; on Power Peptide. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>This coupon code is not valid on this product.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">4.</span> A customer mentioned that the Google coupon code for &quot;Buy 2 Get 7&quot; is not working, even though the &quot;Buy 3 at 999&quot; offer is already live on the site. (a) What should be done if the coupon code provided was wrong? (b) What should be done if the customer is applying it incorrectly?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Need to check the coupon first &mdash; if the coupon was wrong, escalate it; if they are applying it incorrectly, we should assist them.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">5.</span> A customer mentioned the product is not effective after using it for two months and has reached out on different platforms. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Call and check what happened, then help with an alternate product.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">6.</span> A customer mentioned they added two products to their cart and wants to know why they didn&rsquo;t receive three free products. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should explain how B2G3 works, and as an exception, we can help with one freebie.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">7.</span> A customer ordered from Amazon and the product caused a skin reaction (acne/pimples). What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should call and try to pitch another product, and if the customer is adamant, we should refund.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">8.</span> A customer ordered from Blinkit and the products arrived totally broken. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should ask them to reach Blinkit support, and if Blinkit denies helping, we will ask for a screenshot of that and then resolve it ourselves.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">9.</span> A customer purchased body lotion but cannot use it because the pump is missing or not working. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should first ask for an image/video, then check whether the customer is using it correctly or not &mdash; if it's a genuine issue, we resolve it.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">10.</span> A customer reached out regarding a refund not reflecting in their bank account. We shared screenshots from all three platforms, but the customer has now shared their UPI statement with us. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Since the customer is sharing UPI history, we will need the bank statement instead &mdash; sometimes a refund doesn't reflect in UPI right away. We'll clarify this to the customer.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">11.</span> A customer reached out with a screenshot of a payment issue, mentioning they haven&rsquo;t received an order ID or a refund yet. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>First check the screenshot to confirm payment was made to us, then check with POC and verify whether the order was dropped, auto-refunded, or actually placed.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">12.</span> A customer shared an unboxing video showing she received Mamaearth products in her box instead of ours. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>If it's the customer's first time raising this, we should provide a complimentary replacement; if it's a repeat occurrence, we ask them to wait while we review the footage.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">13.</span> A customer who has spoken to 4+ agents is now assigned to you; they are highly frustrated and asking for a freebie (Stanley). What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should clarify to them that we're not able to share that, and then offer a freebie as a very special exception.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">14.</span> An order has been delayed for over 8 days and the customer has reached out to our founder to raise a formal complaint. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should prioritize the shipment, and can also offer a freebie and coupon; as a very special exception, a half refund can be given after checking with POC.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">15.</span> An order was placed on 1 June and the status is still reflecting as &quot;Pickup Generated.&quot; What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Raise a PE (pickup exception) case, and we should reorder.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">16.</span> An order was placed on 14 April (RTO) and the customer is now asking for a refund. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Since it was COD and the order is RTO (delivery returned to origin), a refund is needed.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">17.</span> If a customer mentions they are trying to apply a Google Form coupon code but are unable to do so, what should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should ask them to share a screenshot, then clarify that the coupon code is applicable only on the products listed below the coupon code &mdash; if the same issue occurs even after this, escalate it.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">18.</span> If an order was split (two products), one was delivered and the second was partially dispatched. The order was COD and the customer reached out after 25 days. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>A partial NDR/NSZ case isn't possible in this scenario &mdash; this question is flagged as not applicable / incorrectly framed.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">19.</span> We mistakenly promised a customer they would receive a Stanley, and now they have reached out to us over Twitter. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should clarify to them that we're not able to share that, and offer something as a very special exception.</p></div>
-      <div class="qa-card"><p class="qa-q"><span class="qa-num">20.</span> What is the difference between &quot;Buy 2 Get 3&quot; and &quot;Buy 2 Get 5&quot;?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Both are the same offer, just marketed under different names.</p></div>
-    </div>
-    <div class="no-results" id="noResults">No scenarios match your search.</div>
+    <div id="resultPanel" style="display:none;"></div>
   </div>
 
   <script>
-    var searchBox = document.getElementById('searchBox');
-    var cards = Array.prototype.slice.call(document.querySelectorAll('.qa-card'));
-    var resultCount = document.getElementById('resultCount');
-    var noResults = document.getElementById('noResults');
+    var QUESTIONS = [
+      { id: 1, text: 'A customer added only one product during a "Buy 1 Get 1" offer. It is her birthday and her first order. What should be done?' },
+      { id: 2, text: 'A customer claims a delivery boy abused and misbehaved with her. What should be done?' },
+      { id: 3, text: 'A customer is unable to apply the coupon "B2799" on Power Peptide. What should be done?' },
+      { id: 4, text: 'A customer mentioned that the Google coupon code for "Buy 2 Get 7" is not working, even though the "Buy 3 at 999" offer is already live on the site. (a) What should be done if the coupon code provided was wrong? (b) What should be done if the customer is applying it incorrectly?' },
+      { id: 5, text: 'A customer mentioned the product is not effective after using it for two months and has reached out on different platforms. What should be done?' },
+      { id: 6, text: 'A customer mentioned they added two products to their cart and wants to know why they didn’t receive three free products. What should be done?' },
+      { id: 7, text: 'A customer ordered from Amazon and the product caused a skin reaction (acne/pimples). What should be done?' },
+      { id: 8, text: 'A customer ordered from Blinkit and the products arrived totally broken. What should be done?' },
+      { id: 9, text: 'A customer purchased body lotion but cannot use it because the pump is missing or not working. What should be done?' },
+      { id: 10, text: 'A customer reached out regarding a refund not reflecting in their bank account. We shared screenshots from all three platforms, but the customer has now shared their UPI statement with us. What should be done?' },
+      { id: 11, text: 'A customer reached out with a screenshot of a payment issue, mentioning they haven’t received an order ID or a refund yet. What should be done?' },
+      { id: 12, text: 'A customer shared an unboxing video showing she received Mamaearth products in her box instead of ours. What should be done?' },
+      { id: 13, text: 'A customer who has spoken to 4+ agents is now assigned to you; they are highly frustrated and asking for a freebie (Stanley). What should be done?' },
+      { id: 14, text: 'An order has been delayed for over 8 days and the customer has reached out to our founder to raise a formal complaint. What should be done?' },
+      { id: 15, text: 'An order was placed on 1 June and the status is still reflecting as "Pickup Generated." What should be done?' },
+      { id: 16, text: 'An order was placed on 14 April (RTO) and the customer is now asking for a refund. What should be done?' },
+      { id: 17, text: 'If a customer mentions they are trying to apply a Google Form coupon code but are unable to do so, what should be done?' },
+      { id: 18, text: 'If an order was split (two products), one was delivered and the second was partially dispatched. The order was COD and the customer reached out after 25 days. What should be done?' },
+      { id: 19, text: 'We mistakenly promised a customer they would receive a Stanley, and now they have reached out to us over Twitter. What should be done?' },
+      { id: 20, text: 'What is the difference between "Buy 2 Get 3" and "Buy 2 Get 5"?' }
+    ];
 
-    function applyFilter(){
-      var q = searchBox.value.trim().toLowerCase();
-      var visible = 0;
-      cards.forEach(function(card){
-        var match = !q || card.textContent.toLowerCase().indexOf(q) !== -1;
-        card.style.display = match ? '' : 'none';
-        if (match) visible++;
-      });
-      resultCount.textContent = q ? (visible + ' of ' + cards.length + ' scenarios') : '';
-      noResults.style.display = visible === 0 ? 'block' : 'none';
+    function esc(s) {
+      var d = document.createElement('div');
+      d.textContent = (s == null ? '' : String(s));
+      return d.innerHTML;
     }
 
-    searchBox.addEventListener('input', applyFilter);
+    // Deterministic per-user shuffle: same user always sees the same order (stable across
+    // reloads), but different users get a different order. Seeded from their email so no
+    // server round trip is needed just to pick an order.
+    function hashSeed(str) {
+      var h = 1779033703 ^ str.length;
+      for (var i = 0; i < str.length; i++) {
+        h = Math.imul(h ^ str.charCodeAt(i), 3432918353);
+        h = (h << 13) | (h >>> 19);
+      }
+      return function () {
+        h = Math.imul(h ^ (h >>> 16), 2246822507);
+        h = Math.imul(h ^ (h >>> 13), 3266489909);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+      };
+    }
+
+    function shuffle(arr, rand) {
+      var a = arr.slice();
+      for (var i = a.length - 1; i > 0; i--) {
+        var j = Math.floor(rand() * (i + 1));
+        var tmp = a[i]; a[i] = a[j]; a[j] = tmp;
+      }
+      return a;
+    }
+
+    var orderedQuestions = QUESTIONS;
+
+    function renderForm() {
+      var form = document.getElementById('testForm');
+      form.innerHTML = orderedQuestions.map(function (q, idx) {
+        return '<div class="qa-card">' +
+          '<p class="qa-q"><span class="qa-num">' + (idx + 1) + '.</span> ' + esc(q.text) + '</p>' +
+          '<textarea class="qa-answer" data-id="' + q.id + '" placeholder="Type your answer..."></textarea>' +
+          '</div>';
+      }).join('');
+    }
+
+    function showError(msg) {
+      var b = document.getElementById('errorBanner');
+      b.textContent = msg;
+      b.style.display = 'block';
+    }
+
+    function submitTest() {
+      var textareas = Array.prototype.slice.call(document.querySelectorAll('.qa-answer'));
+      var answers = textareas.map(function (t) {
+        return { id: parseInt(t.dataset.id, 10), text: t.value };
+      });
+
+      var btn = document.getElementById('submitBtn');
+      btn.disabled = true;
+      textareas.forEach(function (t) { t.disabled = true; });
+      document.getElementById('submitStatus').textContent = 'Submitting...';
+
+      fetch('/api/onboarding/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answers: answers })
+      })
+        .then(function (r) {
+          if (!r.ok) throw new Error('Submit failed (' + r.status + ')');
+          return r.json();
+        })
+        .then(function (d) { showResult(d); })
+        .catch(function (e) {
+          document.getElementById('submitStatus').textContent = '';
+          showError(e.message || 'Could not submit the test. Please try again.');
+          btn.disabled = false;
+          textareas.forEach(function (t) { t.disabled = false; });
+        });
+    }
+
+    function showResult(d) {
+      document.getElementById('submitStatus').textContent = '';
+      document.getElementById('submitBtn').style.display = 'none';
+      document.getElementById('testForm').style.display = 'none';
+
+      var scoreById = {};
+      d.results.forEach(function (r) { scoreById[r.id] = r; });
+
+      var breakdownHtml = orderedQuestions.map(function (q, idx) {
+        var r = scoreById[q.id] || { score: 0, max: 5 };
+        var cls = r.score >= r.max ? 'b-full' : (r.score > 0 ? 'b-partial' : 'b-zero');
+        return '<div class="b-item ' + cls + '"><div class="b-q">Q' + (idx + 1) + '</div><div class="b-s">' + r.score + '/' + r.max + '</div></div>';
+      }).join('');
+
+      var panel = document.getElementById('resultPanel');
+      panel.style.display = 'block';
+      panel.innerHTML =
+        '<div class="score-card">' +
+          '<p class="score-big">' + d.total + ' / ' + d.max + '</p>' +
+          '<p class="score-label">Your score</p>' +
+          '<div class="breakdown">' + breakdownHtml + '</div>' +
+        '</div>';
+    }
+
+    window.addEventListener('DOMContentLoaded', function () {
+      fetch('/api/auth/me').then(function (r) { return r.json(); }).then(function (d) {
+        var seed = (d && d.email) ? d.email : String(Math.random());
+        orderedQuestions = shuffle(QUESTIONS, hashSeed(seed));
+        renderForm();
+      }).catch(function () {
+        orderedQuestions = QUESTIONS;
+        renderForm();
+      });
+
+      document.getElementById('submitBtn').addEventListener('click', submitTest);
+    });
   </script>
 </body>
 </html>
