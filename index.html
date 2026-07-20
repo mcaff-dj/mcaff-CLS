@@ -338,18 +338,6 @@
       font-weight: 600;
     }
 
-    .calling-vertical-btn {
-      border: 1px solid var(--border);
-      justify-content: center;
-      font-weight: 600;
-    }
-
-    .calling-vertical-btn.active {
-      background: var(--calling);
-      color: #ffffff;
-      border-color: transparent;
-    }
-
     /* Sidebar Footer */
     .sidebar-footer {
       padding: 16px 20px 24px;
@@ -537,14 +525,8 @@
     </div>
 
     <div class="sidebar-scroll">
-      <!-- Calling Vertical - its own top-level tab, not a Brand Report dropdown option -->
-      <div class="section" id="callingVerticalSection" style="display: none;">
-        <span class="section-title">Calling Vertical</span>
-        <button type="button" class="nav-btn calling-vertical-btn" id="callingVerticalBtn" onclick="selectCallingVertical(true)">Calling Vertical</button>
-      </div>
-
       <!-- Brand Selection -->
-      <div class="section" id="brandReportSection">
+      <div class="section">
         <span class="section-title">Brand Report</span>
         <div class="brand-select-wrapper">
           <select id="brandSelect" class="brand-select" onchange="onBrandChange(this.value, true)">
@@ -755,23 +737,14 @@
             return;
           }
 
-          // Calling Vertical is its own top-level tab, not a Brand Report dropdown
-          // option - split it out of the granted cards before populating the dropdown.
-          var hasCalling = userCards.some(function(c) { return c.key === 'calling'; });
-          var reportCards = userCards.filter(function(c) { return c.key !== 'calling'; });
-          document.getElementById('callingVerticalSection').style.display = hasCalling ? '' : 'none';
+          // Populate select list
+          var brandSelect = document.getElementById('brandSelect');
+          brandSelect.innerHTML = userCards.map(function(c) {
+            return '<option value="' + c.key + '">' + c.label + '</option>';
+          }).join('');
 
-          if (reportCards.length) {
-            document.getElementById('brandReportSection').style.display = '';
-            var brandSelect = document.getElementById('brandSelect');
-            brandSelect.innerHTML = reportCards.map(function(c) {
-              return '<option value="' + c.key + '">' + c.label + '</option>';
-            }).join('');
-            onBrandChange(reportCards[0].key, false);
-          } else {
-            document.getElementById('brandReportSection').style.display = 'none';
-            if (hasCalling) selectCallingVertical(false);
-          }
+          // Select first brand
+          onBrandChange(userCards[0].key, false);
         })
         .catch(function() {
           window.location.href = '/login.html?next=' + encodeURIComponent(window.location.pathname);
@@ -787,15 +760,8 @@
     // Handle Brand Switch. isUserAction is true only when triggered by an actual
     // dropdown selection (not the initial auto-select on page load) - it gates the
     // auto-popup below so we never spawn a tab the user didn't ask for.
-    // Entry point for the standalone "Calling Vertical" tab button (separate from the
-    // Brand Report dropdown/onBrandChange(this.value,...) wiring above it).
-    function selectCallingVertical(isUserAction) {
-      onBrandChange('calling', isUserAction);
-    }
-
     function onBrandChange(brandKey, isUserAction) {
       currentBrand = brandKey;
-      document.getElementById('callingVerticalBtn').classList.toggle('active', brandKey === 'calling');
       var config = brandColors[brandKey] || brandColors.mcaffeine;
 
       // Update Brand accent colors in UI

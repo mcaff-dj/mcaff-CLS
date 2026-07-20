@@ -61,7 +61,7 @@ async function ensureSchema() {
 // NDR/RTO are not separate top-level cards - they're sub-items nested under Calling
 // Vertical in the sidebar nav (see index.html's onBrandChange 'calling' branch), since
 // they're just facets of the same CRM-PEP tool, not their own permission/data domain.
-const CARD_KEYS = ['mcaffeine', 'hyphen', 'productkyc', 'calling', 'mom'];
+const CARD_KEYS = ['mcaffeine', 'hyphen', 'productkyc', 'mom', 'calling'];
 const CARD_LABELS = {
   mcaffeine: 'mCaffeine', hyphen: 'Hyphen', productkyc: 'Product Calling KYC', calling: 'Calling Vertical',
   mom: 'MOM',
@@ -76,7 +76,10 @@ async function getUserByEmail(email) {
 async function getUserPermissions(userId) {
   await ensureSchema();
   const { rows } = await sql`SELECT card_key FROM permissions WHERE user_id = ${userId}`;
-  return rows.map((r) => r.card_key);
+  const granted = new Set(rows.map((r) => r.card_key));
+  // Sort by CARD_KEYS order (not insertion order) so the sidebar dropdown lists cards in
+  // the same sequence for every user, admin or not.
+  return CARD_KEYS.filter((k) => granted.has(k));
 }
 
 // Auto-provisions the very first admin(s) from ADMIN_EMAILS on their first successful
