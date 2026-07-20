@@ -608,7 +608,7 @@
     var CALLING_TEAM_SUBITEMS = {
       overview: { label: 'Overview', text: 'Overview report is coming soon.' },
       ndr: { label: 'NDR-Calling', text: 'NDR-Calling report is coming soon.' },
-      rto: { label: 'RTO-Calling', text: 'RTO-Calling report is coming soon.' }
+      rto: { label: 'RTO-Calling', text: 'RTO CRM Agent & Refund Portal', url: 'rto-crm.html' }
     };
 
     function selectCallingTeamView(view) {
@@ -616,10 +616,18 @@
         b.classList.toggle('active', b.getAttribute('data-calling-team-view') === view);
       });
       var sub = CALLING_TEAM_SUBITEMS[view];
-      document.getElementById('reportIframe').style.display = 'none';
-      document.getElementById('placeholderTitle').textContent = sub.label;
-      document.getElementById('placeholderDesc').textContent = sub.text;
-      document.getElementById('placeholderPanel').style.display = 'flex';
+      var iframe = document.getElementById('reportIframe');
+      var placeholder = document.getElementById('placeholderPanel');
+      if (sub && sub.url) {
+        placeholder.style.display = 'none';
+        iframe.style.display = 'block';
+        iframe.src = sub.url;
+      } else {
+        iframe.style.display = 'none';
+        document.getElementById('placeholderTitle').textContent = sub ? sub.label : '';
+        document.getElementById('placeholderDesc').textContent = sub ? sub.text : '';
+        placeholder.style.display = 'flex';
+      }
     }
 
     function toggleMobileSidebar() {
@@ -792,7 +800,7 @@
           '<button class="nav-btn active" data-calling-team-view="overview" onclick="selectCallingTeamView(\'overview\')">Overview</button>' +
           '<button class="nav-btn" data-calling-team-view="ndr" onclick="selectCallingTeamView(\'ndr\')">NDR-Calling</button>' +
           '<button class="nav-btn" data-calling-team-view="rto" onclick="selectCallingTeamView(\'rto\')">RTO-Calling</button>';
-        selectCallingTeamView('overview');
+        selectCallingTeamView('rto');
         return;
       }
 

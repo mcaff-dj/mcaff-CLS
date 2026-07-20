@@ -1,0 +1,1064 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RTO CRM — Agent Inbox & Refund Portal</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.2/dist/confetti.browser.min.js"></script>
+  
+  <!-- Supabase JS Client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- Google Identity Services -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+          },
+        }
+      }
+    }
+  </script>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    html.dark body {
+      background: #09090b;
+      color: #fafafa;
+    }
+
+    html:not(.dark) body {
+      background: #f8fafc;
+      color: #0f172a;
+    }
+
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    
+    html.dark ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 9999px; }
+    html.dark ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+    
+    html:not(.dark) ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+    html:not(.dark) ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fadeIn { animation: fadeIn 0.15s ease-out; }
+
+    @media print {
+      body * { visibility: hidden; }
+      #printable-receipt, #printable-receipt * { visibility: visible; }
+      #printable-receipt {
+        position: absolute; left: 0; top: 0; width: 100%;
+        color: #000; background: #fff; padding: 32px;
+      }
+    }
+  </style>
+</head>
+
+<body class="font-sans antialiased min-h-screen transition-colors duration-200">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useCallback } = React;
+
+    /* ── Defaults ─────────────────────────────────────── */
+    const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI/edit?usp=sharing';
+    const DEFAULT_SHEET_RANGE = 'Data';
+    const DEFAULT_SUPABASE_URL = 'https://yzvqkboikvbkriccrhjk.supabase.co';
+
+    // High Priority RTO Refusal Reasons list
+    const HIGH_PRIORITY_RTO_REASONS = [
+      'consignee opened the package and refused to accept',
+      'consignee refused to accept',
+      'customer refused to accept',
+      'customer refused to accept:verified',
+      'elasticrun_otp_verified',
+      'entry refused',
+      'kyc|customer refused to share kyc',
+      'otp validation successful',
+      'otp verified cancellation',
+      'prf|receiver refused delivery',
+      'refused to accept',
+      'refused to accept (no cancellation code)',
+      'refused to accept (with cancellation code)',
+      'rto pending - otp validated cancellation'
+    ];
+
+    /* ── Google Sheets Service Account Key ─────────────── */
+    const SERVICE_ACCOUNT = {
+      client_email: 'datafetchcls@sheetdata-501810.iam.gserviceaccount.com',
+      private_key: `-----BEGIN PRIVATE KEY-----
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCxMnfTvnxN9sY8
+BeIIisF68Kml1EIUk1vSeVcZu2H8c2fsHaPDqb4pkm0+qi2qZiW695XmteuoX29y
+++EibTV+UfEYxyK8sTRvOOd0aUshcm3i7q9OUmpg8fU86n+bYv11+MlvWTwm54+u
+PNO/CchrGoqva1rBaTJLwfnGkGRgIot4d7zkSzba0tm7+sSXNAQg1YErzJSZTZln
+WEgPwiM0y+KF6SJhZb0vIE+zmAnsqYEYfxf5uIePEPj/1F1r4uCB2CmjyyXa3zce
+XI+FCkjCVj2hPoI86xXi2d7Je91i6d1xVraSLdvWA9GsZbhpFJAKUiH5zabiR1qS
+to4JfglBAgMBAAECggEAJEmOinlO4XRw4ifeQxuPRcr1IvWV1rraqf6ZXLan+Vf0
+50CmodIoFEFdR+D32xZyEZjURNvqd5+bpjN4xmEQ/F5xfj6BmZy8fS5tD8TkUuQp
+Jrj0g5iTGmlSbHglS7/44ejh74CZtenj3a2tO0kYlv5nekcE3ejaGPOPYB9/vsPc
+0N3yUSoMy8/IhbO//1yPi5gjL4VlNlza7NdUKdTS5U2l8WaYNOLUN1Yy8RTLqjqy
+yt4i3IZxoHTV/Yl0GSP0Kb6dJgVN79awRcNKrvHTt0eBMe8aBA3GOw2momb7+KsN
+M6YgQLvZZnGeuK3dBvKLque+Bba/9aJ2P22T+s7cRQKBgQDkziq7zmziYDVqSgNy
+HwcGUS9Jpjh7Sd615YsjlajS9zTX34tEQlukY64/kl1hnbc5BWMpkqon9jvStTkC
+B3z4kx+BYtaAdYkiKfeXDxjHioXuPWt/LHPWibeR6U88GYiAb0a826NfScttDC22
+E3mY71IpH332EEajeSbzJospqwKBgQDGQgZKjwEQyTDzqTNukG2PibpYQqJ8du9y
+Jw8GqQqrW4H1oPVTzWFmNx0ZeJOgS+z6d+tuBJs8gG1p2LQ8ul3BXpQ1Lwk1k/FP
+BzXUKEMOGdMCeQxyTei3e7MLULi+qwqw3ZrIdxPvd2248uo/ZU/WerVVqTe4XdSd
+9i5RHiPkwwKBgGzXxmxg3lsx+Tb+znTTXbwbkqsub1/23AMblvzujMkO4AxxQwbN
+qlqhMJr9PX7aT/bIIUv9gQRRllO98ciNV13IXwxlwDSLtRiTbjxl6hvCQcP7Y8+z
+jcdY7AJ1QkQMwWqXhMcClM0XhbXyPSyIRygBcMwvNvR++Zt6XpT8mObRAoGAXVWV
+6qHaKZHd5sgAO4vo2EtJm+V640eGwGHc9BC+wh8pVn65IAOvV9SYcXZPYYZ9AQlV
+n4yxnFEFsW/gojpGixNAiK0lE8EbOE43rDJsJwZHTYG5N1KwPTkR+EC/SJvzQ4KA
+LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
+/a/HFurzrbz/JrXTWOyv42tHftwkBwVbUtrKpKD9Wfso9hT3IkHYJzMMQlyiZxYm
++dunM85aHLfEGsk7yOxVjQuNJjsP1KLXvZuWv4p2mPXiUzR75xDzIboUPa11duXs
+46Id18Bkixm5xJ8LVf66yg==
+-----END PRIVATE KEY-----`,
+      token_uri: 'https://oauth2.googleapis.com/token',
+      scopes: 'https://www.googleapis.com/auth/spreadsheets.readonly',
+    };
+
+    function b64url(str) { return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+    function b64urlBytes(buf) { return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+
+    async function importPrivateKey(pem) {
+      const b64 = pem.replace(/-----BEGIN PRIVATE KEY-----/, '').replace(/-----END PRIVATE KEY-----/, '').replace(/\s/g, '');
+      const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      return crypto.subtle.importKey('pkcs8', bin.buffer, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+    }
+
+    async function getAccessToken() {
+      const now = Math.floor(Date.now() / 1000);
+      const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+      const payload = b64url(JSON.stringify({
+        iss: SERVICE_ACCOUNT.client_email,
+        scope: SERVICE_ACCOUNT.scopes,
+        aud: SERVICE_ACCOUNT.token_uri,
+        iat: now,
+        exp: now + 3600,
+      }));
+      const unsigned = `${header}.${payload}`;
+      const key = await importPrivateKey(SERVICE_ACCOUNT.private_key);
+      const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(unsigned));
+      const jwt = `${unsigned}.${b64urlBytes(sig)}`;
+
+      const res = await fetch(SERVICE_ACCOUNT.token_uri, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+      });
+      const data = await res.json();
+      if (!data.access_token) throw new Error(data.error_description || 'Token error');
+      return data.access_token;
+    }
+
+    // Decode OAuth JWT Token
+    function decodeJwt(token) {
+      try {
+        const base64Url = token.split('.')[1];
+        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+        const jsonPayload = decodeURIComponent(atob(base64).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));
+        return JSON.parse(jsonPayload);
+      } catch (e) { return null; }
+    }
+
+    // Parse OAuth Hash Synchronously on Boot
+    function parseOAuthHashOnBoot() {
+      const hash = window.location.hash;
+      if (hash && hash.includes('access_token=')) {
+        try {
+          const params = new URLSearchParams(hash.substring(1));
+          const accessToken = params.get('access_token');
+          if (accessToken) {
+            const payload = decodeJwt(accessToken);
+            if (payload) {
+              const userMeta = payload.user_metadata || {};
+              const userObj = {
+                name: userMeta.full_name || userMeta.name || payload.email,
+                email: payload.email,
+                picture: userMeta.avatar_url || userMeta.picture || `https://api.dicebear.com/7.x/avataaars/svg?seed=${payload.email}`
+              };
+              localStorage.setItem('rto_google_user', JSON.stringify(userObj));
+              if (window.history.replaceState) {
+                window.history.replaceState(null, '', window.location.pathname + window.location.search);
+              }
+              return userObj;
+            }
+          }
+        } catch (e) { console.warn('Boot hash error', e); }
+      }
+      return null;
+    }
+
+    async function fetchSheetData(spreadsheetId, range = 'Data') {
+      const token = await getAccessToken();
+      const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}?majorDimension=ROWS`;
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) throw new Error(`Sheets error (${res.status})`);
+      const data = await res.json();
+      if (!data.values || data.values.length < 2) throw new Error('No data rows found');
+      const [headers, ...rows] = data.values;
+      return rows.map(row => {
+        const obj = {};
+        headers.forEach((h, i) => {
+          const cleanH = (h || '').trim();
+          if (cleanH) obj[cleanH] = (row[i] || '').trim();
+          obj[`col_${i}`] = (row[i] || '').trim();
+          if (i === 3) obj['_col_D'] = (row[i] || '').trim(); // Column D = Index 3 (RTO Reason)
+          if (i === 16) obj['_col_Q'] = (row[i] || '').trim(); // Column Q = Index 16 (Agent Name)
+        });
+        return obj;
+      });
+    }
+
+    function extractSheetId(input) {
+      const match = input.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+      if (match) return match[1];
+      if (/^[a-zA-Z0-9_-]{20,}$/.test(input.trim())) return input.trim();
+      return null;
+    }
+
+    function parseRowDate(row) {
+      const getVal = (...keys) => {
+        for (const k of keys) {
+          const found = Object.keys(row).find(h => h.toLowerCase().replace(/[^a-z0-9]/g, '').includes(k.toLowerCase().replace(/[^a-z0-9]/g, '')));
+          if (found && row[found]) return row[found];
+        }
+        return '';
+      };
+      const dateStr = getVal('Date', 'Order Date', 'RTO Date', 'Scan Date', 'Created At', 'col_0', 'col_1');
+      if (!dateStr) return null;
+      const d = new Date(dateStr);
+      if (!isNaN(d.getTime())) return d;
+      const parts = dateStr.split(/[\/\-\.]/);
+      if (parts.length === 3) {
+        if (parts[0].length === 4) return new Date(parts[0], parts[1] - 1, parts[2]);
+        if (parts[2].length === 4) return new Date(parts[2], parts[1] - 1, parts[0]);
+      }
+      return null;
+    }
+
+    function mapRowToTicket(row, idx) {
+      const get = (...keys) => {
+        for (const k of keys) {
+          const found = Object.keys(row).find(h => h.toLowerCase().replace(/[^a-z0-9]/g, '').includes(k.toLowerCase().replace(/[^a-z0-9]/g, '')));
+          if (found && row[found]) return row[found];
+        }
+        return '';
+      };
+
+      const rawPay = get('Payment Method', 'Payment Mode', 'Payment', 'Type').toUpperCase();
+      const amtRaw = get('Order Amount', 'Amount', 'Price', 'Total', 'Order Value');
+      const orderNum = get('Order Number', 'Order #', 'Order ID', 'OrderNo') || `ORD-${idx + 1000}`;
+      const assignedAgent = get('Agent Name', 'Agent', 'Assigned Agent', 'AgentName', 'Assigned To', '_col_Q', 'col_16') || 'Unassigned';
+
+      // Column D: RTO Reason
+      const rtoReasonVal = get('RTO Reason', '_col_D', 'col_3', 'Reason', 'RTOReason', 'Status', 'Notes') || 'Return To Origin';
+
+      const isPrepaid = rawPay.includes('PREPAID') || rawPay.includes('ONLINE') || rawPay.includes('PAYTM') || rawPay.includes('UPI') || (!rawPay.includes('COD') && !rawPay.includes('CASH'));
+
+      // Check if RTO Reason matches high-priority refusal list
+      const reasonLower = rtoReasonVal.toLowerCase().trim();
+      const isRefusalMatch = HIGH_PRIORITY_RTO_REASONS.some(r => reasonLower.includes(r));
+      const isHighPriority = isPrepaid && isRefusalMatch;
+
+      const rowDate = parseRowDate(row);
+
+      return {
+        id: `TKT-GS-${orderNum}-${idx}`,
+        orderNumber: orderNum,
+        customerName: get('Customer Name', 'Name', 'Customer', 'Full Name') || 'Customer',
+        email: get('Email ID', 'Email', 'Customer Email', 'Mail') || '',
+        phone: get('Contact Number', 'Phone', 'Mobile', 'Contact') || '',
+        address: get('Address', 'Street Address', 'Shipping Address') || '',
+        city: get('City', 'District', 'Town') || '',
+        state: get('State', 'Province') || '',
+        pincode: get('Pincode', 'Zip', 'Postal Code', 'Pin Code', 'Pin') || '',
+        paymentMethod: rawPay.includes('COD') || rawPay.includes('CASH') ? 'COD' : 'Prepaid',
+        orderAmount: parseFloat(amtRaw.replace(/[^0-9.]/g, '')) || 0,
+        rtoReason: rtoReasonVal,
+        assignedAgentName: assignedAgent,
+        isHighPriority: isHighPriority,
+        rowDate: rowDate,
+        rawIndex: idx,
+        status: 'Assigned Today',
+      };
+    }
+
+    /* ── Icons ────────────────────────────────────────── */
+    function SvgSearch(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>; }
+    function SvgX(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>; }
+    function SvgCheck(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M20 6 9 17l-5-5"/></svg>; }
+    function SvgPrinter(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/></svg>; }
+    function SvgRefresh(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>; }
+    function SvgSun(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>; }
+    function SvgMoon(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>; }
+    function SvgGoogle(p) { return <svg width="14" height="14" viewBox="0 0 24 24" {...p}><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>; }
+    function SvgLock(p) { return <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>; }
+
+    /* ── Components ───────────────────────────────────── */
+    function Badge({ children, variant = 'default' }) {
+      const styles = {
+        default: 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-zinc-800/80 dark:text-zinc-300 dark:border-zinc-700/60',
+        prepaid: 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/60 dark:text-sky-400 dark:border-sky-800/50',
+        cod: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/60 dark:text-amber-400 dark:border-amber-800/50',
+        success: 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-400 dark:border-emerald-800/50',
+        warning: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/60 dark:text-amber-400 dark:border-amber-800/50',
+        high: 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/60 dark:text-rose-400 dark:border-rose-800/50',
+      };
+      return <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium border ${styles[variant] || styles.default}`}>{children}</span>;
+    }
+
+    function Overlay({ children, onClose }) {
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+          <div className="absolute inset-0 bg-slate-900/40 dark:bg-black/60 backdrop-blur-xs" />
+          <div className="relative animate-fadeIn" onClick={(e) => e.stopPropagation()}>{children}</div>
+        </div>
+      );
+    }
+
+    function StatCard({ label, value, sub, accent = 'zinc' }) {
+      const accents = {
+        zinc: 'border-slate-200 dark:border-zinc-800/80',
+        sky: 'border-sky-200 dark:border-sky-900/50',
+        amber: 'border-amber-200 dark:border-amber-900/50',
+        emerald: 'border-emerald-200 dark:border-emerald-900/50',
+        rose: 'border-rose-200 dark:border-rose-900/50',
+      };
+      return (
+        <div className={`bg-white dark:bg-zinc-900/60 rounded-xl p-4 border ${accents[accent]} transition-colors hover:bg-slate-50 dark:hover:bg-zinc-900/90 shadow-xs`}>
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-zinc-500 mb-1">{label}</p>
+          <p className="text-xl font-bold text-slate-900 dark:text-zinc-100 tracking-tight">{value}</p>
+          {sub && <p className="text-[11px] text-slate-500 dark:text-zinc-500 mt-1">{sub}</p>}
+        </div>
+      );
+    }
+
+    /* ── Main Application ─────────────────────────────── */
+    function App() {
+      const [theme, setTheme] = useState(() => localStorage.getItem('rto_theme') || 'dark');
+
+      useEffect(() => {
+        const root = document.documentElement;
+        if (theme === 'dark') root.classList.add('dark');
+        else root.classList.remove('dark');
+        localStorage.setItem('rto_theme', theme);
+      }, [theme]);
+
+      const [googleUser, setGoogleUser] = useState(() => {
+        const bootUser = parseOAuthHashOnBoot();
+        if (bootUser) return bootUser;
+        try { const s = localStorage.getItem('rto_google_user'); return s ? JSON.parse(s) : null; } catch { return null; }
+      });
+
+      // Default Agent Status to 'Offline' on first load!
+      const [agentStatus, setAgentStatus] = useState(() => localStorage.getItem('rto_agent_status') || 'Offline');
+
+      const handleSetAgentStatus = (status) => {
+        setAgentStatus(status);
+        localStorage.setItem('rto_agent_status', status);
+        showToast(`Status updated to ${status}`);
+      };
+
+      const [tickets, setTickets] = useState([]);
+      const [ticketOverrides, setTicketOverrides] = useState(() => {
+        try { const s = localStorage.getItem('rto_ticket_overrides'); return s ? JSON.parse(s) : {}; } catch { return {}; }
+      });
+
+      const [searchQuery, setSearchQuery] = useState('');
+      const [activeTab, setActiveTab] = useState('assigned'); // Default to 'assigned'
+      
+      // Date Window Filter State: Default = '7_DAYS'
+      const [dateRange, setDateRange] = useState('7_DAYS');
+      const [paymentFilter, setPaymentFilter] = useState('ALL');
+      const [priorityFilter, setPriorityFilter] = useState('ALL');
+      const [viewMode, setViewMode] = useState('table');
+
+      const [currentPage, setCurrentPage] = useState(1);
+      const [pageSize, setPageSize] = useState(50);
+
+      const [sheetUrl] = useState(DEFAULT_SHEET_URL);
+      const [sheetRange] = useState(DEFAULT_SHEET_RANGE);
+      const [isSyncing, setIsSyncing] = useState(false);
+      const [lastSyncedTime, setLastSyncedTime] = useState(null);
+
+      const [selectedDetailTicket, setSelectedDetailTicket] = useState(null);
+      const [selectedRefundTicket, setSelectedRefundTicket] = useState(null);
+      const [selectedReceiptTicket, setSelectedReceiptTicket] = useState(null);
+      const [toast, setToast] = useState(null);
+
+      const showToast = useCallback((msg) => {
+        setToast(msg);
+        setTimeout(() => setToast(null), 3000);
+      }, []);
+
+      const handleGoogleSignIn = () => {
+        if (window.supabase) {
+          const client = window.supabase.createClient(DEFAULT_SUPABASE_URL, 'placeholder');
+          const redirectUrl = window.location.origin + window.location.pathname;
+          client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: redirectUrl } }).catch((err) => {
+            showToast(err.message || 'Google Auth Error');
+          });
+        }
+      };
+
+      const handleLogout = () => {
+        setGoogleUser(null);
+        localStorage.removeItem('rto_google_user');
+        showToast('Logged out');
+      };
+
+      // Live Google Sheets Fetch
+      const handleLiveSync = useCallback(async (silent = false) => {
+        const id = extractSheetId(sheetUrl);
+        if (!id) return;
+        setIsSyncing(true);
+        try {
+          const rows = await fetchSheetData(id, sheetRange || 'Data');
+          const mapped = rows.map((row, idx) => mapRowToTicket(row, idx));
+          setTickets(mapped);
+          setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+          if (!silent) showToast(`Synced ${rows.length.toLocaleString('en-IN')} rows`);
+        } catch (err) {
+          if (!silent) showToast(err.message || 'Sync failed');
+        } finally {
+          setIsSyncing(false);
+        }
+      }, [sheetUrl, sheetRange, showToast]);
+
+      useEffect(() => { if (googleUser) handleLiveSync(true); }, [googleUser]);
+
+      useEffect(() => {
+        if (!googleUser) return;
+        const timer = setInterval(() => { handleLiveSync(true); }, 60000);
+        return () => clearInterval(timer);
+      }, [googleUser, handleLiveSync]);
+
+      const handleConfirmRefund = (ticketId, refundRecord) => {
+        setTicketOverrides(prev => ({
+          ...prev,
+          [ticketId]: { status: 'Refunded', refundDetails: refundRecord }
+        }));
+        const target = tickets.find(t => t.id === ticketId);
+        if (target) {
+          setSelectedReceiptTicket({ ...target, status: 'Refunded', refundDetails: refundRecord });
+          showToast(`₹${refundRecord.amount.toLocaleString('en-IN')} refunded for ${target.orderNumber}`);
+        }
+      };
+
+      // STRICT AGENT FILTERING MATCH FUNCTION
+      const isTicketAssignedToLoggedInAgent = useCallback((t) => {
+        if (!googleUser || !t.assignedAgentName) return false;
+        const agentNameLower = (googleUser.name || '').toLowerCase().trim();
+        const agentEmailLower = (googleUser.email || '').toLowerCase().trim();
+        const ticketAgentLower = (t.assignedAgentName || '').toLowerCase().trim();
+
+        // 1. Exact Email Match
+        if (agentEmailLower && ticketAgentLower === agentEmailLower) return true;
+
+        // 2. Exact Full Name Match
+        if (agentNameLower && ticketAgentLower === agentNameLower) return true;
+
+        // 3. Email Prefix Match
+        const emailPrefix = agentEmailLower.split('@')[0];
+        if (emailPrefix && emailPrefix.length > 2 && (ticketAgentLower.includes(emailPrefix) || emailPrefix.includes(ticketAgentLower))) return true;
+
+        // 4. First Name Match
+        const firstName = agentNameLower.split(' ')[0];
+        if (firstName && firstName.length > 2 && (ticketAgentLower.includes(firstName) || firstName.includes(ticketAgentLower))) return true;
+
+        return false;
+      }, [googleUser]);
+
+      // Filter by Date Window (Last 7 Days by default to eliminate lag!)
+      const myAssignedTickets = useMemo(() => {
+        if (!googleUser) return [];
+        
+        let base = tickets.map(t => {
+          const override = ticketOverrides[t.id];
+          return override ? { ...t, status: override.status || t.status, refundDetails: override.refundDetails || t.refundDetails } : t;
+        }).filter(t => isTicketAssignedToLoggedInAgent(t));
+
+        // Date Range Filtering (Default = 7 Days)
+        if (dateRange !== 'ALL_TIME') {
+          const daysLimit = dateRange === '7_DAYS' ? 7 : dateRange === '14_DAYS' ? 14 : 30;
+          const cutoff = Date.now() - (daysLimit * 24 * 60 * 60 * 1000);
+          
+          const datedCount = base.filter(t => t.rowDate).length;
+          if (datedCount > 0) {
+            base = base.filter(t => !t.rowDate || t.rowDate.getTime() >= cutoff);
+          } else {
+            base = base.slice(0, 5000);
+          }
+        }
+
+        // Priority Sorting: High Priority Prepaid Refusals come FIRST!
+        return base.sort((a, b) => {
+          if (a.isHighPriority && !b.isHighPriority) return -1;
+          if (!a.isHighPriority && b.isHighPriority) return 1;
+          return 0;
+        });
+      }, [tickets, ticketOverrides, googleUser, isTicketAssignedToLoggedInAgent, dateRange]);
+
+      const highPriorityCount = myAssignedTickets.filter(t => t.isHighPriority && t.status !== 'Refunded').length;
+      const pendingCount = myAssignedTickets.filter(t => t.status !== 'Refunded').length;
+      const refundedCount = myAssignedTickets.filter(t => t.status === 'Refunded').length;
+      const totalRefundedSum = myAssignedTickets.filter(t => t.status === 'Refunded').reduce((a, c) => a + (c.refundDetails?.amount || c.orderAmount || 0), 0);
+
+      const filteredTickets = useMemo(() => {
+        setCurrentPage(1);
+        return myAssignedTickets.filter(t => {
+          if (activeTab === 'high_priority' && (!t.isHighPriority || t.status === 'Refunded')) return false;
+          if (activeTab === 'pending' && t.status === 'Refunded') return false;
+          if (activeTab === 'refunded' && t.status !== 'Refunded') return false;
+
+          if (priorityFilter === 'HIGH' && !t.isHighPriority) return false;
+          if (paymentFilter !== 'ALL' && t.paymentMethod !== paymentFilter) return false;
+
+          if (searchQuery.trim()) {
+            const q = searchQuery.toLowerCase();
+            if (![t.orderNumber, t.customerName, t.email, t.phone, t.city || '', t.rtoReason || ''].some(f => (f || '').toLowerCase().includes(q))) return false;
+          }
+          return true;
+        });
+      }, [myAssignedTickets, activeTab, priorityFilter, paymentFilter, searchQuery]);
+
+      const totalPages = Math.ceil(filteredTickets.length / pageSize) || 1;
+      const paginatedTickets = useMemo(() => {
+        const start = (currentPage - 1) * pageSize;
+        return filteredTickets.slice(start, start + pageSize);
+      }, [filteredTickets, currentPage, pageSize]);
+
+      const tabs = [
+        { key: 'assigned', label: 'My Assigned Leads', count: myAssignedTickets.length },
+        { key: 'high_priority', label: '🔥 High Priority Prepaid', count: highPriorityCount },
+        { key: 'pending', label: 'Pending Refunds', count: pendingCount },
+        { key: 'refunded', label: 'Refunded', count: refundedCount },
+      ];
+
+      /* ──────────────────────────────────────────────────
+         SCREEN 1: LOGIN PAGE (Clean Google Auth Only)
+         ────────────────────────────────────────────────── */
+      if (!googleUser) {
+        return (
+          <div className="min-h-screen flex items-center justify-center p-6 bg-slate-950 text-slate-100">
+            <div className="w-full max-w-md bg-zinc-900 border border-zinc-800/80 rounded-2xl p-8 shadow-2xl space-y-6 text-center animate-fadeIn">
+              
+              <div className="mx-auto h-12 w-12 rounded-xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+                <SvgLock width="24" height="24" />
+              </div>
+
+              <div className="space-y-2">
+                <h1 className="text-xl font-bold tracking-tight text-white">RTO CRM Agent Portal</h1>
+                <p className="text-xs text-zinc-400">
+                  Please sign in with your official Google account to view your assigned Column Q leads.
+                </p>
+              </div>
+
+              {/* Primary Google Login Button */}
+              <button
+                onClick={handleGoogleSignIn}
+                className="w-full py-3.5 rounded-xl bg-white hover:bg-slate-100 text-zinc-900 font-semibold text-xs flex items-center justify-center gap-2.5 shadow-md transition-all transform hover:scale-[1.01]"
+              >
+                <SvgGoogle width="18" height="18" />
+                <span>Sign in with Google</span>
+              </button>
+
+              <p className="text-[11px] text-zinc-600 pt-4 border-t border-zinc-800/60">
+                Strict Privacy Policy: Agents can only access leads assigned to their email in Column Q.
+              </p>
+            </div>
+          </div>
+        );
+      }
+
+      /* ──────────────────────────────────────────────────
+         SCREEN 2: MAIN DASHBOARD (Only for Logged-In Agent)
+         ────────────────────────────────────────────────── */
+      return (
+        <div className="min-h-screen flex flex-col transition-colors duration-200">
+
+          {/* ── Navbar ──────────────────────────────── */}
+          <header className="sticky top-0 z-30 bg-white/90 dark:bg-[#09090b]/90 backdrop-blur-xl border-b border-slate-200 dark:border-zinc-800/80">
+            <div className="max-w-[1400px] mx-auto px-6 h-14 flex items-center justify-between gap-4">
+
+              <div className="flex items-center gap-6">
+                <div className="flex items-center gap-2.5">
+                  <div className="h-7 w-7 rounded-lg bg-slate-900 dark:bg-zinc-100 flex items-center justify-center">
+                    <span className="text-white dark:text-zinc-900 font-bold text-xs">R</span>
+                  </div>
+                  <span className="font-semibold text-sm text-slate-900 dark:text-zinc-100 tracking-tight">RTO CRM</span>
+                </div>
+
+                <nav className="hidden md:flex items-center gap-1">
+                  {tabs.map(tab => (
+                    <button
+                      key={tab.key}
+                      onClick={() => setActiveTab(tab.key)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                        activeTab === tab.key
+                          ? 'bg-slate-100 text-slate-900 dark:bg-zinc-800 dark:text-zinc-100 font-semibold'
+                          : 'text-slate-500 hover:text-slate-900 dark:text-zinc-500 dark:hover:text-zinc-300'
+                      }`}
+                    >
+                      {tab.label}
+                      <span className={`ml-1.5 text-[10px] ${activeTab === tab.key ? 'text-slate-700 dark:text-zinc-400 font-bold' : 'text-slate-400 dark:text-zinc-600'}`}>{tab.count.toLocaleString('en-IN')}</span>
+                    </button>
+                  ))}
+                </nav>
+              </div>
+
+              <div className="flex items-center gap-2.5">
+                {/* Search */}
+                <div className="relative hidden sm:block">
+                  <SvgSearch className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 dark:text-zinc-500" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search Order #, Customer, Reason..."
+                    className="w-48 xl:w-56 pl-8 pr-3 py-1.5 text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg text-slate-900 dark:text-zinc-200 placeholder:text-slate-400 focus:outline-none focus:border-indigo-500"
+                  />
+                  {searchQuery && (
+                    <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700">
+                      <SvgX width="12" height="12" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Live Sync */}
+                <button
+                  onClick={() => handleLiveSync(false)}
+                  disabled={isSyncing}
+                  className="flex items-center gap-1.5 h-8 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg px-2.5 text-xs text-slate-700 dark:text-zinc-300 hover:text-slate-900 dark:hover:text-white transition-colors"
+                  title="Sync Google Sheets"
+                >
+                  <SvgRefresh className={isSyncing ? 'animate-spin text-indigo-600 dark:text-indigo-400' : ''} />
+                  <span className="hidden sm:inline font-medium">{isSyncing ? 'Syncing...' : 'Sync'}</span>
+                </button>
+
+                {/* Theme Switcher */}
+                <button
+                  onClick={() => setTheme(prev => prev === 'dark' ? 'light' : 'dark')}
+                  className="h-8 w-8 rounded-lg bg-slate-100 dark:bg-zinc-900 text-slate-600 dark:text-zinc-400 border border-slate-200 dark:border-zinc-800/80 flex items-center justify-center hover:text-slate-900 transition-colors"
+                >
+                  {theme === 'dark' ? <SvgSun /> : <SvgMoon />}
+                </button>
+
+                {/* AGENT STATUS SWITCHER (Offline by default) */}
+                <div className="flex items-center gap-1.5 h-8 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg px-2">
+                  <span className={`h-2 w-2 rounded-full ${
+                    agentStatus === 'Online' ? 'bg-emerald-500' : agentStatus === 'Busy' ? 'bg-amber-500 animate-pulse' : 'bg-slate-400'
+                  }`} />
+                  <select
+                    value={agentStatus}
+                    onChange={(e) => handleSetAgentStatus(e.target.value)}
+                    className="text-xs bg-transparent border-none text-slate-800 dark:text-zinc-200 font-semibold focus:outline-none cursor-pointer"
+                  >
+                    <option value="Offline" className="bg-white dark:bg-zinc-900">Offline</option>
+                    <option value="Online" className="bg-white dark:bg-zinc-900">Online</option>
+                    <option value="Busy" className="bg-white dark:bg-zinc-900">Busy</option>
+                  </select>
+                </div>
+
+                {/* Logged in Agent Avatar & Logout */}
+                <div className="flex items-center gap-2 h-8 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg p-1 pr-2.5">
+                  <img src={googleUser.picture} alt={googleUser.name} className="h-6 w-6 rounded-full border border-indigo-500" />
+                  <div className="text-left hidden lg:block">
+                    <p className="text-xs font-semibold text-slate-900 dark:text-zinc-100 leading-none">{googleUser.name}</p>
+                  </div>
+                  <button onClick={handleLogout} className="text-[11px] font-medium text-red-500 hover:text-red-400 border-l border-slate-200 dark:border-zinc-800/80 pl-2">
+                    Logout
+                  </button>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          {/* ── Toast ───────────────────────────────── */}
+          {toast && (
+            <div className="fixed top-16 right-6 z-50 animate-fadeIn">
+              <div className="px-4 py-2 rounded-lg bg-slate-900 text-white dark:bg-zinc-800 dark:text-zinc-200 border border-slate-800 dark:border-zinc-700 text-xs shadow-xl flex items-center gap-2">
+                <SvgCheck className="text-emerald-400" />
+                {toast}
+              </div>
+            </div>
+          )}
+
+          {/* ── Main Workspace ──────────────────────── */}
+          <main className="flex-1 max-w-[1400px] w-full mx-auto px-6 py-6 space-y-5">
+
+            {/* Stats Overview */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <StatCard label={`My Leads (${googleUser.name.split(' ')[0]})`} value={myAssignedTickets.length.toLocaleString('en-IN')} sub={`Date Filter: ${dateRange.replace('_', ' ')}`} accent="sky" />
+              <StatCard label="🔥 High Priority Prepaid" value={highPriorityCount.toLocaleString('en-IN')} sub="Prepaid + Refusal Reasons" accent="rose" />
+              <StatCard label="Pending Refunds" value={pendingCount.toLocaleString('en-IN')} sub="Awaiting resolution" accent="amber" />
+              <StatCard label="Total Refunded" value={`₹${totalRefundedSum.toLocaleString('en-IN')}`} sub={`${refundedCount.toLocaleString('en-IN')} completed`} accent="emerald" />
+            </div>
+
+            {/* Filter Bar & Controls */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
+              <p className="text-xs text-slate-500 dark:text-zinc-500">
+                Showing <span className="text-slate-900 dark:text-zinc-300 font-semibold">{filteredTickets.length.toLocaleString('en-IN')}</span> leads for <strong className="text-indigo-600 dark:text-indigo-400">{googleUser.name}</strong>
+              </p>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                
+                {/* 📅 DATE WINDOW FILTER */}
+                <select
+                  value={dateRange}
+                  onChange={(e) => setDateRange(e.target.value)}
+                  className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none font-semibold cursor-pointer"
+                >
+                  <option value="7_DAYS">⚡ Last 7 Days (Fastest)</option>
+                  <option value="14_DAYS">Last 14 Days</option>
+                  <option value="30_DAYS">Last 30 Days</option>
+                  <option value="ALL_TIME">All Time</option>
+                </select>
+
+                {/* Priority Filter */}
+                <select
+                  value={priorityFilter}
+                  onChange={(e) => setPriorityFilter(e.target.value)}
+                  className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none font-medium cursor-pointer"
+                >
+                  <option value="ALL">All Priorities</option>
+                  <option value="HIGH">🔥 High Priority (Prepaid Refusal)</option>
+                </select>
+
+                {/* Payment Filter */}
+                <select
+                  value={paymentFilter}
+                  onChange={(e) => setPaymentFilter(e.target.value)}
+                  className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
+                >
+                  <option value="ALL">All Payments</option>
+                  <option value="Prepaid">Prepaid</option>
+                  <option value="COD">COD</option>
+                </select>
+
+                {/* Page Size */}
+                <select
+                  value={pageSize}
+                  onChange={(e) => setPageSize(Number(e.target.value))}
+                  className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
+                >
+                  <option value="25">25 / page</option>
+                  <option value="50">50 / page</option>
+                  <option value="100">100 / page</option>
+                  <option value="250">250 / page</option>
+                </select>
+
+                {/* View Switcher */}
+                <div className="flex bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg p-0.5">
+                  <button onClick={() => setViewMode('table')} className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${viewMode === 'table' ? 'bg-white text-slate-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100' : 'text-slate-500'}`}>List</button>
+                  <button onClick={() => setViewMode('cards')} className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${viewMode === 'cards' ? 'bg-white text-slate-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100' : 'text-slate-500'}`}>Grid</button>
+                </div>
+              </div>
+            </div>
+
+            {/* ── Table View ─────────────────────────── */}
+            {viewMode === 'table' && (
+              <div className="bg-white dark:bg-zinc-900/40 rounded-xl border border-slate-200 dark:border-zinc-800/60 overflow-hidden shadow-xs">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-200 dark:border-zinc-800/60 bg-slate-50/80 dark:bg-transparent">
+                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Order</th>
+                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Customer</th>
+                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Column D (RTO Reason)</th>
+                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Payment</th>
+                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider text-right">Amount</th>
+                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider text-center">Status</th>
+                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-zinc-800/30">
+                      {paginatedTickets.length === 0 ? (
+                        <tr>
+                          <td colSpan="7" className="py-16 text-center text-slate-500 dark:text-zinc-500 text-xs">
+                            No leads assigned to <strong>{googleUser.name}</strong> ({googleUser.email}) matching current criteria.
+                          </td>
+                        </tr>
+                      ) : paginatedTickets.map(ticket => {
+                        const isRefunded = ticket.status === 'Refunded';
+                        return (
+                          <tr key={ticket.id} className={`hover:bg-slate-50/80 dark:hover:bg-zinc-800/20 transition-colors ${ticket.isHighPriority && !isRefunded ? 'bg-rose-50/30 dark:bg-rose-950/10' : ''}`}>
+                            <td className="py-3 px-4">
+                              <span className="font-mono text-xs font-semibold text-slate-900 dark:text-zinc-200">{ticket.orderNumber}</span>
+                              {ticket.isHighPriority && !isRefunded && (
+                                <span className="block mt-0.5"><Badge variant="high">🔥 High Priority</Badge></span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className="text-slate-900 dark:text-zinc-200 font-medium">{ticket.customerName}</span>
+                              <span className="block text-[11px] text-slate-500 dark:text-zinc-500 mt-0.5">{ticket.email || ticket.phone}</span>
+                            </td>
+                            <td className="py-3 px-4 max-w-[280px]">
+                              <span className={`text-xs font-medium ${ticket.isHighPriority ? 'text-rose-700 dark:text-rose-400 font-semibold' : 'text-slate-700 dark:text-zinc-300'}`}>
+                                {ticket.rtoReason}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4">
+                              <Badge variant={ticket.paymentMethod === 'COD' ? 'cod' : 'prepaid'}>{ticket.paymentMethod}</Badge>
+                            </td>
+                            <td className="py-3 px-4 text-right font-semibold text-slate-900 dark:text-zinc-200">
+                              ₹{ticket.orderAmount.toLocaleString('en-IN')}
+                            </td>
+                            <td className="py-3 px-4 text-center">
+                              <Badge variant={isRefunded ? 'success' : 'warning'}>{isRefunded ? 'Refunded' : 'Pending'}</Badge>
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button onClick={() => setSelectedDetailTicket(ticket)} className="px-3 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 text-[11px] font-medium transition-colors">
+                                  View
+                                </button>
+                                {isRefunded ? (
+                                  <button onClick={() => setSelectedReceiptTicket(ticket)} className="px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-400 dark:border-emerald-800/50 text-[11px] font-medium transition-colors">
+                                    Receipt
+                                  </button>
+                                ) : (
+                                  <button onClick={() => setSelectedRefundTicket(ticket)} className="px-3.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white text-[11px] font-semibold transition-colors shadow-xs">
+                                    Refund
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {totalPages > 1 && (
+                  <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200 dark:border-zinc-800/60 text-xs bg-slate-50 dark:bg-zinc-900/60">
+                    <span className="text-slate-600 dark:text-zinc-500">Page <strong>{currentPage}</strong> of <strong>{totalPages.toLocaleString('en-IN')}</strong></span>
+                    <div className="flex items-center gap-1.5">
+                      <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-2.5 py-1 rounded-md bg-white text-slate-700 border border-slate-200 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 disabled:opacity-40 font-medium">Previous</button>
+                      <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-2.5 py-1 rounded-md bg-white text-slate-700 border border-slate-200 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 disabled:opacity-40 font-medium">Next</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── Cards View ─────────────────────────── */}
+            {viewMode === 'cards' && (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                  {paginatedTickets.map(ticket => {
+                    const isRefunded = ticket.status === 'Refunded';
+                    return (
+                      <div key={ticket.id} className={`bg-white dark:bg-zinc-900/50 rounded-xl border ${ticket.isHighPriority && !isRefunded ? 'border-rose-300 dark:border-rose-900/60 bg-rose-50/20' : 'border-slate-200 dark:border-zinc-800/60'} p-4 flex flex-col justify-between hover:border-slate-300 dark:hover:border-zinc-700/60 transition-colors shadow-xs`}>
+                        <div>
+                          <div className="flex items-center justify-between mb-3">
+                            <span className="font-mono text-xs font-semibold text-slate-900 dark:text-zinc-300">{ticket.orderNumber}</span>
+                            {ticket.isHighPriority && !isRefunded ? (
+                              <Badge variant="high">🔥 High Priority</Badge>
+                            ) : (
+                              <span className="text-[10px] text-slate-500 font-medium bg-slate-100 dark:bg-zinc-800 px-2 py-0.5 rounded">👤 {ticket.assignedAgentName}</span>
+                            )}
+                          </div>
+                          <h3 className="text-sm font-semibold text-slate-900 dark:text-zinc-100">{ticket.customerName}</h3>
+                          <p className="text-[11px] text-slate-500 dark:text-zinc-500 mt-1">{ticket.email} · {ticket.phone}</p>
+                          <div className="mt-3 p-2.5 rounded-lg bg-slate-50 dark:bg-zinc-800/40 border border-slate-200 dark:border-zinc-800/40 text-[11px] text-slate-600 dark:text-zinc-400">
+                            <p>{ticket.address || 'Standard Delivery Address'}</p>
+                            <p className="text-slate-900 dark:text-zinc-300 mt-1 font-medium">{ticket.city}, {ticket.state} — {ticket.pincode}</p>
+                          </div>
+                          <p className="mt-2.5 text-[11px] text-amber-700 dark:text-amber-400 leading-relaxed font-medium">Column D: {ticket.rtoReason}</p>
+                        </div>
+                        <div className="mt-4 pt-3 border-t border-slate-200 dark:border-zinc-800/40 flex items-center justify-between">
+                          <span className="text-sm font-semibold text-slate-900 dark:text-zinc-200">₹{ticket.orderAmount.toLocaleString('en-IN')}</span>
+                          <div className="flex gap-1.5">
+                            <button onClick={() => setSelectedDetailTicket(ticket)} className="px-3 py-1 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-zinc-800 dark:text-zinc-300 text-[11px] font-medium">View</button>
+                            {isRefunded ? (
+                              <button onClick={() => setSelectedReceiptTicket(ticket)} className="px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-400 text-[11px] font-medium">Receipt</button>
+                            ) : (
+                              <button onClick={() => setSelectedRefundTicket(ticket)} className="px-3.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white dark:bg-zinc-100 dark:text-zinc-900 text-[11px] font-semibold shadow-xs">Refund</button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </main>
+
+          {/* ── Customer Detail Modal ────────────────── */}
+          {selectedDetailTicket && (
+            <Overlay onClose={() => setSelectedDetailTicket(null)}>
+              <div className="w-full max-w-lg bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-xl shadow-2xl text-slate-900 dark:text-zinc-100">
+                <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-zinc-800">
+                  <div>
+                    <h3 className="text-sm font-semibold font-mono">{selectedDetailTicket.orderNumber}</h3>
+                  </div>
+                  <button onClick={() => setSelectedDetailTicket(null)} className="text-slate-400 hover:text-slate-700"><SvgX /></button>
+                </div>
+
+                <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto text-xs">
+                  {selectedDetailTicket.isHighPriority && (
+                    <div className="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/40 text-rose-700 dark:text-rose-400 font-semibold">
+                      🔥 High Priority Prepaid Refusal (Column D Matched)
+                    </div>
+                  )}
+
+                  <div>
+                    <h4 className="text-[10px] font-semibold uppercase text-slate-500 mb-1">Column D (RTO Reason)</h4>
+                    <p className="font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/20 p-2.5 rounded border border-amber-200 dark:border-amber-900/20">{selectedDetailTicket.rtoReason}</p>
+                  </div>
+
+                  <div>
+                    <h4 className="text-[10px] font-semibold uppercase text-slate-500 mb-1">Assigned Agent (Col Q)</h4>
+                    <p className="font-semibold text-indigo-600 dark:text-indigo-400">👤 {selectedDetailTicket.assignedAgentName || 'Unassigned'}</p>
+                  </div>
+                  <div>
+                    <h4 className="text-[10px] font-semibold uppercase text-slate-500 mb-1">Customer</h4>
+                    <p className="font-medium text-slate-900 dark:text-zinc-100 text-sm">{selectedDetailTicket.customerName}</p>
+                    <p className="text-slate-500">{selectedDetailTicket.email} · {selectedDetailTicket.phone}</p>
+                  </div>
+                  <div>
+                    <h4 className="text-[10px] font-semibold uppercase text-slate-500 mb-1">Shipping Address</h4>
+                    <p className="text-slate-800 dark:text-zinc-300">{selectedDetailTicket.address}</p>
+                    <p className="text-slate-900 dark:text-zinc-200 font-medium mt-0.5">{selectedDetailTicket.city}, {selectedDetailTicket.state} — {selectedDetailTicket.pincode}</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg">
+                    <div><p className="text-[10px] text-slate-500">Payment</p><p className="font-medium">{selectedDetailTicket.paymentMethod}</p></div>
+                    <div><p className="text-[10px] text-slate-500">Amount</p><p className="font-semibold text-slate-900 dark:text-zinc-100">₹{selectedDetailTicket.orderAmount.toLocaleString('en-IN')}</p></div>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between px-5 py-3 border-t border-slate-200 dark:border-zinc-800">
+                  <button onClick={() => setSelectedDetailTicket(null)} className="text-xs text-slate-500">Close</button>
+                  {selectedDetailTicket.status === 'Refunded' ? (
+                    <button onClick={() => { const t = selectedDetailTicket; setSelectedDetailTicket(null); setSelectedReceiptTicket(t); }} className="px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 text-xs font-medium">Receipt</button>
+                  ) : (
+                    <button onClick={() => { const t = selectedDetailTicket; setSelectedDetailTicket(null); setSelectedRefundTicket(t); }} className="px-3.5 py-1 rounded-md bg-indigo-600 text-white dark:bg-zinc-100 dark:text-zinc-900 text-xs font-semibold">Initiate refund</button>
+                  )}
+                </div>
+              </div>
+            </Overlay>
+          )}
+
+          {/* ── Refund Modal ─────────────────────────── */}
+          {selectedRefundTicket && (
+            <Overlay onClose={() => setSelectedRefundTicket(null)}>
+              <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-xl shadow-2xl p-5 space-y-4 text-slate-900 dark:text-zinc-100">
+                <div className="flex items-center justify-between border-b border-slate-200 dark:border-zinc-800 pb-3">
+                  <h3 className="text-sm font-semibold">Confirm Refund</h3>
+                  <button onClick={() => setSelectedRefundTicket(null)} className="text-slate-400"><SvgX /></button>
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  <div className="flex justify-between bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg">
+                    <span>Order: <strong>{selectedRefundTicket.orderNumber}</strong></span>
+                    <span className="font-semibold text-base">₹{selectedRefundTicket.orderAmount.toLocaleString('en-IN')}</span>
+                  </div>
+                  {selectedRefundTicket.paymentMethod === 'COD' && (
+                    <div className="space-y-1">
+                      <label className="text-[11px] text-slate-500">Customer UPI ID for COD payout:</label>
+                      <input type="text" defaultValue={`${(selectedRefundTicket.customerName || 'user').toLowerCase().replace(/\s+/g, '')}@upi`} id="cod-upi-input" className="w-full bg-slate-100 dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded px-3 py-1.5 font-mono text-xs" />
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between border-t border-slate-200 dark:border-zinc-800 pt-3">
+                  <button onClick={() => setSelectedRefundTicket(null)} className="text-xs text-slate-500">Cancel</button>
+                  <button
+                    onClick={() => {
+                      const upiVal = document.getElementById('cod-upi-input')?.value || '';
+                      const rec = {
+                        refundId: `RFD-${Date.now().toString().slice(-6)}`,
+                        amount: selectedRefundTicket.orderAmount,
+                        reason: selectedRefundTicket.rtoReason,
+                        date: new Date().toLocaleString(),
+                        mode: selectedRefundTicket.paymentMethod === 'COD' ? `UPI (${upiVal})` : 'Original payment source',
+                        transactionRef: `TXN-${Math.random().toString(36).substring(2, 10).toUpperCase()}`,
+                        processedBy: googleUser.name,
+                      };
+                      try { window.confetti?.({ particleCount: 50, spread: 50, origin: { y: 0.7 } }); } catch {}
+                      handleConfirmRefund(selectedRefundTicket.id, rec);
+                      setSelectedRefundTicket(null);
+                    }}
+                    className="px-4 py-2 rounded-lg bg-slate-900 text-white dark:bg-zinc-100 dark:text-zinc-900 text-xs font-semibold"
+                  >
+                    Confirm Refund
+                  </button>
+                </div>
+              </div>
+            </Overlay>
+          )}
+
+          {/* ── Receipt Modal ────────────────────────── */}
+          {selectedReceiptTicket?.refundDetails && (
+            <Overlay onClose={() => setSelectedReceiptTicket(null)}>
+              <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-xl shadow-2xl p-5 space-y-4 text-slate-900 dark:text-zinc-100">
+                <div className="flex items-center justify-between border-b border-slate-200 dark:border-zinc-800 pb-3">
+                  <div className="flex items-center gap-2">
+                    <SvgCheck className="text-emerald-500" />
+                    <h3 className="text-sm font-semibold">Refund Receipt</h3>
+                  </div>
+                  <button onClick={() => setSelectedReceiptTicket(null)} className="text-slate-400"><SvgX /></button>
+                </div>
+
+                <div id="printable-receipt" className="space-y-4">
+                  <div className="text-center py-4 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/20 rounded-lg">
+                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">Refund Amount</p>
+                    <p className="text-3xl font-bold text-emerald-600 dark:text-emerald-400 mt-1">₹{selectedReceiptTicket.refundDetails.amount.toLocaleString('en-IN')}</p>
+                    <p className="text-[10px] text-slate-400 font-mono mt-1">{selectedReceiptTicket.refundDetails.transactionRef}</p>
+                  </div>
+
+                  <div className="space-y-2 text-xs text-slate-600 dark:text-zinc-400">
+                    <div className="flex justify-between"><span>Customer</span><span className="font-semibold text-slate-900 dark:text-zinc-100">{selectedReceiptTicket.customerName}</span></div>
+                    <div className="flex justify-between"><span>Order</span><span className="font-mono text-slate-900 dark:text-zinc-200">{selectedReceiptTicket.orderNumber}</span></div>
+                    <div className="flex justify-between"><span>Payment</span><span className="text-slate-900 dark:text-zinc-200">{selectedReceiptTicket.paymentMethod}</span></div>
+                    <div className="flex justify-between"><span>Mode</span><span className="text-slate-900 dark:text-zinc-200">{selectedReceiptTicket.refundDetails.mode}</span></div>
+                    <div className="flex justify-between"><span>Processed by</span><span className="text-slate-900 dark:text-zinc-200">{selectedReceiptTicket.refundDetails.processedBy}</span></div>
+                    <div className="flex justify-between"><span>Date</span><span className="text-slate-900 dark:text-zinc-200">{selectedReceiptTicket.refundDetails.date}</span></div>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between border-t border-slate-200 dark:border-zinc-800 pt-3">
+                  <button onClick={() => window.print()} className="flex items-center gap-1 text-xs text-slate-600 hover:text-slate-900"><SvgPrinter /> Print</button>
+                  <button onClick={() => setSelectedReceiptTicket(null)} className="text-xs text-slate-500">Close</button>
+                </div>
+              </div>
+            </Overlay>
+          )}
+
+          {/* Footer */}
+          <footer className="border-t border-slate-200 dark:border-zinc-800/40 py-4 text-center">
+            <p className="text-[11px] text-slate-500 dark:text-zinc-600">RTO CRM · Agent Support Portal</p>
+          </footer>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+
+</html>
