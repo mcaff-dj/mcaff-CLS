@@ -413,13 +413,35 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         setTimeout(() => setToast(null), 3000);
       }, []);
 
-      const handleGoogleSignIn = () => {
+      const handleGoogleSignIn = async () => {
         if (window.supabase) {
           const client = window.supabase.createClient(DEFAULT_SUPABASE_URL, 'placeholder');
-          const redirectUrl = window.location.origin + window.location.pathname;
-          client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: redirectUrl } }).catch((err) => {
+          const isInIframe = window.self !== window.top;
+          let targetRedirect = window.location.origin + window.location.pathname;
+          try {
+            if (isInIframe && window.top) {
+              targetRedirect = window.top.location.href.split('#')[0];
+            }
+          } catch (e) {
+            targetRedirect = window.location.href.split('#')[0];
+          }
+
+          try {
+            const { data, error } = await client.auth.signInWithOAuth({
+              provider: 'google',
+              options: {
+                redirectTo: targetRedirect,
+                skipBrowserRedirect: isInIframe
+              }
+            });
+            if (error) throw error;
+
+            if (isInIframe && data && data.url) {
+              window.top.location.href = data.url;
+            }
+          } catch (err) {
             showToast(err.message || 'Google Auth Error');
-          });
+          }
         }
       };
 
