@@ -1213,9 +1213,14 @@ def assemble_report(ctx, here_dir):
     el.innerHTML = h.join('');
   }};
   // Reuses the existing renderPctChart (bar+line SVG) verbatim by pre-computing the
-  // interleaved vals/sales/labels for the currently-visible global weeks - REPORT_ACTIVE_
-  // YEARS (the Year filter) never applies to weekly view, so passing '' for every
-  // opts.months entry is safe (that field is only read for year-filtering).
+  // interleaved vals/sales/labels for the currently-visible global weeks. renderPctChart
+  // itself filters bars by window.REPORT_ACTIVE_YEARS (the Year toggle), extracting each
+  // year from opts.months[i] via yearOfLabel() - passing '' there (as this used to) makes
+  // yearOfLabel find no year, so activeYears.has('') is always false and EVERY bar gets
+  // filtered out, leaving an empty chart. Weekly view is documented as unaffected by the
+  // Year filter (same as every weekly table, which never carries data-yr at all), so the
+  // fix is to make that filtering a no-op for this one call - not to feed it a real month
+  // (which would wrongly make the weekly chart shrink when a year gets deselected).
   window.renderMultiWeekChart = function(svgId, totalsByGi, barColor, lineColor){{
     var svg=document.getElementById(svgId); if(!svg) return;
     var visGi = window.computeVisibleGlobalWeeks();
@@ -1223,8 +1228,11 @@ def assemble_report(ctx, here_dir):
     var vals = visGi.map(function(gi){{ return totalsByGi[gi]||0; }});
     var sales = visGi.map(function(gi){{ return window.WK_SALES[gi]||0; }});
     var labels = visGi.map(function(gi){{ return window.weeklyColumnLabel(gi,isMulti); }});
+    var savedActiveYears = window.REPORT_ACTIVE_YEARS;
+    window.REPORT_ACTIVE_YEARS = null;
     window.renderPctChart(svg, {{ vals:vals, months:vals.map(function(){{return '';}}), monthLabels:labels, sales:sales,
       barColor:barColor, lineColor:lineColor, W:1200, H:380, padL:55, padR:55, padT:40, padB:55 }});
+    window.REPORT_ACTIVE_YEARS = savedActiveYears;
   }};
 
   window.setGranularity=function(g){{

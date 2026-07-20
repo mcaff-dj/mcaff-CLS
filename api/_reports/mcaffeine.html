@@ -454,7 +454,7 @@
     <div>
       <span class="badge">Customer Experience</span>
       <span class="badge">mCaffeine</span>
-      <span class="badge">Updated 20 Jul 2026, 19:53 IST</span>
+      <span class="badge">Updated 20 Jul 2026, 23:13 IST</span>
     </div>
     <h1>Customer Query Segment Report &mdash; mCaffeine</h1>
     <p>Source: "mCaffeine" tab &middot; 1,71,889 raw ticket rows, deduplicated to 1,16,079 unique tickets</p>
@@ -555,9 +555,14 @@
     el.innerHTML = h.join('');
   };
   // Reuses the existing renderPctChart (bar+line SVG) verbatim by pre-computing the
-  // interleaved vals/sales/labels for the currently-visible global weeks - REPORT_ACTIVE_
-  // YEARS (the Year filter) never applies to weekly view, so passing '' for every
-  // opts.months entry is safe (that field is only read for year-filtering).
+  // interleaved vals/sales/labels for the currently-visible global weeks. renderPctChart
+  // itself filters bars by window.REPORT_ACTIVE_YEARS (the Year toggle), extracting each
+  // year from opts.months[i] via yearOfLabel() - passing '' there (as this used to) makes
+  // yearOfLabel find no year, so activeYears.has('') is always false and EVERY bar gets
+  // filtered out, leaving an empty chart. Weekly view is documented as unaffected by the
+  // Year filter (same as every weekly table, which never carries data-yr at all), so the
+  // fix is to make that filtering a no-op for this one call - not to feed it a real month
+  // (which would wrongly make the weekly chart shrink when a year gets deselected).
   window.renderMultiWeekChart = function(svgId, totalsByGi, barColor, lineColor){
     var svg=document.getElementById(svgId); if(!svg) return;
     var visGi = window.computeVisibleGlobalWeeks();
@@ -565,8 +570,11 @@
     var vals = visGi.map(function(gi){ return totalsByGi[gi]||0; });
     var sales = visGi.map(function(gi){ return window.WK_SALES[gi]||0; });
     var labels = visGi.map(function(gi){ return window.weeklyColumnLabel(gi,isMulti); });
+    var savedActiveYears = window.REPORT_ACTIVE_YEARS;
+    window.REPORT_ACTIVE_YEARS = null;
     window.renderPctChart(svg, { vals:vals, months:vals.map(function(){return '';}), monthLabels:labels, sales:sales,
       barColor:barColor, lineColor:lineColor, W:1200, H:380, padL:55, padR:55, padT:40, padB:55 });
+    window.REPORT_ACTIVE_YEARS = savedActiveYears;
   };
 
   window.setGranularity=function(g){
@@ -2450,7 +2458,7 @@ document.addEventListener('click', function(ev){
 })();
 </script>
 
-  <footer><p><strong>Methodology:</strong> Aggregated from the raw "mCaffeine" tab. Rows flagged "Duplicate" are excluded from per-class drill-downs (Overview shows both). Percentages use the sheet's own "Total Sales M" / "Partner Allocation" figures.</p><p>Auto-refreshed daily at 2 PM IST. Last updated 20 Jul 2026, 19:53 IST. No customer PII (name, phone, email, etc.) is ever stored or exposed &mdash; the tables/charts above are aggregated segment counts, and the optional "Download Raw Data" export on each tab is limited to non-PII ticket fields (dates, category, product/SKU/batch, partner, month/week, sales figure, unique flag).</p></footer>
+  <footer><p><strong>Methodology:</strong> Aggregated from the raw "mCaffeine" tab. Rows flagged "Duplicate" are excluded from per-class drill-downs (Overview shows both). Percentages use the sheet's own "Total Sales M" / "Partner Allocation" figures.</p><p>Auto-refreshed daily at 2 PM IST. Last updated 20 Jul 2026, 23:13 IST. No customer PII (name, phone, email, etc.) is ever stored or exposed &mdash; the tables/charts above are aggregated segment counts, and the optional "Download Raw Data" export on each tab is limited to non-PII ticket fields (dates, category, product/SKU/batch, partner, month/week, sales figure, unique flag).</p></footer>
 </div>
 <script>document.querySelectorAll('.tab-btn').forEach(function(b){b.addEventListener('click',function(){document.querySelectorAll('.tab-btn').forEach(function(x){x.classList.remove('active');});document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.remove('active');});b.classList.add('active');document.getElementById('panel-'+b.dataset.tab).classList.add('active');var t=document.getElementById('active-tab-title'); if(t)t.textContent=b.textContent;});});</script>
 <script>
