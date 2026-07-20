@@ -39,6 +39,7 @@ CAT_NORM_MAP = {
     "Pincode non Serviceable": "Pincode not serviceable",
     "Lost order/Destroyed/Damaged": "Lost/Damaged/Destroyed",
     "Marked Delivered but customer did not received the order": "Marked Delivered but customer did not receive order",
+    "Dull-skin issue": "Dull skin issue",
 }
 # Same reasoning as CAT_NORM_MAP above, but for Delivery Partner Name: the older KYC
 # raw-dump sheet has messy operational sub-labels (surface/air legs, direct/hyphen

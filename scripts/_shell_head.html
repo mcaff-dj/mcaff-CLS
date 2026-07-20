@@ -256,6 +256,7 @@
   };
   window.yearOfLabel = function(mo){ var m = /['\s](\d{2})$/.exec(mo || ''); return m ? ('20' + m[1]) : ''; };
   function escXml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  window.escXml = escXml;
 
   // Mode used by every per-class "Complaints wrt Sales" chart: bars = raw counts, line =
   // count/monthSales*100 ("wrt sales %"), both axes independently niceMax()'d.

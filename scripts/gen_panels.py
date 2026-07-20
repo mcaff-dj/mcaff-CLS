@@ -16,7 +16,7 @@ embedded JS/CSS as `{{`/`}}` (high risk of a missed brace silently corrupting th
 """
 from gen_geo_insights import build_delivery_geo_containers, build_geo_script
 from gen_insights import build_insights_card, get_category_insight_items, get_delivery_partner_insight
-from gen_weekly import build_weekly_class_block, build_weekly_delivery_block, week_col_header
+from gen_weekly import build_weekly_class_block, build_weekly_delivery_block, get_week_num, is_partial_week, week_col_header
 from gen_monthly import build_monthly_analysis_panel
 from gen_raw_export import raw_download_link
 from report_context import ci_key, fnum, h_enc, j_enc, n0, pretty_month, round1, sort_keys_by_last_period, year_of
@@ -183,6 +183,11 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     months_json = "[" + ",".join(f'"{j_enc(m)}"' for m in months) + "]"
     month_labels_json = "[" + ",".join(f'"{j_enc(pretty_month(m))}"' for m in months) + "]"
     sales_json = "[" + ",".join(str(v) for v in ctx.sales_arr) + "]"
+    # Same empty-month set as sb1/sb2's skipped <th>/<td>s above, but for the "wrt Sales"
+    # chart (drawn client-side, reactive to row-click filtering) - rch() below slices its
+    # per-month arrays down to just these indices before handing them to renderPctChart,
+    # so a month this class has zero tickets for doesn't render as a bar-less gap either.
+    visible_month_idx_json = "[" + ",".join(str(mi) for mi in range(n) if month_has_data[mi]) + "]"
     alloc_json = "[]"
     if pct_mode == "alloc":
         rows = []
@@ -270,7 +275,7 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     js = """
 <script>
 (function(){
-  var DT=__TICKETS_JSON__, CATS=__CATS_JSON__, DIMS=__DIM2S_JSON__, MONTHS=__MONTHS_JSON__, MONTH_LABELS=__MONTHLABELS_JSON__, SALES=__SALES_JSON__, ALLOC=__ALLOC_JSON__, N=MONTHS.length;
+  var DT=__TICKETS_JSON__, CATS=__CATS_JSON__, DIMS=__DIM2S_JSON__, MONTHS=__MONTHS_JSON__, MONTH_LABELS=__MONTHLABELS_JSON__, SALES=__SALES_JSON__, ALLOC=__ALLOC_JSON__, VIS_MONTH_IDX=__VISMONTHIDX_JSON__, N=MONTHS.length;
   var chartEl=document.getElementById('xf-__PFX__-chart'), pctMode='__PCTMODE__', filter=null;
   function fmt(n){return n.toLocaleString('en-IN');}
   function passOther(t, exceptAxis){ var mo=t[0],c=t[1],d=t[2]; if(mo<0||mo>=N||c<0||c>=CATS.length||d<0||d>=DIMS.length)return false;
@@ -299,7 +304,13 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
       var pe2=document.getElementById('xf-__PFX__-dim-total-mo-'+m+'-pct');
       if(pe2){ if(pctMode==='alloc'){ pe2.textContent='-'; } else { var sm3=SALES[m],p3=sm3>0?Math.round(tot[m]/sm3*1000)/10:0; pe2.textContent=p3+'%'; } } } }
   function rch(){ var r=filteredTotals();
-    window.renderPctChart(chartEl, { vals:r.tot, months:MONTHS, monthLabels:MONTH_LABELS, sales:SALES,
+    // Only chart the months this class actually has tickets in (VIS_MONTH_IDX, same set
+    // sb1/sb2's skipped <th>/<td>s use) - otherwise a class whose category history starts
+    // partway through the sheet would draw a long flat run of zero-height bars first.
+    var visTot=[], visMonths=[], visLabels=[], visSales=[];
+    for(var vi=0;vi<VIS_MONTH_IDX.length;vi++){ var mi=VIS_MONTH_IDX[vi];
+      visTot.push(r.tot[mi]); visMonths.push(MONTHS[mi]); visLabels.push(MONTH_LABELS[mi]); visSales.push(SALES[mi]); }
+    window.renderPctChart(chartEl, { vals:visTot, months:visMonths, monthLabels:visLabels, sales:visSales,
       barColor:'__BARCOLOR__', lineColor:'__LINECOLOR__', W:__W__, H:__H__, padL:__PADL__, padR:__PADR__, padT:__PADT__, padB:__PADB__ });
     return r; }
   function render(){ try{ rct(); rdt(); var r=rch();
@@ -327,6 +338,7 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
             .replace("__DIM2S_JSON__", dim2s_json).replace("__MONTHS_JSON__", months_json)
             .replace("__MONTHLABELS_JSON__", month_labels_json)
             .replace("__SALES_JSON__", sales_json).replace("__ALLOC_JSON__", alloc_json)
+            .replace("__VISMONTHIDX_JSON__", visible_month_idx_json)
             .replace("__W__", str(W)).replace("__H__", str(H))
             .replace("__PADL__", str(pad_l)).replace("__PADR__", str(pad_r)).replace("__PADT__", str(pad_t)).replace("__PADB__", str(pad_b))
             .replace("__BARCOLOR__", bar_color).replace("__LINECOLOR__", line_color)
@@ -426,13 +438,20 @@ def _build_combo_chart(ctx, vals, title, bar_color, line_color):
     # than pre-rendered here, so the Year filter can redraw against only the active years
     # (re-spacing bars, rescaling both axes) instead of just hiding elements and leaving
     # gaps - see registerYearChart. Python's only job is to embed the raw per-month values.
-    months = ctx.months
+    #
+    # Months with zero tickets (e.g. a class whose category history starts partway
+    # through the sheet) are dropped here too, same as _build_category_pivot's columns -
+    # vals[i] already tells us whether that month has any data, no separate lookup needed.
+    visible_idx = [i for i, v in enumerate(vals) if v > 0]
+    months = [ctx.months[i] for i in visible_idx]
+    vals = [vals[i] for i in visible_idx]
+    sales_arr = [ctx.sales_arr[i] for i in visible_idx]
     W, H, pad_l, pad_r, pad_t, pad_b = 1200, 380, 55, 55, 40, 55
     chart_id = _next_chart_id("chart")
     vals_json = "[" + ",".join(str(v) for v in vals) + "]"
     months_json = "[" + ",".join(f'"{j_enc(m)}"' for m in months) + "]"
     month_labels_json = "[" + ",".join(f'"{j_enc(pretty_month(m))}"' for m in months) + "]"
-    sales_json = "[" + ",".join(str(v) for v in ctx.sales_arr) + "]"
+    sales_json = "[" + ",".join(str(v) for v in sales_arr) + "]"
     parts = [f"<div class='card'><div class='pivot-title' style='margin-bottom:18px;'>{h_enc(title)}</div>"
              f"<div class='legend-row' style='justify-content:center;'><div class='legend-item'><span class='swatch' style='background:{bar_color};'></span><span class='lname'>Complaints</span></div>"
              f"<div class='legend-item'><span class='swatch' style='background:{line_color};border-radius:50%;'></span><span class='lname'>wrt sales %</span></div></div>"]
@@ -1040,6 +1059,22 @@ def assemble_report(ctx, here_dir):
         act = " active" if mi == last_eligible else ""
         month_chips.append(f'<button type="button" class="month-chip{act}" data-month="{mi}" data-yr="{year_of(ctx.months[mi])}" '
                             f'onclick="toggleWeekMonthChip({mi})">{h_enc(pretty_month(ctx.months[mi]))}</button>')
+
+    # Shared cross-table weekly data/helpers - every dynamic weekly table (Overview,
+    # each class's category pivot+chart, Delivery's category/chart/partner tables; NOT
+    # ProdPkg's wrt-Sales tab, which stays on its own per-month '.gran-weekly[data-month]'
+    # mechanism, unaffected by any of this) reads these same arrays rather than each
+    # building its own month/week bookkeeping.
+    wk_month_of_json = "[" + ",".join(str(mi) for mi in ctx.week_month_of) + "]"
+    wk_num_json = "[" + ",".join(str(get_week_num(wk)) for wk in ctx.all_weeks) + "]"
+    wk_partial_json = "[" + ",".join(
+        "true" if is_partial_week(ctx, ctx.all_weeks[gi], ctx.week_month_of[gi]) else "false"
+        for gi in range(ctx.total_weeks)
+    ) + "]"
+    month_abbr_json = "[" + ",".join(f'"{j_enc(pretty_month(mo))}"' for mo in ctx.months) + "]"
+    eligible_months_json = "[" + ",".join(str(mi) for mi in ctx.weekly_eligible_months) + "]"
+    wk_sales_json = "[" + ",".join(str(v) for v in ctx.week_sales_arr) + "]"
+
     gran_toolbar = f"""<div class="gran-toolbar">
   <div class="gran-toggle">
     <button type="button" class="gran-btn active" data-gran="monthly" onclick="setGranularity('monthly')">Monthly</button>
@@ -1049,12 +1084,105 @@ def assemble_report(ctx, here_dir):
     <span class="gran-note" style="font-weight:600;">Month</span>
     {''.join(month_chips)}
   </div>
-  <span class="gran-note">Weekly applies to Overview and every complaint-category tab, including the category breakdown on Delivery/Technical/Warehouse/Product/Suggestion &mdash; but their second-dimension breakdown (partner/platform/facility/product name) and click-to-cross-filter stay monthly-only. Not available on NPS/CSAT or the separate Product &amp; Packaging wrt Sales tab. Pick multiple months to stack their weekly tables; the Year filter below also narrows which months are offered here.</span>
+  <span class="gran-note">Weekly applies to Overview and every complaint-category tab, including the category breakdown on Delivery/Technical/Warehouse/Product/Suggestion &mdash; but their second-dimension breakdown (partner/platform/facility/product name) and click-to-cross-filter stay monthly-only. Not available on NPS/CSAT or the separate Product &amp; Packaging wrt Sales tab. Pick multiple months to see them side by side, split out by week (e.g. Jun W1, Jul W1, Jun W2, Jul W2, ...); the Year filter below also narrows which months are offered here.</span>
 </div>
 <script>
 (function(){{
   var curGran='monthly';
-  var selectedWeekMonths = new Set([{last_eligible}]);
+  window.selectedWeekMonths = new Set([{last_eligible}]);
+  var selectedWeekMonths = window.selectedWeekMonths;
+  window.WK_MONTH_OF={wk_month_of_json}; window.WK_NUM={wk_num_json}; window.WK_PARTIAL={wk_partial_json};
+  window.MONTH_ABBR={month_abbr_json}; window.ELIGIBLE_MONTHS={eligible_months_json}; window.WK_SALES={wk_sales_json};
+
+  // Every weekly table registers a zero-arg render callback here (see gen_weekly.py's
+  // block builders) instead of being pre-rendered once per month server-side - this way
+  // a multi-month selection can lay out (month, week) columns week-major (Jun W1, Jul W1,
+  // Jun W2, Jul W2, ...) instead of needing one full stacked table per selected month.
+  window._weeklyRenderers = window._weeklyRenderers || [];
+  window.registerWeeklyRenderer = function(fn){{ window._weeklyRenderers.push(fn); fn(); }};
+  window.renderAllWeeklyTables = function(){{ window._weeklyRenderers.forEach(function(fn){{ fn(); }}); }};
+
+  // Ordered global-week-indices to show for the current selection: every week-number
+  // that any selected month has, in week-number order, cycling through the selected
+  // months (in chronological order) within each week number - the interleaving the
+  // multi-month case needs, since data is bucketed once per (month, week) pair, not
+  // duplicated per possible selection.
+  window.computeVisibleGlobalWeeks = function(){{
+    var selected = window.ELIGIBLE_MONTHS.filter(function(mi){{ return selectedWeekMonths.has(mi); }});
+    var maxWn = 0;
+    for(var gi=0; gi<window.WK_MONTH_OF.length; gi++){{
+      if(selected.indexOf(window.WK_MONTH_OF[gi])!==-1) maxWn=Math.max(maxWn, window.WK_NUM[gi]);
+    }}
+    var out=[];
+    for(var wn=1; wn<=maxWn; wn++){{
+      selected.forEach(function(mi){{
+        for(var gi=0; gi<window.WK_MONTH_OF.length; gi++){{
+          if(window.WK_MONTH_OF[gi]===mi && window.WK_NUM[gi]===wn){{ out.push(gi); }}
+        }}
+      }});
+    }}
+    return out;
+  }};
+  window.weeklyColumnLabel = function(gi, isMulti){{
+    var lbl = 'W'+window.WK_NUM[gi]+(window.WK_PARTIAL[gi]?' (partial)':'');
+    return isMulti ? (window.MONTH_ABBR[window.WK_MONTH_OF[gi]]+' '+lbl) : lbl;
+  }};
+  window.setWeeklyNote = function(elId){{
+    var el=document.getElementById(elId); if(!el) return;
+    var names = window.ELIGIBLE_MONTHS.filter(function(mi){{ return selectedWeekMonths.has(mi); }})
+      .map(function(mi){{ return window.MONTH_ABBR[mi]; }});
+    el.textContent = 'Weekly view for ' + names.join(' + ') + '.';
+  }};
+  function basisAt(basis, ri, gi){{ return Array.isArray(basis[0]) ? (basis[ri][gi]||0) : (basis[gi]||0); }}
+  // Generic pivot table: rowLabels (array of strings) x counts (rowLabels.length dense
+  // arrays, one entry per GLOBAL week index, 0 where absent) x basis (either one flat
+  // array shared by every row - e.g. sales - or a matrix shaped like counts - e.g.
+  // per-partner allocation, which differs row to row).
+  window.renderMultiWeekPivot = function(containerId, rowLabels, counts, basis, cornerLabel, title, pctSuffix){{
+    var el=document.getElementById(containerId); if(!el) return;
+    var visGi = window.computeVisibleGlobalWeeks();
+    if(!visGi.length){{ el.innerHTML=''; return; }}
+    var isMulti = (new Set(visGi.map(function(gi){{return window.WK_MONTH_OF[gi];}}))).size>1;
+    var h=["<div class='pivot-wrap'><div class='pivot-title'>"+window.escXml(title)+"</div><div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner' rowspan='2'>"+window.escXml(cornerLabel)+"</th>"];
+    visGi.forEach(function(gi){{ h.push("<th colspan='2' class='month-hdr'>"+window.escXml(window.weeklyColumnLabel(gi,isMulti))+"</th>"); }});
+    h.push("</tr><tr>");
+    visGi.forEach(function(){{ h.push("<th class='sub-hdr'>Count</th><th class='sub-hdr'>"+window.escXml(pctSuffix)+"</th>"); }});
+    h.push("</tr></thead><tbody>");
+    var totals = visGi.map(function(){{ return 0; }});
+    rowLabels.forEach(function(lbl, ri){{
+      h.push("<tr class='"+((ri%2===0)?'zebra':'')+"'><td class='rowlabel'>"+window.escXml(lbl)+"</td>");
+      visGi.forEach(function(gi, vi){{
+        var cnt = counts[ri][gi]||0; totals[vi]+=cnt;
+        var sm = basisAt(basis, ri, gi);
+        var pct = sm>0 ? Math.round(cnt/sm*1000)/10 : 0;
+        h.push("<td class='num'>"+(cnt>0?window.fmtN0(cnt):'-')+"</td><td class='pct'>"+(cnt>0&&sm>0?(pct+'%'):'-')+"</td>");
+      }});
+      h.push("</tr>");
+    }});
+    h.push("<tr class='total-row'><td class='rowlabel'>Total</td>");
+    visGi.forEach(function(gi, vi){{
+      var sm = Array.isArray(basis[0]) ? 0 : (basis[gi]||0);
+      var pct = sm>0 ? Math.round(totals[vi]/sm*1000)/10 : 0;
+      h.push("<td class='num'>"+window.fmtN0(totals[vi])+"</td><td class='pct'>"+(sm>0?(pct+'%'):'-')+"</td>");
+    }});
+    h.push("</tr></tbody></table></div></div>");
+    el.innerHTML = h.join('');
+  }};
+  // Reuses the existing renderPctChart (bar+line SVG) verbatim by pre-computing the
+  // interleaved vals/sales/labels for the currently-visible global weeks - REPORT_ACTIVE_
+  // YEARS (the Year filter) never applies to weekly view, so passing '' for every
+  // opts.months entry is safe (that field is only read for year-filtering).
+  window.renderMultiWeekChart = function(svgId, totalsByGi, barColor, lineColor){{
+    var svg=document.getElementById(svgId); if(!svg) return;
+    var visGi = window.computeVisibleGlobalWeeks();
+    var isMulti = (new Set(visGi.map(function(gi){{return window.WK_MONTH_OF[gi];}}))).size>1;
+    var vals = visGi.map(function(gi){{ return totalsByGi[gi]||0; }});
+    var sales = visGi.map(function(gi){{ return window.WK_SALES[gi]||0; }});
+    var labels = visGi.map(function(gi){{ return window.weeklyColumnLabel(gi,isMulti); }});
+    window.renderPctChart(svg, {{ vals:vals, months:vals.map(function(){{return '';}}), monthLabels:labels, sales:sales,
+      barColor:barColor, lineColor:lineColor, W:1200, H:380, padL:55, padR:55, padT:40, padB:55 }});
+  }};
+
   window.setGranularity=function(g){{
     curGran=g;
     document.querySelectorAll('.gran-btn').forEach(function(b){{b.classList.toggle('active',b.dataset.gran===g);}});
@@ -1072,9 +1200,11 @@ def assemble_report(ctx, here_dir):
     document.querySelectorAll('.gran-monthly').forEach(function(el){{el.style.display=(curGran==='monthly')?'':'none';}});
     document.querySelectorAll('.gran-weekly').forEach(function(el){{el.style.display='none';}});
     if(curGran==='weekly'){{
+      document.querySelectorAll('.gran-weekly-dynamic').forEach(function(el){{el.style.display='';}});
       selectedWeekMonths.forEach(function(mi){{
         document.querySelectorAll('.gran-weekly[data-month="'+mi+'"]').forEach(function(el){{el.style.display='';}});
       }});
+      window.renderAllWeeklyTables();
     }}
   }};
 }})();
