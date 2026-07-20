@@ -12,3 +12,10 @@ CRM-PEP/.shiprocket_token.json
 
 __pycache__/
 *.pyc
+
+# Exceeds GitHub's 100MB push limit
+data/combined_data.xlsx
+data/combined_data_mcaffeine.xlsx
+
+# Excel lock files
+~$*.xlsx

@@ -158,6 +158,48 @@ def clear_sheet_range(spreadsheet_id, range_):
     return resp.json()
 
 
+def _get_sheet_gid_and_grid(spreadsheet_id, sheet_name):
+    token = get_access_token()
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}"
+    resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+    resp.raise_for_status()
+    for sheet in resp.json()["sheets"]:
+        if sheet["properties"]["title"] == sheet_name:
+            return sheet["properties"]["sheetId"], sheet["properties"]["gridProperties"]
+    raise RuntimeError(f"Sheet tab '{sheet_name}' not found in spreadsheet {spreadsheet_id}")
+
+
+def ensure_grid_size(spreadsheet_id, sheet_name, min_rows, min_cols):
+    """Grows the sheet's underlying grid if needed. A PUT to an explicit range
+    fails outright with 'exceeds grid limits' if the target is beyond the
+    sheet's current (fixed) row/column count - unlike values:append, which
+    auto-grows the grid. Adds a buffer beyond the immediate need so a future
+    incremental write doesn't have to resize again right away."""
+    gid, grid_props = _get_sheet_gid_and_grid(spreadsheet_id, sheet_name)
+    cur_rows = grid_props.get("rowCount", 0)
+    cur_cols = grid_props.get("columnCount", 0)
+    if min_rows <= cur_rows and min_cols <= cur_cols:
+        return
+    new_rows = max(min_rows + 500, cur_rows)
+    new_cols = max(min_cols + 20, cur_cols)
+    token = get_write_access_token()
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate"
+    body = {
+        "requests": [{
+            "updateSheetProperties": {
+                "properties": {"sheetId": gid, "gridProperties": {"rowCount": new_rows, "columnCount": new_cols}},
+                "fields": "gridProperties.rowCount,gridProperties.columnCount",
+            }
+        }]
+    }
+    resp = requests.post(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }, json=body, timeout=60)
+    resp.raise_for_status()
+    print(f"  grew '{sheet_name}' grid to {new_rows} rows x {new_cols} cols (was {cur_rows} x {cur_cols})")
+
+
 def set_sheet_rows_at_row(spreadsheet_id, sheet_name, rows, start_row, chunk_size=300):
     """Writes rows starting at an explicit 1-based row number (chunked + retried).
     Unlike values:append, a PUT to an explicit range is idempotent - retrying after a
@@ -167,6 +209,8 @@ def set_sheet_rows_at_row(spreadsheet_id, sheet_name, rows, start_row, chunk_siz
     token = get_write_access_token()
     max_width = max(len(r) for r in rows)
     last_col = get_column_letter(max_width - 1)
+
+    ensure_grid_size(spreadsheet_id, sheet_name, start_row + len(rows) - 1, max_width)
 
     for start in range(0, len(rows), chunk_size):
         end = min(start + chunk_size, len(rows)) - 1

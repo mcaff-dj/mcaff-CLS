@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Onboarding Test</title>
+<style>
+  :root{
+    --page:#f9f9f7; --surface-card:#ffffff; --text-primary:#0b0b0b; --text-secondary:#52514e;
+    --text-muted:#898781; --border:rgba(11,11,11,0.10); --grid:#e1e0d9;
+    --onboarding:#2b7de0;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --page:#0d0d0d; --surface-card:#1a1a19; --text-primary:#ffffff; --text-secondary:#c3c2b7;
+      --text-muted:#898781; --border:rgba(255,255,255,0.10); --grid:#2c2c2a;
+      --onboarding:#5b9cf0;
+    }
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;min-height:100vh;background:var(--page);color:var(--text-primary);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif;padding:32px 20px;}
+  .wrap{width:100%;max-width:900px;margin:0 auto;}
+  .home-link{display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-size:13px;font-weight:600;
+    color:var(--text-secondary);margin-bottom:20px;}
+  .home-link:hover{color:var(--text-primary);}
+  header{text-align:center;margin-bottom:22px;}
+  .badge{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--onboarding);background:color-mix(in srgb, var(--onboarding) 14%, transparent);border-radius:999px;padding:4px 12px;margin-bottom:14px;}
+  h1{font-size:clamp(22px,4vw,28px);margin:0 0 12px;letter-spacing:-0.01em;}
+  header p{margin:0;color:var(--text-secondary);font-size:14px;line-height:1.6;}
+
+  .search-wrap{margin-bottom:20px;}
+  #searchBox{width:100%;padding:11px 16px;font-size:14px;font-family:inherit;color:var(--text-primary);
+    background:var(--surface-card);border:1px solid var(--grid);border-radius:10px;outline:none;}
+  #searchBox:focus{border-color:var(--onboarding);}
+  #resultCount{margin:8px 2px 0;font-size:12px;color:var(--text-muted);}
+
+  .qa-card{background:var(--surface-card);border:1px solid var(--border);border-radius:12px;
+    padding:16px 18px;margin-bottom:12px;}
+  .qa-q{display:flex;gap:10px;align-items:baseline;font-size:14px;font-weight:600;margin:0 0 8px;}
+  .qa-num{color:var(--onboarding);font-weight:700;flex-shrink:0;}
+  .qa-a{margin:0;padding-left:24px;font-size:13.5px;line-height:1.6;color:var(--text-secondary);
+    border-left:2px solid var(--grid);}
+  .qa-a-label{display:block;font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+    color:var(--text-muted);margin-bottom:4px;}
+  .no-results{text-align:center;color:var(--text-muted);font-size:13px;padding:30px 0;display:none;}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <a class="home-link" href="/">&larr; Home</a>
+    <header>
+      <div><span class="badge">Reference guide</span></div>
+      <h1>Onboarding Test</h1>
+      <p>Customer support scenarios and the expected course of action for each &mdash; use this as a reference while handling calls/tickets, or to test your understanding of process during onboarding.</p>
+    </header>
+
+    <div class="search-wrap">
+      <input type="text" id="searchBox" placeholder="Search a scenario (e.g. RTO, coupon, refund, Blinkit)...">
+      <div id="resultCount"></div>
+    </div>
+
+    <div id="qaList">
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">1.</span> A customer added only one product during a &quot;Buy 1 Get 1&quot; offer. It is her birthday and her first order. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should clear how B1G1 works, and since this is a birthday gift, we should give them one product.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">2.</span> A customer claims a delivery boy abused and misbehaved with her. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Call needed, then mail the delivery team about this, and we can provide a 50% refund for such cases as an exception.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">3.</span> A customer is unable to apply the coupon &quot;B2799&quot; on Power Peptide. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>This coupon code is not valid on this product.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">4.</span> A customer mentioned that the Google coupon code for &quot;Buy 2 Get 7&quot; is not working, even though the &quot;Buy 3 at 999&quot; offer is already live on the site. (a) What should be done if the coupon code provided was wrong? (b) What should be done if the customer is applying it incorrectly?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Need to check the coupon first &mdash; if the coupon was wrong, escalate it; if they are applying it incorrectly, we should assist them.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">5.</span> A customer mentioned the product is not effective after using it for two months and has reached out on different platforms. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Call and check what happened, then help with an alternate product.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">6.</span> A customer mentioned they added two products to their cart and wants to know why they didn&rsquo;t receive three free products. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should explain how B2G3 works, and as an exception, we can help with one freebie.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">7.</span> A customer ordered from Amazon and the product caused a skin reaction (acne/pimples). What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should call and try to pitch another product, and if the customer is adamant, we should refund.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">8.</span> A customer ordered from Blinkit and the products arrived totally broken. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should ask them to reach Blinkit support, and if Blinkit denies helping, we will ask for a screenshot of that and then resolve it ourselves.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">9.</span> A customer purchased body lotion but cannot use it because the pump is missing or not working. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should first ask for an image/video, then check whether the customer is using it correctly or not &mdash; if it's a genuine issue, we resolve it.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">10.</span> A customer reached out regarding a refund not reflecting in their bank account. We shared screenshots from all three platforms, but the customer has now shared their UPI statement with us. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Since the customer is sharing UPI history, we will need the bank statement instead &mdash; sometimes a refund doesn't reflect in UPI right away. We'll clarify this to the customer.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">11.</span> A customer reached out with a screenshot of a payment issue, mentioning they haven&rsquo;t received an order ID or a refund yet. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>First check the screenshot to confirm payment was made to us, then check with POC and verify whether the order was dropped, auto-refunded, or actually placed.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">12.</span> A customer shared an unboxing video showing she received Mamaearth products in her box instead of ours. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>If it's the customer's first time raising this, we should provide a complimentary replacement; if it's a repeat occurrence, we ask them to wait while we review the footage.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">13.</span> A customer who has spoken to 4+ agents is now assigned to you; they are highly frustrated and asking for a freebie (Stanley). What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should clarify to them that we're not able to share that, and then offer a freebie as a very special exception.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">14.</span> An order has been delayed for over 8 days and the customer has reached out to our founder to raise a formal complaint. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should prioritize the shipment, and can also offer a freebie and coupon; as a very special exception, a half refund can be given after checking with POC.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">15.</span> An order was placed on 1 June and the status is still reflecting as &quot;Pickup Generated.&quot; What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Raise a PE (pickup exception) case, and we should reorder.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">16.</span> An order was placed on 14 April (RTO) and the customer is now asking for a refund. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Since it was COD and the order is RTO (delivery returned to origin), a refund is needed.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">17.</span> If a customer mentions they are trying to apply a Google Form coupon code but are unable to do so, what should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should ask them to share a screenshot, then clarify that the coupon code is applicable only on the products listed below the coupon code &mdash; if the same issue occurs even after this, escalate it.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">18.</span> If an order was split (two products), one was delivered and the second was partially dispatched. The order was COD and the customer reached out after 25 days. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>A partial NDR/NSZ case isn't possible in this scenario &mdash; this question is flagged as not applicable / incorrectly framed.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">19.</span> We mistakenly promised a customer they would receive a Stanley, and now they have reached out to us over Twitter. What should be done?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>We should clarify to them that we're not able to share that, and offer something as a very special exception.</p></div>
+      <div class="qa-card"><p class="qa-q"><span class="qa-num">20.</span> What is the difference between &quot;Buy 2 Get 3&quot; and &quot;Buy 2 Get 5&quot;?</p><p class="qa-a"><span class="qa-a-label">Expected answer</span>Both are the same offer, just marketed under different names.</p></div>
+    </div>
+    <div class="no-results" id="noResults">No scenarios match your search.</div>
+  </div>
+
+  <script>
+    var searchBox = document.getElementById('searchBox');
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.qa-card'));
+    var resultCount = document.getElementById('resultCount');
+    var noResults = document.getElementById('noResults');
+
+    function applyFilter(){
+      var q = searchBox.value.trim().toLowerCase();
+      var visible = 0;
+      cards.forEach(function(card){
+        var match = !q || card.textContent.toLowerCase().indexOf(q) !== -1;
+        card.style.display = match ? '' : 'none';
+        if (match) visible++;
+      });
+      resultCount.textContent = q ? (visible + ' of ' + cards.length + ' scenarios') : '';
+      noResults.style.display = visible === 0 ? 'block' : 'none';
+    }
+
+    searchBox.addEventListener('input', applyFilter);
+  </script>
+</body>
+</html>

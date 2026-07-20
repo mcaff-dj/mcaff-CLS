@@ -1,0 +1,113 @@
+﻿[2026-07-15T12:39:48.2927445+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=41500
+[hyphen] fetching tickets resolved 2026-07-15T05:47:14.277Z -> 2026-07-15T07:09:48.403Z
+[hyphen] appended 216 rows (window 2026-07-15T05:47:14.277Z -> 2026-07-15T07:09:48.403Z)
+[2026-07-15T13:01:56.7961377+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=29284
+[hyphen] fetching tickets resolved 2026-07-15T05:47:14.277Z -> 2026-07-15T07:31:56.845Z
+[hyphen] appended 280 rows (window 2026-07-15T05:47:14.277Z -> 2026-07-15T07:31:56.845Z)
+[2026-07-15T15:15:54.1327690+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=40580
+[hyphen] fetching tickets resolved 2026-07-15T07:31:56.845Z -> 2026-07-15T09:45:54.218Z
+[hyphen] appended 283 rows (window 2026-07-15T07:31:56.845Z -> 2026-07-15T09:45:54.218Z)
+[2026-07-15T17:31:37.8911684+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=36940
+[hyphen] fetching tickets resolved 2026-07-15T07:31:56.845Z -> 2026-07-15T12:01:37.982Z
+[2026-07-15T19:38:44.4532121+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=44792
+[hyphen] fetching tickets resolved 2026-07-15T07:31:56.845Z -> 2026-07-15T14:08:44.568Z
+[hyphen] appended 757 rows at row 2162 (window 2026-07-15T07:31:56.845Z -> 2026-07-15T14:08:44.568Z)
+[2026-07-15T22:53:22.3749981+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=8804
+[hyphen] fetching tickets resolved 2026-07-15T14:08:44.568Z -> 2026-07-15T17:23:23.558Z
+[2026-07-15T23:01:56.7355431+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=42936
+[hyphen] fetching tickets resolved 2026-07-15T14:08:44.568Z -> 2026-07-15T17:31:56.829Z
+[2026-07-16T00:26:56.421703+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=36528
+[hyphen] fetching tickets resolved 2026-07-15T14:08:44.568Z -> 2026-07-15T18:56:56.697Z
+[hyphen] appended 303 rows at row 2919 (window 2026-07-15T14:08:44.568Z -> 2026-07-15T18:56:56.697Z)
+[2026-07-16T01:01:56.759670+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=38276
+[hyphen] fetching tickets resolved 2026-07-15T18:56:56.697Z -> 2026-07-15T19:31:56.992Z
+[hyphen] appended 33 rows at row 3222 (window 2026-07-15T18:56:56.697Z -> 2026-07-15T19:31:56.992Z)
+[2026-07-16T03:01:56.717810+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=32988
+[2026-07-17T23:08:45.649465+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=41420
+[2026-07-17T23:14:35.632614+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=46332
+[2026-07-18T01:14:09.760942+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=29064
+[hyphen] fetching tickets resolved 2026-07-15T18:56:56.697Z -> 2026-07-17T19:44:10.574Z
+  write rows 4455-4754 attempt 1 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AHT4754?valueInputOption=USER_ENTERED
+  write rows 4455-4754 attempt 2 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AHT4754?valueInputOption=USER_ENTERED
+  write rows 4455-4754 attempt 3 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AHT4754?valueInputOption=USER_ENTERED
+  write rows 4455-4754 attempt 4 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AHT4754?valueInputOption=USER_ENTERED
+  write rows 4455-4754 attempt 5 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AHT4754?valueInputOption=USER_ENTERED
+Traceback (most recent call last):
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\export_resolved_tickets.py", line 133, in <module>
+    main()
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\export_resolved_tickets.py", line 124, in main
+    lib.set_sheet_rows_at_row(SHEET_ID, tab_name, data_rows, next_row)
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\lib.py", line 186, in set_sheet_rows_at_row
+    resp.raise_for_status()
+  File "C:\Users\VIKASH PATHAK\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\models.py", line 1167, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AHT4754?valueInputOption=USER_ENTERED
+[2026-07-18T03:01:57.321055+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=5924
+[hyphen] fetching tickets resolved 2026-07-15T18:56:56.697Z -> 2026-07-17T21:31:57.516Z
+  write rows 4455-4754 attempt 1 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AHT4754?valueInputOption=USER_ENTERED
+  write rows 4455-4754 attempt 2 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AHT4754?valueInputOption=USER_ENTERED
+  write rows 4455-4754 attempt 3 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AHT4754?valueInputOption=USER_ENTERED
+  write rows 4455-4754 attempt 4 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AHT4754?valueInputOption=USER_ENTERED
+  write rows 4455-4754 attempt 5 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AHT4754?valueInputOption=USER_ENTERED
+Traceback (most recent call last):
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\export_resolved_tickets.py", line 133, in <module>
+    main()
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\export_resolved_tickets.py", line 124, in main
+    lib.set_sheet_rows_at_row(SHEET_ID, tab_name, data_rows, next_row)
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\lib.py", line 186, in set_sheet_rows_at_row
+    resp.raise_for_status()
+  File "C:\Users\VIKASH PATHAK\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\models.py", line 1167, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AHT4754?valueInputOption=USER_ENTERED
+[2026-07-18T21:01:58.245217+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=5048
+[2026-07-18T23:01:57.353789+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=8136
+[2026-07-19T17:01:57.233742+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=16340
+[hyphen] fetching tickets resolved 2026-07-15T18:56:56.697Z -> 2026-07-19T11:31:57.492Z
+  write rows 4455-4754 attempt 1 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AJB4754?valueInputOption=USER_ENTERED
+  write rows 4455-4754 attempt 2 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AJB4754?valueInputOption=USER_ENTERED
+  write rows 4455-4754 attempt 3 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AJB4754?valueInputOption=USER_ENTERED
+  write rows 4455-4754 attempt 4 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AJB4754?valueInputOption=USER_ENTERED
+  write rows 4455-4754 attempt 5 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AJB4754?valueInputOption=USER_ENTERED
+Traceback (most recent call last):
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\export_resolved_tickets.py", line 133, in <module>
+    main()
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\export_resolved_tickets.py", line 124, in main
+    lib.set_sheet_rows_at_row(SHEET_ID, tab_name, data_rows, next_row)
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\lib.py", line 186, in set_sheet_rows_at_row
+    resp.raise_for_status()
+  File "C:\Users\VIKASH PATHAK\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\models.py", line 1167, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4455%3AJB4754?valueInputOption=USER_ENTERED
+[2026-07-19T19:01:57.234788+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=21124
+[2026-07-19T21:01:57.290700+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=18600
+[hyphen] fetching tickets resolved 2026-07-15T18:56:56.697Z -> 2026-07-19T15:31:57.518Z
+[hyphen] tab has no header yet - writing 262 column headers
+  write rows 1202-1501 attempt 1 failed: HTTPSConnectionPool(host='sheets.googleapis.com', port=443): Max retries exceeded with url: /v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A1202%3AJB1501?valueInputOption=USER_ENTERED (Caused by SSLError(SSLEOFError(8, 'EOF occurred in violation of protocol (_ssl.c:2427)')))
+  write rows 4502-4801 attempt 1 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4502%3AJB4801?valueInputOption=USER_ENTERED
+  write rows 4502-4801 attempt 2 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4502%3AJB4801?valueInputOption=USER_ENTERED
+  write rows 4502-4801 attempt 3 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4502%3AJB4801?valueInputOption=USER_ENTERED
+  write rows 4502-4801 attempt 4 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4502%3AJB4801?valueInputOption=USER_ENTERED
+  write rows 4502-4801 attempt 5 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4502%3AJB4801?valueInputOption=USER_ENTERED
+Traceback (most recent call last):
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\export_resolved_tickets.py", line 133, in <module>
+    main()
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\export_resolved_tickets.py", line 124, in main
+    lib.set_sheet_rows_at_row(SHEET_ID, tab_name, data_rows, next_row)
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\lib.py", line 186, in set_sheet_rows_at_row
+    resp.raise_for_status()
+  File "C:\Users\VIKASH PATHAK\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\models.py", line 1167, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27hyphen%27%21A4502%3AJB4801?valueInputOption=USER_ENTERED
+[2026-07-19T23:01:57.205040+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=21772
+[2026-07-20T01:01:57.343367+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=6652
+[2026-07-20T12:29:44.744267+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=23504
+[hyphen] fetching tickets resolved 2026-07-15T18:56:56.697Z -> 2026-07-20T06:59:44.954Z
+  grew 'hyphen' grid to 10586 rows x 413 cols (was 5669 x 413)
+[hyphen] appended 6060 rows at row 4027 (window 2026-07-15T18:56:56.697Z -> 2026-07-20T06:59:44.954Z)
+[2026-07-20T17:52:51.008805+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=9696
+[hyphen] fetching tickets resolved 2026-07-20T06:59:44.954Z -> 2026-07-20T12:22:51.307Z
+  grew 'hyphen' grid to 11209 rows x 413 cols (was 10586 x 413)
+[hyphen] appended 623 rows at row 10087 (window 2026-07-20T06:59:44.954Z -> 2026-07-20T12:22:51.307Z)
+[2026-07-20T19:12:31.728132+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=12932
+[2026-07-20T23:08:55.558362+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=29788
+[2026-07-20T23:14:51.344062+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=26148

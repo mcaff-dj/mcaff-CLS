@@ -28,6 +28,7 @@ HYPHEN_TARGET_COLUMNS = [
     "Disposition: Order", "Disposition: Product Name", "Disposition: Batch number",
     "Disposition: AWB number", "Disposition: Order date", "Disposition: warehouse name",
     "Disposition: partner_name", "Disposition: Estimated_time_delivery_SR",
+    "Disposition: Query Class",
 ]
 
 
