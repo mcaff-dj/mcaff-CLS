@@ -21,7 +21,6 @@
       --mcaff: #4a3aa7;
       --hyphen: #1baf7a;
       --pkyc: #c2740c;
-      --calling: #2563eb;
       --mom: #9333ea;
 
       --sidebar-bg: rgba(249, 249, 247, 0.85);
@@ -43,7 +42,6 @@
         --mcaff: #9085e9;
         --hyphen: #199e70;
         --pkyc: #e0993d;
-        --calling: #5b8def;
         --mom: #c084fc;
 
         --sidebar-bg: rgba(22, 22, 21, 0.85);
@@ -593,27 +591,14 @@
       mcaffeine: { accent: 'var(--mcaff)', bg: 'rgba(74, 58, 167, 0.08)', fg: 'var(--mcaff)' },
       hyphen: { accent: 'var(--hyphen)', bg: 'rgba(25, 156, 92, 0.08)', fg: 'var(--hyphen)' },
       productkyc: { accent: 'var(--pkyc)', bg: 'rgba(194, 116, 12, 0.08)', fg: 'var(--pkyc)' },
-      calling: { accent: 'var(--calling)', bg: 'rgba(37, 99, 235, 0.08)', fg: 'var(--calling)' },
       mom: { accent: 'var(--mom)', bg: 'rgba(147, 51, 234, 0.08)', fg: 'var(--mom)' }
     };
-
-    // TODO: point this at CRM-PEP's deployed URL once it's hosted somewhere reachable by the team.
-    var CALLING_APP_URL = 'http://localhost:5000';
 
     // Cards with no report wired up yet - onBrandChange shows a plain placeholder instead
     // of pointing the iframe at /api/report/{key} (which would 404/500, since there's no
     // api/_reports/{key}.html for these). Remove an entry here once its report exists.
     var COMING_SOON = {
       mom: 'MOM report is coming soon.'
-    };
-
-    // NDR/RTO aren't separate cards - they're sub-items nested under Calling Vertical's
-    // nav (CRM-PEP already manages Shiprocket NDR/RTO leads, just with no distinct view
-    // per type yet). Clicking one shows the same placeholder panel as a top-level
-    // "coming soon" card would, just reached via the nested nav instead of the dropdown.
-    var CALLING_SUBITEMS = {
-      ndr: 'NDR report is coming soon.',
-      rto: 'RTO report is coming soon.'
     };
 
     function toggleMobileSidebar() {
@@ -791,10 +776,6 @@
       placeholderPanel.style.display = 'none';
       iframe.style.display = 'block';
 
-      // Calling Vertical (CRM-PEP) is hosted the same way as every other report now -
-      // loaded straight into the same iframe - just with no monthly/weekly toggle and a
-      // simpler sidebar nav placeholder, since it's a separate app with no tab structure
-      // to mirror and (being cross-origin) no DOM we're allowed to read from this page.
       document.getElementById('granularitySection').style.display =
         (brandKey === 'mcaffeine' || brandKey === 'hyphen') ? 'flex' : 'none';
 
@@ -802,57 +783,14 @@
       document.getElementById('loadingOverlay').style.opacity = '1';
       document.getElementById('loadingOverlay').style.visibility = 'visible';
 
-      if (brandKey === 'calling') {
-        document.getElementById('loadingText').textContent = 'Loading Calling Vertical...';
-        document.getElementById('navList').innerHTML =
-          '<button class="nav-btn active" data-calling-view="dashboard" onclick="selectCallingView(\'dashboard\')">Dashboard</button>' +
-          '<button class="nav-btn" data-calling-view="ndr" onclick="selectCallingView(\'ndr\')">NDR</button>' +
-          '<button class="nav-btn" data-calling-view="rto" onclick="selectCallingView(\'rto\')">RTO</button>';
-        iframe.src = CALLING_APP_URL;
-        return;
-      }
-
       document.getElementById('loadingText').textContent = 'Loading ' + brandKey + ' report...';
       iframe.src = '/api/report/' + encodeURIComponent(brandKey);
-    }
-
-    // Switches between Calling Vertical's own iframe (the CRM-PEP dashboard) and its NDR/
-    // RTO nav sub-items, which have no distinct view yet and just show the same "coming
-    // soon" placeholder used for top-level cards (see COMING_SOON).
-    function selectCallingView(view) {
-      var iframe = document.getElementById('reportIframe');
-      var placeholderPanel = document.getElementById('placeholderPanel');
-      Array.prototype.slice.call(document.querySelectorAll('#navList .nav-btn[data-calling-view]')).forEach(function(b) {
-        b.classList.toggle('active', b.getAttribute('data-calling-view') === view);
-      });
-      if (view === 'dashboard') {
-        placeholderPanel.style.display = 'none';
-        iframe.style.display = 'block';
-        return;
-      }
-      iframe.style.display = 'none';
-      document.getElementById('placeholderTitle').textContent = view.toUpperCase();
-      document.getElementById('placeholderDesc').textContent = CALLING_SUBITEMS[view];
-      placeholderPanel.style.display = 'flex';
     }
 
     // Handles Iframe loaded event
     function onIframeLoaded() {
       var iframe = document.getElementById('reportIframe');
       if (!iframe.src || iframe.src.indexOf('about:blank') !== -1) return;
-
-      // CRM-PEP is hosted on a different origin - browsers block reading a cross-origin
-      // iframe's DOM entirely (contentDocument throws), and there's no shared tab markup
-      // to extract anyway, so just reveal it plainly instead of the same-origin-only CSS
-      // injection / tab-extraction below.
-      if (currentBrand === 'calling') {
-        iframe.classList.add('loaded');
-        document.getElementById('loadingOverlay').style.opacity = '0';
-        document.getElementById('loadingOverlay').style.visibility = 'hidden';
-        document.querySelector('.sidebar').classList.remove('open');
-        document.getElementById('menuToggle').innerHTML = '☰';
-        return;
-      }
 
       var doc = iframe.contentDocument || iframe.contentWindow.document;
       
