@@ -180,7 +180,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         orderAmount:parseFloat(amt.replace(/[^0-9.]/g,''))||0,rtoReason:rto,
         assignedAgent:agt,callingDate:cd||'—',isHighPriority:hp,
         rowDate:parseDate(cd)||parseDate(g('Date','Order Date','c0')),rawIndex:i,
-        status:'Pending',connected:r['c17']||'',disposition:r['c19']||''};
+        status:'Pending',connected:r['c17']||'',disposition:r['c19']||'',agentRemarks:''};
     }
 
     /* ── SVG Icons ───────────────────────────────────── */
@@ -193,6 +193,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
     const UserIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>;
     const CalendarIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></svg>;
     const CreditCardIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><rect width="20" height="14" x="2" y="5" rx="2"/><line x1="2" x2="22" y1="10" y2="10"/></svg>;
+    const ChatIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>;
 
     /* ── Custom Select Component ─────────────────────── */
     function CustomSelect({ value, onChange, options, icon: IconComponent, placeholder, className="" }) {
@@ -313,7 +314,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [toast, setToast] = useState(null);
       const showToast = useCallback(m=>{setToast(m);setTimeout(()=>setToast(null),3000);},[]);
 
-      // Modals
+      // Modals & Disposition State
       const [detailTkt, setDetailTkt] = useState(null);
       const [dispTkt, setDispTkt] = useState(null);
       const [dispConn, setDispConn] = useState(null);
@@ -323,25 +324,58 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [addrChange, setAddrChange] = useState(null);
       const [newAddr, setNewAddr] = useState('');
       const [refNotes, setRefNotes] = useState('');
+      const [agentRemarks, setAgentRemarks] = useState('');
       const [receiptTkt, setReceiptTkt] = useState(null);
 
-      const openDisp = (t)=>{setDispTkt(t);setDispConn(null);setDispReason('');setNewOrder(null);setNewOrderId('');setAddrChange(null);setNewAddr('');setRefNotes('');};
+      const openDisp = (t)=>{
+        setDispTkt(t);
+        const existing = overrides[t.id];
+        setDispConn(existing?.connectedStatus === 'Yes' ? 'YES' : existing?.connectedStatus === 'No' ? 'NO' : null);
+        setDispReason(existing?.agentDisposition || '');
+        setNewOrder(existing?.newOrderId ? 'YES' : null);
+        setNewOrderId(existing?.newOrderId || '');
+        setAddrChange(existing?.newAddress ? 'YES' : null);
+        setNewAddr(existing?.newAddress || '');
+        setRefNotes(existing?.refundDetails?.notes || '');
+        setAgentRemarks(existing?.agentRemarks || '');
+      };
 
       const submitDisp = ()=>{
         if(!dispTkt)return;
         const isRef=dispReason==='Refund Requested';
         const st=isRef?'Refunded':dispConn==='YES'?`Connected — ${dispReason}`:`Unreachable — ${dispReason}`;
-        const ov={status:st,connectedStatus:dispConn==='YES'?'Yes':'No',agentDisposition:dispReason,disposedAt:new Date().toLocaleString(),disposedBy:googleUser.name};
+        
+        // Auto-assign Column Q to active agent's Name + Email ID
+        const agentAssignedTag = `${googleUser.name} (${googleUser.email})`;
+
+        const ov={
+          status: st,
+          connectedStatus: dispConn==='YES'?'Yes':'No',
+          agentDisposition: dispReason,
+          agentRemarks: agentRemarks.trim(),
+          newOrderId: newOrder==='YES'?newOrderId:'',
+          newAddress: addrChange==='YES'?newAddr:'',
+          disposedAt: new Date().toLocaleString([],{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}),
+          disposedBy: agentAssignedTag,
+          assignedAgent: agentAssignedTag, // Updated in Column Q!
+          assignedEmail: googleUser.email
+        };
+
         setOverrides(p=>{const u={...p,[dispTkt.id]:ov};localStorage.setItem('rto_ticket_overrides',JSON.stringify(u));return u;});
         const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
         setActivityLogs(p=>[{time:t,agent:googleUser.email,action:`Disposed ${dispTkt.orderNumber} → ${st}`,type:'ticket'},...p.slice(0,49)]);
-        if(isRef){doRefund(dispTkt.id,{refundId:`RFD-${Date.now().toString().slice(-6)}`,amount:dispTkt.orderAmount,reason:dispReason,date:new Date().toLocaleString(),mode:dispTkt.paymentMethod==='COD'?'UPI Payout':'Original Gateway',transactionRef:`TXN-${Math.random().toString(36).substring(2,10).toUpperCase()}`,processedBy:googleUser.name,notes:refNotes});}
-        else showToast(`Disposition saved for ${dispTkt.orderNumber}`);
+        
+        if(isRef){
+          doRefund(dispTkt.id,{refundId:`RFD-${Date.now().toString().slice(-6)}`,amount:dispTkt.orderAmount,reason:dispReason,date:new Date().toLocaleString(),mode:dispTkt.paymentMethod==='COD'?'UPI Payout':'Original Gateway',transactionRef:`TXN-${Math.random().toString(36).substring(2,10).toUpperCase()}`,processedBy:googleUser.name,notes:refNotes});
+        } else {
+          showToast(`Disposition & Remarks saved for ${dispTkt.orderNumber}`);
+        }
         setDispTkt(null);
       };
 
       const doRefund = (id, rec)=>{
-        setOverrides(p=>({...p,[id]:{status:'Refunded',refundDetails:rec}}));
+        const agentAssignedTag = `${googleUser.name} (${googleUser.email})`;
+        setOverrides(p=>({...p,[id]:{status:'Refunded',refundDetails:rec,assignedAgent:agentAssignedTag,assignedEmail:googleUser.email}}));
         if(googleUser.email){setStats(p=>{const c=p[googleUser.email]||{resolvedCount:0};const u={...p,[googleUser.email]:{resolvedCount:c.resolvedCount+1,lastResolvedAt:Date.now()}};localStorage.setItem('rto_agent_stats',JSON.stringify(u));return u;});}
         const tgt=tickets.find(t=>t.id===id);
         if(tgt){setReceiptTkt({...tgt,refundDetails:rec});try{window.confetti?.({particleCount:60,spread:55,origin:{y:.7}});}catch{}showToast(`₹${rec.amount.toLocaleString('en-IN')} refunded successfully`);}
@@ -359,7 +393,22 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       // Derived data
       const allTickets = useMemo(()=>{
-        let base=tickets.map(t=>{const o=overrides[t.id];return o?{...t,status:o.status||t.status,refundDetails:o.refundDetails,connected:o.connectedStatus||t.connected,disposition:o.agentDisposition||t.disposition}:t;});
+        let base=tickets.map(t=>{
+          const o=overrides[t.id];
+          return o?{
+            ...t,
+            status:o.status||t.status,
+            refundDetails:o.refundDetails,
+            connected:o.connectedStatus||t.connected,
+            disposition:o.agentDisposition||t.disposition,
+            agentRemarks:o.agentRemarks!==undefined?o.agentRemarks:t.agentRemarks,
+            newOrderId:o.newOrderId||t.newOrderId,
+            newAddress:o.newAddress||t.newAddress,
+            disposedAt:o.disposedAt||t.disposedAt,
+            disposedBy:o.disposedBy||t.disposedBy,
+            assignedAgent:o.assignedAgent||t.assignedAgent
+          }:t;
+        });
         base.sort((a,b)=>{if(a.isHighPriority&&!b.isHighPriority)return-1;if(!a.isHighPriority&&b.isHighPriority)return 1;if(a.rowDate&&b.rowDate)return b.rowDate-a.rowDate;return 0;});
         if(userRole==='Agent'){const pend=base.filter(t=>t.status!=='Refunded').slice(0,maxLeads);return[...pend,...base.filter(t=>t.status==='Refunded')];}
         return base;
@@ -368,12 +417,13 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const hp=allTickets.filter(t=>t.isHighPriority&&t.status!=='Refunded').length;
       const pend=allTickets.filter(t=>t.status!=='Refunded').length;
       const refd=allTickets.filter(t=>t.status==='Refunded').length;
+      const dispCount=allTickets.filter(t=>t.disposition||t.agentRemarks||t.status!=='Pending').length;
 
       const agents = useMemo(()=>{const s=new Set();allTickets.forEach(t=>{if(t.assignedAgent&&t.assignedAgent!=='Unassigned')s.add(t.assignedAgent);});agentRoster.forEach(a=>s.add(a.email));return[...s].sort();},[allTickets,agentRoster]);
 
       const agentOptions = useMemo(() => [
         { value: 'ALL', label: 'All agents' },
-        ...agents.map(a => ({ value: a, label: a.includes('@') ? a.split('@')[0] : a }))
+        ...agents.map(a => ({ value: a, label: a.includes('(') ? a.split('(')[0].trim() : (a.includes('@') ? a.split('@')[0] : a) }))
       ], [agents]);
 
       const dateOptions = [
@@ -424,9 +474,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           if(tab==='high'&&(!t.isHighPriority||t.status==='Refunded'))return false;
           if(tab==='pending'&&t.status==='Refunded')return false;
           if(tab==='refunded'&&t.status!=='Refunded')return false;
+          if(tab==='disposed'&&(!t.disposition&&!t.agentRemarks&&t.status==='Pending'))return false;
           if(prioFilter==='HIGH'&&!t.isHighPriority)return false;
           if(payFilter!=='ALL'&&t.paymentMethod!==payFilter)return false;
-          if(search.trim()){const q=search.toLowerCase();if(![t.orderNumber,t.customerName,t.email,t.phone,t.rtoReason,t.callingDate,t.assignedAgent].some(f=>(f||'').toLowerCase().includes(q)))return false;}
+          if(search.trim()){const q=search.toLowerCase();if(![t.orderNumber,t.customerName,t.email,t.phone,t.rtoReason,t.callingDate,t.assignedAgent,t.agentRemarks,t.disposition].some(f=>(f||'').toLowerCase().includes(q)))return false;}
           return true;
         });
       },[allTickets,agentFilter,tab,prioFilter,payFilter,search]);
@@ -438,6 +489,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         {key:'all',label:'All Leads',count:allTickets.length},
         {key:'high',label:'High Priority',count:hp},
         {key:'pending',label:'Pending',count:pend},
+        {key:'disposed',label:'Disposed & Remarks',count:dispCount},
         {key:'refunded',label:'Refunded',count:refd},
       ];
       if(userRole==='Admin'||userRole==='Team Lead')tabs.push({key:'admin',label:'Admin Panel',count:agentRoster.length});
@@ -460,7 +512,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               <div className="flex items-center gap-2">
                 <div className="relative hidden md:block">
                   <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500"/>
-                  <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search orders, customers…" className="w-48 pl-8 pr-3 py-1 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/50"/>
+                  <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search orders, remarks…" className="w-48 pl-8 pr-3 py-1 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/50"/>
                 </div>
                 <button onClick={()=>sync(false)} disabled={isSyncing} className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors disabled:opacity-50" title="Refresh data">
                   <RefreshIcon className={isSyncing?'animate-spin text-indigo-400':''}/>
@@ -615,9 +667,9 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                         <thead><tr className="border-b border-zinc-800/80 text-zinc-500 text-[12px]">
                           <th className="py-3 px-4 text-left font-medium">Order</th>
                           <th className="py-3 px-4 text-left font-medium">Customer</th>
-                          <th className="py-3 px-4 text-left font-medium">Agent</th>
+                          <th className="py-3 px-4 text-left font-medium">Agent Name & Email (Col Q)</th>
                           <th className="py-3 px-4 text-left font-medium">Calling Date</th>
-                          <th className="py-3 px-4 text-left font-medium">RTO Reason</th>
+                          <th className="py-3 px-4 text-left font-medium">RTO Reason & Remarks</th>
                           <th className="py-3 px-4 text-left font-medium">Payment</th>
                           <th className="py-3 px-4 text-right font-medium">Amount</th>
                           <th className="py-3 px-4 text-center font-medium">Status</th>
@@ -626,16 +678,54 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                         <tbody className="divide-y divide-zinc-800/40">
                           {visible.map(t=>{
                             const ref=t.status==='Refunded';
+                            const agtStr = t.assignedAgent || 'Unassigned';
+                            const hasNameEmail = agtStr.includes('(');
+                            const nameDisp = hasNameEmail ? agtStr.split('(')[0].trim() : (agtStr.includes('@') ? agtStr.split('@')[0] : agtStr);
+                            const emailDisp = hasNameEmail ? agtStr.match(/\(([^)]+)\)/)?.[1] : (agtStr.includes('@') ? agtStr : (agtStr !== 'Unassigned' ? `${agtStr}@mcaffeine.com` : ''));
+
                             return(
                               <tr key={t.id} className={`hover:bg-zinc-800/25 transition-colors ${t.isHighPriority&&!ref?'bg-rose-950/10':''}`}>
                                 <td className="py-3 px-4"><span className="font-mono font-semibold text-zinc-200">{t.orderNumber}</span>{t.isHighPriority&&!ref&&<span className="ml-1.5 text-rose-400 text-[10px] font-bold">● HP</span>}</td>
                                 <td className="py-3 px-4"><span className="text-zinc-200 font-medium">{t.customerName}</span><span className="block text-[12px] text-zinc-500 mt-0.5 truncate max-w-[160px]">{t.email||t.phone}</span></td>
-                                <td className="py-3 px-4 text-zinc-400">{t.assignedAgent==='Unassigned'?<span className="text-zinc-600 italic">Unassigned</span>:t.assignedAgent.includes('@')?t.assignedAgent.split('@')[0]:t.assignedAgent}</td>
+                                
+                                {/* Column Q: Agent Name + Email ID */}
+                                <td className="py-3 px-4">
+                                  {agtStr === 'Unassigned' ? (
+                                    <span className="text-zinc-600 italic">Unassigned</span>
+                                  ) : (
+                                    <div className="flex flex-col">
+                                      <span className="text-zinc-200 font-semibold flex items-center gap-1.5">
+                                        👤 {nameDisp}
+                                      </span>
+                                      {emailDisp && (
+                                        <span className="text-[11px] text-indigo-400 font-mono mt-0.5">
+                                          ✉️ {emailDisp}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                </td>
+
                                 <td className="py-3 px-4 text-zinc-400 tabular-nums">{t.callingDate}</td>
-                                <td className="py-3 px-4 max-w-[200px]"><span className={`truncate block ${t.isHighPriority?'text-rose-300 font-medium':'text-zinc-400'}`}>{t.rtoReason}</span></td>
+                                
+                                {/* RTO Reason & Remarks Preview */}
+                                <td className="py-3 px-4 max-w-[220px]">
+                                  <span className={`truncate block ${t.isHighPriority?'text-rose-300 font-medium':'text-zinc-400'}`}>{t.rtoReason}</span>
+                                  {t.agentRemarks && (
+                                    <span className="inline-flex items-center gap-1 mt-1 text-[11px] text-indigo-300 bg-indigo-950/50 border border-indigo-800/40 px-2 py-0.5 rounded-md truncate max-w-full" title={t.agentRemarks}>
+                                      💬 {t.agentRemarks}
+                                    </span>
+                                  )}
+                                  {t.disposition && !t.agentRemarks && (
+                                    <span className="inline-flex items-center gap-1 mt-1 text-[11px] text-zinc-400 bg-zinc-800/60 border border-zinc-700/50 px-2 py-0.5 rounded-md truncate max-w-full">
+                                      📝 {t.disposition}
+                                    </span>
+                                  )}
+                                </td>
+
                                 <td className="py-3 px-4"><Badge color={t.paymentMethod==='COD'?'amber':'blue'}>{t.paymentMethod}</Badge></td>
                                 <td className="py-3 px-4 text-right font-semibold text-zinc-200 tabular-nums">₹{t.orderAmount.toLocaleString('en-IN')}</td>
-                                <td className="py-3 px-4 text-center"><Badge color={ref?'green':'zinc'}>{ref?'Refunded':'Pending'}</Badge></td>
+                                <td className="py-3 px-4 text-center"><Badge color={ref?'green':t.disposition?'blue':'zinc'}>{ref?'Refunded':t.disposition?'Disposed':'Pending'}</Badge></td>
                                 <td className="py-3 px-4 text-right"><div className="flex items-center justify-end gap-1.5">
                                   <button onClick={()=>setDetailTkt(t)} className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 text-[12px] font-medium transition-colors">Details</button>
                                   <button onClick={()=>openDisp(t)} className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-semibold flex items-center gap-1.5 transition-colors shadow-xs"><PhoneIcon/>Call</button>
@@ -841,6 +931,23 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                       </div>
                     </div>
                   )}
+
+                  {/* Step 3: Agent Remarks & Comments Field (Universal) */}
+                  {dispConn && (
+                    <div className="space-y-2 border-t border-zinc-800/80 pt-4 animate-fadeIn">
+                      <label className="block text-[12px] font-bold uppercase tracking-wider text-zinc-300 flex items-center gap-1.5">
+                        <ChatIcon className="text-indigo-400"/> Agent Remarks & Disposition Comments
+                      </label>
+                      <textarea
+                        value={agentRemarks}
+                        onChange={e => setAgentRemarks(e.target.value)}
+                        placeholder="Write detailed remarks (e.g. address change notes, customer callback request, exchange details, etc.)..."
+                        rows="3"
+                        className="w-full bg-zinc-950 border border-zinc-700/80 rounded-xl p-3 text-[13px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500 resize-none shadow-xs"
+                      />
+                    </div>
+                  )}
+
                 </div>
 
                 {/* Modal Footer */}
@@ -856,14 +963,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                         :'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-950/50'
                     }`}
                   >
-                    {dispReason==='Refund Requested' ? '💳 Confirm Refund & Save' : '🚀 Save Call Disposition'}
+                    {dispReason==='Refund Requested' ? '💳 Confirm Refund & Save' : '🚀 Save Disposition & Remarks'}
                   </button>
                 </div>
               </div>
             </Overlay>
           )}
 
-          {/* ═══ DETAIL MODAL ═══ */}
+          {/* ═══ DETAIL MODAL WITH REMARKS & DISPOSITION LOG ═══ */}
           {detailTkt&&(
             <Overlay onClose={()=>setDetailTkt(null)}>
               <div className="w-full max-w-md bg-[#121215] border border-zinc-800/90 rounded-2xl shadow-2xl text-zinc-100">
@@ -871,14 +978,59 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   <h3 className="text-base font-bold font-mono text-zinc-100">{detailTkt.orderNumber}</h3>
                   <button onClick={()=>setDetailTkt(null)} className="p-1 rounded-lg hover:bg-zinc-800 text-zinc-400"><XIcon/></button>
                 </div>
-                <div className="px-6 py-5 space-y-4 max-h-[65vh] overflow-y-auto text-[13px]">
+                <div className="px-6 py-5 space-y-4 max-h-[68vh] overflow-y-auto text-[13px]">
                   {detailTkt.isHighPriority&&<div className="p-3 rounded-xl bg-rose-950/40 border border-rose-900/60 text-rose-300 font-medium text-[13px]">🔥 High Priority — Prepaid refusal match</div>}
+                  
+                  {/* Assigned Agent Column Q Info */}
+                  <div className="p-3.5 rounded-xl bg-zinc-900/90 border border-zinc-800/80 space-y-1">
+                    <p className="text-[11px] text-zinc-500 uppercase font-medium">Assigned Agent (Column Q)</p>
+                    <p className="text-zinc-100 font-bold flex items-center gap-1.5">👤 {detailTkt.assignedAgent}</p>
+                  </div>
+
                   <div className="grid grid-cols-2 gap-4">
                     <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Calling Date</p><p className="font-semibold text-zinc-200">{detailTkt.callingDate}</p></div>
                     <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Payment</p><p className="font-semibold text-zinc-200">{detailTkt.paymentMethod} · ₹{detailTkt.orderAmount.toLocaleString('en-IN')}</p></div>
                   </div>
                   <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">RTO Reason</p><p className="text-zinc-300">{detailTkt.rtoReason}</p></div>
-                  <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Assigned Agent</p><p className="text-indigo-400 font-medium">{detailTkt.assignedAgent}</p></div>
+
+                  {/* Disposed History & Agent Remarks Log Card */}
+                  <div className="p-4 rounded-xl bg-indigo-950/20 border border-indigo-900/40 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-300 flex items-center gap-1.5">
+                        <ChatIcon className="text-indigo-400"/> Agent Remarks & Disposition History
+                      </span>
+                      {detailTkt.disposedAt && <span className="text-[11px] text-zinc-500 font-mono">{detailTkt.disposedAt}</span>}
+                    </div>
+
+                    {detailTkt.disposition || detailTkt.agentRemarks ? (
+                      <div className="space-y-2">
+                        {detailTkt.disposition && (
+                          <div className="flex items-center gap-2">
+                            <Badge color="blue">{detailTkt.disposition}</Badge>
+                            {detailTkt.disposedBy && <span className="text-[11px] text-zinc-400">by {detailTkt.disposedBy}</span>}
+                          </div>
+                        )}
+                        {detailTkt.agentRemarks && (
+                          <div className="p-3 rounded-lg bg-zinc-950/80 border border-zinc-800 text-[13px] text-zinc-200 leading-relaxed font-sans">
+                            <span className="text-indigo-400 font-semibold">Remarks:</span> "{detailTkt.agentRemarks}"
+                          </div>
+                        )}
+                        {detailTkt.newAddress && (
+                          <div className="p-2.5 rounded-lg bg-amber-950/30 border border-amber-900/40 text-[12px] text-amber-200">
+                            📍 <strong>New Address:</strong> {detailTkt.newAddress}
+                          </div>
+                        )}
+                        {detailTkt.newOrderId && (
+                          <div className="p-2.5 rounded-lg bg-sky-950/30 border border-sky-900/40 text-[12px] text-sky-200">
+                            📦 <strong>Replacement Order:</strong> {detailTkt.newOrderId}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-[12px] text-zinc-500 italic">No disposition remarks recorded yet.</p>
+                    )}
+                  </div>
+
                   <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Customer</p><p className="text-zinc-200 font-semibold">{detailTkt.customerName}</p><p className="text-zinc-400">{detailTkt.email} · {detailTkt.phone}</p></div>
                   <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Address</p><p className="text-zinc-300">{detailTkt.address}</p><p className="text-zinc-200 font-medium">{detailTkt.city}, {detailTkt.state} — {detailTkt.pincode}</p></div>
                 </div>
