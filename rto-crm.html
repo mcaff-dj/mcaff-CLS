@@ -215,9 +215,19 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
     }
 
     function mapRowToTicket(row, idx) {
+      const normalizeHeader = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
       const get = (...keys) => {
+        // Prefer an exact header match first - otherwise a sheet column literally named
+        // "Order" can get shadowed by a loose substring match against "Order Amount",
+        // "Order Date", etc. (all of which also normalize to contain "order").
         for (const k of keys) {
-          const found = Object.keys(row).find(h => h.toLowerCase().replace(/[^a-z0-9]/g, '').includes(k.toLowerCase().replace(/[^a-z0-9]/g, '')));
+          const nk = normalizeHeader(k);
+          const exact = Object.keys(row).find(h => normalizeHeader(h) === nk);
+          if (exact && row[exact]) return row[exact];
+        }
+        for (const k of keys) {
+          const nk = normalizeHeader(k);
+          const found = Object.keys(row).find(h => normalizeHeader(h).includes(nk));
           if (found && row[found]) return row[found];
         }
         return '';
@@ -225,7 +235,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       const rawPay = get('Payment Method', 'Payment Mode', 'Payment', 'Type').toUpperCase();
       const amtRaw = get('Order Amount', 'Amount', 'Price', 'Total', 'Order Value');
-      const orderNum = get('Order Number', 'Order #', 'Order ID', 'OrderNo') || `ORD-${idx + 1000}`;
+      const orderNum = get('Order', 'Order Number', 'Order #', 'Order ID', 'OrderNo') || `ORD-${idx + 1000}`;
       const assignedAgent = get('Agent Name', 'Agent', 'Assigned Agent', 'AgentName', 'Assigned To', '_col_Q', 'col_16') || 'Unassigned';
 
       // Column D: RTO Reason
