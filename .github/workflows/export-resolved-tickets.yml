@@ -35,6 +35,11 @@ jobs:
           GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
         run: python scripts/export_recurring.py --api-token "${{ secrets.FLOWCALL_TOKEN_HYPHEN }}" --tab-name hyphen
 
+      - name: Push hyphen to dashboard
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+        run: python scripts/push_hyphen_to_dashboard.py
+
       - name: Export mcaffeine
         env:
           GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}

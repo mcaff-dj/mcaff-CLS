@@ -169,6 +169,45 @@ def _get_sheet_gid_and_grid(spreadsheet_id, sheet_name):
     raise RuntimeError(f"Sheet tab '{sheet_name}' not found in spreadsheet {spreadsheet_id}")
 
 
+def get_sheet_gid(spreadsheet_id, sheet_name):
+    """Numeric sheetId (gid) for a tab - needed for requests like copyPaste
+    that address ranges by gid rather than by tab name."""
+    gid, _ = _get_sheet_gid_and_grid(spreadsheet_id, sheet_name)
+    return gid
+
+
+def copy_paste_column(spreadsheet_id, sheet_gid, src_row, dest_row_start, dest_row_end, col_index):
+    """Copies a single source cell down through a destination row range in the
+    same column via the Sheets API's copyPaste request - Sheets auto-adjusts
+    relative references (B2 -> B3, B4, ...) exactly like dragging the fill
+    handle down manually. Rows are 1-based; col_index is 0-based."""
+    token = get_write_access_token()
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate"
+    body = {
+        "requests": [{
+            "copyPaste": {
+                "source": {
+                    "sheetId": sheet_gid,
+                    "startRowIndex": src_row - 1, "endRowIndex": src_row,
+                    "startColumnIndex": col_index, "endColumnIndex": col_index + 1,
+                },
+                "destination": {
+                    "sheetId": sheet_gid,
+                    "startRowIndex": dest_row_start - 1, "endRowIndex": dest_row_end,
+                    "startColumnIndex": col_index, "endColumnIndex": col_index + 1,
+                },
+                "pasteType": "PASTE_NORMAL",
+            }
+        }]
+    }
+    resp = requests.post(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }, json=body, timeout=60)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def ensure_grid_size(spreadsheet_id, sheet_name, min_rows, min_cols):
     """Grows the sheet's underlying grid if needed. A PUT to an explicit range
     fails outright with 'exceeds grid limits' if the target is beyond the
