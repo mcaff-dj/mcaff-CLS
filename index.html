@@ -840,7 +840,13 @@
       // Sync active granularity
       syncGranularityUI();
 
-      populateReportNav();
+      // Calling Team manages its own static Report Views list (Overview/NDR-Calling/
+      // RTO-Calling) via selectCallingTeamView - mirroring the iframe's internal tab
+      // bar here would otherwise wipe that list out every time RTO-Calling's iframe
+      // (rto-crm.html, which has no .tab-nav) finishes loading or reloads internally.
+      if (currentBrand !== 'calling') {
+        populateReportNav();
+      }
 
       // Show iframe
       iframe.classList.add('loaded');
