@@ -1,10 +1,55 @@
-// Handles Google's OAuth redirect: exchanges the code, verifies the ID token, checks
-// whether this email has been granted access (or matches ADMIN_EMAILS for bootstrap),
-// and issues a session cookie. No self-serve signup - unrecognized emails are rejected.
-const { CARD_KEYS, getUserByEmail, getUserPermissions, bootstrapAdminIfNeeded, logEvent } = require('../_lib/db');
-const { setSessionCookie } = require('../_lib/session');
+// Consolidated auth routes (login/logout/callback/me) into one dynamic-route file
+// to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells us
+// which of the 4 original routes was hit; URLs are unchanged.
+const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, bootstrapAdminIfNeeded, logEvent } = require('../_lib/db');
+const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
 
-module.exports = async (req, res) => {
+async function handleLogin(req, res) {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  if (!clientId) {
+    res.status(500).send('Server not configured: missing GOOGLE_CLIENT_ID.');
+    return;
+  }
+  const proto = req.headers['x-forwarded-proto'] || 'https';
+  const host = req.headers.host;
+  const redirectUri = `${proto}://${host}/api/auth/callback`;
+  const next = (req.query && req.query.next) || '/';
+  const state = Buffer.from(JSON.stringify({ next })).toString('base64url');
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: 'openid email profile',
+    prompt: 'select_account',
+    state,
+  });
+  res.writeHead(302, { Location: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}` });
+  res.end();
+}
+
+async function handleLogout(req, res) {
+  clearSessionCookie(res);
+  res.writeHead(302, { Location: '/' });
+  res.end();
+}
+
+async function handleMe(req, res) {
+  const session = getSession(req);
+  if (!session) {
+    res.status(200).json({ authenticated: false });
+    return;
+  }
+  res.status(200).json({
+    authenticated: true,
+    email: session.email,
+    name: session.name,
+    isAdmin: !!session.isAdmin,
+    cards: (session.perms || []).map((k) => ({ key: k, label: CARD_LABELS[k] || k })),
+  });
+}
+
+async function handleCallback(req, res) {
   try {
     const { code, state } = req.query || {};
     if (!code) {
@@ -91,4 +136,16 @@ module.exports = async (req, res) => {
   } catch (e) {
     res.status(500).send('Login failed: ' + (e.message || String(e)));
   }
+}
+
+const HANDLERS = { login: handleLogin, logout: handleLogout, me: handleMe, callback: handleCallback };
+
+module.exports = async (req, res) => {
+  const action = req.query && req.query.action;
+  const handler = HANDLERS[action];
+  if (!handler) {
+    res.status(404).send('Not found.');
+    return;
+  }
+  await handler(req, res);
 };
