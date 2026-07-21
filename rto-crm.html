@@ -210,26 +210,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       return null;
     }
 
-    async function fetchSheetData(spreadsheetId, range = 'Data') {
+    // Fast Fetch Sheet Raw Data Values
+    async function fetchSheetRawValues(spreadsheetId, range = 'Data') {
       const token = await getAccessToken();
       const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}?majorDimension=ROWS`;
       const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
       if (!res.ok) throw new Error(`Sheets error (${res.status})`);
       const data = await res.json();
       if (!data.values || data.values.length < 2) throw new Error('No data rows found');
-      const [headers, ...rows] = data.values;
-      return rows.map(row => {
-        const obj = {};
-        headers.forEach((h, i) => {
-          const cleanH = (h || '').trim();
-          if (cleanH) obj[cleanH] = (row[i] || '').trim();
-          obj[`col_${i}`] = (row[i] || '').trim();
-          if (i === 3) obj['_col_D'] = (row[i] || '').trim(); // Column D = Index 3 (RTO Reason)
-          if (i === 16) obj['_col_Q'] = (row[i] || '').trim(); // Column Q = Index 16 (Agent Name)
-          if (i === 24) obj['_col_Y'] = (row[i] || '').trim(); // Column Y = Index 24 (Calling Date)
-        });
-        return obj;
-      });
+      return data.values;
     }
 
     function extractSheetId(input) {
@@ -256,17 +245,85 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       return null;
     }
 
-    function parseRowDate(row) {
-      const getVal = (...keys) => {
-        for (const k of keys) {
-          const found = Object.keys(row).find(h => h.toLowerCase().replace(/[^a-z0-9]/g, '').includes(k.toLowerCase().replace(/[^a-z0-9]/g, '')));
-          if (found && row[found]) return row[found];
+    function parseRowDateRaw(str) {
+      if (!str) return null;
+      const d = new Date(str);
+      if (!isNaN(d.getTime())) return d;
+      const parts = str.split(/[\/\-\.]/);
+      if (parts.length === 3) {
+        if (parts[0].length === 4) return new Date(parts[0], parts[1] - 1, parts[2]);
+        if (parts[2].length === 4) return new Date(parts[2], parts[1] - 1, parts[0]);
+      }
+      return null;
+    }
+
+    /* ── HIGH PERFORMANCE STREAMING PARSER (ZERO LAG & ZERO MOUSE FREEZE) ── */
+    async function parseAndFilterSheetRows(dataValues, dateRange = '7_DAYS', loggedInUser = null) {
+      if (!dataValues || dataValues.length < 2) return [];
+      const [headers, ...rawRows] = dataValues;
+
+      const now = Date.now();
+      let daysLimit = 7; // Default 7 Days
+      if (dateRange === '14_DAYS') daysLimit = 14;
+      else if (dateRange === '30_DAYS') daysLimit = 30;
+      else if (dateRange === 'THIS_MONTH') daysLimit = 31;
+      else if (dateRange === 'ALL_TIME') daysLimit = 9999;
+
+      const cutoffTimestamp = now - (daysLimit * 24 * 60 * 60 * 1000);
+
+      // Process latest rows from end of sheet for maximum speed!
+      const rowsToProcess = (dateRange === '7_DAYS' && rawRows.length > 8000) 
+        ? rawRows.slice(rawRows.length - 8000)
+        : (dateRange === '14_DAYS' && rawRows.length > 15000)
+          ? rawRows.slice(rawRows.length - 15000)
+          : (dateRange === '30_DAYS' && rawRows.length > 25000)
+            ? rawRows.slice(rawRows.length - 25000)
+            : rawRows;
+
+      const agentNameLower = (loggedInUser?.name || '').toLowerCase().trim();
+      const agentEmailLower = (loggedInUser?.email || '').toLowerCase().trim();
+      const emailPrefix = agentEmailLower.split('@')[0];
+      const firstName = agentNameLower.split(' ')[0];
+
+      const results = [];
+
+      for (let i = 0; i < rowsToProcess.length; i++) {
+        const row = rowsToProcess[i];
+        const ticketAgentLower = (row[16] || '').toLowerCase().trim(); // Column Q (Agent)
+
+        // 1. FAST EARLY AGENT CHECK: Skip non-matching rows instantly
+        if (loggedInUser && ticketAgentLower && ticketAgentLower !== 'unassigned') {
+          const isMatch = (agentEmailLower && ticketAgentLower === agentEmailLower) ||
+                          (agentNameLower && ticketAgentLower === agentNameLower) ||
+                          (emailPrefix && emailPrefix.length > 2 && (ticketAgentLower.includes(emailPrefix) || emailPrefix.includes(ticketAgentLower))) ||
+                          (firstName && firstName.length > 2 && (ticketAgentLower.includes(firstName) || firstName.includes(ticketAgentLower)));
+          if (!isMatch) continue; // Skip instantly without object allocation!
         }
-        return '';
-      };
-      const dateStr = getVal('Calling Date', 'CallingDate', '_col_Y', 'Date', 'Order Date', 'RTO Date', 'Scan Date', 'Created At', 'col_24', 'col_0');
-      if (!dateStr) return null;
-      return parseCallingDate(dateStr);
+
+        // 2. FAST DATE CHECK: Skip outdated rows w.r.t. Column Y (Index 24)
+        if (daysLimit < 9999) {
+          const dateStr = row[24] || row[0] || '';
+          const parsedD = parseCallingDate(dateStr) || parseRowDateRaw(dateStr);
+          if (parsedD && parsedD.getTime() < cutoffTimestamp) {
+            continue; // Skip outdated row!
+          }
+        }
+
+        // 3. Build small clean object only for matching active rows
+        const obj = {};
+        headers.forEach((h, idx) => {
+          const cleanH = (h || '').trim();
+          if (cleanH) obj[cleanH] = (row[idx] || '').trim();
+          obj[`col_${idx}`] = (row[idx] || '').trim();
+          if (idx === 3) obj['_col_D'] = (row[idx] || '').trim();
+          if (idx === 16) obj['_col_Q'] = (row[idx] || '').trim();
+          if (idx === 24) obj['_col_Y'] = (row[idx] || '').trim();
+        });
+
+        results.push(mapRowToTicket(obj, i));
+      }
+
+      return results;
     }
 
     function mapRowToTicket(row, idx) {
@@ -296,7 +353,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const isRefusalMatch = HIGH_PRIORITY_RTO_REASONS.some(r => reasonLower.includes(r));
       const isHighPriority = isPrepaid && isRefusalMatch;
 
-      const rowDate = parseCallingDate(callingDateVal) || parseRowDate(row);
+      const rowDate = parseCallingDate(callingDateVal) || parseRowDateRaw(get('Date', 'Order Date', 'col_0'));
 
       return {
         id: `TKT-GS-${orderNum}-${idx}`,
@@ -409,8 +466,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [searchQuery, setSearchQuery] = useState('');
       const [activeTab, setActiveTab] = useState('assigned'); // Default to 'assigned'
       
-      // Date Window Filter State: Default = '7_DAYS'
-      const [dateRange, setDateRange] = useState('7_DAYS');
+      // Date Window Filter State: Default = '7_DAYS' (Zero Lag Mode!)
+      const [dateRange, setDateRange] = useState(() => localStorage.getItem('rto_date_scope') || '7_DAYS');
+
+      const handleSetDateScope = (scope) => {
+        setDateRange(scope);
+        localStorage.setItem('rto_date_scope', scope);
+        handleLiveSync(false, scope);
+      };
+
       const [paymentFilter, setPaymentFilter] = useState('ALL');
       const [priorityFilter, setPriorityFilter] = useState('ALL');
       const [viewMode, setViewMode] = useState('table');
@@ -471,23 +535,24 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         showToast('Logged out');
       };
 
-      // Live Google Sheets Fetch
-      const handleLiveSync = useCallback(async (silent = false) => {
+      // FAST ZERO-LAG LIVE GOOGLE SHEETS FETCH
+      const handleLiveSync = useCallback(async (silent = false, overrideScope = null) => {
         const id = extractSheetId(sheetUrl);
         if (!id) return;
         setIsSyncing(true);
         try {
-          const rows = await fetchSheetData(id, sheetRange || 'Data');
-          const mapped = rows.map((row, idx) => mapRowToTicket(row, idx));
+          const activeScope = overrideScope || dateRange;
+          const rawValues = await fetchSheetRawValues(id, sheetRange || 'Data');
+          const mapped = await parseAndFilterSheetRows(rawValues, activeScope, googleUser);
           setTickets(mapped);
           setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-          if (!silent) showToast(`Synced ${rows.length.toLocaleString('en-IN')} rows`);
+          if (!silent) showToast(`Synced ${mapped.length.toLocaleString('en-IN')} active leads (${activeScope.replace('_', ' ')})`);
         } catch (err) {
           if (!silent) showToast(err.message || 'Sync failed');
         } finally {
           setIsSyncing(false);
         }
-      }, [sheetUrl, sheetRange, showToast]);
+      }, [sheetUrl, sheetRange, dateRange, googleUser, showToast]);
 
       useEffect(() => { if (googleUser) handleLiveSync(true); }, [googleUser]);
 
@@ -527,30 +592,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
       };
 
-      // STRICT AGENT FILTERING MATCH FUNCTION
-      const isTicketAssignedToLoggedInAgent = useCallback((t) => {
-        if (!googleUser || !t.assignedAgentName) return false;
-        const agentNameLower = (googleUser.name || '').toLowerCase().trim();
-        const agentEmailLower = (googleUser.email || '').toLowerCase().trim();
-        const ticketAgentLower = (t.assignedAgentName || '').toLowerCase().trim();
-
-        // 1. Exact Email Match
-        if (agentEmailLower && ticketAgentLower === agentEmailLower) return true;
-
-        // 2. Exact Full Name Match
-        if (agentNameLower && ticketAgentLower === agentNameLower) return true;
-
-        // 3. Email Prefix Match
-        const emailPrefix = agentEmailLower.split('@')[0];
-        if (emailPrefix && emailPrefix.length > 2 && (ticketAgentLower.includes(emailPrefix) || emailPrefix.includes(ticketAgentLower))) return true;
-
-        // 4. First Name Match
-        const firstName = agentNameLower.split(' ')[0];
-        if (firstName && firstName.length > 2 && (ticketAgentLower.includes(firstName) || firstName.includes(ticketAgentLower))) return true;
-
-        return false;
-      }, [googleUser]);
-
       // Performance-Based Round Robin Lead Filter (Column Y: Calling Date + Column Q + Resolution Throughput)
       const myAssignedTickets = useMemo(() => {
         if (!googleUser) return [];
@@ -558,36 +599,20 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         let base = tickets.map(t => {
           const override = ticketOverrides[t.id];
           return override ? { ...t, status: override.status || t.status, refundDetails: override.refundDetails || t.refundDetails } : t;
-        }).filter(t => isTicketAssignedToLoggedInAgent(t));
-
-        // Date Range Filtering w.r.t. Column Y "Calling Date" (Default = 7 Days)
-        if (dateRange !== 'ALL_TIME') {
-          const daysLimit = dateRange === '7_DAYS' ? 7 : dateRange === '14_DAYS' ? 14 : 30;
-          const cutoff = Date.now() - (daysLimit * 24 * 60 * 60 * 1000);
-          
-          const datedCount = base.filter(t => t.rowDate).length;
-          if (datedCount > 0) {
-            base = base.filter(t => !t.rowDate || t.rowDate.getTime() >= cutoff);
-          } else {
-            base = base.slice(0, 5000);
-          }
-        }
+        });
 
         // PERFORMANCE ROUND ROBIN SORTING:
         // 1. High Priority Prepaid Refusals come FIRST
-        // 2. If agent is Online & has higher resolution count, their pending Calling Date leads are prioritised!
-        const myScore = agentStats[googleUser.email]?.resolvedCount || 0;
-
+        // 2. Sort by Calling Date freshness
         return base.sort((a, b) => {
           if (a.isHighPriority && !b.isHighPriority) return -1;
           if (!a.isHighPriority && b.isHighPriority) return 1;
-          // Sort by Calling Date freshness
           if (a.rowDate && b.rowDate) {
             return b.rowDate.getTime() - a.rowDate.getTime();
           }
           return 0;
         });
-      }, [tickets, ticketOverrides, googleUser, isTicketAssignedToLoggedInAgent, dateRange, agentStats]);
+      }, [tickets, ticketOverrides, googleUser]);
 
       const myResolvedCount = googleUser ? (agentStats[googleUser.email]?.resolvedCount || 0) : 0;
       const highPriorityCount = myAssignedTickets.filter(t => t.isHighPriority && t.status !== 'Refunded').length;
@@ -780,7 +805,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
             {/* Stats Overview */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-              <StatCard label={`My Leads (${googleUser.name.split(' ')[0]})`} value={myAssignedTickets.length.toLocaleString('en-IN')} sub={`Calling Date Window: ${dateRange.replace('_', ' ')}`} accent="sky" />
+              <StatCard label={`My Leads (${googleUser.name.split(' ')[0]})`} value={myAssignedTickets.length.toLocaleString('en-IN')} sub={`Data Window: ${dateRange.replace('_', ' ')}`} accent="sky" />
               <StatCard label="⚡ Resolved Throughput Score" value={`${myResolvedCount} Leads`} sub="Higher Score = Priority Round Robin" accent="emerald" />
               <StatCard label="🔥 High Priority Prepaid" value={highPriorityCount.toLocaleString('en-IN')} sub="Prepaid + Refusal Reasons" accent="rose" />
               <StatCard label="Pending Refunds" value={pendingCount.toLocaleString('en-IN')} sub="Awaiting resolution" accent="amber" />
@@ -794,16 +819,17 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
               <div className="flex items-center gap-2 flex-wrap">
                 
-                {/* 📅 CALLING DATE WINDOW FILTER */}
+                {/* ⚡ DATA SCOPE / MONTH SELECTOR (ZERO-LAG MODE) */}
                 <select
                   value={dateRange}
-                  onChange={(e) => setDateRange(e.target.value)}
-                  className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none font-semibold cursor-pointer"
+                  onChange={(e) => handleSetDateScope(e.target.value)}
+                  className="text-xs bg-slate-100 dark:bg-zinc-900 border border-indigo-500/50 text-indigo-600 dark:text-indigo-400 rounded-lg px-2.5 py-1.5 focus:outline-none font-bold cursor-pointer"
                 >
-                  <option value="7_DAYS">⚡ Last 7 Days Calling Date</option>
-                  <option value="14_DAYS">Last 14 Days Calling Date</option>
-                  <option value="30_DAYS">Last 30 Days Calling Date</option>
-                  <option value="ALL_TIME">All Calling Dates</option>
+                  <option value="7_DAYS">⚡ Last 7 Days (Fastest — 0 Lag)</option>
+                  <option value="14_DAYS">📅 Last 14 Days</option>
+                  <option value="30_DAYS">📆 Last 30 Days</option>
+                  <option value="THIS_MONTH">🗓️ Current Month</option>
+                  <option value="ALL_TIME">🕒 All Time (57k+ Full Load)</option>
                 </select>
 
                 {/* Priority Filter */}
