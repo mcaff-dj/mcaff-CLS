@@ -83,8 +83,9 @@ brands = k["brands"]
 hyphen = brands.get("Hyphen", {})
 mcaff = brands.get("mCaffeine", {})
 channels = k["channels"]
-chat = channels.get("chat", {})
+whatsapp = channels.get("whatsapp", {})
 email = channels.get("email", {})
+livechat = channels.get("liveChat", {})
 
 html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</title>
 <style>
@@ -262,7 +263,7 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
       <span class="chip hyphen">Hyphen</span> {n(hyphen.get('n',0))} responses, avg {avg(hyphen.get('avg',0))} &nbsp;&middot;&nbsp;
       <span class="chip mcaff">mCaffeine</span> {n(mcaff.get('n',0))} responses, avg {avg(mcaff.get('avg',0))} &nbsp;&middot;&nbsp;
       AI-resolved avg {avg(k['ai_avg'])} (n={n(k['ai_n'])}) &nbsp;vs&nbsp; Human-resolved avg {avg(k['human_avg'])} (n={n(k['human_n'])}) &nbsp;&middot;&nbsp;
-      Chat avg {avg(chat.get('avg',0))} (n={n(chat.get('n',0))}) &nbsp;vs&nbsp; Email avg {avg(email.get('avg',0))} (n={n(email.get('n',0))})
+      WhatsApp avg {avg(whatsapp.get('avg',0))} (n={n(whatsapp.get('n',0))}) &nbsp;&middot;&nbsp; Email avg {avg(email.get('avg',0))} (n={n(email.get('n',0))}) &nbsp;&middot;&nbsp; Live Chat avg {avg(livechat.get('avg',0))} (n={n(livechat.get('n',0))})
     </p>
 
     <div id="dip-banner" class="dip-banner neutral"><span class="dip-icon">…</span><span>Checking month-on-month CSAT…</span></div>
@@ -297,8 +298,9 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
         <label for="f-channel">Channel</label>
         <select id="f-channel">
           <option value="All">All</option>
-          <option value="chat">Chat</option>
+          <option value="whatsapp">WhatsApp</option>
           <option value="email">Email</option>
+          <option value="liveChat">Live Chat</option>
         </select>
       </div>
       <div class="filter-group" style="color:var(--text-muted); font-size:12px;">Applies to the KPIs and heatmap below</div>
@@ -366,6 +368,7 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
           <tbody></tbody>
         </table>
       </details>
+      <p class="footnote">mCaffeine's CSAT comment field is empty in the source DB for every response here &mdash; all comment text below comes from Hyphen.</p>
     </div>
   </div>
 </div>

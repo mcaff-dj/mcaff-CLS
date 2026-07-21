@@ -1,14 +1,72 @@
+import sys
+from pathlib import Path
+
 import pandas as pd
 import json
 import re
 from collections import Counter
 
-SRC = r"mcaff-CLS/data/All_CSAT_both.xlsx"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import mysql_lib
+import pymysql
+
 OUT = r"mcaff-CLS/data/csat_dashboard_data.json"
 
-df = pd.read_excel(SRC)
+# CSAT/ticket tables live in the mcaff_dwh schema specifically, not whatever
+# database MYSQL_DATABASE points at (mcaff_prod) - host/user/password still come
+# from mysql_lib's normal env var / .env.local resolution.
+DWH_DATABASE = "mcaff_dwh"
 
-df["dt"] = pd.to_datetime(df["Submitted Date"], format="%m/%d/%Y, %I:%M:%S %p", errors="coerce")
+# agent := 'AI' whenever the ticket was AI-resolved (overrides whatever's in
+# assigned_to for that handful of tickets where a human name leaked through),
+# else the real agent name, else '(unassigned)' when no agent was recorded.
+BRAND_TABLES = [
+    ("mcaff_tickets_csat", "mcaff_tickets", "mCaffeine"),
+    ("hyphen_tickets_csat", "hyphen_tickets", "Hyphen"),
+]
+
+
+def fetch_brand_csat(cred, csat_table, tickets_table, brand_name):
+    conn = pymysql.connect(
+        host=cred["host"], user=cred["user"], password=cred["password"],
+        database=DWH_DATABASE, port=cred["port"], ssl={"ssl": {}}, connect_timeout=30,
+    )
+    try:
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT
+              CASE WHEN t.status = 'Resolved by AI' THEN 'AI'
+                   ELSE COALESCE(NULLIF(t.assigned_to, 'Unassigned'), '(unassigned)') END AS `Agent Name`,
+              CASE WHEN t.status = 'Resolved by AI' THEN 'Yes' ELSE 'No' END AS `Is AI Agent`,
+              t.subcategory AS `Tasks`,
+              t.source AS `Channel`,
+              cs.csat_rating AS `Rating`,
+              cs.csat_comment AS `Comment`,
+              cs.csat_submitted_at AS `Submitted Date`
+            FROM {csat_table} cs
+            LEFT JOIN {tickets_table} t ON t.ticket_number = cs.ticket_number
+            WHERE cs.csat_status = 'Completed'
+        """)
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+    sub = pd.DataFrame(rows, columns=cols)
+    sub["Brand name"] = brand_name
+    return sub
+
+
+cred = mysql_lib.get_credential()
+if cred is None:
+    raise RuntimeError("MySQL credentials not configured - set MYSQL_HOST/USER/PASSWORD/DATABASE (or .env.local).")
+
+df = pd.concat(
+    [fetch_brand_csat(cred, csat_t, tickets_t, brand) for csat_t, tickets_t, brand in BRAND_TABLES],
+    ignore_index=True,
+)
+df["Channel"] = df["Channel"].fillna("(none)")
+
+df["dt"] = pd.to_datetime(df["Submitted Date"])
 df["month_p"] = df["dt"].dt.to_period("M")
 df["month"] = df["month_p"].dt.strftime("%b %Y")
 df["resolver"] = df["Is AI Agent"].map({"Yes": "AI", "No": "Human"})
