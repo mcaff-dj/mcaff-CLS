@@ -548,43 +548,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       useEffect(()=>{sync(true);},[]);
       useEffect(()=>{const t=setInterval(()=>sync(true),60000);return()=>clearInterval(t);},[sync]);
 
-      // Auto Lead Assignment Effect (runs cleanly outside render loop)
-      useEffect(() => {
-        if (tickets.length === 0 || !googleUser?.email) return;
-
-        const unassignedToClaim = tickets.filter(t => {
-          const ov = overrides[t.id];
-          const currAgt = ov?.assignedAgent || t.assignedAgent;
-          return !currAgt || currAgt === 'Unassigned';
-        });
-
-        if (unassignedToClaim.length === 0) return;
-
-        // Auto-assign first 10 unassigned leads to active user if they don't have overrides yet
-        const newOverrides = {};
-        const agentTag = `${googleUser.email}`;
-
-        unassignedToClaim.slice(0, 10).forEach(t => {
-          if (!overrides[t.id]?.assignedAgent) {
-            newOverrides[t.id] = {
-              ...(overrides[t.id] || {}),
-              assignedAgent: agentTag,
-              assignedEmail: googleUser.email
-            };
-            // Call live Google Sheet write-back for Column Q
-            writeToSheetRow(t.rawIndex, { assignedAgent: agentTag });
-          }
-        });
-
-        if (Object.keys(newOverrides).length > 0) {
-          setOverrides(p => {
-            const u = { ...p, ...newOverrides };
-            localStorage.setItem('rto_ticket_overrides', JSON.stringify(u));
-            return u;
-          });
-        }
-      }, [tickets, googleUser]);
-
       // Derived data
       const allTickets = useMemo(()=>{
         let base=tickets.map(t=>{
@@ -606,16 +569,77 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
         base.sort((a,b)=>{if(a.isHighPriority&&!b.isHighPriority)return-1;if(!a.isHighPriority&&b.isHighPriority)return 1;if(a.rowDate&&b.rowDate)return b.rowDate-a.rowDate;return 0;});
 
-        if(userRole==='Agent'){
-          const e = (googleUser.email || '').toLowerCase();
+        // For Agent Role, show assigned OR unassigned leads claimed for the agent's quota (10 max)
+        if(userRole==='Agent' && googleUser?.email){
+          const e = googleUser.email.toLowerCase();
           const p = e.split('@')[0];
-          const myPending = base.filter(t => t.status !== 'Refunded' && (t.assignedAgent.toLowerCase().includes(e) || t.assignedAgent.toLowerCase().includes(p))).slice(0, maxLeads);
-          const myRefunded = base.filter(t => t.status === 'Refunded' && (t.assignedAgent.toLowerCase().includes(e) || t.assignedAgent.toLowerCase().includes(p)));
-          return [...myPending, ...myRefunded];
+          const isMine = (agt) => agt && agt !== 'Unassigned' && (agt.toLowerCase().includes(e) || agt.toLowerCase().includes(p));
+
+          let myLeads = base.filter(t => t.status !== 'Refunded' && isMine(t.assignedAgent));
+          let unassignedLeads = base.filter(t => t.status !== 'Refunded' && (!t.assignedAgent || t.assignedAgent === 'Unassigned'));
+
+          const needed = Math.max(0, maxLeads - myLeads.length);
+          if (needed > 0 && unassignedLeads.length > 0) {
+            const claimed = unassignedLeads.slice(0, needed).map(t => ({
+              ...t,
+              assignedAgent: googleUser.email
+            }));
+            myLeads = [...myLeads, ...claimed];
+          }
+
+          const myRefunded = base.filter(t => t.status === 'Refunded' && isMine(t.assignedAgent));
+          return [...myLeads.slice(0, maxLeads), ...myRefunded];
         }
 
         return base;
       },[tickets,overrides,userRole,maxLeads,googleUser]);
+
+      // Batch Auto-Assignment Effect: Syncs Column Q to Google Sheet in 1 single batch call for all active leads in box
+      useEffect(() => {
+        if (allTickets.length === 0 || !googleUser?.email || userRole !== 'Agent') return;
+
+        const unassignedInBox = allTickets.filter(t => !overrides[t.id]?.assignedAgent || overrides[t.id]?.assignedAgent === 'Unassigned');
+        if (unassignedInBox.length === 0) return;
+
+        const newOverrides = {};
+        const valueRanges = [];
+        const agentTag = `${googleUser.email}`;
+
+        unassignedInBox.forEach(t => {
+          newOverrides[t.id] = {
+            ...(overrides[t.id] || {}),
+            assignedAgent: agentTag,
+            assignedEmail: googleUser.email
+          };
+          const rowNumber = t.rawIndex + 2;
+          valueRanges.push({
+            range: `Data!Q${rowNumber}`,
+            values: [[agentTag]]
+          });
+        });
+
+        // 1. Update UI state immediately so all 10 rows show Agent Name & Email
+        setOverrides(p => {
+          const u = { ...p, ...newOverrides };
+          try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
+          return u;
+        });
+
+        // 2. Batch update live Google Sheet Column Q in 1 single API call
+        if (valueRanges.length > 0) {
+          getAccessToken().then(token => {
+            const sid = extractSheetId(DEFAULT_SHEET_URL);
+            if (!sid) return;
+            fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
+            }).then(r => {
+              if (r.ok) showToast(`Column Q synced to live Google Sheet for all 10 assigned leads!`);
+            }).catch(console.error);
+          }).catch(console.error);
+        }
+      }, [allTickets, googleUser, userRole]);
 
       const hp=allTickets.filter(t=>t.isHighPriority&&t.status!=='Refunded').length;
       const pend=allTickets.filter(t=>t.status!=='Refunded').length;
