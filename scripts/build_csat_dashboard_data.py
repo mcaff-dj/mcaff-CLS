@@ -25,6 +25,26 @@ BRAND_TABLES = [
     ("hyphen_tickets_csat", "hyphen_tickets", "Hyphen"),
 ]
 
+# `category` is a messy comma-joined tag (sentiment, resolution status, and/or class,
+# not in a fixed order/position) - so Query Class is inferred by matching known class
+# names anywhere in it, most-specific first to avoid substring collisions (e.g. check
+# "Product Suggestion/Recommendation" before plain "Product"). Falls back to '(none)'
+# for tickets with only a sentiment tag and no class assigned (~5-12% of rows).
+QUERY_CLASS_CASE = """
+    CASE
+      WHEN t.category LIKE '%Product Suggestion/Recommendation%' THEN 'Product Suggestion/Recommendation'
+      WHEN t.category LIKE '%Packaging and Operational%' THEN 'Packaging and Operational'
+      WHEN t.category LIKE '%Requests & Enquiries%' THEN 'Requests & Enquiries'
+      WHEN t.category LIKE '%Awaiting Response%' THEN 'Awaiting Response'
+      WHEN t.category LIKE '%Delivery%' THEN 'Delivery'
+      WHEN t.category LIKE '%Warehouse%' THEN 'Warehouse'
+      WHEN t.category LIKE '%Technical%' THEN 'Technical'
+      WHEN t.category LIKE '%Product%' THEN 'Product'
+      WHEN t.category LIKE '%Others%' THEN 'Others'
+      ELSE NULL
+    END
+"""
+
 
 def fetch_brand_csat(cred, csat_table, tickets_table, brand_name):
     conn = pymysql.connect(
@@ -38,7 +58,8 @@ def fetch_brand_csat(cred, csat_table, tickets_table, brand_name):
               CASE WHEN t.status = 'Resolved by AI' THEN 'AI'
                    ELSE COALESCE(NULLIF(t.assigned_to, 'Unassigned'), '(unassigned)') END AS `Agent Name`,
               CASE WHEN t.status = 'Resolved by AI' THEN 'Yes' ELSE 'No' END AS `Is AI Agent`,
-              t.subcategory AS `Tasks`,
+              {QUERY_CLASS_CASE} AS `Query Class`,
+              t.subcategory AS `Query Category`,
               t.source AS `Channel`,
               cs.csat_rating AS `Rating`,
               cs.csat_comment AS `Comment`,
@@ -70,23 +91,27 @@ df["dt"] = pd.to_datetime(df["Submitted Date"])
 df["month_p"] = df["dt"].dt.to_period("M")
 df["month"] = df["month_p"].dt.strftime("%b %Y")
 df["resolver"] = df["Is AI Agent"].map({"Yes": "AI", "No": "Human"})
-df["task"] = df["Tasks"].fillna("(none)")
+df["qclass"] = df["Query Class"].fillna("(none)")
+df["qcat"] = df["Query Category"].fillna("(none)")
 df["agent"] = df["Agent Name"].fillna("(unassigned)")
 df["rating"] = df["Rating"].astype(int)
 
 month_order = sorted(df["month_p"].dropna().unique())
 MONTH_ORDER = [m.strftime("%b %Y") for m in month_order]
 
-# ---- top task categories (cover ~85% of volume), rest bucketed as Other ----
-task_counts = df["task"].value_counts()
+# ---- top query categories (cover most volume), rest bucketed as Other ----
+# Query Class itself is small (~9 classes + "(none)") so it's never bucketed.
+qcat_counts = df["qcat"].value_counts()
 TOP_N = 20
-top_tasks = set(task_counts.head(TOP_N).index)
-df["task_bucket"] = df["task"].apply(lambda t: t if t in top_tasks else "Other")
+top_qcats = set(qcat_counts.head(TOP_N).index)
+df["qcat_bucket"] = df["qcat"].apply(lambda c: c if c in top_qcats else "Other")
 
-# ---- GRANULAR: month x brand x resolver x channel x task_bucket x rating -> n ----
-grp = df.groupby(["month", "Brand name", "resolver", "Channel", "task_bucket", "rating"]).size().reset_index(name="n")
+# ---- GRANULAR: month x brand x resolver x channel x qclass x qcat_bucket x rating -> n ----
+# "c" (qclass) drives the top-level heatmap rows; "cat" (qcat_bucket) is the Query
+# Category breakdown shown when a Query Class row is expanded.
+grp = df.groupby(["month", "Brand name", "resolver", "Channel", "qclass", "qcat_bucket", "rating"]).size().reset_index(name="n")
 GRANULAR = [
-    {"m": r["month"], "b": r["Brand name"], "r": r["resolver"], "ch": r["Channel"], "c": r["task_bucket"], "rt": str(r["rating"]), "n": int(r["n"])}
+    {"m": r["month"], "b": r["Brand name"], "r": r["resolver"], "ch": r["Channel"], "c": r["qclass"], "cat": r["qcat_bucket"], "rt": str(r["rating"]), "n": int(r["n"])}
     for _, r in grp.iterrows()
 ]
 
@@ -158,22 +183,23 @@ def stats_by(group_cols, min_n=1):
     g = g[g["count"] >= min_n]
     return g
 
-task_overall = stats_by(["task"], min_n=15).sort_values("mean")
-weakest = task_overall.head(8).to_dict("records")
+qcat_overall = stats_by(["qcat"], min_n=15).sort_values("mean")
+weakest = qcat_overall.head(8).rename(columns={"qcat": "task"}).to_dict("records")
 
-task_resolver = df.groupby(["task", "resolver"])["rating"].agg(["mean", "count"]).unstack("resolver")
-task_resolver.columns = ["_".join(c) for c in task_resolver.columns]
-tr = task_resolver.dropna(subset=["mean_AI", "mean_Human"])
+qcat_resolver = df.groupby(["qcat", "resolver"])["rating"].agg(["mean", "count"]).unstack("resolver")
+qcat_resolver.columns = ["_".join(c) for c in qcat_resolver.columns]
+tr = qcat_resolver.dropna(subset=["mean_AI", "mean_Human"])
 tr = tr[(tr["count_AI"] >= 30) & (tr["count_Human"] >= 30)]
 tr["gap"] = tr["mean_Human"] - tr["mean_AI"]
 tr = tr.sort_values("gap", ascending=False)
+tr.index.name = "task"
 ai_worse = tr.head(6).reset_index().to_dict("records")
 ai_better_or_tied = tr[tr["gap"] <= 0.1].sort_values("count_AI", ascending=False).head(4).reset_index().to_dict("records")
 
-# month over month AI decline for top volume tasks
-mom = df[df["resolver"] == "AI"].groupby(["task", "month"])["rating"].agg(["mean", "count"]).reset_index()
-mom_pivot = mom.pivot(index="task", columns="month", values="mean")
-mom_n = mom.pivot(index="task", columns="month", values="count")
+# month over month AI decline for top volume query categories
+mom = df[df["resolver"] == "AI"].groupby(["qcat", "month"])["rating"].agg(["mean", "count"]).reset_index()
+mom_pivot = mom.pivot(index="qcat", columns="month", values="mean")
+mom_n = mom.pivot(index="qcat", columns="month", values="count")
 declines = []
 months_present = [m for m in MONTH_ORDER if m in mom_pivot.columns]
 for t in mom_pivot.index:
@@ -189,12 +215,12 @@ for t in mom_pivot.index:
                               "last_m": last_m, "last_v": round(last_v, 2), "last_n": int(last_n), "drop": round(drop, 2)})
 declines.sort(key=lambda x: -x["drop"])
 
-top_volume_task = df["task"].value_counts().idxmax()
-tv = df[df["task"] == top_volume_task]
+top_volume_qcat = df["qcat"].value_counts().idxmax()
+tv = df[df["qcat"] == top_volume_qcat]
 tv_ai = tv[tv["resolver"] == "AI"]
 tv_human = tv[tv["resolver"] == "Human"]
 top_volume_compare = {
-    "task": top_volume_task,
+    "task": top_volume_qcat,
     "n": int(len(tv)),
     "ai_avg": avg_rating(tv_ai), "ai_n": int(len(tv_ai)),
     "human_avg": avg_rating(tv_human), "human_n": int(len(tv_human)),
@@ -212,8 +238,9 @@ result = {
     "ai_better_or_tied": ai_better_or_tied,
     "declines": declines[:4],
     "top_volume_compare": top_volume_compare,
-    "task_coverage_pct": round(100 * task_counts.head(TOP_N).sum() / len(df), 1),
-    "n_tasks_total": int(df["task"].nunique()),
+    "task_coverage_pct": round(100 * qcat_counts.head(TOP_N).sum() / len(df), 1),
+    "n_tasks_total": int(df["qcat"].nunique()),
+    "n_query_classes_total": int(df["qclass"].nunique()),
 }
 
 with open(OUT, "w", encoding="utf-8") as f:

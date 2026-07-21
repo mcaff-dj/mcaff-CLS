@@ -63,9 +63,10 @@ DIP_MARK_NOTE = (
 )
 
 coverage_html = (
-    f"The heatmap below covers the top 20 of {D['n_tasks_total']} distinct task categories "
-    f"({D['task_coverage_pct']}% of all completed CSAT volume); the remainder are grouped into <b>Other</b>. "
-    f"'(none)' means no task was tagged on the ticket. {DIP_MARK_NOTE}"
+    f"Click &#9656; on a Query Class row to expand its Query Category breakdown. "
+    f"The top 20 of {D['n_tasks_total']} distinct Query Categories "
+    f"({D['task_coverage_pct']}% of all completed CSAT volume) are shown per class; the remainder are grouped into <b>Other</b>. "
+    f"'(none)' means no category was tagged on the ticket. {D['n_query_classes_total']} Query Classes total. {DIP_MARK_NOTE}"
 )
 
 agent_coverage_html = (
@@ -208,6 +209,12 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
   table.heatmap td.cell.dip {{ box-shadow: inset 0 0 0 2px var(--warn-border); }}
   .dip-flag {{ display: inline-block; font-size: 8px; line-height: 1; padding: 1.5px 3px; border-radius: 3px; margin-left: 3px; vertical-align: 1px; }}
   table.heatmap tr + tr td, table.heatmap tr + tr th {{ border-top: 1px solid var(--gridline); }}
+  .row-toggle {{ display: inline-block; width: 14px; cursor: pointer; user-select: none; color: var(--text-muted); font-size: 10px; transition: transform 0.15s; }}
+  .row-toggle.expanded {{ transform: rotate(90deg); }}
+  .row-toggle-spacer {{ display: inline-block; width: 14px; }}
+  table.heatmap tr.cls-row td.rowlabel {{ cursor: pointer; }}
+  table.heatmap td.rowlabel.sub {{ padding-left: 30px; font-weight: 450; color: var(--text-secondary); }}
+  table.heatmap tr.qcat-row {{ background: color-mix(in srgb, var(--text-primary) 3%, transparent); }}
 
   .legend {{ display: flex; gap: 18px; flex-wrap: wrap; margin: 4px 0 18px; font-size: 12.5px; color: var(--text-secondary); }}
   .legend-item {{ display: flex; align-items: center; gap: 6px; }}
@@ -257,7 +264,7 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
 
 <div class="viz-root">
   <div class="wrap">
-    <h1>CSAT Deep Dive — Task Category, Resolver &amp; Comment Themes</h1>
+    <h1>CSAT Deep Dive — Query Class, Resolver &amp; Comment Themes</h1>
     <p class="sub">{n(k['total'])} completed CSAT responses &middot; {k['date_min']} &ndash; {k['date_max']} &middot; overall avg rating <b>{avg(k['overall_avg'])}</b> / 5</p>
     <p class="sub-brands">
       <span class="chip hyphen">Hyphen</span> {n(hyphen.get('n',0))} responses, avg {avg(hyphen.get('avg',0))} &nbsp;&middot;&nbsp;
@@ -308,7 +315,7 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
 
     <div class="card">
       <h2>Average CSAT rating, month on month</h2>
-      <p class="card-sub">Task category &times; month, sorted by overall avg rating &mdash; blank cells = no completed CSAT that month. Hover a cell for n.</p>
+      <p class="card-sub">Query Class &times; month, sorted by overall avg rating &mdash; blank cells = no completed CSAT that month. Hover a cell for n, expand a row for its Query Category breakdown.</p>
       <div class="heatmap-scroll">
         <table class="heatmap" id="heatmap-table">
           <thead><tr id="heatmap-head"></tr></thead>
@@ -331,7 +338,7 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
     </div>
 
     <div class="card">
-      <h2>Task category patterns</h2>
+      <h2>Query Category patterns</h2>
       <p class="card-sub">Findings below are computed directly from the CSAT-completed data (Hyphen + mCaffeine, all resolvers unless noted) &mdash; not from the filters above.</p>
       <ul class="findings-list">
         <li>{weakest_html}</li>
@@ -388,26 +395,37 @@ function passesFilter(rec, brand, resolver, channel) {{
   return true;
 }}
 
-function computeHeatmap(granular, brand, resolver, channel) {{
+function computeGroupedRows(records, keyFn) {{
   const cell = {{}};
   const overall = {{}};
-  granular.forEach(rec => {{
-    if (!passesFilter(rec, brand, resolver, channel)) return;
-    if (!cell[rec.c]) cell[rec.c] = {{}};
-    if (!cell[rec.c][rec.m]) cell[rec.c][rec.m] = {{ n: 0, sum: 0 }};
-    cell[rec.c][rec.m].n += rec.n;
-    cell[rec.c][rec.m].sum += rec.n * Number(rec.rt);
-    if (!overall[rec.c]) overall[rec.c] = {{ n: 0, sum: 0 }};
-    overall[rec.c].n += rec.n;
-    overall[rec.c].sum += rec.n * Number(rec.rt);
+  records.forEach(rec => {{
+    const key = keyFn(rec);
+    if (!cell[key]) cell[key] = {{}};
+    if (!cell[key][rec.m]) cell[key][rec.m] = {{ n: 0, sum: 0 }};
+    cell[key][rec.m].n += rec.n;
+    cell[key][rec.m].sum += rec.n * Number(rec.rt);
+    if (!overall[key]) overall[key] = {{ n: 0, sum: 0 }};
+    overall[key].n += rec.n;
+    overall[key].sum += rec.n * Number(rec.rt);
   }});
-  const classes = Object.keys(cell).map(cls => ({{
-    cls, cell: cell[cls],
-    avg: overall[cls].n ? overall[cls].sum / overall[cls].n : 0,
-    n: overall[cls].n
+  const rows = Object.keys(cell).map(key => ({{
+    cls: key, cell: cell[key],
+    avg: overall[key].n ? overall[key].sum / overall[key].n : 0,
+    n: overall[key].n
   }}));
-  classes.sort((a, b) => b.avg - a.avg);
-  return classes;
+  rows.sort((a, b) => b.avg - a.avg);
+  return rows;
+}}
+
+function computeHeatmap(granular, brand, resolver, channel) {{
+  const filtered = granular.filter(rec => passesFilter(rec, brand, resolver, channel));
+  return computeGroupedRows(filtered, rec => rec.c);
+}}
+
+// Query Category breakdown within a single Query Class row (used by the expand toggle).
+function computeSubHeatmap(className, brand, resolver, channel) {{
+  const filtered = GRANULAR.filter(rec => passesFilter(rec, brand, resolver, channel) && rec.c === className);
+  return computeGroupedRows(filtered, rec => rec.cat);
 }}
 
 function hexToRgb(hex) {{
@@ -445,6 +463,50 @@ function rowDips(row) {{
   return dips.length ? dips.sort((a, b) => b.drop - a.drop) : null;
 }}
 
+function colorScale() {{
+  const cs = getComputedStyle(document.documentElement);
+  const c1 = hexToRgb(cs.getPropertyValue('--rating-1') || '#e34948');
+  const c3 = hexToRgb(cs.getPropertyValue('--rating-3') || '#898781');
+  const c5 = hexToRgb(cs.getPropertyValue('--rating-5') || '#2a78d6');
+  return avg => (avg <= 3 ? mixRgb(c1, c3, (avg - 1) / 2) : mixRgb(c3, c5, (avg - 3) / 2));
+}}
+
+function cellsHtmlForRow(row, colorForAvg) {{
+  const dips = rowDips(row);
+  return MONTH_ORDER.map(m => {{
+    const b = row.cell[m];
+    if (!b || b.n === 0) return '<td class="cell empty">&ndash;</td>';
+    const avg = b.sum / b.n;
+    const rgb = colorForAvg(avg);
+    const lum = relLuminance(rgb);
+    const textColor = lum > 0.45 ? '#0b0b0b' : '#ffffff';
+    const isDipCell = m === CURRENT_MONTH && dips;
+    const cellClass = 'cell' + (isDipCell ? ' dip' : '');
+    let dipMark = '';
+    let dipTitle = '';
+    if (isDipCell) {{
+      const badgeBg = lum > 0.45 ? 'rgba(0,0,0,0.55)' : 'rgba(255,255,255,0.7)';
+      dipTitle = ' data-dip="Down vs ' + dips.map(d => d.month + ' (' + d.avg.toFixed(2) + ', &minus;' + d.drop.toFixed(2) + ')').join(', ') + '"';
+      dipMark = ` <span class="dip-flag" style="background:${{badgeBg}}; color:${{textColor}}">&#9660;</span>`;
+    }}
+    return `<td class="${{cellClass}}" data-cls="${{row.cls}}" data-month="${{m}}" data-avg="${{avg.toFixed(2)}}" data-n="${{b.n}}"${{dipTitle}} style="background:rgb(${{rgb.r}},${{rgb.g}},${{rgb.b}}); color:${{textColor}}">${{avg.toFixed(1)}}${{dipMark}}</td>`;
+  }}).join('');
+}}
+
+function wireCellTooltips(body, tooltip) {{
+  body.querySelectorAll('td.cell:not(.empty)').forEach(td => {{
+    td.addEventListener('mousemove', (e) => {{
+      let html = `<b>${{td.dataset.cls}} &middot; ${{td.dataset.month}}</b><br>Avg ${{td.dataset.avg}} &middot; n=${{td.dataset.n}}`;
+      if (td.dataset.dip) html += `<br>${{td.dataset.dip}}`;
+      tooltip.innerHTML = html;
+      tooltip.style.left = e.clientX + 'px';
+      tooltip.style.top = (e.clientY - 10) + 'px';
+      tooltip.classList.add('show');
+    }});
+    td.addEventListener('mouseleave', () => tooltip.classList.remove('show'));
+  }});
+}}
+
 function renderHeatmap(granular, headId, bodyId, cornerLabel, brand, resolver, channel) {{
   const rows = computeHeatmap(granular, brand, resolver, channel);
   const head = document.getElementById(headId);
@@ -458,48 +520,52 @@ function renderHeatmap(granular, headId, bodyId, cornerLabel, brand, resolver, c
     return;
   }}
 
-  const cs = getComputedStyle(document.documentElement);
-  const c1 = hexToRgb(cs.getPropertyValue('--rating-1') || '#e34948');
-  const c3 = hexToRgb(cs.getPropertyValue('--rating-3') || '#898781');
-  const c5 = hexToRgb(cs.getPropertyValue('--rating-5') || '#2a78d6');
+  const colorForAvg = colorScale();
+  body.innerHTML = rows.map(row =>
+    `<tr><td class="rowlabel" title="${{row.cls}}">${{row.cls}} <span style="color:var(--text-muted); font-weight:400;">(n=${{row.n}})</span></td>${{cellsHtmlForRow(row, colorForAvg)}}</tr>`
+  ).join('');
 
-  function colorForAvg(avg) {{
-    return avg <= 3 ? mixRgb(c1, c3, (avg - 1) / 2) : mixRgb(c3, c5, (avg - 3) / 2);
+  wireCellTooltips(body, tooltip);
+}}
+
+// Query Class heatmap: each class row expands to show its Query Category breakdown.
+function renderClassHeatmap(brand, resolver, channel) {{
+  const rows = computeHeatmap(GRANULAR, brand, resolver, channel);
+  const head = document.getElementById('heatmap-head');
+  const body = document.getElementById('heatmap-body');
+  const tooltip = document.getElementById('tooltip');
+
+  head.innerHTML = '<th class="corner">Query Class</th>' + MONTH_ORDER.map(m => `<th>${{m.replace(' 20', " '")}}</th>`).join('');
+
+  if (rows.length === 0) {{
+    body.innerHTML = '<tr><td class="rowlabel">No completed CSAT responses match this filter combination.</td></tr>';
+    return;
   }}
 
-  body.innerHTML = rows.map(row => {{
-    const dips = rowDips(row);
-    const cells = MONTH_ORDER.map(m => {{
-      const b = row.cell[m];
-      if (!b || b.n === 0) return '<td class="cell empty">&ndash;</td>';
-      const avg = b.sum / b.n;
-      const rgb = colorForAvg(avg);
-      const lum = relLuminance(rgb);
-      const textColor = lum > 0.45 ? '#0b0b0b' : '#ffffff';
-      const isDipCell = m === CURRENT_MONTH && dips;
-      const cellClass = 'cell' + (isDipCell ? ' dip' : '');
-      let dipMark = '';
-      let dipTitle = '';
-      if (isDipCell) {{
-        const badgeBg = lum > 0.45 ? 'rgba(0,0,0,0.55)' : 'rgba(255,255,255,0.7)';
-        dipTitle = ' data-dip="Down vs ' + dips.map(d => d.month + ' (' + d.avg.toFixed(2) + ', &minus;' + d.drop.toFixed(2) + ')').join(', ') + '"';
-        dipMark = ` <span class="dip-flag" style="background:${{badgeBg}}; color:${{textColor}}">&#9660;</span>`;
-      }}
-      return `<td class="${{cellClass}}" data-cls="${{row.cls}}" data-month="${{m}}" data-avg="${{avg.toFixed(2)}}" data-n="${{b.n}}"${{dipTitle}} style="background:rgb(${{rgb.r}},${{rgb.g}},${{rgb.b}}); color:${{textColor}}">${{avg.toFixed(1)}}${{dipMark}}</td>`;
-    }}).join('');
-    return `<tr><td class="rowlabel" title="${{row.cls}}">${{row.cls}} <span style="color:var(--text-muted); font-weight:400;">(n=${{row.n}})</span></td>${{cells}}</tr>`;
+  const colorForAvg = colorScale();
+  body.innerHTML = rows.map((row, i) => {{
+    const subRows = computeSubHeatmap(row.cls, brand, resolver, channel);
+    const subHtml = subRows.map(sub =>
+      `<tr class="qcat-row" data-parent-idx="${{i}}" style="display:none;"><td class="rowlabel sub" title="${{sub.cls}}">${{sub.cls}} <span style="color:var(--text-muted); font-weight:400;">(n=${{sub.n}})</span></td>${{cellsHtmlForRow(sub, colorForAvg)}}</tr>`
+    ).join('');
+    const toggle = subRows.length
+      ? `<span class="row-toggle" data-toggle-idx="${{i}}">&#9656;</span>`
+      : '<span class="row-toggle-spacer"></span>';
+    return `<tr class="cls-row" data-toggle-idx="${{i}}"><td class="rowlabel" title="${{row.cls}}">${{toggle}}${{row.cls}} <span style="color:var(--text-muted); font-weight:400;">(n=${{row.n}})</span></td>${{cellsHtmlForRow(row, colorForAvg)}}</tr>${{subHtml}}`;
   }}).join('');
 
-  body.querySelectorAll('td.cell:not(.empty)').forEach(td => {{
-    td.addEventListener('mousemove', (e) => {{
-      let html = `<b>${{td.dataset.cls}} &middot; ${{td.dataset.month}}</b><br>Avg ${{td.dataset.avg}} &middot; n=${{td.dataset.n}}`;
-      if (td.dataset.dip) html += `<br>${{td.dataset.dip}}`;
-      tooltip.innerHTML = html;
-      tooltip.style.left = e.clientX + 'px';
-      tooltip.style.top = (e.clientY - 10) + 'px';
-      tooltip.classList.add('show');
+  wireCellTooltips(body, tooltip);
+
+  function toggleClass(i) {{
+    const toggleEl = body.querySelector(`.row-toggle[data-toggle-idx="${{i}}"]`);
+    if (!toggleEl) return;
+    const expanded = toggleEl.classList.toggle('expanded');
+    body.querySelectorAll(`tr.qcat-row[data-parent-idx="${{i}}"]`).forEach(tr => {{
+      tr.style.display = expanded ? '' : 'none';
     }});
-    td.addEventListener('mouseleave', () => tooltip.classList.remove('show'));
+  }}
+  body.querySelectorAll('tr.cls-row').forEach(tr => {{
+    tr.querySelector('td.rowlabel').addEventListener('click', () => toggleClass(tr.dataset.toggleIdx));
   }});
 }}
 
@@ -662,7 +728,7 @@ function refreshAll() {{
   const channel = document.getElementById('f-channel').value;
   renderKPIs(brand, resolver, channel);
   renderDipBanner(brand, resolver, channel);
-  renderHeatmap(GRANULAR, 'heatmap-head', 'heatmap-body', 'Task Category', brand, resolver, channel);
+  renderClassHeatmap(brand, resolver, channel);
   renderHeatmap(GRANULAR_AGENT, 'heatmap-agent-head', 'heatmap-agent-body', 'Agent', brand, resolver, channel);
 }}
 
