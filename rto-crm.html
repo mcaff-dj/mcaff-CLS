@@ -237,6 +237,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
     const CreditCardIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><rect width="20" height="14" x="2" y="5" rx="2"/><line x1="2" x2="22" y1="10" y2="10"/></svg>;
     const ChatIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>;
     const ShieldIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>;
+    const SparklesIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3L12 3z"/></svg>;
 
     /* ── Custom Select Component ─────────────────────── */
     function CustomSelect({ value, onChange, options, icon: IconComponent, placeholder, className="" }) {
@@ -417,7 +418,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [tab, setTab] = useState('all');
       const [dateScope, setDateScope] = useState(()=>localStorage.getItem('rto_date_scope')||'ALL_TIME');
       const [payFilter, setPayFilter] = useState('ALL');
-      const [prioFilter, setPrioFilter] = useState('ALL');
       const [page, setPage] = useState(1);
       const [perPage, setPerPage] = useState(50);
 
@@ -452,7 +452,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
         // Write directly to Google Sheet Column Q
         writeToSheetRow(tkt.rawIndex, { assignedAgent: agentAssignedTag });
-        showToast(`Assigned ${tkt.orderNumber} to ${googleUser.email} & updated Google Sheet Column Q!`);
+        showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email} & updated Column Q!`);
       };
 
       const openDisp = (t)=>{
@@ -572,14 +572,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           });
         });
 
-        // 1. Update UI overrides state instantly
+        // Update UI overrides state instantly
         setOverrides(p => {
           const u = { ...p, ...newOverrides };
           try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
           return u;
         });
 
-        // 2. Batch update live Google Sheet Column Q
+        // Batch update live Google Sheet Column Q
         if (valueRanges.length > 0) {
           try {
             const token = await getAccessToken();
@@ -614,7 +614,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       useEffect(()=>{sync(true);},[]);
       useEffect(()=>{const t=setInterval(()=>sync(true),60000);return()=>clearInterval(t);},[sync]);
 
-      // Derived data & Queue Replenishment Logic
+      // Derived data & STRICT Calling Date (Latest First) Sorting
       const allTickets = useMemo(()=>{
         let base=tickets.map(t=>{
           const o=overrides[t.id];
@@ -633,7 +633,13 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           }:t;
         });
 
-        base.sort((a,b)=>{if(a.isHighPriority&&!b.isHighPriority)return-1;if(!a.isHighPriority&&b.isHighPriority)return 1;if(a.rowDate&&b.rowDate)return b.rowDate-a.rowDate;return 0;});
+        // STRICT CALLING DATE SORTING: Latest calling date (e.g. 21 Jul, 20 Jul) ALWAYS at the top!
+        base.sort((a,b)=>{
+          if(a.rowDate && b.rowDate && a.rowDate.getTime() !== b.rowDate.getTime()) {
+            return b.rowDate.getTime() - a.rowDate.getTime();
+          }
+          return b.rawIndex - a.rawIndex;
+        });
 
         // REPLENISHMENT ENGINE: An agent's active PENDING box maintains 10 PENDING (unresolved) leads!
         if(userRole==='Agent' && googleUser?.email){
@@ -647,7 +653,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           // 2. Disposed or refunded leads assigned to me (kept for history view)
           const myDisposed = base.filter(t => (t.status !== 'Pending' || t.disposition || t.agentRemarks) && isMine(t.assignedAgent));
 
-          // 3. If pending leads count is below maxLeads (10), claim fresh unassigned leads to refill active box!
+          // 3. If pending leads count is below maxLeads (10), claim fresh unassigned leads (sorted by latest calling date) to refill active box!
           let unassignedLeads = base.filter(t => t.status === 'Pending' && !t.disposition && !t.agentRemarks && (!t.assignedAgent || t.assignedAgent === 'Unassigned'));
 
           const needed = Math.max(0, maxLeads - myPending.length);
@@ -659,7 +665,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
             myPending = [...myPending, ...claimed];
           }
 
-          // Return 10 PENDING leads + ALL DISPOSED leads (so disposed leads remain visible in Disposed/All tab!)
+          // Return 10 PENDING leads + ALL DISPOSED leads (so ALL assigned leads pop with disposed and not actioned ones!)
           return [...myPending.slice(0, maxLeads), ...myDisposed];
         }
 
@@ -713,7 +719,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
       }, [allTickets, googleUser, userRole]);
 
-      const hp=allTickets.filter(t=>t.isHighPriority&&t.status!=='Refunded').length;
+      // Fresh Unassigned Leads Count in Sheet
+      const freshUnassignedCount = useMemo(() => {
+        return tickets.filter(t => {
+          const agt = overrides[t.id]?.assignedAgent || t.assignedAgent;
+          return !agt || agt === 'Unassigned';
+        }).length;
+      }, [tickets, overrides]);
+
       const pend=allTickets.filter(t=>t.status==='Pending'&&!t.disposition&&!t.agentRemarks).length;
       const refd=allTickets.filter(t=>t.status==='Refunded').length;
       const dispCount=allTickets.filter(t=>t.disposition||t.agentRemarks||t.status!=='Pending').length;
@@ -774,26 +787,46 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       const filtered = useMemo(()=>{
         setPage(1);
+        
+        // Fresh Leads Tab: Shows all unassigned leads in the sheet sorted by latest calling date!
+        if (tab === 'fresh') {
+          return tickets.filter(t => {
+            const agt = overrides[t.id]?.assignedAgent || t.assignedAgent;
+            const isUnassigned = !agt || agt === 'Unassigned';
+            if (!isUnassigned) return false;
+            if (payFilter !== 'ALL' && t.paymentMethod !== payFilter) return false;
+            if (search.trim()) {
+              const q = search.toLowerCase();
+              if (![t.orderNumber, t.customerName, t.email, t.phone, t.rtoReason, t.callingDate].some(f => (f || '').toLowerCase().includes(q))) return false;
+            }
+            return true;
+          }).sort((a, b) => {
+            if (a.rowDate && b.rowDate && a.rowDate.getTime() !== b.rowDate.getTime()) {
+              return b.rowDate.getTime() - a.rowDate.getTime();
+            }
+            return b.rawIndex - a.rawIndex;
+          });
+        }
+
+        // All Leads / Pending / Disposed / Refunded Tabs
         return allTickets.filter(t=>{
           if(agentFilter!=='ALL'){const a=t.assignedAgent.toLowerCase(),s=agentFilter.toLowerCase();if(!a.includes(s)&&!s.includes(a))return false;}
-          if(tab==='high'&&(!t.isHighPriority||t.status==='Refunded'))return false;
           if(tab==='pending'&&(t.status!=='Pending'||t.disposition||t.agentRemarks))return false;
           if(tab==='refunded'&&t.status!=='Refunded')return false;
           if(tab==='disposed'&&(!t.disposition&&!t.agentRemarks&&t.status==='Pending'))return false;
-          if(prioFilter==='HIGH'&&!t.isHighPriority)return false;
           if(payFilter!=='ALL'&&t.paymentMethod!==payFilter)return false;
           if(search.trim()){const q=search.toLowerCase();if(![t.orderNumber,t.customerName,t.email,t.phone,t.rtoReason,t.callingDate,t.assignedAgent,t.agentRemarks,t.disposition].some(f=>(f||'').toLowerCase().includes(q)))return false;}
           return true;
         });
-      },[allTickets,agentFilter,tab,prioFilter,payFilter,search]);
+      },[allTickets,tickets,overrides,agentFilter,tab,payFilter,search]);
 
       const pages=Math.ceil(filtered.length/perPage)||1;
       const visible=filtered.slice((page-1)*perPage,page*perPage);
 
       const tabs=[
-        {key:'all',label:'All Leads',count:allTickets.length},
-        {key:'high',label:'High Priority',count:hp},
+        {key:'all',label:'All Leads (Assigned)',count:allTickets.length},
         {key:'pending',label:'Pending Queue',count:pend},
+        {key:'fresh',label:'⚡ Fresh Unassigned Leads',count:freshUnassignedCount},
         {key:'disposed',label:'Disposed & Remarks',count:dispCount},
         {key:'refunded',label:'Refunded',count:refd},
       ];
@@ -819,7 +852,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               <nav className="flex items-center gap-0.5 overflow-x-auto no-scrollbar">
                 {tabs.map(t=>(
                   <button key={t.key} onClick={()=>setTab(t.key)} className={`relative px-3 py-1.5 rounded-lg text-[13px] font-medium whitespace-nowrap transition-all ${tab===t.key?'text-white bg-zinc-800/90 border border-zinc-700/60 shadow-xs':'text-zinc-400 hover:text-zinc-200'}`}>
-                    {t.key==='high'&&<span className="mr-1.5 text-rose-400">●</span>}
+                    {t.key==='fresh'&&<span className="mr-1.5 text-amber-400">⚡</span>}
                     {t.label}
                     <span className={`ml-1.5 text-[10px] tabular-nums px-1.5 py-0.2 rounded-md ${tab===t.key?'text-zinc-300 bg-zinc-700/50':'text-zinc-500 bg-zinc-900'}`}>{t.count.toLocaleString('en-IN')}</span>
                   </button>
@@ -982,11 +1015,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               </div>
             ):(
               <>
-                {/* Stats */}
+                {/* Stats Header Cards */}
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                   <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs"><p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500 mb-1">Active Pending Box</p><p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{pend.toLocaleString('en-IN')}</p><p className="text-[12px] text-zinc-500 mt-1">{agentFilter!=='ALL'?agentFilter:'All agents'}</p></div>
                   <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs"><p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500 mb-1">Avg Handle Time</p><p className="text-2xl font-extrabold text-zinc-100">2.8<span className="text-sm font-normal text-zinc-400 ml-0.5">min</span></p><p className="text-[12px] text-zinc-500 mt-1">Per resolution</p></div>
-                  <div className="bg-zinc-900/70 rounded-xl p-4 border border-rose-900/50 shadow-xs"><p className="text-[11px] font-medium uppercase tracking-wider text-rose-400 mb-1">High Priority</p><p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{hp.toLocaleString('en-IN')}</p><p className="text-[12px] text-zinc-500 mt-1">Prepaid refusals</p></div>
+                  <div className="bg-zinc-900/70 rounded-xl p-4 border border-amber-900/50 shadow-xs"><p className="text-[11px] font-medium uppercase tracking-wider text-amber-400 mb-1">Fresh Unassigned Leads</p><p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{freshUnassignedCount.toLocaleString('en-IN')}</p><p className="text-[12px] text-amber-400/80 mt-1 font-medium">Ready to claim</p></div>
                   <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs"><p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500 mb-1">Total Disposed</p><p className="text-2xl font-extrabold text-indigo-400 tabular-nums">{dispCount.toLocaleString('en-IN')}</p><p className="text-[12px] text-zinc-500 mt-1">Saved in History</p></div>
                 </div>
 
@@ -1069,8 +1102,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                             const emailDisp = hasNameEmail ? agtStr.match(/\(([^)]+)\)/)?.[1] : (agtStr.includes('@') ? agtStr : (agtStr !== 'Unassigned' ? `${agtStr}@mcaffeine.com` : ''));
 
                             return(
-                              <tr key={t.id} className={`hover:bg-zinc-800/25 transition-colors ${t.isHighPriority&&!ref?'bg-rose-950/10':''}`}>
-                                <td className="py-3 px-4"><span className="font-mono font-semibold text-zinc-200">{t.orderNumber}</span>{t.isHighPriority&&!ref&&<span className="ml-1.5 text-rose-400 text-[10px] font-bold">● HP</span>}</td>
+                              <tr key={t.id} className="hover:bg-zinc-800/25 transition-colors">
+                                <td className="py-3 px-4"><span className="font-mono font-semibold text-zinc-200">{t.orderNumber}</span></td>
                                 <td className="py-3 px-4"><span className="text-zinc-200 font-medium">{t.customerName}</span><span className="block text-[12px] text-zinc-500 mt-0.5 truncate max-w-[160px]">{t.email||t.phone}</span></td>
                                 
                                 {/* Column Q: Agent Name + Email ID */}
@@ -1097,11 +1130,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                                   )}
                                 </td>
 
-                                <td className="py-3 px-4 text-zinc-400 tabular-nums">{t.callingDate}</td>
+                                <td className="py-3 px-4 text-zinc-200 font-semibold font-mono tabular-nums">{t.callingDate}</td>
                                 
                                 {/* RTO Reason & Remarks Preview */}
                                 <td className="py-3 px-4 max-w-[220px]">
-                                  <span className={`truncate block ${t.isHighPriority?'text-rose-300 font-medium':'text-zinc-400'}`}>{t.rtoReason}</span>
+                                  <span className="truncate block text-zinc-300">{t.rtoReason}</span>
                                   {t.agentRemarks && (
                                     <span className="inline-flex items-center gap-1 mt-1 text-[11px] text-indigo-300 bg-indigo-950/50 border border-indigo-800/40 px-2 py-0.5 rounded-md truncate max-w-full" title={t.agentRemarks}>
                                       💬 {t.agentRemarks}
@@ -1119,7 +1152,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                                 <td className="py-3 px-4 text-center"><Badge color={ref?'green':isDisposed?'blue':'zinc'}>{ref?'Refunded':isDisposed?'Disposed':'Pending'}</Badge></td>
                                 <td className="py-3 px-4 text-right"><div className="flex items-center justify-end gap-1.5">
                                   <button onClick={()=>setDetailTkt(t)} className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 text-[12px] font-medium transition-colors">Details</button>
-                                  <button onClick={()=>openDisp(t)} className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-semibold flex items-center gap-1.5 transition-colors shadow-xs"><PhoneIcon/>Call</button>
+                                  <button onClick={()=>openDisp(t)} className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-semibold flex items-center gap-1.5 transition-colors shadow-xs"><PhoneIcon/>{isUnassigned ? 'Claim & Call' : 'Call'}</button>
                                 </div></td>
                               </tr>
                             );
@@ -1150,7 +1183,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     <div className="flex items-center gap-2.5">
                       <span className="px-2.5 py-0.5 rounded-md bg-indigo-950/60 text-indigo-300 border border-indigo-800/60 font-mono text-xs font-bold">{dispTkt.orderNumber}</span>
                       <Badge color={dispTkt.paymentMethod==='COD'?'amber':'blue'}>{dispTkt.paymentMethod}</Badge>
-                      {dispTkt.isHighPriority && <Badge color="red">🔥 High Priority</Badge>}
                     </div>
                     <h3 className="text-base font-extrabold text-zinc-100 flex items-center gap-2">
                       {dispTkt.customerName}
@@ -1370,7 +1402,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   <button onClick={()=>setDetailTkt(null)} className="p-1 rounded-lg hover:bg-zinc-800 text-zinc-400"><XIcon/></button>
                 </div>
                 <div className="px-6 py-5 space-y-4 max-h-[68vh] overflow-y-auto text-[13px]">
-                  {detailTkt.isHighPriority&&<div className="p-3 rounded-xl bg-rose-950/40 border border-rose-900/60 text-rose-300 font-medium text-[13px]">🔥 High Priority — Prepaid refusal match</div>}
                   
                   {/* Assigned Agent Column Q Info */}
                   <div className="p-3.5 rounded-xl bg-zinc-900/90 border border-zinc-800/80 space-y-1">
