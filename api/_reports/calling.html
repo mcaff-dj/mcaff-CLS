@@ -8,13 +8,12 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.2/dist/confetti.browser.min.js"></script>
 
   <script>
@@ -31,73 +30,53 @@
   </script>
 
   <style>
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; margin: 0; }
 
-    html.dark body {
-      background: #09090b;
-      color: #fafafa;
-    }
+    html.dark body { background: #0a0a0b; color: #fafafa; }
 
-    html:not(.dark) body {
-      background: #f8fafc;
-      color: #0f172a;
-    }
-
-    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    
-    html.dark ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 9999px; }
-    html.dark ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
-    
-    html:not(.dark) ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
-    html:not(.dark) ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
 
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(6px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    .animate-fadeIn { animation: fadeIn 0.15s ease-out; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes slideUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+    .animate-fadeIn { animation: fadeIn .2s ease-out; }
+    .animate-slideUp { animation: slideUp .25s cubic-bezier(.4,0,.2,1); }
+    .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+    select { -webkit-appearance: none; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none' stroke='%2371717a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m2 4 4 4 4-4'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 8px center; padding-right: 24px !important; }
 
     @media print {
       body * { visibility: hidden; }
       #printable-receipt, #printable-receipt * { visibility: visible; }
-      #printable-receipt {
-        position: absolute; left: 0; top: 0; width: 100%;
-        color: #000; background: #fff; padding: 32px;
-      }
+      #printable-receipt { position: absolute; left: 0; top: 0; width: 100%; color: #000; background: #fff; padding: 32px; }
     }
   </style>
 </head>
 
-<body class="font-sans antialiased min-h-screen transition-colors duration-200">
+<body class="font-sans antialiased min-h-screen">
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useEffect, useMemo, useCallback } = React;
+    const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
-    /* ── Defaults ─────────────────────────────────────── */
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI/edit?usp=sharing';
     const DEFAULT_SHEET_RANGE = 'Data';
 
-    // High Priority RTO Refusal Reasons list
     const HIGH_PRIORITY_RTO_REASONS = [
-      'consignee opened the package and refused to accept',
-      'consignee refused to accept',
-      'customer refused to accept',
-      'customer refused to accept:verified',
-      'elasticrun_otp_verified',
-      'entry refused',
-      'kyc|customer refused to share kyc',
-      'otp validation successful',
-      'otp verified cancellation',
-      'prf|receiver refused delivery',
-      'refused to accept',
-      'refused to accept (no cancellation code)',
-      'refused to accept (with cancellation code)',
-      'rto pending - otp validated cancellation'
+      'consignee opened the package and refused to accept','consignee refused to accept','customer refused to accept',
+      'customer refused to accept:verified','elasticrun_otp_verified','entry refused',
+      'kyc|customer refused to share kyc','otp validation successful','otp verified cancellation',
+      'prf|receiver refused delivery','refused to accept','refused to accept (no cancellation code)',
+      'refused to accept (with cancellation code)','rto pending - otp validated cancellation'
     ];
 
-    /* ── Google Sheets Service Account Key ─────────────── */
+    /* ── Google Sheets Auth ────────────────────────────── */
     const SERVICE_ACCOUNT = {
       client_email: 'datafetchcls@sheetdata-501810.iam.gserviceaccount.com',
       private_key: `-----BEGIN PRIVATE KEY-----
@@ -132,1351 +111,540 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       scopes: 'https://www.googleapis.com/auth/spreadsheets.readonly',
     };
 
-    function b64url(str) { return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
-    function b64urlBytes(buf) { return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+    function b64url(s){return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+    function b64urlBytes(b){return btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+    async function importPK(pem){const b=pem.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s/g,'');const bin=Uint8Array.from(atob(b),c=>c.charCodeAt(0));return crypto.subtle.importKey('pkcs8',bin.buffer,{name:'RSASSA-PKCS1-v1_5',hash:'SHA-256'},false,['sign']);}
 
-    async function importPrivateKey(pem) {
-      const b64 = pem.replace(/-----BEGIN PRIVATE KEY-----/, '').replace(/-----END PRIVATE KEY-----/, '').replace(/\s/g, '');
-      const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-      return crypto.subtle.importKey('pkcs8', bin.buffer, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+    let _tok=null,_exp=0;
+    async function getAccessToken(){
+      const now=Math.floor(Date.now()/1000);
+      if(_tok&&_exp>now+60)return _tok;
+      const h=b64url(JSON.stringify({alg:'RS256',typ:'JWT'}));
+      const p=b64url(JSON.stringify({iss:SERVICE_ACCOUNT.client_email,scope:SERVICE_ACCOUNT.scopes,aud:SERVICE_ACCOUNT.token_uri,iat:now,exp:now+3600}));
+      const u=`${h}.${p}`;const k=await importPK(SERVICE_ACCOUNT.private_key);
+      const sig=await crypto.subtle.sign('RSASSA-PKCS1-v1_5',k,new TextEncoder().encode(u));
+      const jwt=`${u}.${b64urlBytes(sig)}`;
+      const r=await fetch(SERVICE_ACCOUNT.token_uri,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`});
+      const d=await r.json();if(!d.access_token)throw new Error(d.error_description||'Token error');
+      _tok=d.access_token;_exp=now+3500;return _tok;
     }
 
-    let cachedToken = null;
-    let tokenExp = 0;
-
-    async function getAccessToken() {
-      const now = Math.floor(Date.now() / 1000);
-      if (cachedToken && tokenExp > now + 60) return cachedToken;
-
-      const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
-      const payload = b64url(JSON.stringify({
-        iss: SERVICE_ACCOUNT.client_email,
-        scope: SERVICE_ACCOUNT.scopes,
-        aud: SERVICE_ACCOUNT.token_uri,
-        iat: now,
-        exp: now + 3600,
-      }));
-      const unsigned = `${header}.${payload}`;
-      const key = await importPrivateKey(SERVICE_ACCOUNT.private_key);
-      const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(unsigned));
-      const jwt = `${unsigned}.${b64urlBytes(sig)}`;
-
-      const res = await fetch(SERVICE_ACCOUNT.token_uri, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
-      });
-      const data = await res.json();
-      if (!data.access_token) throw new Error(data.error_description || 'Token error');
-      cachedToken = data.access_token;
-      tokenExp = now + 3500;
-      return cachedToken;
+    async function fetchSheet(sid,range='Data'){
+      const t=await getAccessToken();
+      const r=await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${encodeURIComponent(range)}?majorDimension=ROWS`,{headers:{Authorization:`Bearer ${t}`}});
+      if(!r.ok)throw new Error(`Sheets API ${r.status}`);const d=await r.json();
+      if(!d.values||d.values.length<2)throw new Error('No data');return d.values;
     }
 
-    async function fetchSheetRawValues(spreadsheetId, range = 'Data') {
-      const token = await getAccessToken();
-      const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}?majorDimension=ROWS`;
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      if (!res.ok) throw new Error(`Sheets error (${res.status})`);
-      const data = await res.json();
-      if (!data.values || data.values.length < 2) throw new Error('No data rows found');
-      return data.values;
-    }
+    function extractSheetId(i){const m=i.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);return m?m[1]:/^[a-zA-Z0-9_-]{20,}$/.test(i.trim())?i.trim():null;}
 
-    function extractSheetId(input) {
-      const match = input.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
-      if (match) return match[1];
-      if (/^[a-zA-Z0-9_-]{20,}$/.test(input.trim())) return input.trim();
-      return null;
-    }
+    function parseDate(s){if(!s)return null;let d=new Date(s);if(!isNaN(d))return d;const p=s.trim().split(/\s+/);if(p.length===2){const day=parseInt(p[0]),ms=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'],mi=ms.indexOf(p[1].toLowerCase().slice(0,3));if(!isNaN(day)&&mi!==-1)return new Date(new Date().getFullYear(),mi,day);}return null;}
 
-    function parseCallingDate(str) {
-      if (!str) return null;
-      const d = new Date(str);
-      if (!isNaN(d.getTime())) return d;
-      const parts = str.trim().split(/\s+/);
-      if (parts.length === 2) {
-        const day = parseInt(parts[0]);
-        const months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
-        const mIdx = months.indexOf(parts[1].toLowerCase().slice(0, 3));
-        if (!isNaN(day) && mIdx !== -1) {
-          const year = new Date().getFullYear();
-          return new Date(year, mIdx, day);
+    /* ── Non-blocking parser ─────────────────────────── */
+    async function parseRows(vals, user=null, role='Admin'){
+      if(!vals||vals.length<2)return[];
+      const[hdr,...rows]=vals;
+      const aE=(user?.email||'').toLowerCase(),aP=aE.split('@')[0],aF=(user?.name||'').toLowerCase().split(' ')[0];
+      const res=[];
+      for(let i=0;i<rows.length;i++){
+        const r=rows[i];
+        const ag=(r[16]||'').toLowerCase().trim();
+        if(role==='Agent'&&user&&ag&&ag!=='unassigned'){
+          if(!(aE&&ag===aE)||(aP.length>2&&ag.includes(aP))||(aF.length>2&&ag.includes(aF)))
+            if(ag!==aE&&!ag.includes(aP)&&!ag.includes(aF))continue;
         }
+        const o={};hdr.forEach((h,x)=>{const c=(h||'').trim();if(c)o[c]=(r[x]||'').trim();o[`c${x}`]=(r[x]||'').trim();});
+        res.push(mapTkt(o,i));
+        if(i%5000===4999)await new Promise(r=>setTimeout(r,0));
       }
-      return null;
+      return res;
     }
 
-    function parseRowDateRaw(str) {
-      if (!str) return null;
-      const d = new Date(str);
-      if (!isNaN(d.getTime())) return d;
-      const parts = str.split(/[\/\-\.]/);
-      if (parts.length === 3) {
-        if (parts[0].length === 4) return new Date(parts[0], parts[1] - 1, parts[2]);
-        if (parts[2].length === 4) return new Date(parts[2], parts[1] - 1, parts[0]);
-      }
-      return null;
+    function mapTkt(r,i){
+      const g=(...ks)=>{for(const k of ks){const f=Object.keys(r).find(h=>h.toLowerCase().replace(/[^a-z0-9]/g,'').includes(k.toLowerCase().replace(/[^a-z0-9]/g,'')));if(f&&r[f])return r[f];}return'';};
+      const pay=g('Payment Method','Payment Mode','Payment','Type').toUpperCase();
+      const amt=g('Order Amount','Amount','Price','Total','Order Value');
+      const ord=g('Order Number','Order #','Order ID','OrderNo')||`ORD-${i+1000}`;
+      const agt=g('Agent Name','Agent','Assigned Agent','AgentName','Assigned To','c16')||'Unassigned';
+      const rto=g('RTO Reason','c3','Reason','RTOReason')||'Return To Origin';
+      const cd=g('Calling Date','CallingDate','c24')||'';
+      const prep=pay.includes('PREPAID')||pay.includes('ONLINE')||pay.includes('PAYTM')||pay.includes('UPI')||(!pay.includes('COD')&&!pay.includes('CASH'));
+      const hp=prep&&HIGH_PRIORITY_RTO_REASONS.some(x=>rto.toLowerCase().includes(x));
+      return{id:`T-${ord}-${i}`,orderNumber:ord,customerName:g('Customer Name','Name','Customer','Full Name')||'Customer',
+        email:g('Email ID','Email','Customer Email')||'',phone:g('Contact Number','Phone','Mobile','Contact')||'',
+        address:g('Address','Street Address','Shipping Address')||'',city:g('City','District','Town')||'',
+        state:g('State','Province')||'',pincode:g('Pincode','Zip','Postal Code','Pin Code')||'',
+        paymentMethod:pay.includes('COD')||pay.includes('CASH')?'COD':'Prepaid',
+        orderAmount:parseFloat(amt.replace(/[^0-9.]/g,''))||0,rtoReason:rto,
+        assignedAgent:agt,callingDate:cd||'—',isHighPriority:hp,
+        rowDate:parseDate(cd)||parseDate(g('Date','Order Date','c0')),rawIndex:i,
+        status:'Pending',connected:r['c17']||'',disposition:r['c19']||''};
     }
 
-    /* ── HIGH PERFORMANCE NON-BLOCKING MICRO-CHUNK STREAMING PARSER ── */
-    async function parseAndFilterSheetRowsAsync(dataValues, dateRange = 'ALL_TIME', loggedInUser = null, role = 'Admin') {
-      if (!dataValues || dataValues.length < 2) return [];
-      const [headers, ...rawRows] = dataValues;
+    /* ── SVG Icons (clean, consistent 16px) ───────────── */
+    const Icon = ({d, ...p}) => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d={d}/></svg>;
+    const SearchIcon = (p) => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>;
+    const XIcon = (p) => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>;
+    const CheckIcon = (p) => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M20 6 9 17l-5-5"/></svg>;
+    const PhoneIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.76.32 1.54.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c1.27.38 2.05.58 2.81.7A2 2 0 0 1 22 16.92z"/></svg>;
+    const RefreshIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>;
+    const PrintIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/></svg>;
 
-      const agentNameLower = (loggedInUser?.name || '').toLowerCase().trim();
-      const agentEmailLower = (loggedInUser?.email || '').toLowerCase().trim();
-      const emailPrefix = agentEmailLower ? agentEmailLower.split('@')[0] : '';
-      const firstName = agentNameLower ? agentNameLower.split(' ')[0] : '';
-
-      const results = [];
-      const chunkSize = 5000;
-
-      for (let i = 0; i < rawRows.length; i += chunkSize) {
-        const chunk = rawRows.slice(i, i + chunkSize);
-        
-        for (let j = 0; j < chunk.length; j++) {
-          const row = chunk[j];
-          const ticketAgentLower = (row[16] || '').toLowerCase().trim(); // Column Q (Agent)
-
-          if (role === 'Agent' && loggedInUser && ticketAgentLower && ticketAgentLower !== 'unassigned') {
-            const isMatch = (agentEmailLower && ticketAgentLower === agentEmailLower) ||
-                            (agentNameLower && ticketAgentLower === agentNameLower) ||
-                            (emailPrefix && emailPrefix.length > 2 && (ticketAgentLower.includes(emailPrefix) || emailPrefix.includes(ticketAgentLower))) ||
-                            (firstName && firstName.length > 2 && (ticketAgentLower.includes(firstName) || firstName.includes(ticketAgentLower)));
-            if (!isMatch) continue;
-          }
-
-          const obj = {};
-          headers.forEach((h, idx) => {
-            const cleanH = (h || '').trim();
-            if (cleanH) obj[cleanH] = (row[idx] || '').trim();
-            obj[`col_${idx}`] = (row[idx] || '').trim();
-            if (idx === 3) obj['_col_D'] = (row[idx] || '').trim();
-            if (idx === 16) obj['_col_Q'] = (row[idx] || '').trim();
-            if (idx === 17) obj['_col_R'] = (row[idx] || '').trim();
-            if (idx === 19) obj['_col_T'] = (row[idx] || '').trim();
-            if (idx === 24) obj['_col_Y'] = (row[idx] || '').trim();
-          });
-
-          results.push(mapRowToTicket(obj, i + j));
-        }
-
-        if (i + chunkSize < rawRows.length) {
-          await new Promise(r => setTimeout(r, 0));
-        }
-      }
-
-      return results;
+    /* ── Reusable Components ──────────────────────────── */
+    function Badge({children, color='zinc'}){
+      const c={zinc:'bg-zinc-800 text-zinc-300 border-zinc-700',blue:'bg-blue-950/60 text-blue-300 border-blue-800/50',amber:'bg-amber-950/50 text-amber-300 border-amber-800/50',green:'bg-emerald-950/50 text-emerald-300 border-emerald-800/50',red:'bg-rose-950/50 text-rose-300 border-rose-800/50',indigo:'bg-indigo-950/50 text-indigo-300 border-indigo-800/50'};
+      return <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium border ${c[color]||c.zinc}`}>{children}</span>;
     }
 
-    function mapRowToTicket(row, idx) {
-      const get = (...keys) => {
-        for (const k of keys) {
-          const found = Object.keys(row).find(h => h.toLowerCase().replace(/[^a-z0-9]/g, '').includes(k.toLowerCase().replace(/[^a-z0-9]/g, '')));
-          if (found && row[found]) return row[found];
-        }
-        return '';
-      };
-
-      const rawPay = get('Payment Method', 'Payment Mode', 'Payment', 'Type').toUpperCase();
-      const amtRaw = get('Order Amount', 'Amount', 'Price', 'Total', 'Order Value');
-      const orderNum = get('Order Number', 'Order #', 'Order ID', 'OrderNo') || `ORD-${idx + 1000}`;
-      const assignedAgent = get('Agent Name', 'Agent', 'Assigned Agent', 'AgentName', 'Assigned To', '_col_Q', 'col_16') || 'Unassigned';
-
-      const rtoReasonVal = get('RTO Reason', '_col_D', 'col_3', 'Reason', 'RTOReason', 'Status', 'Notes') || 'Return To Origin';
-      const callingDateVal = get('Calling Date', 'CallingDate', '_col_Y', 'col_24') || '';
-
-      const isPrepaid = rawPay.includes('PREPAID') || rawPay.includes('ONLINE') || rawPay.includes('PAYTM') || rawPay.includes('UPI') || (!rawPay.includes('COD') && !rawPay.includes('CASH'));
-
-      const reasonLower = rtoReasonVal.toLowerCase().trim();
-      const isRefusalMatch = HIGH_PRIORITY_RTO_REASONS.some(r => reasonLower.includes(r));
-      const isHighPriority = isPrepaid && isRefusalMatch;
-
-      const rowDate = parseCallingDate(callingDateVal) || parseRowDateRaw(get('Date', 'Order Date', 'col_0'));
-
-      return {
-        id: `TKT-GS-${orderNum}-${idx}`,
-        orderNumber: orderNum,
-        customerName: get('Customer Name', 'Name', 'Customer', 'Full Name') || 'Customer',
-        email: get('Email ID', 'Email', 'Customer Email', 'Mail') || '',
-        phone: get('Contact Number', 'Phone', 'Mobile', 'Contact') || '',
-        address: get('Address', 'Street Address', 'Shipping Address') || '',
-        city: get('City', 'District', 'Town') || '',
-        state: get('State', 'Province') || '',
-        pincode: get('Pincode', 'Zip', 'Postal Code', 'Pin Code', 'Pin') || '',
-        paymentMethod: rawPay.includes('COD') || rawPay.includes('CASH') ? 'COD' : 'Prepaid',
-        orderAmount: parseFloat(amtRaw.replace(/[^0-9.]/g, '')) || 0,
-        rtoReason: rtoReasonVal,
-        assignedAgentName: assignedAgent,
-        callingDate: callingDateVal || 'N/A',
-        isHighPriority: isHighPriority,
-        rowDate: rowDate,
-        rawIndex: idx,
-        status: 'Assigned Today',
-        connectedStatus: row['_col_R'] || 'Pending',
-        agentDisposition: row['_col_T'] || '',
-      };
+    function Overlay({children, onClose}){
+      return(<div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm"/>
+        <div className="relative animate-slideUp max-h-[90vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>{children}</div>
+      </div>);
     }
 
-    /* ── Icons ────────────────────────────────────────── */
-    function SvgSearch(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>; }
-    function SvgX(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>; }
-    function SvgCheck(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M20 6 9 17l-5-5"/></svg>; }
-    function SvgPrinter(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/></svg>; }
-    function SvgRefresh(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>; }
-    function SvgSun(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>; }
-    function SvgMoon(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>; }
-    function SvgShield(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>; }
-    function SvgPhone(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>; }
-    function SvgClock(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>; }
-    function SvgZap(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>; }
-
-    /* ── Components ───────────────────────────────────── */
-    function Badge({ children, variant = 'default' }) {
-      const styles = {
-        default: 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-zinc-800/80 dark:text-zinc-300 dark:border-zinc-700/60',
-        prepaid: 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/60 dark:text-sky-400 dark:border-sky-800/50',
-        cod: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/60 dark:text-amber-400 dark:border-amber-800/50',
-        success: 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-400 dark:border-emerald-800/50',
-        warning: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/60 dark:text-amber-400 dark:border-amber-800/50',
-        high: 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/60 dark:text-rose-400 dark:border-rose-800/50',
-      };
-      return <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium border ${styles[variant] || styles.default}`}>{children}</span>;
-    }
-
-    function Overlay({ children, onClose }) {
-      return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
-          <div className="absolute inset-0 bg-slate-900/40 dark:bg-black/60 backdrop-blur-xs" />
-          <div className="relative animate-fadeIn" onClick={(e) => e.stopPropagation()}>{children}</div>
-        </div>
-      );
-    }
-
-    function StatCard({ label, value, sub, accent = 'zinc' }) {
-      const accents = {
-        zinc: 'border-slate-200 dark:border-zinc-800/80',
-        sky: 'border-sky-200 dark:border-sky-900/50',
-        amber: 'border-amber-200 dark:border-amber-900/50',
-        emerald: 'border-emerald-200 dark:border-emerald-900/50',
-        rose: 'border-rose-200 dark:border-rose-900/50',
-      };
-      return (
-        <div className={`bg-white dark:bg-zinc-900/80 rounded-xl p-4 border ${accents[accent]} transition-all hover:border-slate-300 dark:hover:border-zinc-700 shadow-sm`}>
-          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-zinc-500 mb-1">{label}</p>
-          <p className="text-xl font-extrabold text-slate-900 dark:text-zinc-100 tracking-tight">{value}</p>
-          {sub && <p className="text-[11px] font-medium text-slate-500 dark:text-zinc-400 mt-1">{sub}</p>}
-        </div>
-      );
+    function EmptyState({title, sub}){
+      return(<div className="flex flex-col items-center justify-center py-20 text-center">
+        <div className="w-16 h-16 rounded-2xl bg-zinc-800/60 flex items-center justify-center mb-4"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#52525b" strokeWidth="1.5"><path d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/></svg></div>
+        <p className="text-sm font-semibold text-zinc-300 mb-1">{title}</p>
+        <p className="text-xs text-zinc-500 max-w-xs">{sub}</p>
+      </div>);
     }
 
     /* ── Main Application ─────────────────────────────── */
-    function App() {
-      const [theme, setTheme] = useState(() => localStorage.getItem('rto_theme') || 'dark');
-      const isEmbedded = useMemo(() => window.self !== window.top, []);
-
-      useEffect(() => {
-        const root = document.documentElement;
-        if (theme === 'dark') root.classList.add('dark');
-        else root.classList.remove('dark');
-        localStorage.setItem('rto_theme', theme);
-      }, [theme]);
-
-      // AUTO-INHERIT AUTHENTICATED AGENT FROM DASHBOARD SESSION
-      const [googleUser, setGoogleUser] = useState(() => {
-        try {
-          const s = localStorage.getItem('rto_google_user');
-          if (s) return JSON.parse(s);
-        } catch (e) {}
-
-        return {
-          name: 'Vighnesh Patil',
-          email: 'vighnesh.patil@mcaffeine.com',
-          picture: 'https://api.dicebear.com/7.x/avataaars/svg?seed=vighnesh.patil@mcaffeine.com'
-        };
-      });
-
-      // ROLE SYSTEM: Default to 'Admin' for Vighnesh & Vikash Pathak
+    function App(){
+      const [googleUser, setGoogleUser] = useState(()=>{try{const s=localStorage.getItem('rto_google_user');if(s)return JSON.parse(s);}catch{}return{name:'Vighnesh Patil',email:'vighnesh.patil@mcaffeine.com',picture:'https://api.dicebear.com/7.x/avataaars/svg?seed=vighnesh.patil@mcaffeine.com'};});
       const [userRole, setUserRole] = useState('Admin');
-      const [isAdminAccount, setIsAdminAccount] = useState(true);
 
-      // AGENT ACTIVITY & TIME AUDIT LOGS
-      const [activityLogs, setActivityLogs] = useState(() => {
-        try {
-          const s = localStorage.getItem('rto_agent_activity_logs');
-          return s ? JSON.parse(s) : [
-            { time: '14:30', agent: 'bhavesh.solanki@mcaffeine.com', action: 'Status Changed to Online', type: 'Online' },
-            { time: '14:15', agent: 'badshasab.pathan@mcaffeine.com', action: 'Disposed Ticket ORD-89395890 (Refunded)', type: 'Ticket' },
-            { time: '13:45', agent: 'bhavesh.solanki@mcaffeine.com', action: 'Took Break (Spent 1h 45m Online)', type: 'Break' }
-          ];
-        } catch { return []; }
-      });
+      const [agentRoster, setAgentRoster] = useState(()=>{try{const s=localStorage.getItem('rto_agent_roster');return s?JSON.parse(s):null;}catch{}return null;}||[
+        {email:'vighnesh.patil@mcaffeine.com',name:'Vighnesh Patil',role:'Admin',maxQuota:10,status:'Online',aht:'2.5m',breakTime:'15m'},
+        {email:'vikash.pathak@mcaffeine.com',name:'Vikash Pathak',role:'Admin',maxQuota:10,status:'Online',aht:'3.1m',breakTime:'20m'},
+        {email:'bhavesh.solanki@mcaffeine.com',name:'Bhavesh Solanki',role:'Agent',maxQuota:10,status:'Online',aht:'2.8m',breakTime:'45m'},
+        {email:'badshasab.pathan@mcaffeine.com',name:'Badshasab Pathan',role:'Agent',maxQuota:10,status:'Online',aht:'3.4m',breakTime:'30m'}
+      ]);
 
-      // AGENTS ROSTER
-      const [agentRoster, setAgentRoster] = useState(() => {
-        try {
-          const s = localStorage.getItem('rto_agent_roster');
-          return s ? JSON.parse(s) : [
-            { email: 'vighnesh.patil@mcaffeine.com', name: 'Vighnesh Patil', role: 'Admin', maxQuota: 10, status: 'Online', avgHandlingTime: '2.5m', totalBreakTime: '15m' },
-            { email: 'vikash.pathak@mcaffeine.com', name: 'Vikash Pathak', role: 'Admin', maxQuota: 10, status: 'Online', avgHandlingTime: '3.1m', totalBreakTime: '20m' },
-            { email: 'bhavesh.solanki@mcaffeine.com', name: 'Bhavesh Solanki', role: 'Agent', maxQuota: 10, status: 'Online', avgHandlingTime: '2.8m', totalBreakTime: '45m' },
-            { email: 'badshasab.pathan@mcaffeine.com', name: 'Badshasab Pathan', role: 'Agent', maxQuota: 10, status: 'Online', avgHandlingTime: '3.4m', totalBreakTime: '30m' }
-          ];
-        } catch { return []; }
-      });
+      const [activityLogs, setActivityLogs] = useState(()=>{try{const s=localStorage.getItem('rto_agent_activity_logs');return s?JSON.parse(s):[];}catch{return[];}});
+      const [agentFilter, setAgentFilter] = useState('ALL');
+      const [agentStatus, setAgentStatus] = useState(()=>localStorage.getItem('rto_agent_status')||'Online');
+      const maxLeads = useMemo(()=>{const m=agentRoster.find(a=>a.email.toLowerCase()===googleUser.email.toLowerCase());return m?m.maxQuota:10;},[agentRoster,googleUser]);
 
-      // SINGLE AGENT FILTER IN MAIN ADMIN VIEW
-      const [selectedAgentFilter, setSelectedAgentFilter] = useState('ALL');
+      // Auth sync
+      useEffect(()=>{fetch('/api/auth/me').then(r=>r.json()).then(d=>{if(d?.authenticated&&d.email){const u={name:d.name||d.email.split('@')[0],email:d.email,picture:`https://api.dicebear.com/7.x/avataaars/svg?seed=${d.email}`};setGoogleUser(u);localStorage.setItem('rto_google_user',JSON.stringify(u));setUserRole(d.isAdmin||d.email.toLowerCase().includes('vighnesh')||d.email.toLowerCase().includes('vikash')?'Admin':'Agent');}}).catch(()=>{});},[]);
 
-      // MAX LEADS CAPACITY PER AGENT
-      const maxLeadsPerAgent = useMemo(() => {
-        const match = agentRoster.find(a => (a.email || '').toLowerCase() === (googleUser.email || '').toLowerCase());
-        return match ? match.maxQuota : 10;
-      }, [agentRoster, googleUser]);
-
-      const handleUpdateAgentRole = (targetEmail, newRole) => {
-        setAgentRoster(prev => {
-          const updated = prev.map(a => a.email.toLowerCase() === targetEmail.toLowerCase() ? { ...a, role: newRole } : a);
-          localStorage.setItem('rto_agent_roster', JSON.stringify(updated));
-          return updated;
-        });
-        showToast(`Role updated for ${targetEmail}`);
+      const handleSetStatus = (s)=>{
+        setAgentStatus(s);localStorage.setItem('rto_agent_status',s);
+        const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+        setActivityLogs(p=>{const u=[{time:t,agent:googleUser.email,action:`Status → ${s}`,type:s==='Online'?'online':s==='Busy'?'break':'offline'},...p.slice(0,49)];localStorage.setItem('rto_agent_activity_logs',JSON.stringify(u));return u;});
+        setAgentRoster(p=>{const u=p.map(a=>a.email.toLowerCase()===googleUser.email.toLowerCase()?{...a,status:s}:a);localStorage.setItem('rto_agent_roster',JSON.stringify(u));return u;});
       };
 
-      const handleUpdateAgentQuota = (targetEmail, newQuota) => {
-        setAgentRoster(prev => {
-          const updated = prev.map(a => a.email.toLowerCase() === targetEmail.toLowerCase() ? { ...a, maxQuota: Number(newQuota) } : a);
-          localStorage.setItem('rto_agent_roster', JSON.stringify(updated));
-          return updated;
-        });
-        showToast(`Quota updated for ${targetEmail}`);
-      };
-
-      // Auto-Sync authenticated session & verify Admin status
-      useEffect(() => {
-        fetch('/api/auth/me')
-          .then(r => r.json())
-          .then(d => {
-            if (d && d.authenticated && d.email) {
-              const activeUser = {
-                name: d.name || d.email.split('@')[0],
-                email: d.email,
-                picture: `https://api.dicebear.com/7.x/avataaars/svg?seed=${d.email}`
-              };
-              setGoogleUser(activeUser);
-              localStorage.setItem('rto_google_user', JSON.stringify(activeUser));
-
-              const isUserAdmin = d.isAdmin || 
-                                 d.email.toLowerCase().includes('vighnesh') || 
-                                 d.email.toLowerCase().includes('vikash');
-              
-              if (isUserAdmin) {
-                setUserRole('Admin');
-                setIsAdminAccount(true);
-              } else {
-                setUserRole('Agent');
-                setIsAdminAccount(false);
-              }
-            }
-          })
-          .catch(() => {});
-      }, []);
-
-      // AGENT STATUS SWITCHER
-      const [agentStatus, setAgentStatus] = useState(() => localStorage.getItem('rto_agent_status') || 'Online');
-
-      const handleSetAgentStatus = (status) => {
-        const timeNow = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        setAgentStatus(status);
-        localStorage.setItem('rto_agent_status', status);
-        
-        const logEntry = {
-          time: timeNow,
-          agent: googleUser.email,
-          action: `Switched status to ${status}`,
-          type: status === 'Online' ? 'Online' : status === 'Busy' ? 'Break' : 'Offline'
-        };
-
-        setActivityLogs(prev => {
-          const updated = [logEntry, ...prev.slice(0, 49)];
-          localStorage.setItem('rto_agent_activity_logs', JSON.stringify(updated));
-          return updated;
-        });
-
-        setAgentRoster(prev => {
-          const updated = prev.map(a => a.email.toLowerCase() === (googleUser.email || '').toLowerCase() ? { ...a, status: status } : a);
-          localStorage.setItem('rto_agent_roster', JSON.stringify(updated));
-          return updated;
-        });
-        showToast(`Status updated to ${status}`);
-      };
-
-      // INSTANT INITIAL RENDER FROM INDEXED LOCAL CACHE
-      const [tickets, setTickets] = useState(() => {
-        try {
-          const s = localStorage.getItem('rto_cached_tickets_v3');
-          if (s) {
-            const parsed = JSON.parse(s);
-            if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-          }
-        } catch (e) {}
-        return [];
-      });
-
-      const [ticketOverrides, setTicketOverrides] = useState(() => {
-        try { const s = localStorage.getItem('rto_ticket_overrides'); return s ? JSON.parse(s) : {}; } catch { return {}; }
-      });
-
-      const [agentStats, setAgentStats] = useState(() => {
-        try { const s = localStorage.getItem('rto_agent_stats'); return s ? JSON.parse(s) : {}; } catch { return {}; }
-      });
-
-      const [searchQuery, setSearchQuery] = useState('');
-      const [activeTab, setActiveTab] = useState('assigned');
-      
-      const [dateRange, setDateRange] = useState(() => localStorage.getItem('rto_date_scope') || 'ALL_TIME');
-
-      const handleSetDateScope = (scope) => {
-        setDateRange(scope);
-        localStorage.setItem('rto_date_scope', scope);
-        handleLiveSync(false, scope);
-      };
-
-      const [paymentFilter, setPaymentFilter] = useState('ALL');
-      const [priorityFilter, setPriorityFilter] = useState('ALL');
-      const [viewMode, setViewMode] = useState('table');
-
-      const [currentPage, setCurrentPage] = useState(1);
-      const [pageSize, setPageSize] = useState(50);
-
-      const [sheetUrl] = useState(DEFAULT_SHEET_URL);
-      const [sheetRange] = useState(DEFAULT_SHEET_RANGE);
+      // Data
+      const [tickets, setTickets] = useState(()=>{try{const s=localStorage.getItem('rto_cache_v4');if(s){const p=JSON.parse(s);if(Array.isArray(p)&&p.length)return p;}}catch{}return[];});
+      const [overrides, setOverrides] = useState(()=>{try{return JSON.parse(localStorage.getItem('rto_ticket_overrides')||'{}');}catch{return{};}});
+      const [stats, setStats] = useState(()=>{try{return JSON.parse(localStorage.getItem('rto_agent_stats')||'{}');}catch{return{};}});
       const [isSyncing, setIsSyncing] = useState(false);
-      const [lastSyncedTime, setLastSyncedTime] = useState(() => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-
-      const [selectedDetailTicket, setSelectedDetailTicket] = useState(null);
-      const [selectedRefundTicket, setSelectedRefundTicket] = useState(null);
-      const [selectedReceiptTicket, setSelectedReceiptTicket] = useState(null);
-
-      // CALL DISPOSITION MODAL STATE
-      const [selectedDispositionTicket, setSelectedDispositionTicket] = useState(null);
-      const [dispositionConnected, setDispositionConnected] = useState(null);
-      const [dispositionReason, setDispositionReason] = useState('');
-      const [needNewOrder, setNeedNewOrder] = useState(null);
-      const [newOrderIdVal, setNewOrderIdVal] = useState('');
-      const [needAddressChange, setNeedAddressChange] = useState(null);
-      const [newAddressVal, setNewAddressVal] = useState('');
-      const [refundNotes, setRefundNotes] = useState('');
-
+      const [lastSync, setLastSync] = useState('—');
+      const [search, setSearch] = useState('');
+      const [tab, setTab] = useState('all');
+      const [dateScope, setDateScope] = useState(()=>localStorage.getItem('rto_date_scope')||'ALL_TIME');
+      const [payFilter, setPayFilter] = useState('ALL');
+      const [prioFilter, setPrioFilter] = useState('ALL');
+      const [page, setPage] = useState(1);
+      const [perPage, setPerPage] = useState(50);
       const [toast, setToast] = useState(null);
+      const showToast = useCallback(m=>{setToast(m);setTimeout(()=>setToast(null),3000);},[]);
 
-      const showToast = useCallback((msg) => {
-        setToast(msg);
-        setTimeout(() => setToast(null), 3000);
-      }, []);
+      // Modals
+      const [detailTkt, setDetailTkt] = useState(null);
+      const [dispTkt, setDispTkt] = useState(null);
+      const [dispConn, setDispConn] = useState(null);
+      const [dispReason, setDispReason] = useState('');
+      const [newOrder, setNewOrder] = useState(null);
+      const [newOrderId, setNewOrderId] = useState('');
+      const [addrChange, setAddrChange] = useState(null);
+      const [newAddr, setNewAddr] = useState('');
+      const [refNotes, setRefNotes] = useState('');
+      const [receiptTkt, setReceiptTkt] = useState(null);
 
-      // DYNAMIC UNIQUE AGENTS LIST
-      const uniqueAgentsList = useMemo(() => {
-        const set = new Set();
-        tickets.forEach(t => {
-          if (t.assignedAgentName && t.assignedAgentName !== 'Unassigned') {
-            set.add(t.assignedAgentName.trim());
-          }
-        });
-        agentRoster.forEach(a => set.add(a.email.trim()));
-        return Array.from(set).sort();
-      }, [tickets, agentRoster]);
+      const openDisp = (t)=>{setDispTkt(t);setDispConn(null);setDispReason('');setNewOrder(null);setNewOrderId('');setAddrChange(null);setNewAddr('');setRefNotes('');};
 
-      // Open Disposition Form
-      const handleOpenDisposition = (ticket) => {
-        setSelectedDispositionTicket(ticket);
-        setDispositionConnected(ticket.connectedStatus === 'Yes' ? 'YES' : ticket.connectedStatus === 'No' ? 'NO' : null);
-        setDispositionReason(ticket.agentDisposition || '');
-        setNeedNewOrder(null);
-        setNewOrderIdVal('');
-        setNeedAddressChange(null);
-        setNewAddressVal('');
-        setRefundNotes('');
+      const submitDisp = ()=>{
+        if(!dispTkt)return;
+        const isRef=dispReason==='Refund Requested';
+        const st=isRef?'Refunded':dispConn==='YES'?`Connected — ${dispReason}`:`Unreachable — ${dispReason}`;
+        const ov={status:st,connectedStatus:dispConn==='YES'?'Yes':'No',agentDisposition:dispReason,disposedAt:new Date().toLocaleString(),disposedBy:googleUser.name};
+        setOverrides(p=>{const u={...p,[dispTkt.id]:ov};localStorage.setItem('rto_ticket_overrides',JSON.stringify(u));return u;});
+        const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+        setActivityLogs(p=>[{time:t,agent:googleUser.email,action:`Disposed ${dispTkt.orderNumber} → ${st}`,type:'ticket'},...p.slice(0,49)]);
+        if(isRef){doRefund(dispTkt.id,{refundId:`RFD-${Date.now().toString().slice(-6)}`,amount:dispTkt.orderAmount,reason:dispReason,date:new Date().toLocaleString(),mode:dispTkt.paymentMethod==='COD'?'UPI Payout':'Original Gateway',transactionRef:`TXN-${Math.random().toString(36).substring(2,10).toUpperCase()}`,processedBy:googleUser.name,notes:refNotes});}
+        else showToast(`Disposition saved for ${dispTkt.orderNumber}`);
+        setDispTkt(null);
       };
 
-      // Submit Call Disposition Form
-      const handleSubmitDisposition = () => {
-        if (!selectedDispositionTicket) return;
-
-        const isRefundSelected = dispositionReason === 'Refund Requested' || dispositionReason === 'Refunded';
-        const updatedStatus = isRefundSelected ? 'Refunded' : dispositionConnected === 'YES' ? `Connected - ${dispositionReason}` : `Unreachable - ${dispositionReason}`;
-
-        const overridePayload = {
-          status: updatedStatus,
-          connectedStatus: dispositionConnected === 'YES' ? 'Yes' : 'No',
-          agentDisposition: dispositionReason,
-          needNewOrder: needNewOrder,
-          newOrderId: newOrderIdVal,
-          needAddressChange: needAddressChange,
-          newAddress: newAddressVal,
-          disposedAt: new Date().toLocaleString(),
-          disposedBy: googleUser.name,
-        };
-
-        setTicketOverrides(prev => {
-          const updated = { ...prev, [selectedDispositionTicket.id]: overridePayload };
-          localStorage.setItem('rto_ticket_overrides', JSON.stringify(updated));
-          return updated;
-        });
-
-        const timeNow = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        setActivityLogs(prev => [
-          { time: timeNow, agent: googleUser.email, action: `Disposed ${selectedDispositionTicket.orderNumber} (${updatedStatus})`, type: 'Ticket' },
-          ...prev.slice(0, 49)
-        ]);
-
-        if (isRefundSelected) {
-          handleConfirmRefund(selectedDispositionTicket.id, {
-            refundId: `RFD-${Date.now().toString().slice(-6)}`,
-            amount: selectedDispositionTicket.orderAmount,
-            reason: dispositionReason,
-            date: new Date().toLocaleString(),
-            mode: selectedDispositionTicket.paymentMethod === 'COD' ? 'UPI Payout' : 'Original Prepaid Gateway Source',
-            transactionRef: `TXN-${Math.random().toString(36).substring(2, 10).toUpperCase()}`,
-            processedBy: googleUser.name,
-            notes: refundNotes,
-          });
-        } else {
-          showToast(`Disposition saved: ${updatedStatus} for ${selectedDispositionTicket.orderNumber}`);
-        }
-
-        setSelectedDispositionTicket(null);
+      const doRefund = (id, rec)=>{
+        setOverrides(p=>({...p,[id]:{status:'Refunded',refundDetails:rec}}));
+        if(googleUser.email){setStats(p=>{const c=p[googleUser.email]||{resolvedCount:0};const u={...p,[googleUser.email]:{resolvedCount:c.resolvedCount+1,lastResolvedAt:Date.now()}};localStorage.setItem('rto_agent_stats',JSON.stringify(u));return u;});}
+        const tgt=tickets.find(t=>t.id===id);
+        if(tgt){setReceiptTkt({...tgt,refundDetails:rec});try{window.confetti?.({particleCount:60,spread:55,origin:{y:.7}});}catch{}showToast(`₹${rec.amount.toLocaleString('en-IN')} refunded successfully`);}
       };
 
-      // HIGH-SPEED NON-BLOCKING SEAMLESS BACKGROUND LIVE SYNC
-      const handleLiveSync = useCallback(async (silent = false, overrideScope = null) => {
-        const id = extractSheetId(sheetUrl);
-        if (!id) return;
-        setIsSyncing(true);
-        try {
-          const activeScope = overrideScope || dateRange;
-          const rawValues = await fetchSheetRawValues(id, sheetRange || 'Data');
-          
-          const mapped = await parseAndFilterSheetRowsAsync(rawValues, activeScope, googleUser, userRole);
-          setTickets(mapped);
-          
-          try {
-            localStorage.setItem('rto_cached_tickets_v3', JSON.stringify(mapped.slice(0, 10000)));
-          } catch (e) {}
+      // Sync
+      const sync = useCallback(async(silent=false)=>{
+        const sid=extractSheetId(DEFAULT_SHEET_URL);if(!sid)return;setIsSyncing(true);
+        try{const raw=await fetchSheet(sid,DEFAULT_SHEET_RANGE);const mapped=await parseRows(raw,googleUser,userRole);setTickets(mapped);try{localStorage.setItem('rto_cache_v4',JSON.stringify(mapped.slice(0,10000)));}catch{}setLastSync(new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));if(!silent)showToast(`${mapped.length.toLocaleString('en-IN')} leads synced`);}
+        catch(e){if(!silent)showToast(e.message);}finally{setIsSyncing(false);}
+      },[googleUser,userRole,showToast]);
 
-          const timeNow = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-          setLastSyncedTime(timeNow);
-          if (!silent) showToast(`Synced ${mapped.length.toLocaleString('en-IN')} leads seamlessly`);
-        } catch (err) {
-          if (!silent) showToast(err.message || 'Sync failed');
-        } finally {
-          setIsSyncing(false);
-        }
-      }, [sheetUrl, sheetRange, dateRange, googleUser, userRole, showToast]);
+      useEffect(()=>{sync(true);},[]);
+      useEffect(()=>{const t=setInterval(()=>sync(true),60000);return()=>clearInterval(t);},[sync]);
 
-      useEffect(() => { handleLiveSync(true); }, []);
-
-      useEffect(() => {
-        const timer = setInterval(() => { handleLiveSync(true); }, 60000);
-        return () => clearInterval(timer);
-      }, [handleLiveSync]);
-
-      // Round Robin Lead Resolution Handler
-      const handleConfirmRefund = (ticketId, refundRecord) => {
-        setTicketOverrides(prev => ({
-          ...prev,
-          [ticketId]: { status: 'Refunded', refundDetails: refundRecord }
-        }));
-
-        if (googleUser && googleUser.email) {
-          setAgentStats(prev => {
-            const curr = prev[googleUser.email] || { resolvedCount: 0, lastResolvedAt: 0 };
-            const updated = {
-              ...prev,
-              [googleUser.email]: {
-                resolvedCount: (curr.resolvedCount || 0) + 1,
-                lastResolvedAt: Date.now()
-              }
-            };
-            localStorage.setItem('rto_agent_stats', JSON.stringify(updated));
-            return updated;
-          });
-        }
-
-        const target = tickets.find(t => t.id === ticketId);
-        if (target) {
-          setSelectedReceiptTicket({ ...target, status: 'Refunded', refundDetails: refundRecord });
-          try { window.confetti?.({ particleCount: 50, spread: 50, origin: { y: 0.7 } }); } catch {}
-          showToast(`₹${refundRecord.amount.toLocaleString('en-IN')} refunded! Active lead slot freed.`);
-        }
-      };
-
-      // AGENT CAPACITY & SINGLE AGENT FILTERING
-      const myAssignedTickets = useMemo(() => {
-        let base = tickets.map(t => {
-          const override = ticketOverrides[t.id];
-          return override ? { ...t, status: override.status || t.status, refundDetails: override.refundDetails || t.refundDetails, connectedStatus: override.connectedStatus || t.connectedStatus, agentDisposition: override.agentDisposition || t.agentDisposition } : t;
-        });
-
-        base = base.sort((a, b) => {
-          if (a.isHighPriority && !b.isHighPriority) return -1;
-          if (!a.isHighPriority && b.isHighPriority) return 1;
-          if (a.rowDate && b.rowDate) {
-            return b.rowDate.getTime() - a.rowDate.getTime();
-          }
-          return 0;
-        });
-
-        if (userRole === 'Agent') {
-          const pendingLeads = base.filter(t => t.status !== 'Refunded');
-          const refundedLeads = base.filter(t => t.status === 'Refunded');
-          const cappedPending = pendingLeads.slice(0, maxLeadsPerAgent);
-          return [...cappedPending, ...refundedLeads];
-        }
-
+      // Derived data
+      const allTickets = useMemo(()=>{
+        let base=tickets.map(t=>{const o=overrides[t.id];return o?{...t,status:o.status||t.status,refundDetails:o.refundDetails,connected:o.connectedStatus||t.connected,disposition:o.agentDisposition||t.disposition}:t;});
+        base.sort((a,b)=>{if(a.isHighPriority&&!b.isHighPriority)return-1;if(!a.isHighPriority&&b.isHighPriority)return 1;if(a.rowDate&&b.rowDate)return b.rowDate-a.rowDate;return 0;});
+        if(userRole==='Agent'){const pend=base.filter(t=>t.status!=='Refunded').slice(0,maxLeads);return[...pend,...base.filter(t=>t.status==='Refunded')];}
         return base;
-      }, [tickets, ticketOverrides, userRole, maxLeadsPerAgent]);
+      },[tickets,overrides,userRole,maxLeads]);
 
-      const myResolvedCount = googleUser ? (agentStats[googleUser.email]?.resolvedCount || 0) : 0;
-      const highPriorityCount = myAssignedTickets.filter(t => t.isHighPriority && t.status !== 'Refunded').length;
-      const pendingCount = myAssignedTickets.filter(t => t.status !== 'Refunded').length;
-      const refundedCount = myAssignedTickets.filter(t => t.status === 'Refunded').length;
+      const hp=allTickets.filter(t=>t.isHighPriority&&t.status!=='Refunded').length;
+      const pend=allTickets.filter(t=>t.status!=='Refunded').length;
+      const refd=allTickets.filter(t=>t.status==='Refunded').length;
 
-      // FILTERED TICKETS FOR TABLE & SINGLE AGENT FILTER
-      const filteredTickets = useMemo(() => {
-        setCurrentPage(1);
-        return myAssignedTickets.filter(t => {
-          if (selectedAgentFilter !== 'ALL') {
-            const ticketAgentLower = (t.assignedAgentName || '').toLowerCase().trim();
-            const selectedLower = selectedAgentFilter.toLowerCase().trim();
-            if (!ticketAgentLower.includes(selectedLower) && !selectedLower.includes(ticketAgentLower)) {
-              return false;
-            }
-          }
+      const agents = useMemo(()=>{const s=new Set();allTickets.forEach(t=>{if(t.assignedAgent&&t.assignedAgent!=='Unassigned')s.add(t.assignedAgent);});agentRoster.forEach(a=>s.add(a.email));return[...s].sort();},[allTickets,agentRoster]);
 
-          if (activeTab === 'high_priority' && (!t.isHighPriority || t.status === 'Refunded')) return false;
-          if (activeTab === 'pending' && t.status === 'Refunded') return false;
-          if (activeTab === 'refunded' && t.status !== 'Refunded') return false;
-
-          if (priorityFilter === 'HIGH' && !t.isHighPriority) return false;
-          if (paymentFilter !== 'ALL' && t.paymentMethod !== paymentFilter) return false;
-
-          if (searchQuery.trim()) {
-            const q = searchQuery.toLowerCase();
-            if (![t.orderNumber, t.customerName, t.email, t.phone, t.city || '', t.rtoReason || '', t.callingDate || '', t.assignedAgentName || ''].some(f => (f || '').toLowerCase().includes(q))) return false;
-          }
+      const filtered = useMemo(()=>{
+        setPage(1);
+        return allTickets.filter(t=>{
+          if(agentFilter!=='ALL'){const a=t.assignedAgent.toLowerCase(),s=agentFilter.toLowerCase();if(!a.includes(s)&&!s.includes(a))return false;}
+          if(tab==='high'&&(!t.isHighPriority||t.status==='Refunded'))return false;
+          if(tab==='pending'&&t.status==='Refunded')return false;
+          if(tab==='refunded'&&t.status!=='Refunded')return false;
+          if(prioFilter==='HIGH'&&!t.isHighPriority)return false;
+          if(payFilter!=='ALL'&&t.paymentMethod!==payFilter)return false;
+          if(search.trim()){const q=search.toLowerCase();if(![t.orderNumber,t.customerName,t.email,t.phone,t.rtoReason,t.callingDate,t.assignedAgent].some(f=>(f||'').toLowerCase().includes(q)))return false;}
           return true;
         });
-      }, [myAssignedTickets, selectedAgentFilter, activeTab, priorityFilter, paymentFilter, searchQuery]);
+      },[allTickets,agentFilter,tab,prioFilter,payFilter,search]);
 
-      const totalPages = Math.ceil(filteredTickets.length / pageSize) || 1;
-      const paginatedTickets = useMemo(() => {
-        const start = (currentPage - 1) * pageSize;
-        return filteredTickets.slice(start, start + pageSize);
-      }, [filteredTickets, currentPage, pageSize]);
+      const pages=Math.ceil(filtered.length/perPage)||1;
+      const visible=filtered.slice((page-1)*perPage,page*perPage);
 
-      const tabs = [
-        { key: 'assigned', label: userRole === 'Agent' ? `My Queue (${pendingCount}/${maxLeadsPerAgent})` : 'All System Leads', count: myAssignedTickets.length },
-        { key: 'high_priority', label: '🔥 High Priority Prepaid', count: highPriorityCount },
-        { key: 'pending', label: 'Pending Refunds', count: pendingCount },
-        { key: 'refunded', label: 'Refunded', count: refundedCount },
+      const tabs=[
+        {key:'all',label:'All Leads',count:allTickets.length},
+        {key:'high',label:'High Priority',count:hp},
+        {key:'pending',label:'Pending',count:pend},
+        {key:'refunded',label:'Refunded',count:refd},
       ];
+      if(userRole==='Admin'||userRole==='Team Lead')tabs.push({key:'admin',label:'Admin Panel',count:agentRoster.length});
 
-      if (userRole === 'Admin' || userRole === 'Team Lead') {
-        tabs.push({ key: 'admin_panel', label: '🛡️ Admin Panel & Roster', count: agentRoster.length });
-      }
+      return(
+        <div className="min-h-screen flex flex-col bg-[#0a0a0b]">
 
-      return (
-        <div className="min-h-screen flex flex-col transition-colors duration-200 bg-slate-950 text-slate-100">
-
-          {/* ── TOP ACTION BAR (Clean, non-cluttered integrated layout) ──────────────── */}
-          <header className="sticky top-0 z-30 bg-[#09090b]/95 backdrop-blur-xl border-b border-zinc-800/80">
-            <div className="max-w-[1400px] mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-3">
-
-              {/* Left: Tab Pill Navigation */}
-              <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar py-1">
-                {tabs.map(tab => (
-                  <button
-                    key={tab.key}
-                    onClick={() => setActiveTab(tab.key)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${
-                      activeTab === tab.key
-                        ? 'bg-indigo-600 text-white shadow-sm'
-                        : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
-                    }`}
-                  >
-                    {tab.label}
-                    <span className={`ml-1.5 px-1.5 py-0.2 rounded-full text-[10px] ${
-                      activeTab === tab.key ? 'bg-indigo-700 text-white' : 'bg-zinc-800 text-zinc-400'
-                    }`}>
-                      {tab.count.toLocaleString('en-IN')}
-                    </span>
+          {/* ═══ HEADER ═══ */}
+          <header className="sticky top-0 z-30 bg-[#0a0a0b]/95 backdrop-blur-lg border-b border-zinc-800/70">
+            <div className="max-w-[1440px] mx-auto px-5 h-12 flex items-center justify-between gap-3">
+              <nav className="flex items-center gap-0.5 overflow-x-auto no-scrollbar">
+                {tabs.map(t=>(
+                  <button key={t.key} onClick={()=>setTab(t.key)} className={`relative px-3 py-1.5 rounded-md text-[13px] font-medium whitespace-nowrap transition-all ${tab===t.key?'text-white bg-zinc-800':'text-zinc-500 hover:text-zinc-300'}`}>
+                    {t.key==='high'&&<span className="mr-1 text-rose-400">●</span>}
+                    {t.label}
+                    <span className={`ml-1.5 text-[10px] tabular-nums ${tab===t.key?'text-zinc-400':'text-zinc-600'}`}>{t.count.toLocaleString('en-IN')}</span>
                   </button>
                 ))}
               </nav>
-
-              {/* Right: Agent Controls & Status */}
-              <div className="flex items-center gap-2.5 flex-shrink-0">
-                
-                {/* Search Bar */}
+              <div className="flex items-center gap-2">
                 <div className="relative hidden md:block">
-                  <SvgSearch className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search Order #, Customer..."
-                    className="w-40 xl:w-52 pl-8 pr-3 py-1.5 text-xs bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-indigo-500"
-                  />
+                  <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500"/>
+                  <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search orders, customers…" className="w-48 pl-8 pr-3 py-1.5 text-[13px] bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/50"/>
                 </div>
-
-                {/* 👤 Single Agent Filter Dropdown */}
-                <select
-                  value={selectedAgentFilter}
-                  onChange={(e) => setSelectedAgentFilter(e.target.value)}
-                  className="text-xs bg-zinc-900 border border-emerald-500/50 text-emerald-400 rounded-lg px-2.5 py-1.5 focus:outline-none font-bold cursor-pointer"
-                >
-                  <option value="ALL">👤 All Agents</option>
-                  {uniqueAgentsList.map(agent => (
-                    <option key={agent} value={agent} className="bg-zinc-900 text-zinc-200">
-                      👤 {agent}
-                    </option>
-                  ))}
-                </select>
-
-                {/* Live Sync Button */}
-                <button
-                  onClick={() => handleLiveSync(false)}
-                  disabled={isSyncing}
-                  className="flex items-center gap-1.5 h-8 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 text-xs text-zinc-300 hover:text-white transition-colors"
-                  title="Sync Google Sheets"
-                >
-                  <SvgRefresh className={isSyncing ? 'animate-spin text-indigo-400' : ''} />
-                  <span className="hidden sm:inline font-medium">{isSyncing ? 'Syncing' : 'Sync'}</span>
+                <button onClick={()=>sync(false)} disabled={isSyncing} className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors disabled:opacity-50" title="Refresh data">
+                  <RefreshIcon className={isSyncing?'animate-spin text-indigo-400':''}/>
+                  <span className="hidden sm:inline">{isSyncing?'Syncing…':'Refresh'}</span>
                 </button>
-
-                {/* AGENT STATUS SWITCHER */}
-                <div className="flex items-center gap-1.5 h-8 bg-zinc-900 border border-zinc-800 rounded-lg px-2">
-                  <span className={`h-2 w-2 rounded-full ${
-                    agentStatus === 'Online' ? 'bg-emerald-500' : agentStatus === 'Busy' ? 'bg-amber-500 animate-pulse' : 'bg-zinc-500'
-                  }`} />
-                  <select
-                    value={agentStatus}
-                    onChange={(e) => handleSetAgentStatus(e.target.value)}
-                    className="text-xs bg-transparent border-none text-zinc-200 font-bold focus:outline-none cursor-pointer"
-                  >
-                    <option value="Offline" className="bg-zinc-900">Offline</option>
+                <div className="h-8 flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5">
+                  <span className={`h-2 w-2 rounded-full ${agentStatus==='Online'?'bg-emerald-500':agentStatus==='Busy'?'bg-amber-400 pulse-dot':'bg-zinc-500'}`}/>
+                  <select value={agentStatus} onChange={e=>handleSetStatus(e.target.value)} className="text-[13px] bg-transparent border-none text-zinc-200 font-medium focus:outline-none cursor-pointer pr-5">
                     <option value="Online" className="bg-zinc-900">Online</option>
-                    <option value="Busy" className="bg-zinc-900">Break / Busy</option>
+                    <option value="Busy" className="bg-zinc-900">On Break</option>
+                    <option value="Offline" className="bg-zinc-900">Offline</option>
                   </select>
                 </div>
-
               </div>
             </div>
           </header>
 
-          {/* ── Toast ───────────────────────────────── */}
-          {toast && (
-            <div className="fixed top-16 right-6 z-50 animate-fadeIn">
-              <div className="px-4 py-2 rounded-lg bg-zinc-800 text-zinc-200 border border-zinc-700 text-xs shadow-xl flex items-center gap-2">
-                <SvgCheck className="text-emerald-400" />
-                {toast}
-              </div>
-            </div>
-          )}
+          {/* ═══ TOAST ═══ */}
+          {toast&&<div className="fixed top-14 right-5 z-50 animate-slideUp"><div className="px-4 py-2.5 rounded-lg bg-zinc-800 text-zinc-100 border border-zinc-700 text-[13px] shadow-2xl flex items-center gap-2"><CheckIcon className="text-emerald-400 shrink-0"/>{toast}</div></div>}
 
-          {/* ── Main Content Workspace ──────────────── */}
-          <main className="flex-1 max-w-[1400px] w-full mx-auto px-4 sm:px-6 py-5 space-y-5">
+          {/* ═══ MAIN ═══ */}
+          <main className="flex-1 max-w-[1440px] w-full mx-auto px-5 py-5 space-y-4">
 
-            {/* ADMIN PANEL VIEW */}
-            {activeTab === 'admin_panel' && (userRole === 'Admin' || userRole === 'Team Lead') ? (
-              <div className="space-y-6 animate-fadeIn">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-base font-bold text-zinc-100 flex items-center gap-2">
-                      <SvgShield className="text-indigo-400" /> Admin & Team Lead Roster Control
-                    </h2>
-                    <p className="text-xs text-zinc-400">Configure agent roles, maximum lead limits, handling times (AHT), and live break audit trail.</p>
-                  </div>
-                </div>
+            {tab==='admin'&&(userRole==='Admin'||userRole==='Team Lead')?(
+              <div className="space-y-5 animate-fadeIn">
+                <div><h2 className="text-lg font-bold text-zinc-100">Team Management</h2><p className="text-[13px] text-zinc-500 mt-0.5">Configure roles, lead quotas, and monitor agent activity.</p></div>
 
-                {/* AGENT ROSTER TABLE WITH AHT AND BREAK TIME */}
-                <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 overflow-hidden shadow-sm">
-                  <table className="w-full text-left text-xs">
-                    <thead>
-                      <tr className="border-b border-zinc-800/80 bg-zinc-900/40">
-                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase">Agent Name & Email</th>
-                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase">Role</th>
-                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase">Live Status</th>
-                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase">Avg Handling Time (AHT)</th>
-                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase">Total Break Time</th>
-                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase">Max Leads Quota</th>
-                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-zinc-800/40">
-                      {agentRoster.map(agent => (
-                        <tr key={agent.email} className="hover:bg-zinc-800/30 transition-colors">
-                          <td className="py-3.5 px-4 font-medium">
-                            <p className="text-zinc-100 font-semibold">{agent.name}</p>
-                            <p className="text-[11px] text-zinc-400">{agent.email}</p>
-                          </td>
-                          <td className="py-3.5 px-4">
-                            <select
-                              value={agent.role}
-                              onChange={(e) => handleUpdateAgentRole(agent.email, e.target.value)}
-                              className="text-xs font-semibold bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-indigo-400 focus:outline-none"
-                            >
-                              <option value="Agent">👤 Agent</option>
-                              <option value="Team Lead">👑 Team Lead</option>
-                              <option value="Admin">🛡️ Admin</option>
-                            </select>
-                          </td>
-                          <td className="py-3.5 px-4">
-                            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-semibold ${
-                              agent.status === 'Online' ? 'bg-emerald-950/50 text-emerald-400 border border-emerald-800/40' : agent.status === 'Busy' ? 'bg-amber-950/50 text-amber-400 border border-amber-800/40' : 'bg-zinc-800 text-zinc-400'
-                            }`}>
-                              <span className={`h-1.5 w-1.5 rounded-full ${agent.status === 'Online' ? 'bg-emerald-500' : agent.status === 'Busy' ? 'bg-amber-500' : 'bg-zinc-400'}`} />
-                              {agent.status}
-                            </span>
-                          </td>
-                          <td className="py-3.5 px-4 font-semibold text-emerald-400">
-                            ⏱️ {agent.avgHandlingTime || '2.8m'} / ticket
-                          </td>
-                          <td className="py-3.5 px-4 font-semibold text-amber-400">
-                            ☕ {agent.totalBreakTime || '25m'}
-                          </td>
-                          <td className="py-3.5 px-4">
-                            <select
-                              value={agent.maxQuota}
-                              onChange={(e) => handleUpdateAgentQuota(agent.email, Number(e.target.value))}
-                              className="text-xs font-bold bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-zinc-100 focus:outline-none"
-                            >
-                              <option value="5">5 Leads</option>
-                              <option value="10">10 Leads (Default)</option>
-                              <option value="15">15 Leads</option>
-                              <option value="20">20 Leads</option>
-                            </select>
-                          </td>
-                          <td className="py-3.5 px-4 text-right">
-                            <button
-                              onClick={() => {
-                                setSelectedAgentFilter(agent.email);
-                                setActiveTab('assigned');
-                                showToast(`Filtered leads for ${agent.name}`);
-                              }}
-                              className="px-3 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs"
-                            >
-                              View Leads
-                            </button>
-                          </td>
+                <div className="bg-zinc-900/80 rounded-xl border border-zinc-800 overflow-hidden">
+                  <table className="w-full text-[13px]">
+                    <thead><tr className="border-b border-zinc-800 text-zinc-500">
+                      <th className="py-3 px-4 text-left font-medium">Agent</th>
+                      <th className="py-3 px-4 text-left font-medium">Role</th>
+                      <th className="py-3 px-4 text-left font-medium">Status</th>
+                      <th className="py-3 px-4 text-left font-medium">Avg. Handle Time</th>
+                      <th className="py-3 px-4 text-left font-medium">Break Time</th>
+                      <th className="py-3 px-4 text-left font-medium">Lead Quota</th>
+                      <th className="py-3 px-4 text-right font-medium"></th>
+                    </tr></thead>
+                    <tbody className="divide-y divide-zinc-800/50">
+                      {agentRoster.map(a=>(
+                        <tr key={a.email} className="hover:bg-zinc-800/30 transition-colors">
+                          <td className="py-3 px-4"><p className="font-semibold text-zinc-100">{a.name}</p><p className="text-zinc-500 text-[12px]">{a.email}</p></td>
+                          <td className="py-3 px-4"><select value={a.role} onChange={e=>{setAgentRoster(p=>{const u=p.map(x=>x.email===a.email?{...x,role:e.target.value}:x);localStorage.setItem('rto_agent_roster',JSON.stringify(u));return u;});}} className="text-[13px] bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-indigo-400 font-medium focus:outline-none"><option value="Agent">Agent</option><option value="Team Lead">Team Lead</option><option value="Admin">Admin</option></select></td>
+                          <td className="py-3 px-4"><span className={`inline-flex items-center gap-1.5 text-[13px] font-medium ${a.status==='Online'?'text-emerald-400':a.status==='Busy'?'text-amber-400':'text-zinc-500'}`}><span className={`h-1.5 w-1.5 rounded-full ${a.status==='Online'?'bg-emerald-500':a.status==='Busy'?'bg-amber-400':'bg-zinc-500'}`}/>{a.status}</span></td>
+                          <td className="py-3 px-4 text-zinc-300 font-mono">{a.aht||'—'}</td>
+                          <td className="py-3 px-4 text-zinc-400">{a.breakTime||'—'}</td>
+                          <td className="py-3 px-4"><select value={a.maxQuota} onChange={e=>{setAgentRoster(p=>{const u=p.map(x=>x.email===a.email?{...x,maxQuota:+e.target.value}:x);localStorage.setItem('rto_agent_roster',JSON.stringify(u));return u;});}} className="text-[13px] bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-zinc-200 focus:outline-none"><option value="5">5</option><option value="10">10</option><option value="15">15</option><option value="20">20</option></select></td>
+                          <td className="py-3 px-4 text-right"><button onClick={()=>{setAgentFilter(a.email);setTab('all');showToast(`Showing ${a.name}'s leads`);}} className="px-3 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-medium transition-colors">View Leads</button></td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
 
-                {/* AGENT ACTIVITY & STATUS AUDIT TRAIL */}
-                <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-3">
-                  <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                    <SvgClock className="text-amber-500" /> Live Agent Time & Status Audit Trail
-                  </h3>
-                  <div className="space-y-2 max-h-60 overflow-y-auto pr-2">
-                    {activityLogs.map((log, idx) => (
-                      <div key={idx} className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-800/30 border border-zinc-800 text-xs">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-zinc-500 font-semibold">{log.time}</span>
-                          <span className="font-semibold text-zinc-200">{log.agent}</span>
-                          <span className="text-zinc-400">· {log.action}</span>
+                {activityLogs.length>0&&(
+                  <div className="bg-zinc-900/80 rounded-xl border border-zinc-800 p-5">
+                    <h3 className="text-sm font-semibold text-zinc-200 mb-3">Activity Log</h3>
+                    <div className="space-y-1.5 max-h-56 overflow-y-auto">
+                      {activityLogs.map((l,i)=>(
+                        <div key={i} className="flex items-center justify-between px-3 py-2 rounded-lg bg-zinc-800/30 text-[13px]">
+                          <div className="flex items-center gap-2.5"><span className="text-zinc-500 font-mono text-[12px] w-12">{l.time}</span><span className="text-zinc-300 font-medium">{l.agent.split('@')[0]}</span><span className="text-zinc-500">{l.action}</span></div>
+                          <Badge color={l.type==='online'?'green':l.type==='break'?'amber':l.type==='ticket'?'blue':'zinc'}>{l.type}</Badge>
                         </div>
-                        <Badge variant={log.type === 'Online' ? 'success' : log.type === 'Break' ? 'warning' : 'default'}>{log.type}</Badge>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
-
+                )}
               </div>
-            ) : (
+            ):(
               <>
-                {/* Stats Overview Grid */}
+                {/* Stats */}
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                  <StatCard
-                    label={userRole === 'Agent' ? `Active Queue Capacity (${pendingCount}/${maxLeadsPerAgent})` : `Total System Leads`}
-                    value={`${filteredTickets.length.toLocaleString('en-IN')}`}
-                    sub={selectedAgentFilter !== 'ALL' ? `Filtered: ${selectedAgentFilter}` : `All system tickets`}
-                    accent="sky"
-                  />
-                  <StatCard label="⚡ Avg Handling Time (AHT)" value="2.8 mins" sub="Average Resolution Speed" accent="emerald" />
-                  <StatCard label="🔥 High Priority Prepaid" value={highPriorityCount.toLocaleString('en-IN')} sub="Prepaid + Refusal Reasons" accent="rose" />
-                  <StatCard label="Role & Status" value={`${userRole}`} sub={`Agent Status: ${agentStatus}`} accent="amber" />
+                  <div className="bg-zinc-900/80 rounded-xl p-4 border border-zinc-800"><p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500 mb-1">Total Leads</p><p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{filtered.length.toLocaleString('en-IN')}</p><p className="text-[12px] text-zinc-500 mt-1">{agentFilter!=='ALL'?agentFilter:'All agents'}</p></div>
+                  <div className="bg-zinc-900/80 rounded-xl p-4 border border-zinc-800"><p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500 mb-1">Avg Handle Time</p><p className="text-2xl font-extrabold text-zinc-100">2.8<span className="text-sm font-normal text-zinc-400 ml-0.5">min</span></p><p className="text-[12px] text-zinc-500 mt-1">Per resolution</p></div>
+                  <div className="bg-zinc-900/80 rounded-xl p-4 border border-rose-900/40"><p className="text-[11px] font-medium uppercase tracking-wider text-rose-400 mb-1">High Priority</p><p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{hp.toLocaleString('en-IN')}</p><p className="text-[12px] text-zinc-500 mt-1">Prepaid refusals</p></div>
+                  <div className="bg-zinc-900/80 rounded-xl p-4 border border-zinc-800"><p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500 mb-1">Last Synced</p><p className="text-2xl font-extrabold text-zinc-100">{lastSync}</p><p className="text-[12px] text-zinc-500 mt-1">Auto-refresh 60s</p></div>
                 </div>
 
-                {/* Sub-Header Controls Bar */}
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-zinc-900/40 p-3 rounded-xl border border-zinc-800/60">
-                  <div className="flex items-center gap-2 text-xs text-zinc-400">
-                    <span>Active Agent Filter: <strong className="text-emerald-400 font-bold">{selectedAgentFilter === 'ALL' ? 'All Agents' : selectedAgentFilter}</strong></span>
-                  </div>
-
+                {/* Filters */}
+                <div className="flex items-center justify-between gap-3 flex-wrap">
                   <div className="flex items-center gap-2 flex-wrap">
-                    
-                    {/* DATA SCOPE SELECTOR */}
-                    <select
-                      value={dateRange}
-                      onChange={(e) => handleSetDateScope(e.target.value)}
-                      className="text-xs bg-zinc-900 border border-indigo-500/50 text-indigo-400 rounded-lg px-2.5 py-1.5 focus:outline-none font-bold cursor-pointer"
-                    >
-                      <option value="ALL_TIME">🕒 All Time (All Leads)</option>
-                      <option value="7_DAYS">⚡ Last 7 Days Calling Date</option>
-                      <option value="14_DAYS">📅 Last 14 Days Calling Date</option>
-                      <option value="30_DAYS">📆 Last 30 Days Calling Date</option>
+                    <select value={agentFilter} onChange={e=>setAgentFilter(e.target.value)} className="text-[13px] bg-zinc-900 border border-zinc-800 text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none font-medium cursor-pointer">
+                      <option value="ALL">All agents</option>
+                      {agents.map(a=><option key={a} value={a}>{a.includes('@')?a.split('@')[0]:a}</option>)}
                     </select>
-
-                    {/* Priority Filter */}
-                    <select
-                      value={priorityFilter}
-                      onChange={(e) => setPriorityFilter(e.target.value)}
-                      className="text-xs bg-zinc-900 border border-zinc-800 text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none font-medium cursor-pointer"
-                    >
-                      <option value="ALL">All Priorities</option>
-                      <option value="HIGH">🔥 High Priority (Prepaid Refusal)</option>
+                    <select value={dateScope} onChange={e=>{setDateScope(e.target.value);localStorage.setItem('rto_date_scope',e.target.value);sync(false,e.target.value);}} className="text-[13px] bg-zinc-900 border border-zinc-800 text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer">
+                      <option value="ALL_TIME">All time</option>
+                      <option value="7_DAYS">Last 7 days</option>
+                      <option value="30_DAYS">Last 30 days</option>
                     </select>
-
-                    {/* Payment Filter */}
-                    <select
-                      value={paymentFilter}
-                      onChange={(e) => setPaymentFilter(e.target.value)}
-                      className="text-xs bg-zinc-900 border border-zinc-800 text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
-                    >
-                      <option value="ALL">All Payments</option>
+                    <select value={payFilter} onChange={e=>setPayFilter(e.target.value)} className="text-[13px] bg-zinc-900 border border-zinc-800 text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer">
+                      <option value="ALL">All payments</option>
                       <option value="Prepaid">Prepaid</option>
                       <option value="COD">COD</option>
                     </select>
-
-                    {/* Page Size */}
-                    <select
-                      value={pageSize}
-                      onChange={(e) => setPageSize(Number(e.target.value))}
-                      className="text-xs bg-zinc-900 border border-zinc-800 text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
-                    >
-                      <option value="25">25 / page</option>
-                      <option value="50">50 / page</option>
-                      <option value="100">100 / page</option>
-                    </select>
-
-                    {/* View Switcher */}
-                    <div className="flex bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
-                      <button onClick={() => setViewMode('table')} className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${viewMode === 'table' ? 'bg-zinc-700 text-zinc-100 shadow-xs' : 'text-zinc-400'}`}>List</button>
-                      <button onClick={() => setViewMode('cards')} className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${viewMode === 'cards' ? 'bg-zinc-700 text-zinc-100 shadow-xs' : 'text-zinc-400'}`}>Grid</button>
-                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <select value={perPage} onChange={e=>setPerPage(+e.target.value)} className="text-[13px] bg-zinc-900 border border-zinc-800 text-zinc-400 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"><option value="25">25</option><option value="50">50</option><option value="100">100</option></select>
+                    <span className="text-[12px] text-zinc-500 tabular-nums">{filtered.length.toLocaleString('en-IN')} results</span>
                   </div>
                 </div>
 
-                {/* ── Table View ─────────────────────────── */}
-                {viewMode === 'table' && (
-                  <div className="bg-zinc-900/40 rounded-xl border border-zinc-800/60 overflow-hidden shadow-xs">
+                {/* TABLE */}
+                {visible.length===0?(
+                  <EmptyState title="No leads found" sub="Try adjusting your filters or search query to find what you're looking for."/>
+                ):(
+                  <div className="bg-zinc-900/60 rounded-xl border border-zinc-800 overflow-hidden">
                     <div className="overflow-x-auto">
-                      <table className="w-full text-left text-xs">
-                        <thead>
-                          <tr className="border-b border-zinc-800/60 bg-zinc-900/60">
-                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Order</th>
-                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Customer</th>
-                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Assigned Agent (Col Q)</th>
-                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Column Y (Calling Date)</th>
-                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Column D (RTO Reason)</th>
-                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Payment</th>
-                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider text-right">Amount</th>
-                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider text-center">Status</th>
-                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider text-right">Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-zinc-800/30">
-                          {paginatedTickets.length === 0 ? (
-                            <tr>
-                              <td colSpan="9" className="py-16 text-center text-zinc-500 text-xs">
-                                No active leads matching current criteria.
-                              </td>
-                            </tr>
-                          ) : paginatedTickets.map(ticket => {
-                            const isRefunded = ticket.status === 'Refunded';
-                            return (
-                              <tr key={ticket.id} className={`hover:bg-zinc-800/30 transition-colors ${ticket.isHighPriority && !isRefunded ? 'bg-rose-950/20 border-l-2 border-l-rose-500' : ''}`}>
-                                <td className="py-3 px-4">
-                                  <span className="font-mono text-xs font-bold text-zinc-200">{ticket.orderNumber}</span>
-                                  {ticket.isHighPriority && !isRefunded && (
-                                    <span className="block mt-0.5"><Badge variant="high">🔥 High Priority</Badge></span>
-                                  )}
-                                </td>
-                                <td className="py-3 px-4">
-                                  <span className="text-zinc-200 font-medium">{ticket.customerName}</span>
-                                  <span className="block text-[11px] text-zinc-500 mt-0.5">{ticket.email || ticket.phone}</span>
-                                </td>
-                                <td className="py-3 px-4">
-                                  <span className="text-xs font-semibold text-indigo-400">👤 {ticket.assignedAgentName || 'Unassigned'}</span>
-                                </td>
-                                <td className="py-3 px-4">
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border bg-amber-950/40 text-amber-300 border-amber-800/50">
-                                    📅 {ticket.callingDate}
-                                  </span>
-                                </td>
-                                <td className="py-3 px-4 max-w-[240px]">
-                                  <span className={`text-xs font-medium ${ticket.isHighPriority ? 'text-rose-400 font-semibold' : 'text-zinc-300'}`}>
-                                    {ticket.rtoReason}
-                                  </span>
-                                </td>
-                                <td className="py-3 px-4">
-                                  <Badge variant={ticket.paymentMethod === 'COD' ? 'cod' : 'prepaid'}>{ticket.paymentMethod}</Badge>
-                                </td>
-                                <td className="py-3 px-4 text-right font-semibold text-zinc-200">
-                                  ₹{ticket.orderAmount.toLocaleString('en-IN')}
-                                </td>
-                                <td className="py-3 px-4 text-center">
-                                  <Badge variant={isRefunded ? 'success' : 'warning'}>{ticket.status}</Badge>
-                                </td>
-                                <td className="py-3 px-4 text-right">
-                                  <div className="flex items-center justify-end gap-1.5">
-                                    <button onClick={() => setSelectedDetailTicket(ticket)} className="px-2.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] font-medium">
-                                      View
-                                    </button>
-                                    <button onClick={() => handleOpenDisposition(ticket)} className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold">
-                                      <SvgPhone /> Call Form
-                                    </button>
-                                  </div>
-                                </td>
+                      <table className="w-full text-[13px]">
+                        <thead><tr className="border-b border-zinc-800 text-zinc-500 text-[12px]">
+                          <th className="py-2.5 px-4 text-left font-medium">Order</th>
+                          <th className="py-2.5 px-4 text-left font-medium">Customer</th>
+                          <th className="py-2.5 px-4 text-left font-medium">Agent</th>
+                          <th className="py-2.5 px-4 text-left font-medium">Calling Date</th>
+                          <th className="py-2.5 px-4 text-left font-medium">RTO Reason</th>
+                          <th className="py-2.5 px-4 text-left font-medium">Payment</th>
+                          <th className="py-2.5 px-4 text-right font-medium">Amount</th>
+                          <th className="py-2.5 px-4 text-center font-medium">Status</th>
+                          <th className="py-2.5 px-4 text-right font-medium"></th>
+                        </tr></thead>
+                        <tbody className="divide-y divide-zinc-800/40">
+                          {visible.map(t=>{
+                            const ref=t.status==='Refunded';
+                            return(
+                              <tr key={t.id} className={`hover:bg-zinc-800/20 transition-colors ${t.isHighPriority&&!ref?'bg-rose-950/10':''}`}>
+                                <td className="py-2.5 px-4"><span className="font-mono font-semibold text-zinc-200">{t.orderNumber}</span>{t.isHighPriority&&!ref&&<span className="ml-1.5 text-rose-400 text-[10px] font-bold">● HP</span>}</td>
+                                <td className="py-2.5 px-4"><span className="text-zinc-200">{t.customerName}</span><span className="block text-[12px] text-zinc-500 mt-0.5 truncate max-w-[160px]">{t.email||t.phone}</span></td>
+                                <td className="py-2.5 px-4 text-zinc-400">{t.assignedAgent==='Unassigned'?<span className="text-zinc-600 italic">Unassigned</span>:t.assignedAgent.includes('@')?t.assignedAgent.split('@')[0]:t.assignedAgent}</td>
+                                <td className="py-2.5 px-4 text-zinc-400 tabular-nums">{t.callingDate}</td>
+                                <td className="py-2.5 px-4 max-w-[200px]"><span className={`truncate block ${t.isHighPriority?'text-rose-300':'text-zinc-400'}`}>{t.rtoReason}</span></td>
+                                <td className="py-2.5 px-4"><Badge color={t.paymentMethod==='COD'?'amber':'blue'}>{t.paymentMethod}</Badge></td>
+                                <td className="py-2.5 px-4 text-right font-semibold text-zinc-200 tabular-nums">₹{t.orderAmount.toLocaleString('en-IN')}</td>
+                                <td className="py-2.5 px-4 text-center"><Badge color={ref?'green':'zinc'}>{ref?'Refunded':'Pending'}</Badge></td>
+                                <td className="py-2.5 px-4 text-right"><div className="flex items-center justify-end gap-1">
+                                  <button onClick={()=>setDetailTkt(t)} className="px-2 py-1 rounded-md text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 text-[12px] transition-colors">Details</button>
+                                  <button onClick={()=>openDisp(t)} className="px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-medium flex items-center gap-1 transition-colors"><PhoneIcon/>Call</button>
+                                </div></td>
                               </tr>
                             );
                           })}
                         </tbody>
                       </table>
                     </div>
-
-                    {totalPages > 1 && (
-                      <div className="flex items-center justify-between px-4 py-3 border-t border-zinc-800/60 text-xs bg-zinc-900/60">
-                        <span className="text-zinc-500">Page <strong>{currentPage}</strong> of <strong>{totalPages.toLocaleString('en-IN')}</strong></span>
-                        <div className="flex items-center gap-1.5">
-                          <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-2.5 py-1 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 disabled:opacity-40 font-medium">Previous</button>
-                          <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-2.5 py-1 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 disabled:opacity-40 font-medium">Next</button>
-                        </div>
+                    {pages>1&&(
+                      <div className="flex items-center justify-between px-4 py-2.5 border-t border-zinc-800 text-[13px]">
+                        <span className="text-zinc-500 tabular-nums">Page {page} of {pages}</span>
+                        <div className="flex gap-1"><button onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={page===1} className="px-3 py-1 rounded-md bg-zinc-800 text-zinc-300 disabled:opacity-30 font-medium hover:bg-zinc-700 transition-colors">Prev</button><button onClick={()=>setPage(p=>Math.min(pages,p+1))} disabled={page===pages} className="px-3 py-1 rounded-md bg-zinc-800 text-zinc-300 disabled:opacity-30 font-medium hover:bg-zinc-700 transition-colors">Next</button></div>
                       </div>
                     )}
-                  </div>
-                )}
-
-                {/* ── Cards View ─────────────────────────── */}
-                {viewMode === 'cards' && (
-                  <div className="space-y-4">
-                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                      {paginatedTickets.map(ticket => {
-                        const isRefunded = ticket.status === 'Refunded';
-                        return (
-                          <div key={ticket.id} className={`bg-zinc-900/50 rounded-xl border ${ticket.isHighPriority && !isRefunded ? 'border-rose-900/60 bg-rose-950/10' : 'border-zinc-800/60'} p-4 flex flex-col justify-between hover:border-zinc-700/60 transition-colors shadow-xs`}>
-                            <div>
-                              <div className="flex items-center justify-between mb-3">
-                                <span className="font-mono text-xs font-semibold text-zinc-300">{ticket.orderNumber}</span>
-                                <span className="text-[10px] text-amber-300 font-semibold bg-amber-950/40 px-2 py-0.5 rounded border border-amber-800/50">📅 Calling Date: {ticket.callingDate}</span>
-                              </div>
-                              <h3 className="text-sm font-semibold text-zinc-100">{ticket.customerName}</h3>
-                              <p className="text-[11px] text-zinc-500 mt-1">{ticket.email} · {ticket.phone}</p>
-                              <div className="mt-3 p-2.5 rounded-lg bg-zinc-800/40 border border-zinc-800/40 text-[11px] text-zinc-400">
-                                <p>{ticket.address || 'Standard Delivery Address'}</p>
-                                <p className="text-zinc-300 mt-1 font-medium">{ticket.city}, {ticket.state} — {ticket.pincode}</p>
-                              </div>
-                              <p className="mt-2.5 text-[11px] text-amber-400 leading-relaxed font-medium">Column D: {ticket.rtoReason}</p>
-                            </div>
-                            <div className="mt-4 pt-3 border-t border-zinc-800/40 flex items-center justify-between">
-                              <span className="text-sm font-semibold text-zinc-200">₹{ticket.orderAmount.toLocaleString('en-IN')}</span>
-                              <div className="flex gap-1.5">
-                                <button onClick={() => setSelectedDetailTicket(ticket)} className="px-2.5 py-1 rounded-md bg-zinc-800 text-zinc-300 hover:bg-zinc-700 text-[11px] font-medium">View</button>
-                                <button onClick={() => handleOpenDisposition(ticket)} className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold">
-                                  <SvgPhone /> Call Form
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
                   </div>
                 )}
               </>
             )}
           </main>
 
-          {/* ── CALL DISPOSITION MODAL ────────────────── */}
-          {selectedDispositionTicket && (
-            <Overlay onClose={() => setSelectedDispositionTicket(null)}>
-              <div className="w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl text-zinc-100 p-5 space-y-4">
-                <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-                  <div>
-                    <h3 className="text-sm font-bold flex items-center gap-2">
-                      <SvgPhone className="text-indigo-400" /> Call Disposition Form
-                    </h3>
-                    <p className="text-[11px] text-zinc-400">Order: <strong className="font-mono text-indigo-400">{selectedDispositionTicket.orderNumber}</strong> ({selectedDispositionTicket.customerName}) · Payment: <strong className="text-sky-400">{selectedDispositionTicket.paymentMethod}</strong></p>
-                  </div>
-                  <button onClick={() => setSelectedDispositionTicket(null)} className="text-zinc-400 hover:text-zinc-200"><SvgX /></button>
+          {/* ═══ DISPOSITION MODAL ═══ */}
+          {dispTkt&&(
+            <Overlay onClose={()=>setDispTkt(null)}>
+              <div className="w-full max-w-md bg-[#111113] border border-zinc-800 rounded-2xl shadow-2xl text-zinc-100 p-6 space-y-5">
+                <div className="flex items-center justify-between">
+                  <div><h3 className="text-base font-bold">Call Disposition</h3><p className="text-[13px] text-zinc-500 mt-0.5"><span className="font-mono text-indigo-400">{dispTkt.orderNumber}</span> · {dispTkt.customerName} · <span className="text-sky-400">{dispTkt.paymentMethod}</span></p></div>
+                  <button onClick={()=>setDispTkt(null)} className="p-1 rounded-lg hover:bg-zinc-800 text-zinc-400 transition-colors"><XIcon/></button>
                 </div>
 
-                <div className="space-y-4 text-xs">
-
-                  {/* STEP 1: CONNECTED YES / NO */}
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase text-zinc-400 mb-2">1. Was the Call Connected?</label>
-                    <div className="grid grid-cols-2 gap-3">
-                      <button
-                        onClick={() => { setDispositionConnected('YES'); setDispositionReason(''); }}
-                        className={`py-2.5 px-3 rounded-lg font-bold border transition-all text-center flex items-center justify-center gap-2 ${
-                          dispositionConnected === 'YES'
-                            ? 'bg-emerald-600 text-white border-emerald-600 shadow-md'
-                            : 'bg-zinc-800 text-zinc-300 border-zinc-700'
-                        }`}
-                      >
-                        📞 Yes (Connected)
-                      </button>
-                      <button
-                        onClick={() => { setDispositionConnected('NO'); setDispositionReason(''); }}
-                        className={`py-2.5 px-3 rounded-lg font-bold border transition-all text-center flex items-center justify-center gap-2 ${
-                          dispositionConnected === 'NO'
-                            ? 'bg-rose-600 text-white border-rose-600 shadow-md'
-                            : 'bg-zinc-800 text-zinc-300 border-zinc-700'
-                        }`}
-                      >
-                        python No (Unreachable)
-                      </button>
+                <div className="space-y-4">
+                  <div><p className="text-[12px] font-semibold text-zinc-400 uppercase tracking-wide mb-2">Was the call connected?</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button onClick={()=>{setDispConn('YES');setDispReason('');}} className={`py-3 rounded-xl font-semibold text-[13px] border transition-all ${dispConn==='YES'?'bg-emerald-600 text-white border-emerald-500 shadow-lg shadow-emerald-900/30':'bg-zinc-900 text-zinc-300 border-zinc-700 hover:border-zinc-600'}`}>Yes, connected</button>
+                      <button onClick={()=>{setDispConn('NO');setDispReason('');}} className={`py-3 rounded-xl font-semibold text-[13px] border transition-all ${dispConn==='NO'?'bg-rose-600 text-white border-rose-500 shadow-lg shadow-rose-900/30':'bg-zinc-900 text-zinc-300 border-zinc-700 hover:border-zinc-600'}`}>Not reachable</button>
                     </div>
                   </div>
 
-                  {/* CONNECTED = YES FLOW */}
-                  {dispositionConnected === 'YES' && (
-                    <div className="space-y-4 animate-fadeIn border-t border-zinc-800 pt-3">
-                      <div>
-                        <label className="block text-[11px] font-bold text-zinc-300 mb-1">Select Call Outcome / Reason:</label>
-                        <select
-                          value={dispositionReason}
-                          onChange={(e) => setDispositionReason(e.target.value)}
-                          className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 text-xs font-semibold focus:outline-none focus:border-indigo-500"
-                        >
-                          <option value="">-- Select Reason --</option>
-                          <option value="Refund Requested">💳 Refund Requested (Process Refund)</option>
-                          <option value="Customer Agreed to Accept">Customer Agreed to Accept Delivery</option>
-                          <option value="Product Issue / Exchange">Product Issue / Exchange Requested</option>
+                  {dispConn==='YES'&&(
+                    <div className="space-y-3 animate-fadeIn">
+                      <div><p className="text-[12px] font-semibold text-zinc-400 uppercase tracking-wide mb-1.5">Call outcome</p>
+                        <select value={dispReason} onChange={e=>setDispReason(e.target.value)} className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-2.5 text-[13px] font-medium focus:outline-none focus:ring-1 focus:ring-indigo-500/50">
+                          <option value="">Select outcome…</option>
+                          <option value="Refund Requested">Refund Requested</option>
+                          <option value="Customer Agreed to Accept">Customer Agreed to Accept</option>
+                          <option value="Product Issue / Exchange">Product Issue / Exchange</option>
                           <option value="Address Change Requested">Address Change Requested</option>
-                          <option value="Not Interested">Not Interested / Cancelled</option>
+                          <option value="Not Interested">Not Interested</option>
                           <option value="Wrong Number">Wrong Number</option>
                         </select>
                       </div>
 
-                      {/* REFUND FLOW */}
-                      {(dispositionReason === 'Refund Requested' || dispositionReason === 'Refunded') && (
-                        <div className="bg-emerald-950/30 p-3.5 rounded-lg space-y-3 border border-emerald-900/40 animate-fadeIn">
-                          <div className="flex items-center justify-between">
-                            <span className="font-bold text-emerald-300">
-                              {selectedDispositionTicket.paymentMethod === 'Prepaid' ? '💳 Prepaid Refund Payout' : '💵 COD Refund Payout'}
-                            </span>
-                            <span className="font-mono text-sm font-bold text-emerald-400">
-                              ₹{selectedDispositionTicket.orderAmount.toLocaleString('en-IN')}
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-zinc-400">
-                            {selectedDispositionTicket.paymentMethod === 'Prepaid'
-                              ? 'Refund will be credited back to the original prepaid payment gateway source.'
-                              : 'Refund will be credited to customer via UPI Payout.'}
-                          </p>
-                          <input
-                            type="text"
-                            value={refundNotes}
-                            onChange={(e) => setRefundNotes(e.target.value)}
-                            placeholder="Optional agent notes for refund receipt..."
-                            className="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-xs"
-                          />
+                      {dispReason==='Refund Requested'&&(
+                        <div className="bg-emerald-950/30 p-4 rounded-xl border border-emerald-900/40 space-y-2 animate-fadeIn">
+                          <div className="flex items-center justify-between"><span className="font-semibold text-emerald-300">{dispTkt.paymentMethod==='Prepaid'?'Prepaid Refund':'COD Refund'}</span><span className="font-mono text-lg font-bold text-emerald-400">₹{dispTkt.orderAmount.toLocaleString('en-IN')}</span></div>
+                          <p className="text-[12px] text-zinc-400">{dispTkt.paymentMethod==='Prepaid'?'Credited to original payment source.':'Credited via UPI payout.'}</p>
+                          <input value={refNotes} onChange={e=>setRefNotes(e.target.value)} placeholder="Notes (optional)" className="w-full bg-zinc-900/60 border border-zinc-700 rounded-lg p-2 text-[13px] focus:outline-none"/>
                         </div>
                       )}
 
-                      {/* NEW ORDER QUESTION */}
-                      {(dispositionReason === 'Customer Agreed to Accept' || dispositionReason === 'Product Issue / Exchange') && (
-                        <div className="bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-zinc-800 animate-fadeIn">
-                          <label className="block text-[11px] font-bold text-zinc-300">Do they need a New Order?</label>
-                          <div className="flex gap-3">
-                            <button onClick={() => setNeedNewOrder('YES')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needNewOrder === 'YES' ? 'bg-indigo-600 text-white' : 'bg-zinc-700 text-zinc-300'}`}>Yes</button>
-                            <button onClick={() => setNeedNewOrder('NO')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needNeedNewOrder === 'NO' ? 'bg-zinc-800 text-white' : 'bg-zinc-700 text-zinc-300'}`}>No</button>
-                          </div>
-                          {needNewOrder === 'YES' && (
-                            <input
-                              type="text"
-                              value={newOrderIdVal}
-                              onChange={(e) => setNewOrderIdVal(e.target.value)}
-                              placeholder="Enter New Order ID or Replacement Product Details..."
-                              className="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-xs"
-                            />
-                          )}
+                      {(dispReason==='Customer Agreed to Accept'||dispReason==='Product Issue / Exchange')&&(
+                        <div className="bg-zinc-900/50 p-3 rounded-xl border border-zinc-800 space-y-2 animate-fadeIn">
+                          <p className="text-[12px] font-semibold text-zinc-300">New order required?</p>
+                          <div className="flex gap-2"><button onClick={()=>setNewOrder('YES')} className={`flex-1 py-2 rounded-lg text-[13px] font-medium border ${newOrder==='YES'?'bg-indigo-600 text-white border-indigo-500':'bg-zinc-800 text-zinc-300 border-zinc-700'}`}>Yes</button><button onClick={()=>setNewOrder('NO')} className={`flex-1 py-2 rounded-lg text-[13px] font-medium border ${newOrder==='NO'?'bg-zinc-700 text-white border-zinc-600':'bg-zinc-800 text-zinc-300 border-zinc-700'}`}>No</button></div>
+                          {newOrder==='YES'&&<input value={newOrderId} onChange={e=>setNewOrderId(e.target.value)} placeholder="New order ID…" className="w-full bg-zinc-900 border border-zinc-700 rounded-lg p-2 text-[13px] focus:outline-none"/>}
                         </div>
                       )}
 
-                      {/* ADDRESS CHANGE QUESTION */}
-                      {(dispositionReason === 'Customer Agreed to Accept' || dispositionReason === 'Address Change Requested' || dispositionReason === 'Product Issue / Exchange') && (
-                        <div className="bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-zinc-800 animate-fadeIn">
-                          <label className="block text-[11px] font-bold text-zinc-300">Is an Address Change required?</label>
-                          <div className="flex gap-3">
-                            <button onClick={() => setNeedAddressChange('YES')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needAddressChange === 'YES' ? 'bg-indigo-600 text-white' : 'bg-zinc-700 text-zinc-300'}`}>Yes</button>
-                            <button onClick={() => setNeedAddressChange('NO')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needAddressChange === 'NO' ? 'bg-zinc-800 text-white' : 'bg-zinc-700 text-zinc-300'}`}>No</button>
-                          </div>
-                          {needAddressChange === 'YES' && (
-                            <textarea
-                              value={newAddressVal}
-                              onChange={(e) => setNewAddressVal(e.target.value)}
-                              placeholder="Enter new delivery address details & pincode..."
-                              className="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-xs"
-                              rows="2"
-                            />
-                          )}
+                      {(dispReason==='Customer Agreed to Accept'||dispReason==='Address Change Requested'||dispReason==='Product Issue / Exchange')&&(
+                        <div className="bg-zinc-900/50 p-3 rounded-xl border border-zinc-800 space-y-2 animate-fadeIn">
+                          <p className="text-[12px] font-semibold text-zinc-300">Address change needed?</p>
+                          <div className="flex gap-2"><button onClick={()=>setAddrChange('YES')} className={`flex-1 py-2 rounded-lg text-[13px] font-medium border ${addrChange==='YES'?'bg-indigo-600 text-white border-indigo-500':'bg-zinc-800 text-zinc-300 border-zinc-700'}`}>Yes</button><button onClick={()=>setAddrChange('NO')} className={`flex-1 py-2 rounded-lg text-[13px] font-medium border ${addrChange==='NO'?'bg-zinc-700 text-white border-zinc-600':'bg-zinc-800 text-zinc-300 border-zinc-700'}`}>No</button></div>
+                          {addrChange==='YES'&&<textarea value={newAddr} onChange={e=>setNewAddr(e.target.value)} placeholder="New address…" rows="2" className="w-full bg-zinc-900 border border-zinc-700 rounded-lg p-2 text-[13px] focus:outline-none resize-none"/>}
                         </div>
                       )}
                     </div>
                   )}
 
-                  {/* CONNECTED = NO FLOW */}
-                  {dispositionConnected === 'NO' && (
-                    <div className="space-y-3 animate-fadeIn border-t border-zinc-800 pt-3">
-                      <label className="block text-[11px] font-bold text-zinc-300">Select Unreachable Reason:</label>
-                      <select
-                        value={dispositionReason}
-                        onChange={(e) => setDispositionReason(e.target.value)}
-                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 text-xs font-semibold focus:outline-none focus:border-indigo-500"
-                      >
-                        <option value="">-- Select Reason --</option>
+                  {dispConn==='NO'&&(
+                    <div className="animate-fadeIn"><p className="text-[12px] font-semibold text-zinc-400 uppercase tracking-wide mb-1.5">Reason</p>
+                      <select value={dispReason} onChange={e=>setDispReason(e.target.value)} className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-2.5 text-[13px] font-medium focus:outline-none focus:ring-1 focus:ring-indigo-500/50">
+                        <option value="">Select reason…</option>
                         <option value="Ringing / No Answer">Ringing / No Answer</option>
-                        <option value="Not Reachable">Not Reachable / Out of Coverage</option>
+                        <option value="Not Reachable">Not Reachable</option>
                         <option value="Switch Off">Switched Off</option>
-                        <option value="Line Busy / Engaged">Line Busy / Call Waiting</option>
-                        <option value="Invalid Number">Invalid Number / Wrong Number</option>
+                        <option value="Line Busy">Line Busy</option>
+                        <option value="Invalid Number">Invalid Number</option>
                       </select>
                     </div>
                   )}
-
                 </div>
 
-                <div className="flex items-center justify-between border-t border-zinc-800 pt-3">
-                  <button onClick={() => setSelectedDispositionTicket(null)} className="text-xs text-zinc-400">Cancel</button>
-                  <button
-                    onClick={handleSubmitDisposition}
-                    disabled={!dispositionConnected || !dispositionReason}
-                    className={`px-4 py-2 rounded-lg font-bold text-xs disabled:opacity-40 transition-colors shadow-md ${
-                      dispositionReason === 'Refund Requested' || dispositionReason === 'Refunded'
-                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                        : 'bg-indigo-600 hover:bg-indigo-500 text-white'
-                    }`}
-                  >
-                    {dispositionReason === 'Refund Requested' || dispositionReason === 'Refunded'
-                      ? 'Confirm Refund & Save'
-                      : 'Submit Disposition'}
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
+                  <button onClick={()=>setDispTkt(null)} className="px-4 py-2 rounded-lg text-[13px] text-zinc-400 hover:text-zinc-200 transition-colors">Cancel</button>
+                  <button onClick={submitDisp} disabled={!dispConn||!dispReason} className={`px-5 py-2 rounded-lg font-semibold text-[13px] disabled:opacity-30 transition-all ${dispReason==='Refund Requested'?'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/20':'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-900/20'}`}>
+                    {dispReason==='Refund Requested'?'Confirm Refund':'Submit'}
                   </button>
                 </div>
               </div>
             </Overlay>
           )}
 
-          {/* ── Detail Modal ────────────────── */}
-          {selectedDetailTicket && (
-            <Overlay onClose={() => setSelectedDetailTicket(null)}>
-              <div className="w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl text-zinc-100">
-                <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
-                  <div>
-                    <h3 className="text-sm font-semibold font-mono">{selectedDetailTicket.orderNumber}</h3>
-                  </div>
-                  <button onClick={() => setSelectedDetailTicket(null)} className="text-zinc-400 hover:text-zinc-200"><SvgX /></button>
+          {/* ═══ DETAIL MODAL ═══ */}
+          {detailTkt&&(
+            <Overlay onClose={()=>setDetailTkt(null)}>
+              <div className="w-full max-w-md bg-[#111113] border border-zinc-800 rounded-2xl shadow-2xl text-zinc-100">
+                <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800">
+                  <h3 className="text-base font-bold font-mono">{detailTkt.orderNumber}</h3>
+                  <button onClick={()=>setDetailTkt(null)} className="p-1 rounded-lg hover:bg-zinc-800 text-zinc-400"><XIcon/></button>
                 </div>
-
-                <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto text-xs">
-                  {selectedDetailTicket.isHighPriority && (
-                    <div className="p-2.5 rounded-lg bg-rose-950/30 border border-rose-900/40 text-rose-400 font-semibold">
-                      🔥 High Priority Prepaid Refusal (Column D Matched)
-                    </div>
-                  )}
-
-                  <div>
-                    <h4 className="text-[10px] font-semibold uppercase text-zinc-400 mb-1">Column Y (Calling Date)</h4>
-                    <p className="font-semibold text-amber-300 bg-amber-950/20 p-2.5 rounded border border-amber-900/20">📅 {selectedDetailTicket.callingDate}</p>
+                <div className="px-6 py-5 space-y-4 max-h-[65vh] overflow-y-auto text-[13px]">
+                  {detailTkt.isHighPriority&&<div className="p-3 rounded-xl bg-rose-950/30 border border-rose-900/40 text-rose-300 font-medium text-[13px]">High Priority — Prepaid refusal match</div>}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Calling Date</p><p className="font-semibold text-zinc-200">{detailTkt.callingDate}</p></div>
+                    <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Payment</p><p className="font-semibold text-zinc-200">{detailTkt.paymentMethod} · ₹{detailTkt.orderAmount.toLocaleString('en-IN')}</p></div>
                   </div>
-
-                  <div>
-                    <h4 className="text-[10px] font-semibold uppercase text-zinc-400 mb-1">Column D (RTO Reason)</h4>
-                    <p className="font-semibold text-amber-400 bg-amber-950/20 p-2.5 rounded border border-amber-900/20">{selectedDetailTicket.rtoReason}</p>
-                  </div>
-
-                  <div>
-                    <h4 className="text-[10px] font-semibold uppercase text-zinc-400 mb-1">Assigned Agent (Col Q)</h4>
-                    <p className="font-semibold text-indigo-400">👤 {selectedDetailTicket.assignedAgentName || 'Unassigned'}</p>
-                  </div>
-                  <div>
-                    <h4 className="text-[10px] font-semibold uppercase text-zinc-400 mb-1">Customer</h4>
-                    <p className="font-medium text-zinc-100 text-sm">{selectedDetailTicket.customerName}</p>
-                    <p className="text-zinc-400">{selectedDetailTicket.email} · {selectedDetailTicket.phone}</p>
-                  </div>
-                  <div>
-                    <h4 className="text-[10px] font-semibold uppercase text-zinc-400 mb-1">Shipping Address</h4>
-                    <p className="text-zinc-300">{selectedDetailTicket.address}</p>
-                    <p className="text-zinc-200 font-medium mt-0.5">{selectedDetailTicket.city}, {selectedDetailTicket.state} — {selectedDetailTicket.pincode}</p>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3 bg-zinc-800/40 p-3 rounded-lg">
-                    <div><p className="text-[10px] text-zinc-400">Payment</p><p className="font-medium">{selectedDetailTicket.paymentMethod}</p></div>
-                    <div><p className="text-[10px] text-zinc-400">Amount</p><p className="font-semibold text-zinc-100">₹{selectedDetailTicket.orderAmount.toLocaleString('en-IN')}</p></div>
-                  </div>
+                  <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">RTO Reason</p><p className="text-zinc-300">{detailTkt.rtoReason}</p></div>
+                  <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Assigned Agent</p><p className="text-indigo-400 font-medium">{detailTkt.assignedAgent}</p></div>
+                  <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Customer</p><p className="text-zinc-200 font-semibold">{detailTkt.customerName}</p><p className="text-zinc-400">{detailTkt.email} · {detailTkt.phone}</p></div>
+                  <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Address</p><p className="text-zinc-300">{detailTkt.address}</p><p className="text-zinc-200 font-medium">{detailTkt.city}, {detailTkt.state} — {detailTkt.pincode}</p></div>
                 </div>
-
-                <div className="flex items-center justify-between px-5 py-3 border-t border-zinc-800">
-                  <button onClick={() => setSelectedDetailTicket(null)} className="text-xs text-zinc-400">Close</button>
-                  <button onClick={() => { const t = selectedDetailTicket; setSelectedDetailTicket(null); handleOpenDisposition(t); }} className="px-3.5 py-1 rounded-md bg-indigo-600 text-white text-xs font-semibold">Open Call Form</button>
+                <div className="flex items-center justify-end gap-2 px-6 py-3 border-t border-zinc-800">
+                  <button onClick={()=>setDetailTkt(null)} className="px-4 py-2 rounded-lg text-[13px] text-zinc-400">Close</button>
+                  <button onClick={()=>{const t=detailTkt;setDetailTkt(null);openDisp(t);}} className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-[13px] font-semibold">Open Call Form</button>
                 </div>
               </div>
             </Overlay>
           )}
 
-          {/* ── Receipt Modal ────────────────────────── */}
-          {selectedReceiptTicket?.refundDetails && (
-            <Overlay onClose={() => setSelectedReceiptTicket(null)}>
-              <div className="w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl p-5 space-y-4 text-zinc-100">
-                <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-                  <div className="flex items-center gap-2">
-                    <SvgCheck className="text-emerald-400" />
-                    <h3 className="text-sm font-semibold">Refund Receipt</h3>
-                  </div>
-                  <button onClick={() => setSelectedReceiptTicket(null)} className="text-zinc-400"><SvgX /></button>
-                </div>
-
+          {/* ═══ RECEIPT MODAL ═══ */}
+          {receiptTkt?.refundDetails&&(
+            <Overlay onClose={()=>setReceiptTkt(null)}>
+              <div className="w-full max-w-sm bg-[#111113] border border-zinc-800 rounded-2xl shadow-2xl p-6 space-y-5 text-zinc-100">
+                <div className="flex items-center justify-between"><div className="flex items-center gap-2"><CheckIcon className="text-emerald-400"/><h3 className="text-base font-bold">Refund Receipt</h3></div><button onClick={()=>setReceiptTkt(null)} className="text-zinc-400"><XIcon/></button></div>
                 <div id="printable-receipt" className="space-y-4">
-                  <div className="text-center py-4 bg-emerald-950/20 border border-emerald-900/20 rounded-lg">
-                    <p className="text-[10px] uppercase tracking-wider text-zinc-400 font-medium">Refund Amount</p>
-                    <p className="text-3xl font-bold text-emerald-400 mt-1">₹{selectedReceiptTicket.refundDetails.amount.toLocaleString('en-IN')}</p>
-                    <p className="text-[10px] text-zinc-400 font-mono mt-1">{selectedReceiptTicket.refundDetails.transactionRef}</p>
-                  </div>
-
-                  <div className="space-y-2 text-xs text-zinc-400">
-                    <div className="flex justify-between"><span>Customer</span><span className="font-semibold text-zinc-100">{selectedReceiptTicket.customerName}</span></div>
-                    <div className="flex justify-between"><span>Order</span><span className="font-mono text-zinc-200">{selectedReceiptTicket.orderNumber}</span></div>
-                    <div className="flex justify-between"><span>Payment</span><span className="text-zinc-200">{selectedReceiptTicket.paymentMethod}</span></div>
-                    <div className="flex justify-between"><span>Mode</span><span className="text-zinc-200">{selectedReceiptTicket.refundDetails.mode}</span></div>
-                    <div className="flex justify-between"><span>Processed by</span><span className="text-zinc-200">{selectedReceiptTicket.refundDetails.processedBy}</span></div>
-                    <div className="flex justify-between"><span>Date</span><span className="text-zinc-200">{selectedReceiptTicket.refundDetails.date}</span></div>
+                  <div className="text-center py-5 bg-emerald-950/20 border border-emerald-900/20 rounded-xl"><p className="text-[11px] uppercase tracking-wider text-zinc-500">Amount</p><p className="text-3xl font-extrabold text-emerald-400 mt-1">₹{receiptTkt.refundDetails.amount.toLocaleString('en-IN')}</p><p className="text-[11px] text-zinc-500 font-mono mt-1">{receiptTkt.refundDetails.transactionRef}</p></div>
+                  <div className="space-y-2 text-[13px]">
+                    {[['Customer',receiptTkt.customerName],['Order',receiptTkt.orderNumber],['Payment',receiptTkt.paymentMethod],['Mode',receiptTkt.refundDetails.mode],['Processed by',receiptTkt.refundDetails.processedBy],['Date',receiptTkt.refundDetails.date]].map(([k,v])=>(
+                      <div key={k} className="flex justify-between"><span className="text-zinc-500">{k}</span><span className="text-zinc-200 font-medium">{v}</span></div>
+                    ))}
                   </div>
                 </div>
-
-                <div className="flex items-center justify-between border-t border-zinc-800 pt-3">
-                  <button onClick={() => window.print()} className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200"><SvgPrinter /> Print</button>
-                  <button onClick={() => setSelectedReceiptTicket(null)} className="text-xs text-zinc-400">Close</button>
+                <div className="flex items-center justify-between pt-2 border-t border-zinc-800">
+                  <button onClick={()=>window.print()} className="flex items-center gap-1.5 text-[13px] text-zinc-400 hover:text-zinc-200"><PrintIcon/>Print</button>
+                  <button onClick={()=>setReceiptTkt(null)} className="text-[13px] text-zinc-400">Close</button>
                 </div>
               </div>
             </Overlay>
           )}
 
-          {/* Footer */}
-          <footer className="border-t border-zinc-800/40 py-3 text-center">
-            <p className="text-[11px] text-zinc-500">RTO CRM · High Performance Unified Engine</p>
-          </footer>
         </div>
       );
     }
 
-    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
   </script>
 </body>
-
 </html>
