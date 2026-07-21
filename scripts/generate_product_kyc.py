@@ -284,6 +284,13 @@ def main():
         document.getElementById('panel-' + b.dataset.tab).classList.add('active');
       }});
     }});
+    // Embedded in the dashboard iframe - the sidebar's mirrored Report Views list
+    // already covers navigation, so hide this report's own tab row there. Leave it
+    // visible on direct/standalone access, since that's the only nav available then.
+    if (window.top !== window.self) {{
+      var tn = document.querySelector('.tab-nav');
+      if (tn) tn.style.display = 'none';
+    }}
   </script>
 </body>
 </html>

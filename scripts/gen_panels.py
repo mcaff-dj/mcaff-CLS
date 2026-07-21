@@ -1091,11 +1091,17 @@ def assemble_report(ctx, here_dir):
             f'<p>Auto-refreshed daily at 2 PM IST. Last updated {now_str}. No customer PII (name, phone, email, etc.) is ever stored or exposed &mdash; '
             f'the tables/charts above are aggregated segment counts, and the optional "Download Raw Data" export on each tab is limited to non-PII ticket fields '
             f'(dates, category, product/SKU/batch, partner, month/week, sales figure, unique flag).</p></footer>')
+    # When this report is embedded in the dashboard's iframe, its own tab row is
+    # redundant with the sidebar's mirrored "Report Views" list (see index.html's
+    # populateReportNav) - hide it there, but leave it visible when the report is
+    # opened directly (e.g. /mcaffeine.html), since that's the only nav available then.
     tabjs = ("<script>document.querySelectorAll('.tab-btn').forEach(function(b){b.addEventListener('click',function(){"
              "document.querySelectorAll('.tab-btn').forEach(function(x){x.classList.remove('active');});"
              "document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.remove('active');});"
              "b.classList.add('active');document.getElementById('panel-'+b.dataset.tab).classList.add('active');"
-             "var t=document.getElementById('active-tab-title'); if(t)t.textContent=b.textContent;});});</script>")
+             "var t=document.getElementById('active-tab-title'); if(t)t.textContent=b.textContent;});});"
+             "if(window.top!==window.self){var tn=document.querySelector('.tab-nav'); if(tn)tn.style.display='none';}"
+             "</script>")
 
     month_chips = []
     last_eligible = ctx.weekly_eligible_months[-1] if ctx.weekly_eligible_months else -1
