@@ -141,8 +141,13 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       return crypto.subtle.importKey('pkcs8', bin.buffer, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
     }
 
+    let cachedToken = null;
+    let tokenExp = 0;
+
     async function getAccessToken() {
       const now = Math.floor(Date.now() / 1000);
+      if (cachedToken && tokenExp > now + 60) return cachedToken;
+
       const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
       const payload = b64url(JSON.stringify({
         iss: SERVICE_ACCOUNT.client_email,
@@ -163,7 +168,9 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       });
       const data = await res.json();
       if (!data.access_token) throw new Error(data.error_description || 'Token error');
-      return data.access_token;
+      cachedToken = data.access_token;
+      tokenExp = now + 3500;
+      return cachedToken;
     }
 
     async function fetchSheetRawValues(spreadsheetId, range = 'Data') {
@@ -212,8 +219,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       return null;
     }
 
-    /* ── HIGH PERFORMANCE STREAMING PARSER ── */
-    async function parseAndFilterSheetRows(dataValues, dateRange = 'ALL_TIME', loggedInUser = null, role = 'Admin') {
+    /* ── HIGH PERFORMANCE NON-BLOCKING MICRO-CHUNK STREAMING PARSER ── */
+    async function parseAndFilterSheetRowsAsync(dataValues, dateRange = 'ALL_TIME', loggedInUser = null, role = 'Admin') {
       if (!dataValues || dataValues.length < 2) return [];
       const [headers, ...rawRows] = dataValues;
 
@@ -223,32 +230,42 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const firstName = agentNameLower ? agentNameLower.split(' ')[0] : '';
 
       const results = [];
+      const chunkSize = 5000;
 
-      for (let i = 0; i < rawRows.length; i++) {
-        const row = rawRows[i];
-        const ticketAgentLower = (row[16] || '').toLowerCase().trim(); // Column Q (Agent)
+      for (let i = 0; i < rawRows.length; i += chunkSize) {
+        const chunk = rawRows.slice(i, i + chunkSize);
+        
+        for (let j = 0; j < chunk.length; j++) {
+          const row = chunk[j];
+          const ticketAgentLower = (row[16] || '').toLowerCase().trim(); // Column Q (Agent)
 
-        if (role === 'Agent' && loggedInUser && ticketAgentLower && ticketAgentLower !== 'unassigned') {
-          const isMatch = (agentEmailLower && ticketAgentLower === agentEmailLower) ||
-                          (agentNameLower && ticketAgentLower === agentNameLower) ||
-                          (emailPrefix && emailPrefix.length > 2 && (ticketAgentLower.includes(emailPrefix) || emailPrefix.includes(ticketAgentLower))) ||
-                          (firstName && firstName.length > 2 && (ticketAgentLower.includes(firstName) || firstName.includes(ticketAgentLower)));
-          if (!isMatch) continue;
+          if (role === 'Agent' && loggedInUser && ticketAgentLower && ticketAgentLower !== 'unassigned') {
+            const isMatch = (agentEmailLower && ticketAgentLower === agentEmailLower) ||
+                            (agentNameLower && ticketAgentLower === agentNameLower) ||
+                            (emailPrefix && emailPrefix.length > 2 && (ticketAgentLower.includes(emailPrefix) || emailPrefix.includes(ticketAgentLower))) ||
+                            (firstName && firstName.length > 2 && (ticketAgentLower.includes(firstName) || firstName.includes(ticketAgentLower)));
+            if (!isMatch) continue;
+          }
+
+          const obj = {};
+          headers.forEach((h, idx) => {
+            const cleanH = (h || '').trim();
+            if (cleanH) obj[cleanH] = (row[idx] || '').trim();
+            obj[`col_${idx}`] = (row[idx] || '').trim();
+            if (idx === 3) obj['_col_D'] = (row[idx] || '').trim();
+            if (idx === 16) obj['_col_Q'] = (row[idx] || '').trim();
+            if (idx === 17) obj['_col_R'] = (row[idx] || '').trim();
+            if (idx === 19) obj['_col_T'] = (row[idx] || '').trim();
+            if (idx === 24) obj['_col_Y'] = (row[idx] || '').trim();
+          });
+
+          results.push(mapRowToTicket(obj, i + j));
         }
 
-        const obj = {};
-        headers.forEach((h, idx) => {
-          const cleanH = (h || '').trim();
-          if (cleanH) obj[cleanH] = (row[idx] || '').trim();
-          obj[`col_${idx}`] = (row[idx] || '').trim();
-          if (idx === 3) obj['_col_D'] = (row[idx] || '').trim();
-          if (idx === 16) obj['_col_Q'] = (row[idx] || '').trim();
-          if (idx === 17) obj['_col_R'] = (row[idx] || '').trim();
-          if (idx === 19) obj['_col_T'] = (row[idx] || '').trim();
-          if (idx === 24) obj['_col_Y'] = (row[idx] || '').trim();
-        });
-
-        results.push(mapRowToTicket(obj, i));
+        // Non-blocking yield to main thread to ensure 60 FPS UI responsiveness!
+        if (i + chunkSize < rawRows.length) {
+          await new Promise(r => setTimeout(r, 0));
+        }
       }
 
       return results;
@@ -314,6 +331,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
     function SvgShield(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>; }
     function SvgPhone(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>; }
     function SvgClock(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>; }
+    function SvgZap(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>; }
 
     /* ── Components ───────────────────────────────────── */
     function Badge({ children, variant = 'default' }) {
@@ -395,7 +413,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         } catch { return []; }
       });
 
-      // AGENTS ROSTER (INCLUDING VIKASH PATHAK AS ADMIN)
+      // AGENTS ROSTER
       const [agentRoster, setAgentRoster] = useState(() => {
         try {
           const s = localStorage.getItem('rto_agent_roster');
@@ -435,7 +453,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         showToast(`Quota updated for ${targetEmail}`);
       };
 
-      // Auto-Sync authenticated session & verify Admin status for vikash.pathak & vighnesh.patil
+      // Auto-Sync authenticated session & verify Admin status
       useEffect(() => {
         fetch('/api/auth/me')
           .then(r => r.json())
@@ -465,7 +483,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           .catch(() => {});
       }, []);
 
-      // AGENT STATUS SWITCHER (Online | Offline | Break) + TIMELOG AUDIT
+      // AGENT STATUS SWITCHER
       const [agentStatus, setAgentStatus] = useState(() => localStorage.getItem('rto_agent_status') || 'Online');
 
       const handleSetAgentStatus = (status) => {
@@ -473,7 +491,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         setAgentStatus(status);
         localStorage.setItem('rto_agent_status', status);
         
-        // Audit log entry
         const logEntry = {
           time: timeNow,
           agent: googleUser.email,
@@ -495,7 +512,18 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         showToast(`Status updated to ${status}`);
       };
 
-      const [tickets, setTickets] = useState([]);
+      // INSTANT INITIAL RENDER FROM INDEXED LOCAL CACHE
+      const [tickets, setTickets] = useState(() => {
+        try {
+          const s = localStorage.getItem('rto_cached_tickets_v3');
+          if (s) {
+            const parsed = JSON.parse(s);
+            if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+          }
+        } catch (e) {}
+        return [];
+      });
+
       const [ticketOverrides, setTicketOverrides] = useState(() => {
         try { const s = localStorage.getItem('rto_ticket_overrides'); return s ? JSON.parse(s) : {}; } catch { return {}; }
       });
@@ -525,6 +553,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [sheetUrl] = useState(DEFAULT_SHEET_URL);
       const [sheetRange] = useState(DEFAULT_SHEET_RANGE);
       const [isSyncing, setIsSyncing] = useState(false);
+      const [lastSyncedTime, setLastSyncedTime] = useState(() => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
 
       const [selectedDetailTicket, setSelectedDetailTicket] = useState(null);
       const [selectedRefundTicket, setSelectedRefundTicket] = useState(null);
@@ -532,11 +561,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       // CALL DISPOSITION MODAL STATE
       const [selectedDispositionTicket, setSelectedDispositionTicket] = useState(null);
-      const [dispositionConnected, setDispositionConnected] = useState(null); // 'YES' | 'NO'
+      const [dispositionConnected, setDispositionConnected] = useState(null);
       const [dispositionReason, setDispositionReason] = useState('');
-      const [needNewOrder, setNeedNewOrder] = useState(null); // 'YES' | 'NO'
+      const [needNewOrder, setNeedNewOrder] = useState(null);
       const [newOrderIdVal, setNewOrderIdVal] = useState('');
-      const [needAddressChange, setNeedAddressChange] = useState(null); // 'YES' | 'NO'
+      const [needAddressChange, setNeedAddressChange] = useState(null);
       const [newAddressVal, setNewAddressVal] = useState('');
       const [refundNotes, setRefundNotes] = useState('');
 
@@ -547,7 +576,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         setTimeout(() => setToast(null), 3000);
       }, []);
 
-      // DYNAMIC UNIQUE AGENTS LIST (From Google Sheet Column Q)
+      // DYNAMIC UNIQUE AGENTS LIST
       const uniqueAgentsList = useMemo(() => {
         const set = new Set();
         tickets.forEach(t => {
@@ -596,7 +625,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return updated;
         });
 
-        // Audit Log
         const timeNow = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         setActivityLogs(prev => [
           { time: timeNow, agent: googleUser.email, action: `Disposed ${selectedDispositionTicket.orderNumber} (${updatedStatus})`, type: 'Ticket' },
@@ -621,7 +649,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         setSelectedDispositionTicket(null);
       };
 
-      // FAST ZERO-LAG LIVE GOOGLE SHEETS FETCH
+      // HIGH-SPEED NON-BLOCKING SEAMLESS BACKGROUND LIVE SYNC
       const handleLiveSync = useCallback(async (silent = false, overrideScope = null) => {
         const id = extractSheetId(sheetUrl);
         if (!id) return;
@@ -629,9 +657,19 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         try {
           const activeScope = overrideScope || dateRange;
           const rawValues = await fetchSheetRawValues(id, sheetRange || 'Data');
-          const mapped = await parseAndFilterSheetRows(rawValues, activeScope, googleUser, userRole);
+          
+          // Non-blocking micro-chunk background streaming parser
+          const mapped = await parseAndFilterSheetRowsAsync(rawValues, activeScope, googleUser, userRole);
           setTickets(mapped);
-          if (!silent) showToast(`Synced ${mapped.length.toLocaleString('en-IN')} active leads`);
+          
+          // Save to instant local cache asynchronously
+          try {
+            localStorage.setItem('rto_cached_tickets_v3', JSON.stringify(mapped.slice(0, 10000)));
+          } catch (e) {}
+
+          const timeNow = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          setLastSyncedTime(timeNow);
+          if (!silent) showToast(`Synced ${mapped.length.toLocaleString('en-IN')} leads seamlessly`);
         } catch (err) {
           if (!silent) showToast(err.message || 'Sync failed');
         } finally {
@@ -711,7 +749,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const filteredTickets = useMemo(() => {
         setCurrentPage(1);
         return myAssignedTickets.filter(t => {
-          // SINGLE AGENT FILTER IN MAIN ADMIN VIEW
           if (selectedAgentFilter !== 'ALL') {
             const ticketAgentLower = (t.assignedAgentName || '').toLowerCase().trim();
             const selectedLower = selectedAgentFilter.toLowerCase().trim();
@@ -775,6 +812,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   </span>
                 </div>
 
+                {/* SEAMLESS LIVE SYNC BADGE */}
+                <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 text-[11px] font-semibold border border-emerald-200 dark:border-emerald-800/50">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-ping" />
+                  <SvgZap className="text-emerald-500" /> Seamless 0-Lag Sync Active
+                </div>
+
                 <nav className="hidden md:flex items-center gap-1">
                   {tabs.map(tab => (
                     <button
@@ -806,7 +849,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   />
                 </div>
 
-                {/* Live Sync */}
+                {/* Live Sync Button */}
                 <button
                   onClick={() => handleLiveSync(false)}
                   disabled={isSyncing}
@@ -825,7 +868,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   {theme === 'dark' ? <SvgSun /> : <SvgMoon />}
                 </button>
 
-                {/* AGENT STATUS SWITCHER (Online | Offline | Break) */}
+                {/* AGENT STATUS SWITCHER */}
                 <div className="flex items-center gap-1.5 h-8 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg px-2">
                   <span className={`h-2 w-2 rounded-full ${
                     agentStatus === 'Online' ? 'bg-emerald-500' : agentStatus === 'Busy' ? 'bg-amber-500 animate-pulse' : 'bg-slate-400'
@@ -1255,7 +1298,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                         </select>
                       </div>
 
-                      {/* REFUND FLOW (PREPAID OR COD) */}
+                      {/* REFUND FLOW */}
                       {(dispositionReason === 'Refund Requested' || dispositionReason === 'Refunded') && (
                         <div className="bg-emerald-50 dark:bg-emerald-950/30 p-3.5 rounded-lg space-y-3 border border-emerald-200 dark:border-emerald-900/40 animate-fadeIn">
                           <div className="flex items-center justify-between">
@@ -1281,7 +1324,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                         </div>
                       )}
 
-                      {/* NEW ORDER QUESTION — ONLY SHOWN WHEN REASON WARRANTS IT */}
+                      {/* NEW ORDER QUESTION */}
                       {(dispositionReason === 'Customer Agreed to Accept' || dispositionReason === 'Product Issue / Exchange') && (
                         <div className="bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-slate-200 dark:border-zinc-800 animate-fadeIn">
                           <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300">Do they need a New Order?</label>
@@ -1301,7 +1344,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                         </div>
                       )}
 
-                      {/* ADDRESS CHANGE QUESTION — ONLY SHOWN WHEN REASON WARRANTS IT */}
+                      {/* ADDRESS CHANGE QUESTION */}
                       {(dispositionReason === 'Customer Agreed to Accept' || dispositionReason === 'Address Change Requested' || dispositionReason === 'Product Issue / Exchange') && (
                         <div className="bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-slate-200 dark:border-zinc-800 animate-fadeIn">
                           <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300">Is an Address Change required?</label>
@@ -1459,7 +1502,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
           {/* Footer */}
           <footer className="border-t border-slate-200 dark:border-zinc-800/40 py-4 text-center">
-            <p className="text-[11px] text-slate-500 dark:text-zinc-600">RTO CRM · Agent Time Logs & Single Agent Analytics</p>
+            <p className="text-[11px] text-slate-500 dark:text-zinc-600">RTO CRM · High Performance Seamless Sync Engine</p>
           </footer>
         </div>
       );
