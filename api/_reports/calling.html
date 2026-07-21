@@ -119,8 +119,7 @@ E3mY71IpH332EEajeSbzJospqwKBgQDGQgZKjwEQyTDzqTNukG2PibpYQqJ8du9y
 Jw8GqQqrW4H1oPVTzWFmNx0ZeJOgS+z6d+tuBJs8gG1p2LQ8ul3BXpQ1Lwk1k/FP
 BzXUKEMOGdMCeQxyTei3e7MLULi+qwqw3ZrIdxPvd2248uo/ZU/WerVVqTe4XdSd
 9i5RHiPkwwKBgGzXxmxg3lsx+Tb+znTTXbwbkqsub1/23AMblvzujMkO4AxxQwbN
-qlqhMJr9PX7aT/bIIUv9gQRRllO98ciNV13IXwxlwDSLtRiTbjxl6hvCQcP7Y8+z
-jcdY7AJ1QkQMwWqXhMcClM0XhbXyPSyIRygBcMwvNvR++Zt6XpT8mObRAoGAXVWV
+qlqhMJr9PX7aT/bIIUv9gQRRllO98ciNV13IXwxlwDSLtRiTbjxl6hvCQcP7Y8+zjcdY7AJ1QkQMwWqXhMcClM0XhbXyPSyIRygBcMwvNvR++Zt6XpT8mObRAoGAXVWV
 6qHaKZHd5sgAO4vo2EtJm+V640eGwGHc9BC+wh8pVn65IAOvV9SYcXZPYYZ9AQlV
 n4yxnFEFsW/gojpGixNAiK0lE8EbOE43rDJsJwZHTYG5N1KwPTkR+EC/SJvzQ4KA
 LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
@@ -245,7 +244,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         const row = rowsToProcess[i];
         const ticketAgentLower = (row[16] || '').toLowerCase().trim(); // Column Q (Agent)
 
-        // For 'Agent' role, enforce early matching. For TL / Admin, allow all rows!
         if (role === 'Agent' && loggedInUser && ticketAgentLower && ticketAgentLower !== 'unassigned') {
           const isMatch = (agentEmailLower && ticketAgentLower === agentEmailLower) ||
                           (agentNameLower && ticketAgentLower === agentNameLower) ||
@@ -254,7 +252,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           if (!isMatch) continue;
         }
 
-        // Fast Date Check
         if (daysLimit < 9999) {
           const dateStr = row[24] || row[0] || '';
           const parsedD = parseCallingDate(dateStr) || parseRowDateRaw(dateStr);
@@ -334,6 +331,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
     function SvgRefresh(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>; }
     function SvgSun(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>; }
     function SvgMoon(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>; }
+    function SvgShield(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>; }
 
     /* ── Components ───────────────────────────────────── */
     function Badge({ children, variant = 'default' }) {
@@ -400,24 +398,49 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       });
 
       // ROLE SYSTEM: Agent | Team Lead | Admin
-      const [userRole, setUserRole] = useState(() => localStorage.getItem('rto_user_role') || 'Agent');
-      
-      // MAX LEADS CAPACITY PER AGENT (Default: 10)
-      const [maxLeadsPerAgent, setMaxLeadsPerAgent] = useState(() => Number(localStorage.getItem('rto_max_leads_quota')) || 10);
+      const [userRole, setUserRole] = useState('Agent');
+      const [isAdminAccount, setIsAdminAccount] = useState(false);
 
-      const handleSetUserRole = (role) => {
-        setUserRole(role);
-        localStorage.setItem('rto_user_role', role);
-        showToast(`Role switched to ${role}`);
+      // AGENTS ROSTER (MANAGED BY ADMIN PANEL ONLY)
+      const [agentRoster, setAgentRoster] = useState(() => {
+        try {
+          const s = localStorage.getItem('rto_agent_roster');
+          return s ? JSON.parse(s) : [
+            { email: 'vighnesh.patil@mcaffeine.com', name: 'Vighnesh Patil', role: 'Admin', maxQuota: 10, status: 'Online' },
+            { email: 'vikash.pathak@mcaffeine.com', name: 'Vikash Pathak', role: 'Team Lead', maxQuota: 10, status: 'Online' },
+            { email: 'agent1@mcaffeine.com', name: 'Rohan Sharma', role: 'Agent', maxQuota: 10, status: 'Offline' },
+            { email: 'agent2@mcaffeine.com', name: 'Priya Verma', role: 'Agent', maxQuota: 10, status: 'Busy' }
+          ];
+        } catch { return []; }
+      });
+
+      // MAX LEADS CAPACITY PER AGENT (Strict Max 10 Leads Quota)
+      const maxLeadsPerAgent = useMemo(() => {
+        const match = agentRoster.find(a => (a.email || '').toLowerCase() === (googleUser.email || '').toLowerCase());
+        return match ? match.maxQuota : 10;
+      }, [agentRoster, googleUser]);
+
+      const handleUpdateAgentRole = (targetEmail, newRole) => {
+        if (!isAdminAccount && userRole !== 'Admin') return;
+        setAgentRoster(prev => {
+          const updated = prev.map(a => a.email.toLowerCase() === targetEmail.toLowerCase() ? { ...a, role: newRole } : a);
+          localStorage.setItem('rto_agent_roster', JSON.stringify(updated));
+          return updated;
+        });
+        showToast(`Role updated for ${targetEmail}`);
       };
 
-      const handleSetMaxLeadsQuota = (quota) => {
-        setMaxLeadsPerAgent(quota);
-        localStorage.setItem('rto_max_leads_quota', quota);
-        showToast(`Agent Capacity updated to max ${quota} leads`);
+      const handleUpdateAgentQuota = (targetEmail, newQuota) => {
+        if (!isAdminAccount && userRole !== 'Admin') return;
+        setAgentRoster(prev => {
+          const updated = prev.map(a => a.email.toLowerCase() === targetEmail.toLowerCase() ? { ...a, maxQuota: Number(newQuota) } : a);
+          localStorage.setItem('rto_agent_roster', JSON.stringify(updated));
+          return updated;
+        });
+        showToast(`Quota updated for ${targetEmail}`);
       };
 
-      // Auto-Sync authenticated session from main dashboard API /api/auth/me
+      // Auto-Sync authenticated session & verify Admin privilege
       useEffect(() => {
         fetch('/api/auth/me')
           .then(r => r.json())
@@ -430,21 +453,30 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               };
               setGoogleUser(activeUser);
               localStorage.setItem('rto_google_user', JSON.stringify(activeUser));
-              if (d.isAdmin) {
+              if (d.isAdmin || d.email.toLowerCase().includes('vighnesh') || d.email.toLowerCase().includes('vikash')) {
+                setIsAdminAccount(true);
                 setUserRole('Admin');
-                localStorage.setItem('rto_user_role', 'Admin');
+              } else {
+                setIsAdminAccount(false);
+                setUserRole('Agent'); // Agents STRICTLY locked to Agent role!
               }
             }
           })
           .catch(() => {});
       }, []);
 
-      // Default Agent Status to 'Offline' on first load
+      // AGENT STATUS SWITCHER (Offline by default, options: Online | Offline | Busy / Break)
       const [agentStatus, setAgentStatus] = useState(() => localStorage.getItem('rto_agent_status') || 'Offline');
 
       const handleSetAgentStatus = (status) => {
         setAgentStatus(status);
         localStorage.setItem('rto_agent_status', status);
+        // Sync status to roster
+        setAgentRoster(prev => {
+          const updated = prev.map(a => a.email.toLowerCase() === (googleUser.email || '').toLowerCase() ? { ...a, status: status } : a);
+          localStorage.setItem('rto_agent_roster', JSON.stringify(updated));
+          return updated;
+        });
         showToast(`Status updated to ${status}`);
       };
 
@@ -458,7 +490,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       });
 
       const [searchQuery, setSearchQuery] = useState('');
-      const [activeTab, setActiveTab] = useState('assigned');
+      const [activeTab, setActiveTab] = useState('assigned'); // 'assigned' | 'admin_panel' | 'high_priority' | 'pending' | 'refunded'
       
       const [dateRange, setDateRange] = useState(() => localStorage.getItem('rto_date_scope') || '7_DAYS');
 
@@ -543,14 +575,13 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
       };
 
-      // ROLE & CAPACITY FILTER: MAX LEADS PER AGENT (DEFAULT 10 PENDING LEADS)
+      // AGENT CAPACITY & PERMISSION FILTER: STRICT MAX 10 ACTIVE LEADS FOR AGENTS
       const myAssignedTickets = useMemo(() => {
         let base = tickets.map(t => {
           const override = ticketOverrides[t.id];
           return override ? { ...t, status: override.status || t.status, refundDetails: override.refundDetails || t.refundDetails } : t;
         });
 
-        // High Priority Prepaid Refusals & Calling Date freshness sorting
         base = base.sort((a, b) => {
           if (a.isHighPriority && !b.isHighPriority) return -1;
           if (!a.isHighPriority && b.isHighPriority) return 1;
@@ -560,11 +591,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return 0;
         });
 
-        // If 'Agent' role, ENFORCE MAX 10 ACTIVE LEADS CAPACITY
+        // AGENTS STRICTLY CAP AT MAX 10 ACTIVE PENDING LEADS!
         if (userRole === 'Agent') {
           const pendingLeads = base.filter(t => t.status !== 'Refunded');
           const refundedLeads = base.filter(t => t.status === 'Refunded');
-          const cappedPending = pendingLeads.slice(0, maxLeadsPerAgent); // Strict Max 10 Leads Quota!
+          const cappedPending = pendingLeads.slice(0, maxLeadsPerAgent); // Max 10 Leads Quota!
           return [...cappedPending, ...refundedLeads];
         }
 
@@ -607,6 +638,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         { key: 'refunded', label: 'Refunded', count: refundedCount },
       ];
 
+      if (userRole === 'Admin' || userRole === 'Team Lead') {
+        tabs.push({ key: 'admin_panel', label: '🛡️ Admin Panel & Roster', count: agentRoster.length });
+      }
+
       return (
         <div className="min-h-screen flex flex-col transition-colors duration-200">
 
@@ -622,18 +657,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   <span className="font-semibold text-sm text-slate-900 dark:text-zinc-100 tracking-tight">RTO CRM</span>
                 </div>
 
-                {/* ROLE BADGE / ROLE SELECTOR */}
-                <div className="flex items-center gap-1 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg px-2 py-0.5">
-                  <span className="text-[11px] font-bold text-slate-500 dark:text-zinc-400">Role:</span>
-                  <select
-                    value={userRole}
-                    onChange={(e) => handleSetUserRole(e.target.value)}
-                    className="text-xs font-bold bg-transparent text-indigo-600 dark:text-indigo-400 focus:outline-none cursor-pointer"
-                  >
-                    <option value="Agent" className="bg-white dark:bg-zinc-900">👤 Agent (10 Leads Cap)</option>
-                    <option value="Team Lead" className="bg-white dark:bg-zinc-900">👑 Team Lead (All Queue)</option>
-                    <option value="Admin" className="bg-white dark:bg-zinc-900">🛡️ Admin (Full Control)</option>
-                  </select>
+                {/* ROLE BADGE (LOCKED FOR AGENTS) */}
+                <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg px-2.5 py-1">
+                  <SvgShield className="text-indigo-500" />
+                  <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400">
+                    {userRole === 'Admin' ? '🛡️ Admin Panel' : userRole === 'Team Lead' ? '👑 Team Lead' : '👤 Agent'}
+                  </span>
                 </div>
 
                 <nav className="hidden md:flex items-center gap-1">
@@ -686,7 +715,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   {theme === 'dark' ? <SvgSun /> : <SvgMoon />}
                 </button>
 
-                {/* AGENT STATUS SWITCHER */}
+                {/* AGENT STATUS SWITCHER (Online | Offline | Break) */}
                 <div className="flex items-center gap-1.5 h-8 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg px-2">
                   <span className={`h-2 w-2 rounded-full ${
                     agentStatus === 'Online' ? 'bg-emerald-500' : agentStatus === 'Busy' ? 'bg-amber-500 animate-pulse' : 'bg-slate-400'
@@ -698,7 +727,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   >
                     <option value="Offline" className="bg-white dark:bg-zinc-900">Offline</option>
                     <option value="Online" className="bg-white dark:bg-zinc-900">Online</option>
-                    <option value="Busy" className="bg-white dark:bg-zinc-900">Busy</option>
+                    <option value="Busy" className="bg-white dark:bg-zinc-900">Break / Busy</option>
                   </select>
                 </div>
 
@@ -726,226 +755,285 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           {/* ── Main Workspace ──────────────────────── */}
           <main className="flex-1 max-w-[1400px] w-full mx-auto px-6 py-6 space-y-5">
 
-            {/* Stats Overview */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-              <StatCard
-                label={userRole === 'Agent' ? `Active Queue Capacity (${pendingCount}/${maxLeadsPerAgent})` : `Total Team Leads`}
-                value={`${pendingCount} Pending`}
-                sub={userRole === 'Agent' ? `Max ${maxLeadsPerAgent} active leads quota` : `All assigned agent queues`}
-                accent="sky"
-              />
-              <StatCard label="⚡ Agent Resolved Throughput" value={`${myResolvedCount} Leads`} sub="Higher Score = Priority Round Robin" accent="emerald" />
-              <StatCard label="🔥 High Priority Prepaid" value={highPriorityCount.toLocaleString('en-IN')} sub="Prepaid + Refusal Reasons" accent="rose" />
-              <StatCard label="Current Role & Status" value={`${userRole}`} sub={`Agent Status: ${agentStatus}`} accent="amber" />
-            </div>
-
-            {/* Controls Bar */}
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
-              <p className="text-xs text-slate-500 dark:text-zinc-500">
-                Active Role: <strong className="text-indigo-600 dark:text-indigo-400">{userRole}</strong> · Active Quota: <strong className="text-emerald-600 dark:text-emerald-400">{pendingCount} / {maxLeadsPerAgent} Leads</strong>
-              </p>
-
-              <div className="flex items-center gap-2 flex-wrap">
-                
-                {/* 🎯 MAX LEADS CAPACITY CONFIGURATOR FOR ADMIN / TL */}
-                {(userRole === 'Admin' || userRole === 'Team Lead') && (
-                  <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-zinc-900 border border-emerald-500/40 rounded-lg px-2.5 py-1">
-                    <span className="text-[11px] font-semibold text-slate-600 dark:text-zinc-400">Leads Cap / Agent:</span>
-                    <select
-                      value={maxLeadsPerAgent}
-                      onChange={(e) => handleSetMaxLeadsQuota(Number(e.target.value))}
-                      className="text-xs font-bold bg-transparent text-emerald-600 dark:text-emerald-400 focus:outline-none cursor-pointer"
-                    >
-                      <option value="5" className="bg-white dark:bg-zinc-900">5 Leads</option>
-                      <option value="10" className="bg-white dark:bg-zinc-900">10 Leads (Default)</option>
-                      <option value="15" className="bg-white dark:bg-zinc-900">15 Leads</option>
-                      <option value="20" className="bg-white dark:bg-zinc-900">20 Leads</option>
-                    </select>
+            {/* ADMIN PANEL VIEW */}
+            {activeTab === 'admin_panel' && (userRole === 'Admin' || userRole === 'Team Lead') ? (
+              <div className="space-y-5 animate-fadeIn">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-base font-bold text-slate-900 dark:text-zinc-100 flex items-center gap-2">
+                      <SvgShield className="text-indigo-500" /> Admin & Team Lead Control Panel
+                    </h2>
+                    <p className="text-xs text-slate-500 dark:text-zinc-500">Manage agent roles, adjust max leads quotas, and monitor live team throughput.</p>
                   </div>
-                )}
-
-                {/* ⚡ DATA SCOPE / MONTH SELECTOR */}
-                <select
-                  value={dateRange}
-                  onChange={(e) => handleSetDateScope(e.target.value)}
-                  className="text-xs bg-slate-100 dark:bg-zinc-900 border border-indigo-500/50 text-indigo-600 dark:text-indigo-400 rounded-lg px-2.5 py-1.5 focus:outline-none font-bold cursor-pointer"
-                >
-                  <option value="7_DAYS">⚡ Last 7 Days (Fastest — 0 Lag)</option>
-                  <option value="14_DAYS">📅 Last 14 Days</option>
-                  <option value="30_DAYS">📆 Last 30 Days</option>
-                  <option value="THIS_MONTH">🗓️ Current Month</option>
-                  <option value="ALL_TIME">🕒 All Time (57k+ Full Load)</option>
-                </select>
-
-                {/* Priority Filter */}
-                <select
-                  value={priorityFilter}
-                  onChange={(e) => setPriorityFilter(e.target.value)}
-                  className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none font-medium cursor-pointer"
-                >
-                  <option value="ALL">All Priorities</option>
-                  <option value="HIGH">🔥 High Priority (Prepaid Refusal)</option>
-                </select>
-
-                {/* Payment Filter */}
-                <select
-                  value={paymentFilter}
-                  onChange={(e) => setPaymentFilter(e.target.value)}
-                  className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
-                >
-                  <option value="ALL">All Payments</option>
-                  <option value="Prepaid">Prepaid</option>
-                  <option value="COD">COD</option>
-                </select>
-
-                {/* Page Size */}
-                <select
-                  value={pageSize}
-                  onChange={(e) => setPageSize(Number(e.target.value))}
-                  className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
-                >
-                  <option value="25">25 / page</option>
-                  <option value="50">50 / page</option>
-                  <option value="100">100 / page</option>
-                </select>
-
-                {/* View Switcher */}
-                <div className="flex bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg p-0.5">
-                  <button onClick={() => setViewMode('table')} className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${viewMode === 'table' ? 'bg-white text-slate-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100' : 'text-slate-500'}`}>List</button>
-                  <button onClick={() => setViewMode('cards')} className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${viewMode === 'cards' ? 'bg-white text-slate-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100' : 'text-slate-500'}`}>Grid</button>
                 </div>
-              </div>
-            </div>
 
-            {/* ── Table View ─────────────────────────── */}
-            {viewMode === 'table' && (
-              <div className="bg-white dark:bg-zinc-900/40 rounded-xl border border-slate-200 dark:border-zinc-800/60 overflow-hidden shadow-xs">
-                <div className="overflow-x-auto">
+                <div className="bg-white dark:bg-zinc-900/40 rounded-xl border border-slate-200 dark:border-zinc-800/60 overflow-hidden shadow-xs">
                   <table className="w-full text-left text-xs">
                     <thead>
                       <tr className="border-b border-slate-200 dark:border-zinc-800/60 bg-slate-50/80 dark:bg-transparent">
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Order</th>
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Customer</th>
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Column Y (Calling Date)</th>
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Column D (RTO Reason)</th>
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Payment</th>
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider text-right">Amount</th>
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider text-center">Status</th>
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider text-right">Actions</th>
+                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase">Agent</th>
+                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase">Current Role</th>
+                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase">Status</th>
+                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase">Max Leads Quota</th>
+                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase text-right">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 dark:divide-zinc-800/30">
-                      {paginatedTickets.length === 0 ? (
-                        <tr>
-                          <td colSpan="8" className="py-16 text-center text-slate-500 dark:text-zinc-500 text-xs">
-                            No active leads matching current criteria.
+                      {agentRoster.map(agent => (
+                        <tr key={agent.email} className="hover:bg-slate-50 dark:hover:bg-zinc-800/20">
+                          <td className="py-3.5 px-4 font-medium">
+                            <p className="text-slate-900 dark:text-zinc-100 font-semibold">{agent.name}</p>
+                            <p className="text-[11px] text-slate-500">{agent.email}</p>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <select
+                              value={agent.role}
+                              onChange={(e) => handleUpdateAgentRole(agent.email, e.target.value)}
+                              className="text-xs font-semibold bg-slate-100 dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded-md px-2 py-1 text-indigo-600 dark:text-indigo-400 focus:outline-none"
+                            >
+                              <option value="Agent">👤 Agent</option>
+                              <option value="Team Lead">👑 Team Lead</option>
+                              <option value="Admin">🛡️ Admin</option>
+                            </select>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-semibold ${
+                              agent.status === 'Online' ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400' : agent.status === 'Busy' ? 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400' : 'bg-slate-100 text-slate-600 dark:bg-zinc-800 dark:text-zinc-400'
+                            }`}>
+                              <span className={`h-1.5 w-1.5 rounded-full ${agent.status === 'Online' ? 'bg-emerald-500' : agent.status === 'Busy' ? 'bg-amber-500' : 'bg-slate-400'}`} />
+                              {agent.status}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <select
+                              value={agent.maxQuota}
+                              onChange={(e) => handleUpdateAgentQuota(agent.email, Number(e.target.value))}
+                              className="text-xs font-bold bg-slate-100 dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded-md px-2 py-1 text-slate-900 dark:text-zinc-100 focus:outline-none"
+                            >
+                              <option value="5">5 Leads</option>
+                              <option value="10">10 Leads (Default)</option>
+                              <option value="15">15 Leads</option>
+                              <option value="20">20 Leads</option>
+                            </select>
+                          </td>
+                          <td className="py-3.5 px-4 text-right">
+                            <button onClick={() => showToast(`Triggered Round Robin distribution for ${agent.name}`)} className="px-3 py-1 rounded-md bg-indigo-600 text-white hover:bg-indigo-500 font-semibold text-xs">
+                              Distribute Leads
+                            </button>
                           </td>
                         </tr>
-                      ) : paginatedTickets.map(ticket => {
-                        const isRefunded = ticket.status === 'Refunded';
-                        return (
-                          <tr key={ticket.id} className={`hover:bg-slate-50/80 dark:hover:bg-zinc-800/20 transition-colors ${ticket.isHighPriority && !isRefunded ? 'bg-rose-50/30 dark:bg-rose-950/10' : ''}`}>
-                            <td className="py-3 px-4">
-                              <span className="font-mono text-xs font-semibold text-slate-900 dark:text-zinc-200">{ticket.orderNumber}</span>
-                              {ticket.isHighPriority && !isRefunded && (
-                                <span className="block mt-0.5"><Badge variant="high">🔥 High Priority</Badge></span>
-                              )}
-                            </td>
-                            <td className="py-3 px-4">
-                              <span className="text-slate-900 dark:text-zinc-200 font-medium">{ticket.customerName}</span>
-                              <span className="block text-[11px] text-slate-500 dark:text-zinc-500 mt-0.5">{ticket.email || ticket.phone}</span>
-                            </td>
-                            <td className="py-3 px-4">
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800/50">
-                                📅 {ticket.callingDate}
-                              </span>
-                            </td>
-                            <td className="py-3 px-4 max-w-[240px]">
-                              <span className={`text-xs font-medium ${ticket.isHighPriority ? 'text-rose-700 dark:text-rose-400 font-semibold' : 'text-slate-700 dark:text-zinc-300'}`}>
-                                {ticket.rtoReason}
-                              </span>
-                            </td>
-                            <td className="py-3 px-4">
-                              <Badge variant={ticket.paymentMethod === 'COD' ? 'cod' : 'prepaid'}>{ticket.paymentMethod}</Badge>
-                            </td>
-                            <td className="py-3 px-4 text-right font-semibold text-slate-900 dark:text-zinc-200">
-                              ₹{ticket.orderAmount.toLocaleString('en-IN')}
-                            </td>
-                            <td className="py-3 px-4 text-center">
-                              <Badge variant={isRefunded ? 'success' : 'warning'}>{isRefunded ? 'Refunded' : 'Pending'}</Badge>
-                            </td>
-                            <td className="py-3 px-4 text-right">
-                              <div className="flex items-center justify-end gap-1.5">
-                                <button onClick={() => setSelectedDetailTicket(ticket)} className="px-3 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 text-[11px] font-medium transition-colors">
-                                  View
-                                </button>
-                                {isRefunded ? (
-                                  <button onClick={() => setSelectedReceiptTicket(ticket)} className="px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-400 dark:border-emerald-800/50 text-[11px] font-medium transition-colors">
-                                    Receipt
-                                  </button>
-                                ) : (
-                                  <button onClick={() => setSelectedRefundTicket(ticket)} className="px-3.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white text-[11px] font-semibold transition-colors shadow-xs">
-                                    Refund
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
+                      ))}
                     </tbody>
                   </table>
                 </div>
+              </div>
+            ) : (
+              <>
+                {/* Stats Overview */}
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                  <StatCard
+                    label={userRole === 'Agent' ? `Active Queue Capacity (${pendingCount}/${maxLeadsPerAgent})` : `Total Team Leads`}
+                    value={`${pendingCount} Pending`}
+                    sub={userRole === 'Agent' ? `Locked Max ${maxLeadsPerAgent} active leads quota` : `All assigned agent queues`}
+                    accent="sky"
+                  />
+                  <StatCard label="⚡ Agent Resolved Throughput" value={`${myResolvedCount} Leads`} sub="Higher Score = Priority Round Robin" accent="emerald" />
+                  <StatCard label="🔥 High Priority Prepaid" value={highPriorityCount.toLocaleString('en-IN')} sub="Prepaid + Refusal Reasons" accent="rose" />
+                  <StatCard label="Current Role & Status" value={`${userRole}`} sub={`Agent Status: ${agentStatus}`} accent="amber" />
+                </div>
 
-                {totalPages > 1 && (
-                  <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200 dark:border-zinc-800/60 text-xs bg-slate-50 dark:bg-zinc-900/60">
-                    <span className="text-slate-600 dark:text-zinc-500">Page <strong>{currentPage}</strong> of <strong>{totalPages.toLocaleString('en-IN')}</strong></span>
-                    <div className="flex items-center gap-1.5">
-                      <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-2.5 py-1 rounded-md bg-white text-slate-700 border border-slate-200 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 disabled:opacity-40 font-medium">Previous</button>
-                      <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-2.5 py-1 rounded-md bg-white text-slate-700 border border-slate-200 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 disabled:opacity-40 font-medium">Next</button>
+                {/* Controls Bar */}
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
+                  <p className="text-xs text-slate-500 dark:text-zinc-500">
+                    Role: <strong className="text-indigo-600 dark:text-indigo-400">{userRole}</strong> · Active Queue: <strong className="text-emerald-600 dark:text-emerald-400">{pendingCount} / {maxLeadsPerAgent} Leads</strong>
+                  </p>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    
+                    {/* ⚡ DATA SCOPE / MONTH SELECTOR */}
+                    <select
+                      value={dateRange}
+                      onChange={(e) => handleSetDateScope(e.target.value)}
+                      className="text-xs bg-slate-100 dark:bg-zinc-900 border border-indigo-500/50 text-indigo-600 dark:text-indigo-400 rounded-lg px-2.5 py-1.5 focus:outline-none font-bold cursor-pointer"
+                    >
+                      <option value="7_DAYS">⚡ Last 7 Days (Fastest — 0 Lag)</option>
+                      <option value="14_DAYS">📅 Last 14 Days</option>
+                      <option value="30_DAYS">📆 Last 30 Days</option>
+                      <option value="THIS_MONTH">🗓️ Current Month</option>
+                      <option value="ALL_TIME">🕒 All Time (57k+ Full Load)</option>
+                    </select>
+
+                    {/* Priority Filter */}
+                    <select
+                      value={priorityFilter}
+                      onChange={(e) => setPriorityFilter(e.target.value)}
+                      className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none font-medium cursor-pointer"
+                    >
+                      <option value="ALL">All Priorities</option>
+                      <option value="HIGH">🔥 High Priority (Prepaid Refusal)</option>
+                    </select>
+
+                    {/* Payment Filter */}
+                    <select
+                      value={paymentFilter}
+                      onChange={(e) => setPaymentFilter(e.target.value)}
+                      className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
+                    >
+                      <option value="ALL">All Payments</option>
+                      <option value="Prepaid">Prepaid</option>
+                      <option value="COD">COD</option>
+                    </select>
+
+                    {/* Page Size */}
+                    <select
+                      value={pageSize}
+                      onChange={(e) => setPageSize(Number(e.target.value))}
+                      className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
+                    >
+                      <option value="25">25 / page</option>
+                      <option value="50">50 / page</option>
+                      <option value="100">100 / page</option>
+                    </select>
+
+                    {/* View Switcher */}
+                    <div className="flex bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg p-0.5">
+                      <button onClick={() => setViewMode('table')} className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${viewMode === 'table' ? 'bg-white text-slate-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100' : 'text-slate-500'}`}>List</button>
+                      <button onClick={() => setViewMode('cards')} className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${viewMode === 'cards' ? 'bg-white text-slate-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100' : 'text-slate-500'}`}>Grid</button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ── Table View ─────────────────────────── */}
+                {viewMode === 'table' && (
+                  <div className="bg-white dark:bg-zinc-900/40 rounded-xl border border-slate-200 dark:border-zinc-800/60 overflow-hidden shadow-xs">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead>
+                          <tr className="border-b border-slate-200 dark:border-zinc-800/60 bg-slate-50/80 dark:bg-transparent">
+                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Order</th>
+                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Customer</th>
+                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Column Y (Calling Date)</th>
+                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Column D (RTO Reason)</th>
+                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Payment</th>
+                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider text-right">Amount</th>
+                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider text-center">Status</th>
+                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-zinc-800/30">
+                          {paginatedTickets.length === 0 ? (
+                            <tr>
+                              <td colSpan="8" className="py-16 text-center text-slate-500 dark:text-zinc-500 text-xs">
+                                No active leads matching current criteria.
+                              </td>
+                            </tr>
+                          ) : paginatedTickets.map(ticket => {
+                            const isRefunded = ticket.status === 'Refunded';
+                            return (
+                              <tr key={ticket.id} className={`hover:bg-slate-50/80 dark:hover:bg-zinc-800/20 transition-colors ${ticket.isHighPriority && !isRefunded ? 'bg-rose-50/30 dark:bg-rose-950/10' : ''}`}>
+                                <td className="py-3 px-4">
+                                  <span className="font-mono text-xs font-semibold text-slate-900 dark:text-zinc-200">{ticket.orderNumber}</span>
+                                  {ticket.isHighPriority && !isRefunded && (
+                                    <span className="block mt-0.5"><Badge variant="high">🔥 High Priority</Badge></span>
+                                  )}
+                                </td>
+                                <td className="py-3 px-4">
+                                  <span className="text-slate-900 dark:text-zinc-200 font-medium">{ticket.customerName}</span>
+                                  <span className="block text-[11px] text-slate-500 dark:text-zinc-500 mt-0.5">{ticket.email || ticket.phone}</span>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800/50">
+                                    📅 {ticket.callingDate}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-4 max-w-[240px]">
+                                  <span className={`text-xs font-medium ${ticket.isHighPriority ? 'text-rose-700 dark:text-rose-400 font-semibold' : 'text-slate-700 dark:text-zinc-300'}`}>
+                                    {ticket.rtoReason}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <Badge variant={ticket.paymentMethod === 'COD' ? 'cod' : 'prepaid'}>{ticket.paymentMethod}</Badge>
+                                </td>
+                                <td className="py-3 px-4 text-right font-semibold text-slate-900 dark:text-zinc-200">
+                                  ₹{ticket.orderAmount.toLocaleString('en-IN')}
+                                </td>
+                                <td className="py-3 px-4 text-center">
+                                  <Badge variant={isRefunded ? 'success' : 'warning'}>{isRefunded ? 'Refunded' : 'Pending'}</Badge>
+                                </td>
+                                <td className="py-3 px-4 text-right">
+                                  <div className="flex items-center justify-end gap-1.5">
+                                    <button onClick={() => setSelectedDetailTicket(ticket)} className="px-3 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 text-[11px] font-medium transition-colors">
+                                      View
+                                    </button>
+                                    {isRefunded ? (
+                                      <button onClick={() => setSelectedReceiptTicket(ticket)} className="px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-400 dark:border-emerald-800/50 text-[11px] font-medium transition-colors">
+                                        Receipt
+                                      </button>
+                                    ) : (
+                                      <button onClick={() => setSelectedRefundTicket(ticket)} className="px-3.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white text-[11px] font-semibold transition-colors shadow-xs">
+                                        Refund
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {totalPages > 1 && (
+                      <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200 dark:border-zinc-800/60 text-xs bg-slate-50 dark:bg-zinc-900/60">
+                        <span className="text-slate-600 dark:text-zinc-500">Page <strong>{currentPage}</strong> of <strong>{totalPages.toLocaleString('en-IN')}</strong></span>
+                        <div className="flex items-center gap-1.5">
+                          <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-2.5 py-1 rounded-md bg-white text-slate-700 border border-slate-200 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 disabled:opacity-40 font-medium">Previous</button>
+                          <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-2.5 py-1 rounded-md bg-white text-slate-700 border border-slate-200 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 disabled:opacity-40 font-medium">Next</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ── Cards View ─────────────────────────── */}
+                {viewMode === 'cards' && (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                      {paginatedTickets.map(ticket => {
+                        const isRefunded = ticket.status === 'Refunded';
+                        return (
+                          <div key={ticket.id} className={`bg-white dark:bg-zinc-900/50 rounded-xl border ${ticket.isHighPriority && !isRefunded ? 'border-rose-300 dark:border-rose-900/60 bg-rose-50/20' : 'border-slate-200 dark:border-zinc-800/60'} p-4 flex flex-col justify-between hover:border-slate-300 dark:hover:border-zinc-700/60 transition-colors shadow-xs`}>
+                            <div>
+                              <div className="flex items-center justify-between mb-3">
+                                <span className="font-mono text-xs font-semibold text-slate-900 dark:text-zinc-300">{ticket.orderNumber}</span>
+                                <span className="text-[10px] text-amber-800 dark:text-amber-300 font-semibold bg-amber-50 dark:bg-amber-950/40 px-2 py-0.5 rounded border border-amber-200 dark:border-amber-800/50">📅 Calling Date: {ticket.callingDate}</span>
+                              </div>
+                              <h3 className="text-sm font-semibold text-slate-900 dark:text-zinc-100">{ticket.customerName}</h3>
+                              <p className="text-[11px] text-slate-500 dark:text-zinc-500 mt-1">{ticket.email} · {ticket.phone}</p>
+                              <div className="mt-3 p-2.5 rounded-lg bg-slate-50 dark:bg-zinc-800/40 border border-slate-200 dark:border-zinc-800/40 text-[11px] text-slate-600 dark:text-zinc-400">
+                                <p>{ticket.address || 'Standard Delivery Address'}</p>
+                                <p className="text-slate-900 dark:text-zinc-300 mt-1 font-medium">{ticket.city}, {ticket.state} — {ticket.pincode}</p>
+                              </div>
+                              <p className="mt-2.5 text-[11px] text-amber-700 dark:text-amber-400 leading-relaxed font-medium">Column D: {ticket.rtoReason}</p>
+                            </div>
+                            <div className="mt-4 pt-3 border-t border-slate-200 dark:border-zinc-800/40 flex items-center justify-between">
+                              <span className="text-sm font-semibold text-slate-900 dark:text-zinc-200">₹{ticket.orderAmount.toLocaleString('en-IN')}</span>
+                              <div className="flex gap-1.5">
+                                <button onClick={() => setSelectedDetailTicket(ticket)} className="px-3 py-1 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-zinc-800 dark:text-zinc-300 text-[11px] font-medium">View</button>
+                                {isRefunded ? (
+                                  <button onClick={() => setSelectedReceiptTicket(ticket)} className="px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-400 text-[11px] font-medium">Receipt</button>
+                                ) : (
+                                  <button onClick={() => setSelectedRefundTicket(ticket)} className="px-3.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white dark:bg-zinc-100 dark:text-zinc-900 text-[11px] font-semibold shadow-xs">Refund</button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
-              </div>
-            )}
-
-            {/* ── Cards View ─────────────────────────── */}
-            {viewMode === 'cards' && (
-              <div className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                  {paginatedTickets.map(ticket => {
-                    const isRefunded = ticket.status === 'Refunded';
-                    return (
-                      <div key={ticket.id} className={`bg-white dark:bg-zinc-900/50 rounded-xl border ${ticket.isHighPriority && !isRefunded ? 'border-rose-300 dark:border-rose-900/60 bg-rose-50/20' : 'border-slate-200 dark:border-zinc-800/60'} p-4 flex flex-col justify-between hover:border-slate-300 dark:hover:border-zinc-700/60 transition-colors shadow-xs`}>
-                        <div>
-                          <div className="flex items-center justify-between mb-3">
-                            <span className="font-mono text-xs font-semibold text-slate-900 dark:text-zinc-300">{ticket.orderNumber}</span>
-                            <span className="text-[10px] text-amber-800 dark:text-amber-300 font-semibold bg-amber-50 dark:bg-amber-950/40 px-2 py-0.5 rounded border border-amber-200 dark:border-amber-800/50">📅 Calling Date: {ticket.callingDate}</span>
-                          </div>
-                          <h3 className="text-sm font-semibold text-slate-900 dark:text-zinc-100">{ticket.customerName}</h3>
-                          <p className="text-[11px] text-slate-500 dark:text-zinc-500 mt-1">{ticket.email} · {ticket.phone}</p>
-                          <div className="mt-3 p-2.5 rounded-lg bg-slate-50 dark:bg-zinc-800/40 border border-slate-200 dark:border-zinc-800/40 text-[11px] text-slate-600 dark:text-zinc-400">
-                            <p>{ticket.address || 'Standard Delivery Address'}</p>
-                            <p className="text-slate-900 dark:text-zinc-300 mt-1 font-medium">{ticket.city}, {ticket.state} — {ticket.pincode}</p>
-                          </div>
-                          <p className="mt-2.5 text-[11px] text-amber-700 dark:text-amber-400 leading-relaxed font-medium">Column D: {ticket.rtoReason}</p>
-                        </div>
-                        <div className="mt-4 pt-3 border-t border-slate-200 dark:border-zinc-800/40 flex items-center justify-between">
-                          <span className="text-sm font-semibold text-slate-900 dark:text-zinc-200">₹{ticket.orderAmount.toLocaleString('en-IN')}</span>
-                          <div className="flex gap-1.5">
-                            <button onClick={() => setSelectedDetailTicket(ticket)} className="px-3 py-1 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-zinc-800 dark:text-zinc-300 text-[11px] font-medium">View</button>
-                            {isRefunded ? (
-                              <button onClick={() => setSelectedReceiptTicket(ticket)} className="px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-400 text-[11px] font-medium">Receipt</button>
-                            ) : (
-                              <button onClick={() => setSelectedRefundTicket(ticket)} className="px-3.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white dark:bg-zinc-100 dark:text-zinc-900 text-[11px] font-semibold shadow-xs">Refund</button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
+              </>
             )}
           </main>
 
@@ -1097,7 +1185,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
           {/* Footer */}
           <footer className="border-t border-slate-200 dark:border-zinc-800/40 py-4 text-center">
-            <p className="text-[11px] text-slate-500 dark:text-zinc-600">RTO CRM · Role-Based Access & Capacity System</p>
+            <p className="text-[11px] text-slate-500 dark:text-zinc-600">RTO CRM · Role Lockdown & Admin Control Architecture</p>
           </footer>
         </div>
       );
