@@ -147,22 +147,22 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         const rowNumber = sheetRowIndex + 2; // 1-based index (row 1 is header)
         const valueRanges = [];
 
-        if (updates.assignedAgent) {
+        if (updates.assignedAgent !== undefined) {
           valueRanges.push({ range: `Data!Q${rowNumber}`, values: [[updates.assignedAgent]] });
         }
-        if (updates.connectedStatus) {
+        if (updates.connectedStatus !== undefined) {
           valueRanges.push({ range: `Data!R${rowNumber}`, values: [[updates.connectedStatus]] });
         }
-        if (updates.disposition) {
+        if (updates.disposition !== undefined) {
           valueRanges.push({ range: `Data!T${rowNumber}`, values: [[updates.disposition]] });
         }
-        if (updates.remarks) {
+        if (updates.remarks !== undefined) {
           valueRanges.push({ range: `Data!U${rowNumber}`, values: [[updates.remarks]] });
         }
-        if (updates.newOrderId) {
+        if (updates.newOrderId !== undefined) {
           valueRanges.push({ range: `Data!V${rowNumber}`, values: [[updates.newOrderId]] });
         }
-        if (updates.newAddress) {
+        if (updates.newAddress !== undefined) {
           valueRanges.push({ range: `Data!X${rowNumber}`, values: [[updates.newAddress]] });
         }
 
@@ -525,7 +525,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         if(isRef){
           doRefund(dispTkt.id,{refundId:`RFD-${Date.now().toString().slice(-6)}`,amount:dispTkt.orderAmount,reason:dispReason,date:new Date().toLocaleString(),mode:dispTkt.paymentMethod==='COD'?'UPI Payout':'Original Gateway',transactionRef:`TXN-${Math.random().toString(36).substring(2,10).toUpperCase()}`,processedBy:googleUser.name,notes:refNotes});
         } else {
-          showToast(`Saved & synced to live Google Sheet Column Q!`);
+          showToast(`Disposed ${dispTkt.orderNumber} & refilled fresh lead into box!`);
         }
         setDispTkt(null);
       };
@@ -538,6 +538,72 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         if(tgt){setReceiptTkt({...tgt,refundDetails:rec});try{window.confetti?.({particleCount:60,spread:55,origin:{y:.7}});}catch{}showToast(`₹${rec.amount.toLocaleString('en-IN')} refunded successfully`);}
       };
 
+      // Admin Bulk Reassign / Unassign Controls
+      const adminBulkAction = async (sourceAgentEmail, targetAgentEmail) => {
+        const isUnassign = targetAgentEmail === 'UNASSIGN';
+        const sourceEmail = sourceAgentEmail.toLowerCase();
+        const sourcePrefix = sourceEmail.split('@')[0];
+
+        // Find all tickets assigned to sourceAgentEmail
+        const targetTickets = tickets.filter(t => {
+          const currAgt = (overrides[t.id]?.assignedAgent || t.assignedAgent || '').toLowerCase();
+          return currAgt.includes(sourceEmail) || currAgt.includes(sourcePrefix);
+        });
+
+        if (targetTickets.length === 0) {
+          showToast(`No active leads found for ${sourceAgentEmail}`);
+          return;
+        }
+
+        const newOverrides = {};
+        const valueRanges = [];
+        const newAssignedTag = isUnassign ? '' : targetAgentEmail;
+
+        targetTickets.forEach(t => {
+          newOverrides[t.id] = {
+            ...(overrides[t.id] || {}),
+            assignedAgent: isUnassign ? 'Unassigned' : newAssignedTag,
+            assignedEmail: isUnassign ? '' : targetAgentEmail
+          };
+          const rowNumber = t.rawIndex + 2;
+          valueRanges.push({
+            range: `Data!Q${rowNumber}`,
+            values: [[newAssignedTag]]
+          });
+        });
+
+        // 1. Update UI overrides state instantly
+        setOverrides(p => {
+          const u = { ...p, ...newOverrides };
+          try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
+          return u;
+        });
+
+        // 2. Batch update live Google Sheet Column Q
+        if (valueRanges.length > 0) {
+          try {
+            const token = await getAccessToken();
+            const sid = extractSheetId(DEFAULT_SHEET_URL);
+            if (sid) {
+              const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
+              });
+              if (res.ok) {
+                if (isUnassign) {
+                  showToast(`🧹 Unassigned all ${valueRanges.length} leads from ${sourceAgentEmail} & cleared Column Q!`);
+                } else {
+                  showToast(`🔄 Reassigned ${valueRanges.length} leads to ${targetAgentEmail} & updated Google Sheet!`);
+                }
+              }
+            }
+          } catch (err) {
+            console.error('Bulk reassign error:', err);
+          }
+        }
+      };
+
       // Sync
       const sync = useCallback(async(silent=false)=>{
         const sid=extractSheetId(DEFAULT_SHEET_URL);if(!sid)return;setIsSyncing(true);
@@ -548,7 +614,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       useEffect(()=>{sync(true);},[]);
       useEffect(()=>{const t=setInterval(()=>sync(true),60000);return()=>clearInterval(t);},[sync]);
 
-      // Derived data
+      // Derived data & Queue Replenishment Logic
       const allTickets = useMemo(()=>{
         let base=tickets.map(t=>{
           const o=overrides[t.id];
@@ -569,26 +635,32 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
         base.sort((a,b)=>{if(a.isHighPriority&&!b.isHighPriority)return-1;if(!a.isHighPriority&&b.isHighPriority)return 1;if(a.rowDate&&b.rowDate)return b.rowDate-a.rowDate;return 0;});
 
-        // For Agent Role, show assigned OR unassigned leads claimed for the agent's quota (10 max)
+        // REPLENISHMENT ENGINE: An agent's active PENDING box maintains 10 PENDING (unresolved) leads!
         if(userRole==='Agent' && googleUser?.email){
           const e = googleUser.email.toLowerCase();
           const p = e.split('@')[0];
           const isMine = (agt) => agt && agt !== 'Unassigned' && (agt.toLowerCase().includes(e) || agt.toLowerCase().includes(p));
 
-          let myLeads = base.filter(t => t.status !== 'Refunded' && isMine(t.assignedAgent));
-          let unassignedLeads = base.filter(t => t.status !== 'Refunded' && (!t.assignedAgent || t.assignedAgent === 'Unassigned'));
+          // 1. Pending unresolved leads currently assigned to me
+          let myPending = base.filter(t => t.status === 'Pending' && !t.disposition && !t.agentRemarks && isMine(t.assignedAgent));
+          
+          // 2. Disposed or refunded leads assigned to me (kept for history view)
+          const myDisposed = base.filter(t => (t.status !== 'Pending' || t.disposition || t.agentRemarks) && isMine(t.assignedAgent));
 
-          const needed = Math.max(0, maxLeads - myLeads.length);
+          // 3. If pending leads count is below maxLeads (10), claim fresh unassigned leads to refill active box!
+          let unassignedLeads = base.filter(t => t.status === 'Pending' && !t.disposition && !t.agentRemarks && (!t.assignedAgent || t.assignedAgent === 'Unassigned'));
+
+          const needed = Math.max(0, maxLeads - myPending.length);
           if (needed > 0 && unassignedLeads.length > 0) {
             const claimed = unassignedLeads.slice(0, needed).map(t => ({
               ...t,
               assignedAgent: googleUser.email
             }));
-            myLeads = [...myLeads, ...claimed];
+            myPending = [...myPending, ...claimed];
           }
 
-          const myRefunded = base.filter(t => t.status === 'Refunded' && isMine(t.assignedAgent));
-          return [...myLeads.slice(0, maxLeads), ...myRefunded];
+          // Return 10 PENDING leads + ALL DISPOSED leads (so disposed leads remain visible in Disposed/All tab!)
+          return [...myPending.slice(0, maxLeads), ...myDisposed];
         }
 
         return base;
@@ -598,7 +670,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       useEffect(() => {
         if (allTickets.length === 0 || !googleUser?.email || userRole !== 'Agent') return;
 
-        const unassignedInBox = allTickets.filter(t => !overrides[t.id]?.assignedAgent || overrides[t.id]?.assignedAgent === 'Unassigned');
+        const unassignedInBox = allTickets.filter(t => (!t.disposition && !t.agentRemarks && t.status === 'Pending') && (!overrides[t.id]?.assignedAgent || overrides[t.id]?.assignedAgent === 'Unassigned'));
         if (unassignedInBox.length === 0) return;
 
         const newOverrides = {};
@@ -618,14 +690,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           });
         });
 
-        // 1. Update UI state immediately so all 10 rows show Agent Name & Email
+        // Update UI state immediately so all 10 rows show Agent Name & Email
         setOverrides(p => {
           const u = { ...p, ...newOverrides };
           try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
           return u;
         });
 
-        // 2. Batch update live Google Sheet Column Q in 1 single API call
+        // Batch update live Google Sheet Column Q in 1 single API call
         if (valueRanges.length > 0) {
           getAccessToken().then(token => {
             const sid = extractSheetId(DEFAULT_SHEET_URL);
@@ -635,14 +707,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
               body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
             }).then(r => {
-              if (r.ok) showToast(`Column Q synced to live Google Sheet for all 10 assigned leads!`);
+              if (r.ok) showToast(`Synced Column Q in Google Sheet for fresh box leads!`);
             }).catch(console.error);
           }).catch(console.error);
         }
       }, [allTickets, googleUser, userRole]);
 
       const hp=allTickets.filter(t=>t.isHighPriority&&t.status!=='Refunded').length;
-      const pend=allTickets.filter(t=>t.status!=='Refunded').length;
+      const pend=allTickets.filter(t=>t.status==='Pending'&&!t.disposition&&!t.agentRemarks).length;
       const refd=allTickets.filter(t=>t.status==='Refunded').length;
       const dispCount=allTickets.filter(t=>t.disposition||t.agentRemarks||t.status!=='Pending').length;
 
@@ -705,7 +777,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         return allTickets.filter(t=>{
           if(agentFilter!=='ALL'){const a=t.assignedAgent.toLowerCase(),s=agentFilter.toLowerCase();if(!a.includes(s)&&!s.includes(a))return false;}
           if(tab==='high'&&(!t.isHighPriority||t.status==='Refunded'))return false;
-          if(tab==='pending'&&t.status==='Refunded')return false;
+          if(tab==='pending'&&(t.status!=='Pending'||t.disposition||t.agentRemarks))return false;
           if(tab==='refunded'&&t.status!=='Refunded')return false;
           if(tab==='disposed'&&(!t.disposition&&!t.agentRemarks&&t.status==='Pending'))return false;
           if(prioFilter==='HIGH'&&!t.isHighPriority)return false;
@@ -721,7 +793,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const tabs=[
         {key:'all',label:'All Leads',count:allTickets.length},
         {key:'high',label:'High Priority',count:hp},
-        {key:'pending',label:'Pending',count:pend},
+        {key:'pending',label:'Pending Queue',count:pend},
         {key:'disposed',label:'Disposed & Remarks',count:dispCount},
         {key:'refunded',label:'Refunded',count:refd},
       ];
@@ -789,9 +861,9 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
             {tab==='admin'&&(userRole==='Admin'||userRole==='Team Lead')?(
               <div className="space-y-6 animate-fadeIn">
-                <div><h2 className="text-lg font-bold text-zinc-100">Team Roster & Permission Control</h2><p className="text-[13px] text-zinc-500 mt-0.5">Manage agent roles, lead capacity limits, and monitor live activity logs across the entire team.</p></div>
+                <div><h2 className="text-lg font-bold text-zinc-100">Team Roster & Bulk Lead Reassignment Control</h2><p className="text-[13px] text-zinc-500 mt-0.5">Manage agent roles, lead capacity limits, reassign active agent boxes, or wipe Column Q in Google Sheet.</p></div>
 
-                {/* Agent Roster Table */}
+                {/* Agent Roster & Reassignment Table */}
                 <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 overflow-hidden">
                   <table className="w-full text-[13px]">
                     <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
@@ -799,9 +871,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                       <th className="py-3 px-4 text-left font-medium">Assigned Role</th>
                       <th className="py-3 px-4 text-left font-medium">Status</th>
                       <th className="py-3 px-4 text-left font-medium">Avg. Handle Time</th>
-                      <th className="py-3 px-4 text-left font-medium">Break Time</th>
                       <th className="py-3 px-4 text-left font-medium">Lead Quota</th>
-                      <th className="py-3 px-4 text-right font-medium"></th>
+                      <th className="py-3 px-4 text-right font-medium">Bulk Reassign / Unassign Box</th>
                     </tr></thead>
                     <tbody className="divide-y divide-zinc-800/50">
                       {agentRoster.map(a=>(
@@ -823,7 +894,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                           </td>
                           <td className="py-3 px-4"><span className={`inline-flex items-center gap-1.5 text-[13px] font-medium ${a.status==='Online'?'text-emerald-400':a.status==='Busy'?'text-amber-400':'text-zinc-500'}`}><span className={`h-1.5 w-1.5 rounded-full ${a.status==='Online'?'bg-emerald-500':a.status==='Busy'?'bg-amber-400':'bg-zinc-500'}`}/>{a.status}</span></td>
                           <td className="py-3 px-4 text-zinc-300 font-mono">{a.aht||'—'}</td>
-                          <td className="py-3 px-4 text-zinc-400">{a.breakTime||'—'}</td>
                           <td className="py-3 px-4">
                             <CustomSelect
                               value={a.maxQuota}
@@ -838,7 +908,35 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                               ]}
                             />
                           </td>
-                          <td className="py-3 px-4 text-right"><button onClick={()=>{setAgentFilter(a.email);setTab('all');showToast(`Filtered leads for ${a.name}`);}} className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-medium transition-colors shadow-xs">View Leads</button></td>
+                          
+                          {/* Bulk Reassign & Unassign Action Controls */}
+                          <td className="py-3 px-4 text-right">
+                            <div className="flex items-center justify-end gap-2">
+                              <CustomSelect
+                                value="REASSIGN"
+                                onChange={(targetAgentEmail) => {
+                                  if (targetAgentEmail !== 'REASSIGN') {
+                                    adminBulkAction(a.email, targetAgentEmail);
+                                  }
+                                }}
+                                options={[
+                                  { value: 'REASSIGN', label: '🔄 Reassign Box To…' },
+                                  ...agentRoster.filter(target => target.email !== a.email).map(target => ({
+                                    value: target.email,
+                                    label: `➡️ ${target.name}`
+                                  }))
+                                ]}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => adminBulkAction(a.email, 'UNASSIGN')}
+                                className="px-3 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900 text-rose-200 border border-rose-800/80 text-[12px] font-bold transition-all shadow-xs"
+                                title="Wipe assigned agent and clear Column Q in Google Sheet"
+                              >
+                                🧹 Unassign All (Clear Sheet)
+                              </button>
+                            </div>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -886,10 +984,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               <>
                 {/* Stats */}
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                  <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs"><p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500 mb-1">Total Leads</p><p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{filtered.length.toLocaleString('en-IN')}</p><p className="text-[12px] text-zinc-500 mt-1">{agentFilter!=='ALL'?agentFilter:'All agents'}</p></div>
+                  <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs"><p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500 mb-1">Active Pending Box</p><p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{pend.toLocaleString('en-IN')}</p><p className="text-[12px] text-zinc-500 mt-1">{agentFilter!=='ALL'?agentFilter:'All agents'}</p></div>
                   <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs"><p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500 mb-1">Avg Handle Time</p><p className="text-2xl font-extrabold text-zinc-100">2.8<span className="text-sm font-normal text-zinc-400 ml-0.5">min</span></p><p className="text-[12px] text-zinc-500 mt-1">Per resolution</p></div>
                   <div className="bg-zinc-900/70 rounded-xl p-4 border border-rose-900/50 shadow-xs"><p className="text-[11px] font-medium uppercase tracking-wider text-rose-400 mb-1">High Priority</p><p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{hp.toLocaleString('en-IN')}</p><p className="text-[12px] text-zinc-500 mt-1">Prepaid refusals</p></div>
-                  <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs"><p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500 mb-1">Last Synced</p><p className="text-2xl font-extrabold text-zinc-100">{lastSync}</p><p className="text-[12px] text-zinc-500 mt-1">Auto-refresh 60s</p></div>
+                  <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs"><p className="text-[11px] font-medium uppercase tracking-wider text-zinc-500 mb-1">Total Disposed</p><p className="text-2xl font-extrabold text-indigo-400 tabular-nums">{dispCount.toLocaleString('en-IN')}</p><p className="text-[12px] text-zinc-500 mt-1">Saved in History</p></div>
                 </div>
 
                 {/* Custom Styled Filter Bar */}
@@ -907,7 +1005,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     ) : (
                       <div className="h-8 px-3 py-1 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[13px] font-medium text-zinc-300 flex items-center gap-2">
                         <UserIcon className="text-indigo-400 shrink-0" />
-                        <span>My Assigned Queue ({googleUser.email.split('@')[0]})</span>
+                        <span>My Active Queue ({googleUser.email.split('@')[0]})</span>
                       </div>
                     )}
 
@@ -963,6 +1061,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                         <tbody className="divide-y divide-zinc-800/40">
                           {visible.map(t=>{
                             const ref=t.status==='Refunded';
+                            const isDisposed = t.disposition || t.agentRemarks || t.status !== 'Pending';
                             const agtStr = t.assignedAgent || 'Unassigned';
                             const isUnassigned = !agtStr || agtStr === 'Unassigned';
                             const hasNameEmail = agtStr.includes('(');
@@ -1017,7 +1116,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
                                 <td className="py-3 px-4"><Badge color={t.paymentMethod==='COD'?'amber':'blue'}>{t.paymentMethod}</Badge></td>
                                 <td className="py-3 px-4 text-right font-semibold text-zinc-200 tabular-nums">₹{t.orderAmount.toLocaleString('en-IN')}</td>
-                                <td className="py-3 px-4 text-center"><Badge color={ref?'green':t.disposition?'blue':'zinc'}>{ref?'Refunded':t.disposition?'Disposed':'Pending'}</Badge></td>
+                                <td className="py-3 px-4 text-center"><Badge color={ref?'green':isDisposed?'blue':'zinc'}>{ref?'Refunded':isDisposed?'Disposed':'Pending'}</Badge></td>
                                 <td className="py-3 px-4 text-right"><div className="flex items-center justify-end gap-1.5">
                                   <button onClick={()=>setDetailTkt(t)} className="px-2.5 py-1 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 text-[12px] font-medium transition-colors">Details</button>
                                   <button onClick={()=>openDisp(t)} className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-semibold flex items-center gap-1.5 transition-colors shadow-xs"><PhoneIcon/>Call</button>
