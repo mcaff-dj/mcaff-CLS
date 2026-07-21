@@ -33,9 +33,17 @@ jobs:
         env:
           GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
           EVENT_NAME: ${{ github.event_name }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
         run: |
           if (-not $env:GOOGLE_SA_KEY_JSON) {
             throw "Missing repository secret GOOGLE_SA_KEY (paste the service-account JSON there)."
+          }
+          if (-not $env:MYSQL_HOST -or -not $env:MYSQL_USER -or -not $env:MYSQL_PASSWORD -or -not $env:MYSQL_DATABASE) {
+            throw "Missing MYSQL_HOST/MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE repository secrets - needed for the mCaffeine/Hyphen Agent/AI CSAT charts (sourced from mcaff_dwh)."
           }
           # The "Refresh data now" button on the site calls workflow_dispatch; the daily
           # 2 PM IST cron fires as a schedule event. Only the button gets the quick path
