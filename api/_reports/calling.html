@@ -216,12 +216,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [googleUser, setGoogleUser] = useState(()=>{try{const s=localStorage.getItem('rto_google_user');if(s)return JSON.parse(s);}catch{}return{name:'Vighnesh Patil',email:'vighnesh.patil@mcaffeine.com',picture:'https://api.dicebear.com/7.x/avataaars/svg?seed=vighnesh.patil@mcaffeine.com'};});
       const [userRole, setUserRole] = useState('Admin');
 
-      const [agentRoster, setAgentRoster] = useState(()=>{try{const s=localStorage.getItem('rto_agent_roster');return s?JSON.parse(s):null;}catch{}return null;}||[
-        {email:'vighnesh.patil@mcaffeine.com',name:'Vighnesh Patil',role:'Admin',maxQuota:10,status:'Online',aht:'2.5m',breakTime:'15m'},
-        {email:'vikash.pathak@mcaffeine.com',name:'Vikash Pathak',role:'Admin',maxQuota:10,status:'Online',aht:'3.1m',breakTime:'20m'},
-        {email:'bhavesh.solanki@mcaffeine.com',name:'Bhavesh Solanki',role:'Agent',maxQuota:10,status:'Online',aht:'2.8m',breakTime:'45m'},
-        {email:'badshasab.pathan@mcaffeine.com',name:'Badshasab Pathan',role:'Agent',maxQuota:10,status:'Online',aht:'3.4m',breakTime:'30m'}
-      ]);
+      const [agentRoster, setAgentRoster] = useState(()=>{
+        try { const s = localStorage.getItem('rto_agent_roster'); if (s) { const p = JSON.parse(s); if (Array.isArray(p) && p.length) return p; } } catch {}
+        return [
+          {email:'vighnesh.patil@mcaffeine.com',name:'Vighnesh Patil',role:'Admin',maxQuota:10,status:'Online',aht:'2.5m',breakTime:'15m'},
+          {email:'vikash.pathak@mcaffeine.com',name:'Vikash Pathak',role:'Admin',maxQuota:10,status:'Online',aht:'3.1m',breakTime:'20m'},
+          {email:'bhavesh.solanki@mcaffeine.com',name:'Bhavesh Solanki',role:'Agent',maxQuota:10,status:'Online',aht:'2.8m',breakTime:'45m'},
+          {email:'badshasab.pathan@mcaffeine.com',name:'Badshasab Pathan',role:'Agent',maxQuota:10,status:'Online',aht:'3.4m',breakTime:'30m'}
+        ];
+      });
 
       const [activityLogs, setActivityLogs] = useState(()=>{try{const s=localStorage.getItem('rto_agent_activity_logs');return s?JSON.parse(s):[];}catch{return[];}});
       const [agentFilter, setAgentFilter] = useState('ALL');
