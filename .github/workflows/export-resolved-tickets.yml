@@ -2,7 +2,10 @@ name: Export resolved tickets
 
 on:
   schedule:
-    - cron: '7 */2 * * *'   # every 2 hours, offset 7 min past to avoid the top-of-hour rush
+    # 30 min past every even UTC hour = 6am, 8am, 10am, 12pm, 2pm, 4pm, 6pm,
+    # 8pm, 10pm, 12am, 2am, 4am IST (UTC+5:30) - i.e. 10am/12pm/2pm/4pm/6pm/
+    # 8pm/10pm/12am/2am/4am/6am/8am IST as requested.
+    - cron: '30 */2 * * *'
   workflow_dispatch: {}      # manual "Run workflow" button
 
 permissions:
