@@ -37,6 +37,11 @@ BRANDS = [
                 "wh": 21, "prosales": 22, "lastsource": 3, "platform": 32, "visdamage": 30, "outerpkg": 29, "statezone": 28,
                 "order_id": 2, "awb": 9},
         "small_tabs": {"mom": "MoM", "prodnps": "MCF:PRODUCT NPS", "agent": "AGENT", "ai": "AI"},
+        # CSAT (Agent/AI split) now comes from mcaff_dwh MySQL for Mar'26 onward,
+        # spliced onto the frozen Dec'25-Feb'26 history still sitting in the
+        # AGENT/AI sheet tabs above (mcaff_dwh has no CSAT data before Mar'26) -
+        # see scripts/csat_source.py.
+        "csat_mysql": {"csat_table": "mcaff_tickets_csat", "tickets_table": "mcaff_tickets"},
     },
     {
         "brand": "hyphen",
@@ -59,5 +64,6 @@ BRANDS = [
                 "wh": 22, "prosales": 21, "lastsource": 3, "platform": 40, "visdamage": 33, "outerpkg": 32, "statezone": 34,
                 "order_id": 2, "awb": 9},
         "small_tabs": {"mom": "Hyp: MoM", "prodnps": "HYP:PRODUCT NPS", "agent": "Hyp Agent Chart", "ai": "HYP AI Chart"},
+        "csat_mysql": {"csat_table": "hyphen_tickets_csat", "tickets_table": "hyphen_tickets"},
     },
 ]

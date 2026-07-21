@@ -48,16 +48,18 @@ def get_credential():
     }
 
 
-def query(sql, params=None):
+def query(sql, params=None, database=None):
     """Returns a list of row tuples, or None if MYSQL_* credentials aren't configured.
-    Raises on an actual connection/query error - the caller decides whether to swallow it."""
+    Raises on an actual connection/query error - the caller decides whether to swallow it.
+    database overrides cred["database"] - some tables (e.g. the CSAT/ticket tables) live
+    in a different schema (mcaff_dwh) on the same server than MYSQL_DATABASE points at."""
     cred = get_credential()
     if cred is None:
         return None
     import pymysql
     conn = pymysql.connect(
         host=cred["host"], user=cred["user"], password=cred["password"],
-        database=cred["database"], port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
+        database=database or cred["database"], port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
     )
     try:
         cur = conn.cursor()

@@ -10,6 +10,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import csat_source
 import gen_monthly
 import gen_panels
 import gen_raw_export
@@ -192,14 +193,19 @@ def main():
         print(f"[{b['brand']}] quick refresh: reusing cached small tabs")
         with open(small_tabs_cache_path, "r", encoding="utf-8-sig") as f:
             cache = json.load(f)
-        mom, prodnps, agent, ai = cache["mom"], cache["prodnps"], cache["agent"], cache["ai"]
+        mom, prodnps, agent_hist, ai_hist = cache["mom"], cache["prodnps"], cache["agent"], cache["ai"]
     else:
         mom = lib.get_sheet_values(b["spreadsheet_id"], b["small_tabs"]["mom"])
         prodnps = lib.get_sheet_values(b["spreadsheet_id"], b["small_tabs"]["prodnps"])
-        agent = lib.get_sheet_values(b["spreadsheet_id"], b["small_tabs"]["agent"])
-        ai = lib.get_sheet_values(b["spreadsheet_id"], b["small_tabs"]["ai"])
+        agent_hist = lib.get_sheet_values(b["spreadsheet_id"], b["small_tabs"]["agent"])
+        ai_hist = lib.get_sheet_values(b["spreadsheet_id"], b["small_tabs"]["ai"])
         with open(small_tabs_cache_path, "w", encoding="utf-8") as f:
-            json.dump({"mom": mom, "prodnps": prodnps, "agent": agent, "ai": ai}, f, separators=(",", ":"))
+            json.dump({"mom": mom, "prodnps": prodnps, "agent": agent_hist, "ai": ai_hist}, f, separators=(",", ":"))
+
+    print(f"[{b['brand']}] fetching Agent/AI CSAT from MySQL...")
+    agent_mysql, ai_mysql = csat_source.fetch_agent_ai_csat(b["csat_mysql"]["csat_table"], b["csat_mysql"]["tickets_table"])
+    agent = csat_source.splice_with_sheet_history(agent_hist, agent_mysql)
+    ai = csat_source.splice_with_sheet_history(ai_hist, ai_mysql)
 
     ctx.data_rows = data_rows
     ctx.mom, ctx.prodnps, ctx.agent, ctx.ai = mom, prodnps, agent, ai
