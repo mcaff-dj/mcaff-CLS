@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
-"""One-off: fetch a specific historical window of resolved tickets, apply the
-same 3 cleanup rules as cleanup_ticket_sheet.py, map columns onto whatever
-header the target tab ALREADY has (so this can extend an already-cleaned
-tab without re-clearing it), and append at the bottom.
+"""Recurring (every 2 hours) export: fetch resolved tickets since the last
+run, apply the same 3 cleanup rules as cleanup_ticket_sheet.py, map columns
+onto whatever header the tab already has, drop any ticket whose "Ticket
+Number" is already present in the sheet, and append only the new/unique
+ones.
 
-Python port of backfill-gap-cleaned.ps1.
+State file tracks the last successful window end per tab, so a run that
+fires late still catches up the full gap instead of dropping it.
+
+This supersedes export_resolved_tickets.py (which appended raw, unfiltered
+columns and had no dedup) - use this one for the scheduled job so the tabs
+stay in the cleaned/restricted shape.
 """
 import argparse
 import csv
 import io
+import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -19,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib
 
 SHEET_ID = "1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A"
+STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "resolved-ticket-export-state.json"
 
 # Used ONLY when a tab has no header row yet - matches the fixed list applied
 # to both hyphen and mcaffeine via cleanup_ticket_sheet.py --restrict-columns.
@@ -39,10 +48,23 @@ DEFAULT_TARGET_COLUMNS = [
 ]
 
 
-def fetch_export_csv(api_token, tab_name, gap_start, gap_end):
+def get_state():
+    if not STATE_PATH.exists():
+        return {}
+    with open(STATE_PATH, "r", encoding="utf-8-sig") as f:
+        return json.load(f)
+
+
+def save_state(state):
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=4)
+
+
+def fetch_export_csv(api_token, tab_name, start_str, end_str):
     body = {
-        "startDate": gap_start,
-        "endDate": gap_end,
+        "startDate": start_str,
+        "endDate": end_str,
         "timestampKey": "resolvedAt",
         "statuses": ["resolved_by_ai", "resolved_by_agent"],
         "sortOrder": "desc",
@@ -73,17 +95,30 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--api-token", required=True)
     parser.add_argument("--tab-name", required=True)
-    parser.add_argument("--gap-start", required=True)
-    parser.add_argument("--gap-end", required=True)
+    parser.add_argument("--hours-back", type=int, default=2)
     args = parser.parse_args()
 
     tab_name = args.tab_name
-    print(f"[{tab_name}] fetching gap window {args.gap_start} -> {args.gap_end}")
+    now = datetime.now(timezone.utc)
+    state = get_state()
+    if state.get(tab_name):
+        start_date = datetime.fromisoformat(state[tab_name].replace("Z", "+00:00"))
+    else:
+        start_date = now - timedelta(hours=args.hours_back)
+    end_date = now
 
-    csv_text = fetch_export_csv(args.api_token, tab_name, args.gap_start, args.gap_end)
+    start_str = start_date.strftime("%Y-%m-%dT%H:%M:%S.") + f"{start_date.microsecond // 1000:03d}Z"
+    end_str = end_date.strftime("%Y-%m-%dT%H:%M:%S.") + f"{end_date.microsecond // 1000:03d}Z"
+
+    print(f"[{tab_name}] fetching tickets resolved {start_str} -> {end_str}")
+
+    csv_text = fetch_export_csv(args.api_token, tab_name, start_str, end_str)
     all_rows = list(csv.reader(io.StringIO(csv_text)))
+
     if len(all_rows) <= 1:
-        print(f"[{tab_name}] no tickets in gap window - nothing to do")
+        print(f"[{tab_name}] no resolved tickets in this window - nothing to append")
+        state[tab_name] = end_str
+        save_state(state)
         return
 
     raw_headers = all_rows[0]
@@ -94,6 +129,7 @@ def main():
     idx_disp_order = raw_headers.index("Disposition: Order") if "Disposition: Order" in raw_headers else -1
     idx_customer_id = raw_headers.index("Customer ID") if "Customer ID" in raw_headers else -1
     idx_subcategory = raw_headers.index("Subcategory") if "Subcategory" in raw_headers else -1
+    idx_ticket_number = raw_headers.index("Ticket Number") if "Ticket Number" in raw_headers else -1
     idx_query_class = raw_headers.index("Disposition: Query Class") if "Disposition: Query Class" in raw_headers else -1
 
     fallback_count = 0
@@ -132,15 +168,31 @@ def main():
     print(f"[{tab_name}] dropped {before_qc_count - len(raw_rows)} rows with 'Requests & Enquiries'/'Others' in "
           f"Disposition: Query Class ({before_qc_count} -> {len(raw_rows)})")
 
+    # De-dup THIS batch against itself (a ticket can appear twice if it was
+    # touched more than once inside the window) and against every Ticket
+    # Number already sitting in the sheet, so a re-run (or a resumed/late
+    # window overlapping previous coverage) never creates duplicate rows.
+    if idx_ticket_number >= 0:
+        seen_in_batch = set()
+        deduped = []
+        for r in raw_rows:
+            tid = str(r[idx_ticket_number]) if len(r) > idx_ticket_number else ""
+            if tid and tid in seen_in_batch:
+                continue
+            if tid:
+                seen_in_batch.add(tid)
+            deduped.append(r)
+        intra_batch_dupes = len(raw_rows) - len(deduped)
+        raw_rows = deduped
+        if intra_batch_dupes:
+            print(f"[{tab_name}] dropped {intra_batch_dupes} duplicate Ticket Number rows within this batch")
+
     if not raw_rows:
         print(f"[{tab_name}] nothing left to append after filtering")
+        state[tab_name] = end_str
+        save_state(state)
         return
 
-    # Map every surviving row onto the EXISTING tab's header (by name) so this
-    # batch's columns - which can vary window to window, since the export's
-    # Objective:* columns are dynamic per query - line up with whatever schema
-    # the tab already has. If the tab has no header yet, use the defined
-    # default rather than this batch's raw header.
     existing_header = lib.get_sheet_values(SHEET_ID, f"'{tab_name}'!A1:ZZ1")
     if existing_header:
         target_headers = existing_header[0]
@@ -157,19 +209,38 @@ def main():
             missing.append(name)
         col_indices.append(idx)
     if missing:
-        print(f"[{tab_name}] gap batch has no column for (left blank): {', '.join(missing)}")
+        print(f"[{tab_name}] no column for (left blank): {', '.join(missing)}")
+
+    idx_ticket_number_in_target = target_headers.index("Ticket Number") if "Ticket Number" in target_headers else -1
 
     mapped_rows = [
         [(src_row[i] if 0 <= i < len(src_row) else "") for i in col_indices]
         for src_row in raw_rows
     ]
 
+    if idx_ticket_number_in_target >= 0:
+        existing_ids = lib.get_sheet_values(SHEET_ID, f"'{tab_name}'!{lib.get_column_letter(idx_ticket_number_in_target)}2:{lib.get_column_letter(idx_ticket_number_in_target)}")
+        existing_ids = {str(r[0]) for r in existing_ids if r}
+        before_dedup = len(mapped_rows)
+        mapped_rows = [r for r in mapped_rows if str(r[idx_ticket_number_in_target]) not in existing_ids]
+        print(f"[{tab_name}] dropped {before_dedup - len(mapped_rows)} rows already present in the sheet "
+              f"(matched by Ticket Number)")
+
+    if not mapped_rows:
+        print(f"[{tab_name}] nothing new to append (all tickets already present)")
+        state[tab_name] = end_str
+        save_state(state)
+        return
+
     next_row = lib.get_last_data_row(SHEET_ID, tab_name) + 1
     if next_row < 2:
         next_row = 2
     lib.set_sheet_rows_at_row(SHEET_ID, tab_name, mapped_rows, next_row)
 
-    print(f"[{tab_name}] appended {len(mapped_rows)} gap-filled rows at row {next_row}")
+    print(f"[{tab_name}] appended {len(mapped_rows)} unique rows at row {next_row} (window {start_str} -> {end_str})")
+
+    state[tab_name] = end_str
+    save_state(state)
 
 
 if __name__ == "__main__":

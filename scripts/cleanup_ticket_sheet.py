@@ -72,6 +72,7 @@ def main():
     idx_disp_order = headers.index("Disposition: Order") if "Disposition: Order" in headers else -1
     idx_customer_id = headers.index("Customer ID") if "Customer ID" in headers else -1
     idx_subcategory = headers.index("Subcategory") if "Subcategory" in headers else -1
+    idx_query_class = headers.index("Disposition: Query Class") if "Disposition: Query Class" in headers else -1
 
     print(f"[{tab_name}] indices - OrderName={idx_order_name} DispOrder={idx_disp_order} "
           f"CustomerID={idx_customer_id} Subcategory={idx_subcategory}")
@@ -106,6 +107,15 @@ def main():
         rows = [r for r in rows if len(r) > idx_subcategory and str(r[idx_subcategory]).strip() != ""]
     dropped_count = before_count - len(rows)
     print(f"[{tab_name}] dropped {dropped_count} rows with blank Subcategory ({before_count} -> {len(rows)})")
+
+    before_qc_count = len(rows)
+    if idx_query_class >= 0:
+        rows = [r for r in rows
+                if not (len(r) > idx_query_class and
+                        ("Requests & Enquiries" in str(r[idx_query_class]) or "Others" in str(r[idx_query_class])))]
+    dropped_qc_count = before_qc_count - len(rows)
+    print(f"[{tab_name}] dropped {dropped_qc_count} rows with 'Requests & Enquiries'/'Others' in "
+          f"Disposition: Query Class ({before_qc_count} -> {len(rows)})")
 
     final_headers = headers
     if args.restrict_columns:

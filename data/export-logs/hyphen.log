@@ -111,3 +111,7 @@ requests.exceptions.HTTPError: 400 Client Error: Bad Request for url: https://sh
 [2026-07-20T19:12:31.728132+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=12932
 [2026-07-20T23:08:55.558362+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=29788
 [2026-07-20T23:14:51.344062+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=26148
+[2026-07-21T13:51:03.653432+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=9224
+[2026-07-21T17:11:09.801932+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=33788
+[hyphen] fetching tickets resolved 2026-07-21T08:25:30.854Z -> 2026-07-21T11:41:10.016Z
+[hyphen] appended 315 rows at row 63 (window 2026-07-21T08:25:30.854Z -> 2026-07-21T11:41:10.016Z)
