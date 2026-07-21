@@ -945,9 +945,9 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                 </div>
 
                 <div className="space-y-3 text-xs">
-                  <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg">
-                    <span>Order: <strong>{selectedRefundTicket.orderNumber}</strong></span>
-                    <span className="font-semibold text-base whitespace-nowrap">₹{selectedRefundTicket.orderAmount.toLocaleString('en-IN')}</span>
+                  <div className="flex flex-col gap-1 bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg">
+                    <span className="text-slate-500 dark:text-zinc-400">Order: <strong className="text-slate-900 dark:text-zinc-100">{selectedRefundTicket.orderNumber}</strong></span>
+                    <span className="font-semibold text-base">₹{selectedRefundTicket.orderAmount.toLocaleString('en-IN')}</span>
                   </div>
                   {selectedRefundTicket.paymentMethod === 'COD' && (
                     <div className="space-y-1">
@@ -957,8 +957,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   )}
                 </div>
 
-                <div className="flex items-center justify-between border-t border-slate-200 dark:border-zinc-800 pt-3">
-                  <button onClick={() => setSelectedRefundTicket(null)} className="text-xs text-slate-500">Cancel</button>
+                <div className="flex items-center justify-between gap-3 border-t border-slate-200 dark:border-zinc-800 pt-3">
+                  <button onClick={() => setSelectedRefundTicket(null)} className="text-xs text-slate-500 whitespace-nowrap">Cancel</button>
                   <button
                     onClick={() => {
                       const upiVal = document.getElementById('cod-upi-input')?.value || '';
