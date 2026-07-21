@@ -798,11 +798,21 @@
         document.getElementById('granularitySection').style.display = 'none';
         document.getElementById('loadingOverlay').style.opacity = '0';
         document.getElementById('loadingOverlay').style.visibility = 'hidden';
-        document.getElementById('navList').innerHTML =
-          '<button class="nav-btn active" data-calling-team-view="overview" onclick="selectCallingTeamView(\'overview\')">Overview</button>' +
-          '<button class="nav-btn" data-calling-team-view="ndr" onclick="selectCallingTeamView(\'ndr\')">NDR-Calling</button>' +
-          '<button class="nav-btn" data-calling-team-view="rto" onclick="selectCallingTeamView(\'rto\')">RTO-Calling</button>';
-        selectCallingTeamView('rto');
+
+        // Same tab-restriction convention as populateReportNav() - an admin can
+        // grant a user just some of these three sub-items (see report_tab_permissions
+        // in db.js); an absent/empty list means all three, as before.
+        var callingViews = ['overview', 'ndr', 'rto'];
+        var allowedViews = userTabPerms['calling'];
+        if (Array.isArray(allowedViews) && allowedViews.length) {
+          var allowedViewSet = {};
+          allowedViews.forEach(function(k) { allowedViewSet[k] = true; });
+          callingViews = callingViews.filter(function(v) { return allowedViewSet[v]; });
+        }
+        document.getElementById('navList').innerHTML = callingViews.map(function(v) {
+          return '<button class="nav-btn" data-calling-team-view="' + v + '" onclick="selectCallingTeamView(\'' + v + '\')">' + CALLING_TEAM_SUBITEMS[v].label + '</button>';
+        }).join('');
+        selectCallingTeamView(callingViews.indexOf('rto') !== -1 ? 'rto' : (callingViews[0] || 'rto'));
         return;
       }
 

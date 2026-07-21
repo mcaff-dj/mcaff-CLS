@@ -4,9 +4,11 @@
 // actually built in scripts/gen_panels.py's assemble_report() (csat/nps/overview/
 // monthly/<brand classes>/prodpkg) and scripts/generate_product_kyc.py
 // (PKYC_CATEGORY_LABELS in productkyc_config.py) - those are Python and can't be
-// imported here, so nothing enforces this automatically. A card with no entry
-// here has no tab-level structure (mom/calling/onboarding/npsdeepdive are single-
-// view reports) and only ever gets whole-card access.
+// imported here, so nothing enforces this automatically. `calling`'s entries
+// mirror index.html's own CALLING_TEAM_SUBITEMS (a hardcoded sidebar structure,
+// not a generated report tab bar) - keep those two in sync by hand too. A card
+// with no entry here has no tab-level structure (mom/onboarding/npsdeepdive are
+// single-view reports) and only ever gets whole-card access.
 const CARD_TABS = {
   mcaffeine: [
     { key: 'csat', label: 'CSAT' },
@@ -38,6 +40,11 @@ const CARD_TABS = {
     { key: 'lotions', label: 'Lotions' },
     { key: 'lipbalms', label: 'Lip Balms' },
     { key: 'scrubs', label: 'Scrubs' },
+  ],
+  calling: [
+    { key: 'overview', label: 'Overview' },
+    { key: 'ndr', label: 'NDR-Calling' },
+    { key: 'rto', label: 'RTO-Calling' },
   ],
 };
 
