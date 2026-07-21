@@ -78,7 +78,7 @@
       'refused to accept (with cancellation code)','rto pending - otp validated cancellation'
     ];
 
-    /* ── Google Sheets Auth ────────────────────────────── */
+    /* ── Google Sheets Auth (Full Read & Write Scope) ──── */
     const SERVICE_ACCOUNT = {
       client_email: 'datafetchcls@sheetdata-501810.iam.gserviceaccount.com',
       private_key: `-----BEGIN PRIVATE KEY-----
@@ -110,7 +110,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 46Id18Bkixm5xJ8LVf66yg==
 -----END PRIVATE KEY-----`,
       token_uri: 'https://oauth2.googleapis.com/token',
-      scopes: 'https://www.googleapis.com/auth/spreadsheets.readonly',
+      scopes: 'https://www.googleapis.com/auth/spreadsheets',
     };
 
     function b64url(s){return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
@@ -136,6 +136,48 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const r=await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${encodeURIComponent(range)}?majorDimension=ROWS`,{headers:{Authorization:`Bearer ${t}`}});
       if(!r.ok)throw new Error(`Sheets API ${r.status}`);const d=await r.json();
       if(!d.values||d.values.length<2)throw new Error('No data');return d.values;
+    }
+
+    /* ── Live Google Sheets Write-Back Engine ──────────── */
+    async function writeToSheetRow(sheetRowIndex, updates) {
+      try {
+        const token = await getAccessToken();
+        const sid = extractSheetId(DEFAULT_SHEET_URL);
+        if (!sid) return;
+        const rowNumber = sheetRowIndex + 2; // 1-based index (row 1 is header)
+        const valueRanges = [];
+
+        if (updates.assignedAgent) {
+          valueRanges.push({ range: `Data!Q${rowNumber}`, values: [[updates.assignedAgent]] });
+        }
+        if (updates.connectedStatus) {
+          valueRanges.push({ range: `Data!R${rowNumber}`, values: [[updates.connectedStatus]] });
+        }
+        if (updates.disposition) {
+          valueRanges.push({ range: `Data!T${rowNumber}`, values: [[updates.disposition]] });
+        }
+        if (updates.remarks) {
+          valueRanges.push({ range: `Data!U${rowNumber}`, values: [[updates.remarks]] });
+        }
+        if (updates.newOrderId) {
+          valueRanges.push({ range: `Data!V${rowNumber}`, values: [[updates.newOrderId]] });
+        }
+        if (updates.newAddress) {
+          valueRanges.push({ range: `Data!X${rowNumber}`, values: [[updates.newAddress]] });
+        }
+
+        if (valueRanges.length === 0) return;
+
+        const body = { valueInputOption: 'USER_ENTERED', data: valueRanges };
+        const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        if (res.ok) console.log(`Live Sheet row ${rowNumber} updated in Google Sheet Column Q!`);
+      } catch (err) {
+        console.error('Sheet write error:', err);
+      }
     }
 
     function extractSheetId(i){const m=i.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);return m?m[1]:/^[a-zA-Z0-9_-]{20,}$/.test(i.trim())?i.trim():null;}
@@ -427,6 +469,17 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         };
 
         setOverrides(p=>{const u={...p,[dispTkt.id]:ov};localStorage.setItem('rto_ticket_overrides',JSON.stringify(u));return u;});
+        
+        // Live Google Sheet Write-Back to Column Q, R, T, U, V, X!
+        writeToSheetRow(dispTkt.rawIndex, {
+          assignedAgent: agentAssignedTag,
+          connectedStatus: dispConn==='YES'?'Yes':'No',
+          disposition: dispReason,
+          remarks: agentRemarks.trim(),
+          newOrderId: newOrder==='YES'?newOrderId:'',
+          newAddress: addrChange==='YES'?newAddr:''
+        });
+
         const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
         
         const newLog = {
@@ -446,7 +499,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         if(isRef){
           doRefund(dispTkt.id,{refundId:`RFD-${Date.now().toString().slice(-6)}`,amount:dispTkt.orderAmount,reason:dispReason,date:new Date().toLocaleString(),mode:dispTkt.paymentMethod==='COD'?'UPI Payout':'Original Gateway',transactionRef:`TXN-${Math.random().toString(36).substring(2,10).toUpperCase()}`,processedBy:googleUser.name,notes:refNotes});
         } else {
-          showToast(`Disposition & Remarks saved for ${dispTkt.orderNumber}`);
+          showToast(`Saved & synced to live Google Sheet Column Q!`);
         }
         setDispTkt(null);
       };
@@ -469,7 +522,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       useEffect(()=>{sync(true);},[]);
       useEffect(()=>{const t=setInterval(()=>sync(true),60000);return()=>clearInterval(t);},[sync]);
 
-      // Derived data
+      // Derived data & Auto-Lead Assignment Logic
       const allTickets = useMemo(()=>{
         let base=tickets.map(t=>{
           const o=overrides[t.id];
@@ -487,10 +540,42 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
             assignedAgent:o.assignedAgent||t.assignedAgent
           }:t;
         });
+
         base.sort((a,b)=>{if(a.isHighPriority&&!b.isHighPriority)return-1;if(!a.isHighPriority&&b.isHighPriority)return 1;if(a.rowDate&&b.rowDate)return b.rowDate-a.rowDate;return 0;});
-        if(userRole==='Agent'){const pend=base.filter(t=>t.status!=='Refunded').slice(0,maxLeads);return[...pend,...base.filter(t=>t.status==='Refunded')];}
+
+        // AUTO-ASSIGNMENT ENGINE: For Agent Role, claim unassigned leads up to maxLeads (10)
+        if(userRole === 'Agent' && googleUser?.email) {
+          const agentTag = `${googleUser.name} (${googleUser.email})`;
+          const isAssignedToMe = (agt) => {
+            if(!agt || agt === 'Unassigned') return false;
+            const l = agt.toLowerCase();
+            const e = googleUser.email.toLowerCase();
+            const p = e.split('@')[0];
+            return l.includes(e) || l.includes(p);
+          };
+
+          let assignedToMe = base.filter(t => t.status !== 'Refunded' && isAssignedToMe(t.assignedAgent));
+          const availableSlots = Math.max(0, maxLeads - assignedToMe.length);
+
+          if (availableSlots > 0) {
+            // Claim unassigned / blank leads
+            const unassignedLeads = base.filter(t => t.status !== 'Refunded' && (!t.assignedAgent || t.assignedAgent === 'Unassigned'));
+            const toClaim = unassignedLeads.slice(0, availableSlots);
+
+            toClaim.forEach(t => {
+              t.assignedAgent = agentTag;
+              // Trigger background live sheet write-back to Column Q
+              writeToSheetRow(t.rawIndex, { assignedAgent: agentTag });
+            });
+          }
+
+          const myPending = base.filter(t => t.status !== 'Refunded' && isAssignedToMe(t.assignedAgent)).slice(0, maxLeads);
+          const myRefunded = base.filter(t => t.status === 'Refunded' && isAssignedToMe(t.assignedAgent));
+          return [...myPending, ...myRefunded];
+        }
+
         return base;
-      },[tickets,overrides,userRole,maxLeads]);
+      },[tickets,overrides,userRole,maxLeads,googleUser]);
 
       const hp=allTickets.filter(t=>t.isHighPriority&&t.status!=='Refunded').length;
       const pend=allTickets.filter(t=>t.status!=='Refunded').length;
@@ -758,7 +843,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     ) : (
                       <div className="h-8 px-3 py-1 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[13px] font-medium text-zinc-300 flex items-center gap-2">
                         <UserIcon className="text-indigo-400 shrink-0" />
-                        <span>My Assigned Leads ({googleUser.email.split('@')[0]})</span>
+                        <span>My Assigned Queue ({googleUser.email.split('@')[0]})</span>
                       </div>
                     )}
 
@@ -1099,7 +1184,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                         :'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-950/50'
                     }`}
                   >
-                    {dispReason==='Refund Requested' ? '💳 Confirm Refund & Save' : '🚀 Save Disposition & Remarks'}
+                    {dispReason==='Refund Requested' ? '💳 Confirm Refund & Save' : '🚀 Save Disposition & Sync Live Sheet'}
                   </button>
                 </div>
               </div>
