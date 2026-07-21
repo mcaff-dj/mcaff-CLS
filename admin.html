@@ -40,6 +40,16 @@
   .perm-toggle{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;padding:3px 8px;border-radius:999px;border:1px solid var(--border);cursor:pointer;margin:2px;}
   .perm-toggle.on{background:rgba(26,156,92,.14);color:#1a9c5c;border-color:transparent;}
   .msg{font-size:12.5px;color:var(--text-muted);margin-top:8px;}
+  .card-perm-block{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;}
+  .tab-toggle-link{font-size:11px;color:var(--accent);text-decoration:none;white-space:nowrap;}
+  .tab-toggle-link:hover{text-decoration:underline;}
+  .tab-subrow{display:flex;gap:8px;flex-wrap:wrap;width:100%;padding:8px 0 2px 18px;}
+  .tab-chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:4px 9px;border-radius:999px;border:1px dashed var(--border);color:var(--text-secondary);cursor:pointer;user-select:none;}
+  .tab-chip input{margin:0;}
+  .tabs-edit-link{font-size:10.5px;color:var(--accent);text-decoration:none;margin-left:2px;}
+  .tabs-edit-link:hover{text-decoration:underline;}
+  .tab-edit-row td{background:var(--page);font-size:12px;}
+  .tab-edit-row .save-tabs-btn{padding:4px 10px;font-size:11.5px;margin-left:6px;}
   .denied{padding:60px 20px;text-align:center;color:var(--text-secondary);}
 </style>
 </head>
@@ -101,17 +111,60 @@
 
   <script>
     var CARD_KEYS = [];
+    var CARD_TABS = {}; // { cardKey: [{key,label}, ...] } - only cards with internal tabs appear here
     function esc(s){ var d=document.createElement('div'); d.textContent=(s==null?'':String(s)); return d.innerHTML; }
 
+    // One card's chip, plus - if that card has internal tabs (CARD_TABS[key]) - a
+    // "customize tabs" link revealing a checklist to restrict the grant to just
+    // those tabs (UI-level convenience only, see report_tab_permissions in db.js).
+    // Leaving the checklist untouched (never expanded) grants every tab, same as
+    // before this feature existed.
+    function renderPermBlock(key){
+      var chip = '<label class="chip"><input type="checkbox" class="card-chk" value="'+esc(key)+'"> '+esc(key)+'</label>';
+      var tabs = CARD_TABS[key];
+      if(!tabs || !tabs.length) return '<div class="card-perm-block">'+chip+'</div>';
+      var tabChips = tabs.map(function(t){
+        return '<label class="tab-chip"><input type="checkbox" class="tab-chk" value="'+esc(t.key)+'"> '+esc(t.label)+'</label>';
+      }).join('');
+      return '<div class="card-perm-block" data-card="'+esc(key)+'">'+chip+
+        ' <a href="#" class="tab-toggle-link" data-card="'+esc(key)+'">customize tabs</a>'+
+        '<div class="tab-subrow" data-card="'+esc(key)+'" style="display:none;">'+tabChips+'</div>'+
+        '</div>';
+    }
+
+    function wireTabToggleLinks(container){
+      container.querySelectorAll('.tab-toggle-link').forEach(function(link){
+        link.addEventListener('click', function(e){
+          e.preventDefault();
+          var subrow = container.querySelector('.tab-subrow[data-card="'+link.dataset.card+'"]');
+          var showing = subrow.style.display !== 'none';
+          subrow.style.display = showing ? 'none' : 'flex';
+          if(!showing) subrow.dataset.touched = '1';
+        });
+      });
+    }
+
+    // perms = checked top-level card checkboxes. tabPermissions only includes a
+    // card key if its "customize tabs" checklist was actually expanded - so a card
+    // nobody touched never gets an (accidentally empty) restriction.
+    function collectPerms(containerId){
+      var container = document.getElementById(containerId);
+      var perms = Array.prototype.slice.call(container.querySelectorAll('.card-chk:checked')).map(function(c){ return c.value; });
+      var tabPermissions = {};
+      Array.prototype.slice.call(container.querySelectorAll('.tab-subrow')).forEach(function(subrow){
+        if(subrow.dataset.touched !== '1') return;
+        tabPermissions[subrow.dataset.card] = Array.prototype.slice.call(subrow.querySelectorAll('.tab-chk:checked')).map(function(c){ return c.value; });
+      });
+      return { perms: perms, tabPermissions: tabPermissions };
+    }
+
     function renderInvitePerms(){
-      var wrap = document.getElementById('inv-perms');
-      wrap.innerHTML = CARD_KEYS.map(function(k){
-        return '<label class="chip"><input type="checkbox" value="'+esc(k)+'"> '+esc(k)+'</label>';
-      }).join('');
+      var invWrap = document.getElementById('inv-perms');
+      invWrap.innerHTML = CARD_KEYS.map(renderPermBlock).join('');
+      wireTabToggleLinks(invWrap);
       var bulkWrap = document.getElementById('bulk-perms');
-      bulkWrap.innerHTML = CARD_KEYS.map(function(k){
-        return '<label class="chip"><input type="checkbox" value="'+esc(k)+'"> '+esc(k)+'</label>';
-      }).join('');
+      bulkWrap.innerHTML = CARD_KEYS.map(renderPermBlock).join('');
+      wireTabToggleLinks(bulkWrap);
     }
 
     function parseBulkEmails(raw){
@@ -139,18 +192,54 @@
     function loadUsers(){
       fetch('/api/admin/users').then(function(r){ return r.json(); }).then(function(d){
         CARD_KEYS = d.cardKeys || [];
+        CARD_TABS = d.cardTabs || {};
         renderInvitePerms();
         var body = document.getElementById('users-body');
-        body.innerHTML = (d.users || []).map(function(u){
+        var rows = [];
+        (d.users || []).forEach(function(u){
           var perms = CARD_KEYS.map(function(k){
             var on = u.permissions.indexOf(k) !== -1;
-            return '<span class="perm-toggle'+(on?' on':'')+'" data-uid="'+u.id+'" data-key="'+esc(k)+'" data-on="'+on+'">'+esc(k)+(on?' ✓':' +')+'</span>';
+            var tabs = CARD_TABS[k];
+            var tabsLink = (on && tabs && tabs.length) ? ' <a href="#" class="tabs-edit-link" data-uid="'+u.id+'" data-key="'+esc(k)+'">tabs</a>' : '';
+            return '<span class="perm-toggle'+(on?' on':'')+'" data-uid="'+u.id+'" data-key="'+esc(k)+'" data-on="'+on+'">'+esc(k)+(on?' ✓':' +')+'</span>'+tabsLink;
           }).join('');
-          return '<tr><td>'+esc(u.email)+'</td><td>'+esc(u.name||'')+'</td><td>'+(u.is_admin?'Yes':'')+'</td><td>'+perms+'</td></tr>';
-        }).join('');
+          rows.push('<tr><td>'+esc(u.email)+'</td><td>'+esc(u.name||'')+'</td><td>'+(u.is_admin?'Yes':'')+'</td><td>'+perms+'</td></tr>');
+          // One hidden edit-row per restrictable card, pre-checked from the user's
+          // current tabPermissions - revealed by the "tabs" link above.
+          CARD_KEYS.forEach(function(k){
+            var tabs = CARD_TABS[k];
+            if(!tabs || !tabs.length) return;
+            var current = (u.tabPermissions && u.tabPermissions[k]) || [];
+            var checks = tabs.map(function(t){
+              var checked = current.indexOf(t.key) !== -1;
+              return '<label class="tab-chip"><input type="checkbox" class="edit-tab-chk" value="'+esc(t.key)+'"'+(checked?' checked':'')+'> '+esc(t.label)+'</label>';
+            }).join('');
+            rows.push('<tr class="tab-edit-row" data-uid="'+u.id+'" data-key="'+esc(k)+'" style="display:none;"><td colspan="4">'+
+              '<b>'+esc(k)+'</b> tabs (none checked = full access): '+checks+
+              '<button type="button" class="save-tabs-btn" data-uid="'+u.id+'" data-key="'+esc(k)+'">Save</button></td></tr>');
+          });
+        });
+        body.innerHTML = rows.join('');
         body.querySelectorAll('.perm-toggle').forEach(function(el){
           el.addEventListener('click', function(){
             togglePerm(el.dataset.uid, el.dataset.key, el.dataset.on === 'true', el);
+          });
+        });
+        body.querySelectorAll('.tabs-edit-link').forEach(function(el){
+          el.addEventListener('click', function(e){
+            e.preventDefault();
+            var row = body.querySelector('.tab-edit-row[data-uid="'+el.dataset.uid+'"][data-key="'+el.dataset.key+'"]');
+            if(row) row.style.display = (row.style.display === 'none') ? 'table-row' : 'none';
+          });
+        });
+        body.querySelectorAll('.save-tabs-btn').forEach(function(el){
+          el.addEventListener('click', function(){
+            var row = el.closest('tr');
+            var tabKeys = Array.prototype.slice.call(row.querySelectorAll('.edit-tab-chk:checked')).map(function(c){ return c.value; });
+            fetch('/api/admin/permissions', {
+              method: 'PUT', headers: {'Content-Type':'application/json'},
+              body: JSON.stringify({ userId: el.dataset.uid, cardKey: el.dataset.key, tabKeys: tabKeys })
+            }).then(function(r){ return r.json(); }).then(function(){ loadUsers(); });
           });
         });
       });
@@ -170,17 +259,17 @@
     document.getElementById('inv-submit').addEventListener('click', function(){
       var email = document.getElementById('inv-email').value.trim();
       var name = document.getElementById('inv-name').value.trim();
-      var perms = Array.prototype.slice.call(document.querySelectorAll('#inv-perms input:checked')).map(function(c){ return c.value; });
+      var picked = collectPerms('inv-perms');
       var msg = document.getElementById('inv-msg');
       if(!email){ msg.textContent = 'Email is required.'; return; }
       fetch('/api/admin/users', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ email: email, name: name, permissions: perms })
+        body: JSON.stringify({ email: email, name: name, permissions: picked.perms, tabPermissions: picked.tabPermissions })
       }).then(function(r){ return r.json(); }).then(function(d){
         msg.textContent = d.error ? d.error : 'Saved.';
         document.getElementById('inv-email').value = '';
         document.getElementById('inv-name').value = '';
-        document.querySelectorAll('#inv-perms input').forEach(function(c){ c.checked = false; });
+        renderInvitePerms();
         loadUsers();
       });
     });
@@ -188,13 +277,13 @@
     document.getElementById('bulk-submit').addEventListener('click', function(){
       var raw = document.getElementById('bulk-emails').value;
       var users = parseBulkEmails(raw);
-      var perms = Array.prototype.slice.call(document.querySelectorAll('#bulk-perms input:checked')).map(function(c){ return c.value; });
+      var picked = collectPerms('bulk-perms');
       var msg = document.getElementById('bulk-msg');
       if(!users.length){ msg.textContent = 'Enter at least one email.'; return; }
       msg.textContent = 'Inviting ' + users.length + ' people…';
       fetch('/api/admin/users', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ users: users, permissions: perms })
+        body: JSON.stringify({ users: users, permissions: picked.perms, tabPermissions: picked.tabPermissions })
       }).then(function(r){ return r.json(); }).then(function(d){
         if(d.error){ msg.textContent = d.error; return; }
         var results = d.results || [];
@@ -206,7 +295,7 @@
         }
         msg.textContent = text;
         document.getElementById('bulk-emails').value = '';
-        document.querySelectorAll('#bulk-perms input').forEach(function(c){ c.checked = false; });
+        renderInvitePerms();
         loadUsers();
       });
     });

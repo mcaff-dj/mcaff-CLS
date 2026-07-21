@@ -587,6 +587,7 @@
     var currentBrand = "";
     var currentTabId = "";
     var userCards = [];
+    var userTabPerms = {}; // { cardKey: [tabKey, ...] } - absent/empty key = every tab allowed
     var brandColors = {
       mcaffeine: { accent: 'var(--mcaff)', bg: 'rgba(74, 58, 167, 0.08)', fg: 'var(--mcaff)' },
       hyphen: { accent: 'var(--hyphen)', bg: 'rgba(25, 156, 92, 0.08)', fg: 'var(--hyphen)' },
@@ -746,6 +747,7 @@
           }
 
           userCards = d.cards || [];
+          userTabPerms = d.tabPerms || {};
           if (userCards.length === 0) {
             document.getElementById('loadingText').textContent = 'No reports shared with you yet. Contact your admin.';
             return;
@@ -867,12 +869,23 @@
     function populateReportNav() {
       var iframe = document.getElementById('reportIframe');
       var doc = iframe.contentDocument || iframe.contentWindow.document;
-      var innerBtns = doc.querySelectorAll('.tab-nav .tab-btn');
+      var innerBtns = Array.prototype.slice.call(doc.querySelectorAll('.tab-nav .tab-btn'));
       var navList = document.getElementById('navList');
       navList.innerHTML = '';
       if (!innerBtns.length) return;
 
-      Array.prototype.forEach.call(innerBtns, function(b) {
+      // Restrict to specific tabs within this card, if the admin granted only some
+      // (UI-level convenience - see report_tab_permissions in db.js. The full data
+      // for every tab is still present in the loaded report; this only hides the
+      // nav entry). An absent/empty list means every tab is allowed, as before.
+      var allowedTabs = userTabPerms[currentBrand];
+      if (Array.isArray(allowedTabs) && allowedTabs.length) {
+        var allowedSet = {};
+        allowedTabs.forEach(function(k) { allowedSet[k] = true; });
+        innerBtns = innerBtns.filter(function(b) { return allowedSet[b.dataset.tab]; });
+      }
+
+      innerBtns.forEach(function(b) {
         var btn = document.createElement('button');
         btn.className = 'nav-btn' + (b.classList.contains('active') ? ' active' : '');
         btn.setAttribute('data-tab', b.dataset.tab);
@@ -883,6 +896,14 @@
 
       var innerNav = doc.querySelector('.tab-nav');
       if (innerNav) innerNav.style.display = 'none';
+
+      // The report's own default-active tab (e.g. CSAT) may not be one this user is
+      // restricted to - switch to the first allowed tab instead of leaving them on
+      // a tab with no corresponding sidebar entry.
+      var activeIsAllowed = innerBtns.some(function(b) { return b.classList.contains('active'); });
+      if (innerBtns.length && !activeIsAllowed) {
+        selectTab(innerBtns[0].dataset.tab);
+      }
     }
 
     // Switch tab inside iframe

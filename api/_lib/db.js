@@ -55,6 +55,19 @@ async function ensureSchema() {
   await sql`ALTER TABLE audit_log ALTER COLUMN card_key DROP NOT NULL`;
   await sql`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'view'`;
   await sql`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS detail TEXT`;
+  // Sub-permission within an already-granted card (e.g. "just the CSAT tab under
+  // Hyphen"), UI-level only - see api/_lib/tabs.js. No rows for a (user, card) pair
+  // means "no restriction, full access to every tab", so existing grants are
+  // unaffected by this table's existence.
+  await sql`
+    CREATE TABLE IF NOT EXISTS report_tab_permissions (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      card_key TEXT NOT NULL,
+      tab_key TEXT NOT NULL,
+      granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (user_id, card_key, tab_key)
+    )
+  `;
   schemaReady = true;
 }
 
@@ -74,6 +87,28 @@ async function getUserPermissions(userId) {
   await ensureSchema();
   const { rows } = await sql`SELECT card_key FROM permissions WHERE user_id = ${userId}`;
   return rows.map((r) => r.card_key);
+}
+
+// Returns { cardKey: [tabKey, ...] } - only for card keys that have an actual
+// restriction; a card with no entry here means "no restriction, every tab".
+async function getUserTabPermissions(userId) {
+  await ensureSchema();
+  const { rows } = await sql`SELECT card_key, tab_key FROM report_tab_permissions WHERE user_id = ${userId}`;
+  const out = {};
+  for (const r of rows) {
+    (out[r.card_key] = out[r.card_key] || []).push(r.tab_key);
+  }
+  return out;
+}
+
+// Replaces the full set of allowed tabs for (userId, cardKey) with exactly
+// tabKeys - an empty array removes the restriction entirely (full access).
+async function setTabPermissions(userId, cardKey, tabKeys) {
+  await ensureSchema();
+  await sql`DELETE FROM report_tab_permissions WHERE user_id = ${userId} AND card_key = ${cardKey}`;
+  for (const tabKey of tabKeys) {
+    await sql`INSERT INTO report_tab_permissions (user_id, card_key, tab_key) VALUES (${userId}, ${cardKey}, ${tabKey}) ON CONFLICT DO NOTHING`;
+  }
 }
 
 // Auto-provisions the very first admin(s) from ADMIN_EMAILS on their first successful

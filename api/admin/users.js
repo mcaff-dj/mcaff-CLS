@@ -1,11 +1,15 @@
 // GET  /api/admin/users -> list all users + their permissions (admin only)
-// POST /api/admin/users -> create/invite a user: { email, name, permissions: ['mcaffeine',...] }
-//                       -> or bulk-invite: { users: [{email,name},...], permissions: ['mcaffeine',...] }
-const { sql, ensureSchema, CARD_KEYS, CARD_LABELS } = require('../_lib/db');
+// POST /api/admin/users -> create/invite a user: { email, name, permissions: ['mcaffeine',...], tabPermissions: {hyphen:['csat']} }
+//                       -> or bulk-invite: { users: [{email,name},...], permissions: [...], tabPermissions: {...} }
+//        tabPermissions restricts a granted card to only the listed tabs (UI-level
+//        only - see report_tab_permissions in db.js); a card key absent from it, or
+//        given an empty array, gets full access to every tab as before.
+const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions } = require('../_lib/db');
+const { CARD_TABS } = require('../_lib/tabs');
 const { getSession } = require('../_lib/session');
 const { sendMail, siteBaseUrl } = require('../_lib/mail');
 
-async function upsertAndInvite(email, name, perms, req) {
+async function upsertAndInvite(email, name, perms, tabPerms, req) {
   const existing = await sql`SELECT id FROM users WHERE email = ${email}`;
   const isNewUser = existing.rows.length === 0;
 
@@ -17,6 +21,11 @@ async function upsertAndInvite(email, name, perms, req) {
   const user = rows[0];
   for (const key of perms) {
     await sql`INSERT INTO permissions (user_id, card_key) VALUES (${user.id}, ${key}) ON CONFLICT DO NOTHING`;
+  }
+  for (const [cardKey, tabKeys] of Object.entries(tabPerms || {})) {
+    if (!perms.includes(cardKey)) continue;
+    const validKeys = new Set((CARD_TABS[cardKey] || []).map((t) => t.key));
+    await setTabPermissions(user.id, cardKey, (Array.isArray(tabKeys) ? tabKeys : []).filter((k) => validKeys.has(k)));
   }
 
   const { rows: permRows } = await sql`SELECT card_key FROM permissions WHERE user_id = ${user.id}`;
@@ -56,12 +65,18 @@ module.exports = async (req, res) => {
   if (req.method === 'GET') {
     const { rows: users } = await sql`SELECT id, email, name, is_admin, created_at FROM users ORDER BY created_at ASC`;
     const { rows: perms } = await sql`SELECT user_id, card_key FROM permissions`;
+    const { rows: tabPerms } = await sql`SELECT user_id, card_key, tab_key FROM report_tab_permissions`;
     const byUser = {};
     perms.forEach((p) => {
       (byUser[p.user_id] = byUser[p.user_id] || []).push(p.card_key);
     });
-    const result = users.map((u) => ({ ...u, permissions: byUser[u.id] || [] }));
-    res.status(200).json({ users: result, cardKeys: CARD_KEYS });
+    const tabsByUser = {};
+    tabPerms.forEach((p) => {
+      const u = (tabsByUser[p.user_id] = tabsByUser[p.user_id] || {});
+      (u[p.card_key] = u[p.card_key] || []).push(p.tab_key);
+    });
+    const result = users.map((u) => ({ ...u, permissions: byUser[u.id] || [], tabPermissions: tabsByUser[u.id] || {} }));
+    res.status(200).json({ users: result, cardKeys: CARD_KEYS, cardTabs: CARD_TABS });
     return;
   }
 
@@ -72,10 +87,11 @@ module.exports = async (req, res) => {
     }
     body = body || {};
     const perms = Array.isArray(body.permissions) ? body.permissions.filter((k) => CARD_KEYS.includes(k)) : [];
+    const tabPerms = (body.tabPermissions && typeof body.tabPermissions === 'object') ? body.tabPermissions : {};
 
     if (Array.isArray(body.users)) {
-      // Bulk mode: shared `perms` applied to every entry, invited one at a time
-      // (sequential, not parallel - keeps DB/Resend load predictable for a
+      // Bulk mode: shared `perms`/`tabPerms` applied to every entry, invited one at
+      // a time (sequential, not parallel - keeps DB/Resend load predictable for a
       // human-triggered admin action and keeps per-row error isolation simple).
       const seen = new Set();
       const entries = body.users
@@ -92,7 +108,7 @@ module.exports = async (req, res) => {
       const results = [];
       for (const entry of entries) {
         try {
-          const user = await upsertAndInvite(entry.email, entry.name, perms, req);
+          const user = await upsertAndInvite(entry.email, entry.name, perms, tabPerms, req);
           results.push({ email: entry.email, ok: true, user });
         } catch (e) {
           console.error('Bulk invite failed for', entry.email, e.message || e);
@@ -109,7 +125,7 @@ module.exports = async (req, res) => {
       res.status(400).json({ error: 'Email is required' });
       return;
     }
-    const user = await upsertAndInvite(email, name, perms, req);
+    const user = await upsertAndInvite(email, name, perms, tabPerms, req);
     res.status(200).json({ user });
     return;
   }

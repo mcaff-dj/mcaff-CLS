@@ -1,7 +1,7 @@
 // Consolidated auth routes (login/logout/callback/me) into one dynamic-route file
 // to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells us
 // which of the 4 original routes was hit; URLs are unchanged.
-const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, bootstrapAdminIfNeeded, logEvent } = require('../_lib/db');
+const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent } = require('../_lib/db');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
 
 async function handleLogin(req, res) {
@@ -46,6 +46,7 @@ async function handleMe(req, res) {
     name: session.name,
     isAdmin: !!session.isAdmin,
     cards: (session.perms || []).map((k) => ({ key: k, label: CARD_LABELS[k] || k })),
+    tabPerms: session.tabPerms || {},
   });
 }
 
@@ -112,14 +113,17 @@ async function handleCallback(req, res) {
 
     // Admins always get every card, regardless of what's in the permissions table - so a
     // newly-added card (e.g. today's mom/ndr/rto) is automatically visible to admins on
-    // their next login, with no manual grant/backfill step needed.
+    // their next login, with no manual grant/backfill step needed. Same for tab
+    // restrictions: admins never get one (empty object = every tab of every card).
     const permissions = user.is_admin ? CARD_KEYS : await getUserPermissions(user.id);
+    const tabPerms = user.is_admin ? {} : await getUserTabPermissions(user.id);
     setSessionCookie(res, {
       uid: user.id,
       email: user.email,
       name: user.name,
       isAdmin: !!user.is_admin,
       perms: permissions,
+      tabPerms,
     });
 
     const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
