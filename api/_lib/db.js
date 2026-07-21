@@ -61,7 +61,7 @@ async function ensureSchema() {
 const CARD_KEYS = ['mcaffeine', 'hyphen', 'productkyc', 'mom', 'calling', 'onboarding', 'npsdeepdive'];
 const CARD_LABELS = {
   mcaffeine: 'mCaffeine', hyphen: 'Hyphen', productkyc: 'Product Calling KYC',
-  mom: 'MOM', calling: 'Calling Team', onboarding: 'Onboarding Test', npsdeepdive: 'NPS Deep Dive',
+  mom: 'MOM', calling: 'Calling Team', onboarding: 'Onboarding Test', npsdeepdive: 'CSAT Deep Dive',
 };
 
 async function getUserByEmail(email) {

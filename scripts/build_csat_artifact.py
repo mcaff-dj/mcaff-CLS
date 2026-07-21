@@ -2,6 +2,7 @@ import json
 
 DATA_PATH = r"mcaff-CLS/data/csat_dashboard_data.json"
 OUT_PATH = r"C:\Users\VIKASH PATHAK\AppData\Local\Temp\claude\c--Users-VIKASH-PATHAK-Desktop-Service-account\16b80c7f-e823-4d15-be9d-cfcc291e6052\scratchpad\csat_dashboard.html"
+REPORT_OUT_PATH = r"mcaff-CLS/api/_reports/npsdeepdive.html"
 
 with open(DATA_PATH, "r", encoding="utf-8") as f:
     D = json.load(f)
@@ -73,7 +74,7 @@ channels = k["channels"]
 chat = channels.get("chat", {})
 email = channels.get("email", {})
 
-html = f"""<title>CSAT Dashboard — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</title>
+html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</title>
 <style>
   .viz-root {{
     --surface-1:      #fcfcfb;
@@ -221,7 +222,7 @@ html = f"""<title>CSAT Dashboard — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
 
 <div class="viz-root">
   <div class="wrap">
-    <h1>CSAT Dashboard — Task Category, Resolver &amp; Comment Themes</h1>
+    <h1>CSAT Deep Dive — Task Category, Resolver &amp; Comment Themes</h1>
     <p class="sub">{n(k['total'])} completed CSAT responses &middot; {k['date_min']} &ndash; {k['date_max']} &middot; overall avg rating <b>{avg(k['overall_avg'])}</b> / 5</p>
     <p class="sub-brands">
       <span class="chip hyphen">Hyphen</span> {n(hyphen.get('n',0))} responses, avg {avg(hyphen.get('avg',0))} &nbsp;&middot;&nbsp;
@@ -537,3 +538,24 @@ with open(OUT_PATH, "w", encoding="utf-8") as f:
     f.write(html)
 
 print("wrote", OUT_PATH, len(html), "chars")
+
+# Standalone document for the gated report server (api/report/[card].js reads this
+# file raw and serves it to an iframe, so it needs its own doctype/html/head/body).
+# The <title>/<style> tags inside `html` are parsed into the document head per the
+# HTML5 parsing algorithm even though they're physically written in the body.
+report_html = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+</head>
+<body>
+{html}
+</body>
+</html>
+"""
+
+with open(REPORT_OUT_PATH, "w", encoding="utf-8") as f:
+    f.write(report_html)
+
+print("wrote", REPORT_OUT_PATH, len(report_html), "chars")
