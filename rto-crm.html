@@ -1016,12 +1016,21 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                  ══════════════════════════════════════════════════════════════════════ */
               <div className="space-y-6 animate-fadeIn">
                 {(() => {
+                  const inScope = (t) => {
+                    if (dateScope === 'ALL_TIME') return true;
+                    if (!t.rowDate) return true;
+                    const diffDays = (new Date().getTime() - t.rowDate.getTime()) / (1000 * 3600 * 24);
+                    if (dateScope === '7_DAYS') return diffDays <= 7;
+                    if (dateScope === '30_DAYS') return diffDays <= 30;
+                    return true;
+                  };
+
                   const agentMetrics = effectiveAgentRoster.map(ag => {
                     const email = ag.email.toLowerCase();
                     const prefix = email.split('@')[0];
                     const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(prefix));
 
-                    const assigned = allTickets.filter(t => isMine(t.assignedAgent));
+                    const assigned = allTickets.filter(t => isMine(t.assignedAgent) && inScope(t));
                     const disposed = assigned.filter(t => t.disposition || t.agentRemarks || t.status !== 'Pending');
                     const pending = assigned.filter(t => t.status === 'Pending' && !t.disposition && !t.agentRemarks);
                     const connected = disposed.filter(t => {
@@ -1069,6 +1078,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   const totalRefundAmt = agentMetrics.reduce((s, a) => s + a.totalRefundAmt, 0);
                   const avgConnectRate = totalDisposed > 0 ? Math.round(agentMetrics.reduce((s, a) => s + a.connected, 0) / totalDisposed * 100) : 0;
                   const onlineCount = agentMetrics.filter(a => a.status === 'Online').length;
+                  const freshUnassignedInScope = tickets.filter(t => {
+                    const agt = overrides[t.id]?.assignedAgent || t.assignedAgent;
+                    return (!agt || agt === 'Unassigned') && inScope(t);
+                  }).length;
 
                   const dispColors = {
                     'Customer Agreed to Accept': { bg: 'bg-emerald-500', text: 'text-emerald-300' },
@@ -1094,6 +1107,16 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                           <p className="text-[13px] text-zinc-500 mt-0.5">Comprehensive real-time metrics, disposition breakdown, and lead activity across all {effectiveAgentRoster.length} team members.</p>
                         </div>
                         <div className="flex items-center gap-2">
+                          <CustomSelect
+                            value={dateScope}
+                            onChange={(val) => {
+                              setDateScope(val);
+                              localStorage.setItem('rto_date_scope', val);
+                            }}
+                            options={dateOptions}
+                            icon={CalendarIcon}
+                            placeholder="Date Scope"
+                          />
                           <span className="text-[12px] text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-2.5 py-1 rounded-lg font-mono flex items-center gap-1.5">
                             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 pulse-dot"></span>
                             {onlineCount}/{effectiveAgentRoster.length} Active
@@ -1133,7 +1156,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                         </div>
                         <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs">
                           <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Fresh Unassigned</p>
-                          <p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{freshUnassignedCount.toLocaleString('en-IN')}</p>
+                          <p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{freshUnassignedInScope.toLocaleString('en-IN')}</p>
                           <p className="text-[11px] text-zinc-500 mt-0.5">Ready to claim</p>
                         </div>
                       </div>
