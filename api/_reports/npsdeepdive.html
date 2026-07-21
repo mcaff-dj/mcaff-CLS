@@ -163,12 +163,12 @@
     </p>
 
     <div class="kpi-row">
-      <div class="kpi"><div class="kpi-label">Total responses</div><div class="kpi-value">63,489</div><div class="kpi-sub">closed tickets</div></div>
-      <div class="kpi"><div class="kpi-label">Overall avg rating</div><div class="kpi-value">3.98</div><div class="kpi-sub">out of 5</div></div>
-      <div class="kpi"><div class="kpi-label">AI-resolved avg</div><div class="kpi-value">3.79</div><div class="kpi-sub">n=35,299</div></div>
-      <div class="kpi"><div class="kpi-label">Human-resolved avg</div><div class="kpi-value">4.21</div><div class="kpi-sub">n=28,190</div></div>
-      <div class="kpi"><div class="kpi-label">Promoters (4&ndash;5)</div><div class="kpi-value">76.1%</div><div class="kpi-sub">of all responses</div></div>
-      <div class="kpi"><div class="kpi-label">Detractors (1&ndash;2)</div><div class="kpi-value">19.9%</div><div class="kpi-sub">of all responses</div></div>
+      <div class="kpi"><div class="kpi-label">Total responses</div><div class="kpi-value" id="kpi-total">63,489</div><div class="kpi-sub" id="kpi-total-sub">closed tickets</div></div>
+      <div class="kpi"><div class="kpi-label">Overall avg rating</div><div class="kpi-value" id="kpi-overall-avg">3.98</div><div class="kpi-sub">out of 5</div></div>
+      <div class="kpi"><div class="kpi-label">AI-resolved avg</div><div class="kpi-value" id="kpi-ai-avg">3.79</div><div class="kpi-sub" id="kpi-ai-sub">n=35,299</div></div>
+      <div class="kpi"><div class="kpi-label">Human-resolved avg</div><div class="kpi-value" id="kpi-human-avg">4.21</div><div class="kpi-sub" id="kpi-human-sub">n=28,190</div></div>
+      <div class="kpi"><div class="kpi-label">Promoters (4&ndash;5)</div><div class="kpi-value" id="kpi-promoters">76.1%</div><div class="kpi-sub">of filtered responses</div></div>
+      <div class="kpi"><div class="kpi-label">Detractors (1&ndash;2)</div><div class="kpi-value" id="kpi-detractors">19.9%</div><div class="kpi-sub">of filtered responses</div></div>
     </div>
 
     <div class="filterbar">
@@ -196,7 +196,7 @@
           <option value="email">Email</option>
         </select>
       </div>
-      <div class="filter-group" style="color:var(--text-muted); font-size:12px;">Applies to the heatmap below</div>
+      <div class="filter-group" style="color:var(--text-muted); font-size:12px;">Applies to the KPIs and heatmap below</div>
     </div>
 
     <div class="card">
@@ -412,10 +412,52 @@ function renderCloud(words) {
   });
 }
 
+function computeKPIs(brand, resolver, channel) {
+  let totalN = 0, totalSum = 0;
+  let aiN = 0, aiSum = 0, humanN = 0, humanSum = 0;
+  let promotersN = 0, detractorsN = 0;
+  GRANULAR.forEach(rec => {
+    if (!passesFilter(rec, brand, resolver, channel)) return;
+    const rt = Number(rec.rt);
+    totalN += rec.n;
+    totalSum += rec.n * rt;
+    if (rec.r === 'AI') { aiN += rec.n; aiSum += rec.n * rt; }
+    if (rec.r === 'Human') { humanN += rec.n; humanSum += rec.n * rt; }
+    if (rt >= 4) promotersN += rec.n;
+    if (rt <= 2) detractorsN += rec.n;
+  });
+  return {
+    totalN,
+    overallAvg: totalN ? totalSum / totalN : 0,
+    aiAvg: aiN ? aiSum / aiN : 0, aiN,
+    humanAvg: humanN ? humanSum / humanN : 0, humanN,
+    promotersPct: totalN ? 100 * promotersN / totalN : 0,
+    detractorsPct: totalN ? 100 * detractorsN / totalN : 0,
+  };
+}
+
+function fmtInt(x) { return Math.round(x).toLocaleString('en-IN'); }
+function fmtAvg(x) { return x.toFixed(2); }
+function fmtPct(x) { return x.toFixed(1) + '%'; }
+
+function renderKPIs(brand, resolver, channel) {
+  const s = computeKPIs(brand, resolver, channel);
+  document.getElementById('kpi-total').textContent = fmtInt(s.totalN);
+  document.getElementById('kpi-total-sub').textContent = brand === 'All' && resolver === 'All' && channel === 'All' ? 'closed tickets' : 'closed tickets (filtered)';
+  document.getElementById('kpi-overall-avg').textContent = s.totalN ? fmtAvg(s.overallAvg) : '–';
+  document.getElementById('kpi-ai-avg').textContent = s.aiN ? fmtAvg(s.aiAvg) : '–';
+  document.getElementById('kpi-ai-sub').textContent = 'n=' + fmtInt(s.aiN);
+  document.getElementById('kpi-human-avg').textContent = s.humanN ? fmtAvg(s.humanAvg) : '–';
+  document.getElementById('kpi-human-sub').textContent = 'n=' + fmtInt(s.humanN);
+  document.getElementById('kpi-promoters').textContent = s.totalN ? fmtPct(s.promotersPct) : '–';
+  document.getElementById('kpi-detractors').textContent = s.totalN ? fmtPct(s.detractorsPct) : '–';
+}
+
 function refreshAll() {
   const brand = document.getElementById('f-brand').value;
   const resolver = document.getElementById('f-resolver').value;
   const channel = document.getElementById('f-channel').value;
+  renderKPIs(brand, resolver, channel);
   renderHeatmap(brand, resolver, channel);
 }
 
