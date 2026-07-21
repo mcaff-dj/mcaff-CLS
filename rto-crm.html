@@ -166,7 +166,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       return data.access_token;
     }
 
-    // Fast Fetch Sheet Raw Data Values
     async function fetchSheetRawValues(spreadsheetId, range = 'Data') {
       const token = await getAccessToken();
       const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}?majorDimension=ROWS`;
@@ -213,8 +212,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       return null;
     }
 
-    /* ── HIGH PERFORMANCE STREAMING PARSER (ZERO LAG) ── */
-    async function parseAndFilterSheetRows(dataValues, dateRange = '7_DAYS', loggedInUser = null) {
+    /* ── HIGH PERFORMANCE STREAMING PARSER ── */
+    async function parseAndFilterSheetRows(dataValues, dateRange = '7_DAYS', loggedInUser = null, role = 'Agent') {
       if (!dataValues || dataValues.length < 2) return [];
       const [headers, ...rawRows] = dataValues;
 
@@ -227,7 +226,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       const cutoffTimestamp = now - (daysLimit * 24 * 60 * 60 * 1000);
 
-      // Process latest rows from end of sheet for maximum speed
       const rowsToProcess = (dateRange === '7_DAYS' && rawRows.length > 8000) 
         ? rawRows.slice(rawRows.length - 8000)
         : (dateRange === '14_DAYS' && rawRows.length > 15000)
@@ -247,8 +245,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         const row = rowsToProcess[i];
         const ticketAgentLower = (row[16] || '').toLowerCase().trim(); // Column Q (Agent)
 
-        // Fast Agent Match Check
-        if (loggedInUser && ticketAgentLower && ticketAgentLower !== 'unassigned') {
+        // For 'Agent' role, enforce early matching. For TL / Admin, allow all rows!
+        if (role === 'Agent' && loggedInUser && ticketAgentLower && ticketAgentLower !== 'unassigned') {
           const isMatch = (agentEmailLower && ticketAgentLower === agentEmailLower) ||
                           (agentNameLower && ticketAgentLower === agentNameLower) ||
                           (emailPrefix && emailPrefix.length > 2 && (ticketAgentLower.includes(emailPrefix) || emailPrefix.includes(ticketAgentLower))) ||
@@ -295,15 +293,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const orderNum = get('Order Number', 'Order #', 'Order ID', 'OrderNo') || `ORD-${idx + 1000}`;
       const assignedAgent = get('Agent Name', 'Agent', 'Assigned Agent', 'AgentName', 'Assigned To', '_col_Q', 'col_16') || 'Unassigned';
 
-      // Column D: RTO Reason
       const rtoReasonVal = get('RTO Reason', '_col_D', 'col_3', 'Reason', 'RTOReason', 'Status', 'Notes') || 'Return To Origin';
-      
-      // Column Y: Calling Date
       const callingDateVal = get('Calling Date', 'CallingDate', '_col_Y', 'col_24') || '';
 
       const isPrepaid = rawPay.includes('PREPAID') || rawPay.includes('ONLINE') || rawPay.includes('PAYTM') || rawPay.includes('UPI') || (!rawPay.includes('COD') && !rawPay.includes('CASH'));
 
-      // Check if RTO Reason matches high-priority refusal list
       const reasonLower = rtoReasonVal.toLowerCase().trim();
       const isRefusalMatch = HIGH_PRIORITY_RTO_REASONS.some(r => reasonLower.includes(r));
       const isHighPriority = isPrepaid && isRefusalMatch;
@@ -391,20 +385,37 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         localStorage.setItem('rto_theme', theme);
       }, [theme]);
 
-      // AUTO-INHERIT AUTHENTICATED AGENT FROM DASHBOARD SESSION (NO SECOND LOGIN GATE!)
+      // AUTO-INHERIT AUTHENTICATED AGENT FROM DASHBOARD SESSION
       const [googleUser, setGoogleUser] = useState(() => {
         try {
           const s = localStorage.getItem('rto_google_user');
           if (s) return JSON.parse(s);
         } catch (e) {}
 
-        // Default active agent fallback so user is NEVER prompted for a second login!
         return {
           name: 'Vighnesh Patil',
           email: 'vighnesh.patil@mcaffeine.com',
           picture: 'https://api.dicebear.com/7.x/avataaars/svg?seed=vighnesh.patil@mcaffeine.com'
         };
       });
+
+      // ROLE SYSTEM: Agent | Team Lead | Admin
+      const [userRole, setUserRole] = useState(() => localStorage.getItem('rto_user_role') || 'Agent');
+      
+      // MAX LEADS CAPACITY PER AGENT (Default: 10)
+      const [maxLeadsPerAgent, setMaxLeadsPerAgent] = useState(() => Number(localStorage.getItem('rto_max_leads_quota')) || 10);
+
+      const handleSetUserRole = (role) => {
+        setUserRole(role);
+        localStorage.setItem('rto_user_role', role);
+        showToast(`Role switched to ${role}`);
+      };
+
+      const handleSetMaxLeadsQuota = (quota) => {
+        setMaxLeadsPerAgent(quota);
+        localStorage.setItem('rto_max_leads_quota', quota);
+        showToast(`Agent Capacity updated to max ${quota} leads`);
+      };
 
       // Auto-Sync authenticated session from main dashboard API /api/auth/me
       useEffect(() => {
@@ -419,6 +430,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               };
               setGoogleUser(activeUser);
               localStorage.setItem('rto_google_user', JSON.stringify(activeUser));
+              if (d.isAdmin) {
+                setUserRole('Admin');
+                localStorage.setItem('rto_user_role', 'Admin');
+              }
             }
           })
           .catch(() => {});
@@ -463,7 +478,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [sheetUrl] = useState(DEFAULT_SHEET_URL);
       const [sheetRange] = useState(DEFAULT_SHEET_RANGE);
       const [isSyncing, setIsSyncing] = useState(false);
-      const [lastSyncedTime, setLastSyncedTime] = useState(null);
 
       const [selectedDetailTicket, setSelectedDetailTicket] = useState(null);
       const [selectedRefundTicket, setSelectedRefundTicket] = useState(null);
@@ -483,16 +497,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         try {
           const activeScope = overrideScope || dateRange;
           const rawValues = await fetchSheetRawValues(id, sheetRange || 'Data');
-          const mapped = await parseAndFilterSheetRows(rawValues, activeScope, googleUser);
+          const mapped = await parseAndFilterSheetRows(rawValues, activeScope, googleUser, userRole);
           setTickets(mapped);
-          setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
           if (!silent) showToast(`Synced ${mapped.length.toLocaleString('en-IN')} active leads (${activeScope.replace('_', ' ')})`);
         } catch (err) {
           if (!silent) showToast(err.message || 'Sync failed');
         } finally {
           setIsSyncing(false);
         }
-      }, [sheetUrl, sheetRange, dateRange, googleUser, showToast]);
+      }, [sheetUrl, sheetRange, dateRange, googleUser, userRole, showToast]);
 
       useEffect(() => { handleLiveSync(true); }, []);
 
@@ -526,18 +539,19 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         const target = tickets.find(t => t.id === ticketId);
         if (target) {
           setSelectedReceiptTicket({ ...target, status: 'Refunded', refundDetails: refundRecord });
-          showToast(`₹${refundRecord.amount.toLocaleString('en-IN')} refunded! Resolution score updated.`);
+          showToast(`₹${refundRecord.amount.toLocaleString('en-IN')} refunded! Active lead slot freed.`);
         }
       };
 
-      // Performance-Based Round Robin Lead Filter
+      // ROLE & CAPACITY FILTER: MAX LEADS PER AGENT (DEFAULT 10 PENDING LEADS)
       const myAssignedTickets = useMemo(() => {
         let base = tickets.map(t => {
           const override = ticketOverrides[t.id];
           return override ? { ...t, status: override.status || t.status, refundDetails: override.refundDetails || t.refundDetails } : t;
         });
 
-        return base.sort((a, b) => {
+        // High Priority Prepaid Refusals & Calling Date freshness sorting
+        base = base.sort((a, b) => {
           if (a.isHighPriority && !b.isHighPriority) return -1;
           if (!a.isHighPriority && b.isHighPriority) return 1;
           if (a.rowDate && b.rowDate) {
@@ -545,7 +559,17 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           }
           return 0;
         });
-      }, [tickets, ticketOverrides]);
+
+        // If 'Agent' role, ENFORCE MAX 10 ACTIVE LEADS CAPACITY
+        if (userRole === 'Agent') {
+          const pendingLeads = base.filter(t => t.status !== 'Refunded');
+          const refundedLeads = base.filter(t => t.status === 'Refunded');
+          const cappedPending = pendingLeads.slice(0, maxLeadsPerAgent); // Strict Max 10 Leads Quota!
+          return [...cappedPending, ...refundedLeads];
+        }
+
+        return base;
+      }, [tickets, ticketOverrides, userRole, maxLeadsPerAgent]);
 
       const myResolvedCount = googleUser ? (agentStats[googleUser.email]?.resolvedCount || 0) : 0;
       const highPriorityCount = myAssignedTickets.filter(t => t.isHighPriority && t.status !== 'Refunded').length;
@@ -577,15 +601,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       }, [filteredTickets, currentPage, pageSize]);
 
       const tabs = [
-        { key: 'assigned', label: 'My Assigned Leads', count: myAssignedTickets.length },
+        { key: 'assigned', label: userRole === 'Agent' ? `My Active Queue (${pendingCount}/${maxLeadsPerAgent})` : 'All Team Leads', count: myAssignedTickets.length },
         { key: 'high_priority', label: '🔥 High Priority Prepaid', count: highPriorityCount },
         { key: 'pending', label: 'Pending Refunds', count: pendingCount },
         { key: 'refunded', label: 'Refunded', count: refundedCount },
       ];
 
-      /* ──────────────────────────────────────────────────
-         MAIN DASHBOARD (Direct access, zero second login screen)
-         ────────────────────────────────────────────────── */
       return (
         <div className="min-h-screen flex flex-col transition-colors duration-200">
 
@@ -593,12 +614,26 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           <header className="sticky top-0 z-30 bg-white/90 dark:bg-[#09090b]/90 backdrop-blur-xl border-b border-slate-200 dark:border-zinc-800/80">
             <div className="max-w-[1400px] mx-auto px-6 h-14 flex items-center justify-between gap-4">
 
-              <div className="flex items-center gap-6">
+              <div className="flex items-center gap-5">
                 <div className="flex items-center gap-2.5">
                   <div className="h-7 w-7 rounded-lg bg-slate-900 dark:bg-zinc-100 flex items-center justify-center">
                     <span className="text-white dark:text-zinc-900 font-bold text-xs">R</span>
                   </div>
                   <span className="font-semibold text-sm text-slate-900 dark:text-zinc-100 tracking-tight">RTO CRM</span>
+                </div>
+
+                {/* ROLE BADGE / ROLE SELECTOR */}
+                <div className="flex items-center gap-1 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg px-2 py-0.5">
+                  <span className="text-[11px] font-bold text-slate-500 dark:text-zinc-400">Role:</span>
+                  <select
+                    value={userRole}
+                    onChange={(e) => handleSetUserRole(e.target.value)}
+                    className="text-xs font-bold bg-transparent text-indigo-600 dark:text-indigo-400 focus:outline-none cursor-pointer"
+                  >
+                    <option value="Agent" className="bg-white dark:bg-zinc-900">👤 Agent (10 Leads Cap)</option>
+                    <option value="Team Lead" className="bg-white dark:bg-zinc-900">👑 Team Lead (All Queue)</option>
+                    <option value="Admin" className="bg-white dark:bg-zinc-900">🛡️ Admin (Full Control)</option>
+                  </select>
                 </div>
 
                 <nav className="hidden md:flex items-center gap-1">
@@ -627,14 +662,9 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search Order #, Customer, Reason, Calling Date..."
-                    className="w-48 xl:w-56 pl-8 pr-3 py-1.5 text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg text-slate-900 dark:text-zinc-200 placeholder:text-slate-400 focus:outline-none focus:border-indigo-500"
+                    placeholder="Search Order #, Customer, Reason..."
+                    className="w-44 xl:w-52 pl-8 pr-3 py-1.5 text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg text-slate-900 dark:text-zinc-200 placeholder:text-slate-400 focus:outline-none focus:border-indigo-500"
                   />
-                  {searchQuery && (
-                    <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700">
-                      <SvgX width="12" height="12" />
-                    </button>
-                  )}
                 </div>
 
                 {/* Live Sync */}
@@ -656,7 +686,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   {theme === 'dark' ? <SvgSun /> : <SvgMoon />}
                 </button>
 
-                {/* AGENT STATUS SWITCHER (Offline by default) */}
+                {/* AGENT STATUS SWITCHER */}
                 <div className="flex items-center gap-1.5 h-8 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg px-2">
                   <span className={`h-2 w-2 rounded-full ${
                     agentStatus === 'Online' ? 'bg-emerald-500' : agentStatus === 'Busy' ? 'bg-amber-500 animate-pulse' : 'bg-slate-400'
@@ -672,7 +702,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   </select>
                 </div>
 
-                {/* Logged in Agent Avatar (Synced with Dashboard Session) */}
+                {/* Logged in User Avatar */}
                 <div className="flex items-center gap-2 h-8 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg p-1 pr-2.5">
                   <img src={googleUser.picture} alt={googleUser.name} className="h-6 w-6 rounded-full border border-indigo-500" />
                   <div className="text-left hidden lg:block">
@@ -698,21 +728,43 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
             {/* Stats Overview */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-              <StatCard label={`My Leads (${googleUser.name.split(' ')[0]})`} value={myAssignedTickets.length.toLocaleString('en-IN')} sub={`Data Window: ${dateRange.replace('_', ' ')}`} accent="sky" />
-              <StatCard label="⚡ Resolved Throughput Score" value={`${myResolvedCount} Leads`} sub="Higher Score = Priority Round Robin" accent="emerald" />
+              <StatCard
+                label={userRole === 'Agent' ? `Active Queue Capacity (${pendingCount}/${maxLeadsPerAgent})` : `Total Team Leads`}
+                value={`${pendingCount} Pending`}
+                sub={userRole === 'Agent' ? `Max ${maxLeadsPerAgent} active leads quota` : `All assigned agent queues`}
+                accent="sky"
+              />
+              <StatCard label="⚡ Agent Resolved Throughput" value={`${myResolvedCount} Leads`} sub="Higher Score = Priority Round Robin" accent="emerald" />
               <StatCard label="🔥 High Priority Prepaid" value={highPriorityCount.toLocaleString('en-IN')} sub="Prepaid + Refusal Reasons" accent="rose" />
-              <StatCard label="Pending Refunds" value={pendingCount.toLocaleString('en-IN')} sub="Awaiting resolution" accent="amber" />
+              <StatCard label="Current Role & Status" value={`${userRole}`} sub={`Agent Status: ${agentStatus}`} accent="amber" />
             </div>
 
-            {/* Filter Bar & Controls */}
+            {/* Controls Bar */}
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
               <p className="text-xs text-slate-500 dark:text-zinc-500">
-                Showing <span className="text-slate-900 dark:text-zinc-300 font-semibold">{filteredTickets.length.toLocaleString('en-IN')}</span> leads for <strong className="text-indigo-600 dark:text-indigo-400">{googleUser.name}</strong> (Round-Robin Score: <strong>{myResolvedCount}</strong>)
+                Active Role: <strong className="text-indigo-600 dark:text-indigo-400">{userRole}</strong> · Active Quota: <strong className="text-emerald-600 dark:text-emerald-400">{pendingCount} / {maxLeadsPerAgent} Leads</strong>
               </p>
 
               <div className="flex items-center gap-2 flex-wrap">
                 
-                {/* ⚡ DATA SCOPE / MONTH SELECTOR (ZERO-LAG MODE) */}
+                {/* 🎯 MAX LEADS CAPACITY CONFIGURATOR FOR ADMIN / TL */}
+                {(userRole === 'Admin' || userRole === 'Team Lead') && (
+                  <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-zinc-900 border border-emerald-500/40 rounded-lg px-2.5 py-1">
+                    <span className="text-[11px] font-semibold text-slate-600 dark:text-zinc-400">Leads Cap / Agent:</span>
+                    <select
+                      value={maxLeadsPerAgent}
+                      onChange={(e) => handleSetMaxLeadsQuota(Number(e.target.value))}
+                      className="text-xs font-bold bg-transparent text-emerald-600 dark:text-emerald-400 focus:outline-none cursor-pointer"
+                    >
+                      <option value="5" className="bg-white dark:bg-zinc-900">5 Leads</option>
+                      <option value="10" className="bg-white dark:bg-zinc-900">10 Leads (Default)</option>
+                      <option value="15" className="bg-white dark:bg-zinc-900">15 Leads</option>
+                      <option value="20" className="bg-white dark:bg-zinc-900">20 Leads</option>
+                    </select>
+                  </div>
+                )}
+
+                {/* ⚡ DATA SCOPE / MONTH SELECTOR */}
                 <select
                   value={dateRange}
                   onChange={(e) => handleSetDateScope(e.target.value)}
@@ -755,7 +807,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   <option value="25">25 / page</option>
                   <option value="50">50 / page</option>
                   <option value="100">100 / page</option>
-                  <option value="250">250 / page</option>
                 </select>
 
                 {/* View Switcher */}
@@ -787,7 +838,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                       {paginatedTickets.length === 0 ? (
                         <tr>
                           <td colSpan="8" className="py-16 text-center text-slate-500 dark:text-zinc-500 text-xs">
-                            No leads assigned to <strong>{googleUser.name}</strong> ({googleUser.email}) matching current criteria.
+                            No active leads matching current criteria.
                           </td>
                         </tr>
                       ) : paginatedTickets.map(ticket => {
@@ -898,7 +949,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
             )}
           </main>
 
-          {/* ── Customer Detail Modal ────────────────── */}
+          {/* ── Detail Modal ────────────────── */}
           {selectedDetailTicket && (
             <Overlay onClose={() => setSelectedDetailTicket(null)}>
               <div className="w-full max-w-lg bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-xl shadow-2xl text-slate-900 dark:text-zinc-100">
@@ -1046,7 +1097,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
           {/* Footer */}
           <footer className="border-t border-slate-200 dark:border-zinc-800/40 py-4 text-center">
-            <p className="text-[11px] text-slate-500 dark:text-zinc-600">RTO CRM · Agent Support Portal</p>
+            <p className="text-[11px] text-slate-500 dark:text-zinc-600">RTO CRM · Role-Based Access & Capacity System</p>
           </footer>
         </div>
       );
