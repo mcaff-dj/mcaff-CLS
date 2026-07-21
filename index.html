@@ -23,6 +23,7 @@
       --pkyc: #c2740c;
       --mom: #9333ea;
       --onboarding: #2b7de0;
+      --npsdeepdive: #0e7490;
 
       --sidebar-bg: rgba(249, 249, 247, 0.85);
       --active-bg: rgba(74, 58, 167, 0.08);
@@ -45,6 +46,7 @@
         --pkyc: #e0993d;
         --mom: #c084fc;
         --onboarding: #5b9cf0;
+        --npsdeepdive: #22d3ee;
 
         --sidebar-bg: rgba(22, 22, 21, 0.85);
         --active-bg: rgba(144, 133, 233, 0.12);
@@ -594,14 +596,16 @@
       hyphen: { accent: 'var(--hyphen)', bg: 'rgba(25, 156, 92, 0.08)', fg: 'var(--hyphen)' },
       productkyc: { accent: 'var(--pkyc)', bg: 'rgba(194, 116, 12, 0.08)', fg: 'var(--pkyc)' },
       mom: { accent: 'var(--mom)', bg: 'rgba(147, 51, 234, 0.08)', fg: 'var(--mom)' },
-      onboarding: { accent: 'var(--onboarding)', bg: 'rgba(43, 125, 224, 0.08)', fg: 'var(--onboarding)' }
+      onboarding: { accent: 'var(--onboarding)', bg: 'rgba(43, 125, 224, 0.08)', fg: 'var(--onboarding)' },
+      npsdeepdive: { accent: 'var(--npsdeepdive)', bg: 'rgba(14, 116, 144, 0.08)', fg: 'var(--npsdeepdive)' }
     };
 
     // Cards with no report wired up yet - onBrandChange shows a plain placeholder instead
     // of pointing the iframe at /api/report/{key} (which would 404/500, since there's no
     // api/_reports/{key}.html for these). Remove an entry here once its report exists.
     var COMING_SOON = {
-      mom: 'MOM report is coming soon.'
+      mom: 'MOM report is coming soon.',
+      npsdeepdive: 'NPS Deep Dive report is coming soon.'
     };
 
     // Calling Team has its own three nested nav sub-items instead of one blanket
