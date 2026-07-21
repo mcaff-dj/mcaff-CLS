@@ -184,6 +184,25 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
     function parseDate(s){if(!s)return null;let d=new Date(s);if(!isNaN(d))return d;const p=s.trim().split(/\s+/);if(p.length===2){const day=parseInt(p[0]),ms=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'],mi=ms.indexOf(p[1].toLowerCase().slice(0,3));if(!isNaN(day)&&mi!==-1)return new Date(new Date().getFullYear(),mi,day);}return null;}
 
+    function startOfDay(d){const x=new Date(d);x.setHours(0,0,0,0);return x;}
+
+    function isDateInScope(rowDate, scope, customFrom, customTo){
+      if(scope==='ALL_TIME')return true;
+      if(!rowDate)return true;
+      const now=new Date(),today=startOfDay(now),rd=startOfDay(rowDate);
+      if(scope==='TODAY')return rd.getTime()===today.getTime();
+      if(scope==='YESTERDAY'){const y=new Date(today);y.setDate(y.getDate()-1);return rd.getTime()===y.getTime();}
+      if(scope==='7_DAYS')return (now.getTime()-rowDate.getTime())/(1000*3600*24)<=7;
+      if(scope==='30_DAYS')return (now.getTime()-rowDate.getTime())/(1000*3600*24)<=30;
+      if(scope==='CUSTOM'){
+        if(!customFrom&&!customTo)return true;
+        if(customFrom&&rd.getTime()<startOfDay(new Date(customFrom)).getTime())return false;
+        if(customTo&&rd.getTime()>startOfDay(new Date(customTo)).getTime())return false;
+        return true;
+      }
+      return true;
+    }
+
     /* ── Non-blocking parser ─────────────────────────── */
     async function parseRows(vals, user=null, role='Admin'){
       if(!vals||vals.length<2)return[];
@@ -417,6 +436,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [search, setSearch] = useState('');
       const [tab, setTab] = useState('all');
       const [dateScope, setDateScope] = useState(()=>localStorage.getItem('rto_date_scope')||'ALL_TIME');
+      const [customDateFrom, setCustomDateFrom] = useState(()=>localStorage.getItem('rto_custom_date_from')||'');
+      const [customDateTo, setCustomDateTo] = useState(()=>localStorage.getItem('rto_custom_date_to')||'');
       const [payFilter, setPayFilter] = useState('ALL');
       const [page, setPage] = useState(1);
       const [perPage, setPerPage] = useState(50);
@@ -801,8 +822,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       const dateOptions = [
         { value: 'ALL_TIME', label: 'All time' },
+        { value: 'TODAY', label: 'Today' },
+        { value: 'YESTERDAY', label: 'Yesterday' },
         { value: '7_DAYS', label: 'Last 7 days' },
         { value: '30_DAYS', label: 'Last 30 days' },
+        { value: 'CUSTOM', label: 'Custom range' },
       ];
 
       const payOptions = [
@@ -859,15 +883,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return lower.includes(targetEmail) || (targetPrefix && lower.includes(targetPrefix));
         };
 
-        const inScope = (t) => {
-          if (dateScope === 'ALL_TIME') return true;
-          if (!t.rowDate) return true;
-          const now = new Date();
-          const diffDays = (now.getTime() - t.rowDate.getTime()) / (1000 * 3600 * 24);
-          if (dateScope === '7_DAYS') return diffDays <= 7;
-          if (dateScope === '30_DAYS') return diffDays <= 30;
-          return true;
-        };
+        const inScope = (t) => isDateInScope(t.rowDate, dateScope, customDateFrom, customDateTo);
 
         const agentLeads = allTickets.filter(t => isTargetAgent(t.assignedAgent) && inScope(t));
         const disposedLeads = agentLeads.filter(t => t.disposition || t.agentRemarks || t.status !== 'Pending');
@@ -901,7 +917,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           connectRate,
           reorderRate
         };
-      }, [allTickets, agentFilter, googleUser, userRole, dateScope, overrides]);
+      }, [allTickets, agentFilter, googleUser, userRole, dateScope, customDateFrom, customDateTo, overrides]);
 
       const filtered = useMemo(()=>{
         setPage(1);
@@ -1016,14 +1032,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                  ══════════════════════════════════════════════════════════════════════ */
               <div className="space-y-6 animate-fadeIn">
                 {(() => {
-                  const inScope = (t) => {
-                    if (dateScope === 'ALL_TIME') return true;
-                    if (!t.rowDate) return true;
-                    const diffDays = (new Date().getTime() - t.rowDate.getTime()) / (1000 * 3600 * 24);
-                    if (dateScope === '7_DAYS') return diffDays <= 7;
-                    if (dateScope === '30_DAYS') return diffDays <= 30;
-                    return true;
-                  };
+                  const inScope = (t) => isDateInScope(t.rowDate, dateScope, customDateFrom, customDateTo);
 
                   const agentMetrics = effectiveAgentRoster.map(ag => {
                     const email = ag.email.toLowerCase();
@@ -1117,6 +1126,23 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                             icon={CalendarIcon}
                             placeholder="Date Scope"
                           />
+                          {dateScope === 'CUSTOM' && (
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="date"
+                                value={customDateFrom}
+                                onChange={(e) => { setCustomDateFrom(e.target.value); localStorage.setItem('rto_custom_date_from', e.target.value); }}
+                                className="h-8 px-2 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[12px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+                              />
+                              <span className="text-zinc-500 text-[12px]">to</span>
+                              <input
+                                type="date"
+                                value={customDateTo}
+                                onChange={(e) => { setCustomDateTo(e.target.value); localStorage.setItem('rto_custom_date_to', e.target.value); }}
+                                className="h-8 px-2 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[12px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+                              />
+                            </div>
+                          )}
                           <span className="text-[12px] text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-2.5 py-1 rounded-lg font-mono flex items-center gap-1.5">
                             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 pulse-dot"></span>
                             {onlineCount}/{effectiveAgentRoster.length} Active
@@ -1545,6 +1571,24 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                       icon={CalendarIcon}
                       placeholder="Date Scope"
                     />
+
+                    {dateScope === 'CUSTOM' && (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="date"
+                          value={customDateFrom}
+                          onChange={(e) => { setCustomDateFrom(e.target.value); localStorage.setItem('rto_custom_date_from', e.target.value); }}
+                          className="h-8 px-2 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[12px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+                        />
+                        <span className="text-zinc-500 text-[12px]">to</span>
+                        <input
+                          type="date"
+                          value={customDateTo}
+                          onChange={(e) => { setCustomDateTo(e.target.value); localStorage.setItem('rto_custom_date_to', e.target.value); }}
+                          className="h-8 px-2 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[12px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+                        />
+                      </div>
+                    )}
 
                     <CustomSelect
                       value={payFilter}
