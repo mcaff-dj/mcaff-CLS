@@ -45,6 +45,11 @@ jobs:
           GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
         run: python scripts/export_recurring.py --api-token "${{ secrets.FLOWCALL_TOKEN_MCAFFEINE }}" --tab-name mcaffeine
 
+      - name: Push mcaffeine to dashboard
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+        run: python scripts/push_mcaffeine_to_dashboard.py
+
       - name: Commit state file if changed
         run: |
           git config user.name  "github-actions[bot]"
