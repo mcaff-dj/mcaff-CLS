@@ -840,6 +840,8 @@
       // Sync active granularity
       syncGranularityUI();
 
+      populateReportNav();
+
       // Show iframe
       iframe.classList.add('loaded');
       document.getElementById('loadingOverlay').style.opacity = '0';
@@ -848,6 +850,33 @@
       // Auto close mobile sidebar
       document.querySelector('.sidebar').classList.remove('open');
       document.getElementById('menuToggle').innerHTML = '☰';
+    }
+
+    // Mirrors the report's own internal tab bar (.tab-nav .tab-btn, inside the iframe)
+    // into the sidebar's "Report Views" list - same nav-btn/#navList pattern Calling
+    // Team's static sub-items use - then hides the now-redundant tab row inside the
+    // iframe. selectTab() still works: clicking a hidden tab-btn still fires its click
+    // handler, so the report's own tabjs script (active class + panel toggling) is
+    // untouched.
+    function populateReportNav() {
+      var iframe = document.getElementById('reportIframe');
+      var doc = iframe.contentDocument || iframe.contentWindow.document;
+      var innerBtns = doc.querySelectorAll('.tab-nav .tab-btn');
+      var navList = document.getElementById('navList');
+      navList.innerHTML = '';
+      if (!innerBtns.length) return;
+
+      Array.prototype.forEach.call(innerBtns, function(b) {
+        var btn = document.createElement('button');
+        btn.className = 'nav-btn' + (b.classList.contains('active') ? ' active' : '');
+        btn.setAttribute('data-tab', b.dataset.tab);
+        btn.textContent = b.textContent;
+        btn.onclick = function() { selectTab(b.dataset.tab); };
+        navList.appendChild(btn);
+      });
+
+      var innerNav = doc.querySelector('.tab-nav');
+      if (innerNav) innerNav.style.display = 'none';
     }
 
     // Switch tab inside iframe
