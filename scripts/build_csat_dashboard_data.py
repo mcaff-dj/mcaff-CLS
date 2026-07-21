@@ -13,6 +13,7 @@ df["month_p"] = df["dt"].dt.to_period("M")
 df["month"] = df["month_p"].dt.strftime("%b %Y")
 df["resolver"] = df["Is AI Agent"].map({"Yes": "AI", "No": "Human"})
 df["task"] = df["Tasks"].fillna("(none)")
+df["agent"] = df["Agent Name"].fillna("(unassigned)")
 df["rating"] = df["Rating"].astype(int)
 
 month_order = sorted(df["month_p"].dropna().unique())
@@ -29,6 +30,14 @@ grp = df.groupby(["month", "Brand name", "resolver", "Channel", "task_bucket", "
 GRANULAR = [
     {"m": r["month"], "b": r["Brand name"], "r": r["resolver"], "ch": r["Channel"], "c": r["task_bucket"], "rt": str(r["rating"]), "n": int(r["n"])}
     for _, r in grp.iterrows()
+]
+
+# ---- GRANULAR_AGENT: month x brand x resolver x channel x agent x rating -> n ----
+# Only 41 distinct agents total (incl. "AI" and "(unassigned)"), so no Other bucket needed.
+grp_agent = df.groupby(["month", "Brand name", "resolver", "Channel", "agent", "rating"]).size().reset_index(name="n")
+GRANULAR_AGENT = [
+    {"m": r["month"], "b": r["Brand name"], "r": r["resolver"], "ch": r["Channel"], "c": r["agent"], "rt": str(r["rating"]), "n": int(r["n"])}
+    for _, r in grp_agent.iterrows()
 ]
 
 # ---- KPI tiles ----
@@ -137,6 +146,8 @@ result = {
     "kpis": kpis,
     "month_order": MONTH_ORDER,
     "granular": GRANULAR,
+    "granular_agent": GRANULAR_AGENT,
+    "n_agents_total": int(df["agent"].nunique()),
     "words_by_filter": WORDS_BY_FILTER,
     "weakest": weakest,
     "ai_worse": ai_worse,
@@ -152,5 +163,6 @@ with open(OUT, "w", encoding="utf-8") as f:
 
 print("wrote", OUT)
 print("granular rows:", len(GRANULAR))
+print("granular_agent rows:", len(GRANULAR_AGENT))
 print("word rows:", len(WORDS_BY_FILTER))
 print(json.dumps({k: v for k, v in result.items() if k not in ("granular", "words_by_filter")}, indent=2, default=str)[:4000])

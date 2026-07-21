@@ -63,7 +63,13 @@ coverage_html = (
     f"'(none)' means no task was tagged on the ticket."
 )
 
+agent_coverage_html = (
+    f"All {D['n_agents_total']} agents are shown (no bucketing needed). "
+    f"'AI' is every AI-resolved ticket; '(unassigned)' means the ticket was human-resolved but no agent name was recorded."
+)
+
 GRANULAR_JSON = json.dumps(D["granular"], ensure_ascii=False, separators=(",", ":"))
+GRANULAR_AGENT_JSON = json.dumps(D["granular_agent"], ensure_ascii=False, separators=(",", ":"))
 WORDS_JSON = json.dumps(D["words_by_filter"], ensure_ascii=False, separators=(",", ":"))
 MONTH_ORDER_JSON = json.dumps(D["month_order"], ensure_ascii=False)
 
@@ -281,6 +287,18 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
     </div>
 
     <div class="card">
+      <h2>Average CSAT rating, month on month &mdash; by Agent</h2>
+      <p class="card-sub">Agent &times; month, sorted by overall avg rating &mdash; blank cells = no completed CSAT that month. Hover a cell for n.</p>
+      <div class="heatmap-scroll">
+        <table class="heatmap" id="heatmap-agent-table">
+          <thead><tr id="heatmap-agent-head"></tr></thead>
+          <tbody id="heatmap-agent-body"></tbody>
+        </table>
+      </div>
+      <p class="footnote">{agent_coverage_html}</p>
+    </div>
+
+    <div class="card">
       <h2>Task category patterns</h2>
       <p class="card-sub">Findings below are computed directly from the CSAT-completed data (Hyphen + mCaffeine, all resolvers unless noted) &mdash; not from the filters above.</p>
       <ul class="findings-list">
@@ -326,6 +344,7 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
 
 <script>
 const GRANULAR = {GRANULAR_JSON};
+const GRANULAR_AGENT = {GRANULAR_AGENT_JSON};
 const WORDS_BY_FILTER = {WORDS_JSON};
 const MONTH_ORDER = {MONTH_ORDER_JSON};
 
@@ -336,10 +355,10 @@ function passesFilter(rec, brand, resolver, channel) {{
   return true;
 }}
 
-function computeHeatmap(brand, resolver, channel) {{
+function computeHeatmap(granular, brand, resolver, channel) {{
   const cell = {{}};
   const overall = {{}};
-  GRANULAR.forEach(rec => {{
+  granular.forEach(rec => {{
     if (!passesFilter(rec, brand, resolver, channel)) return;
     if (!cell[rec.c]) cell[rec.c] = {{}};
     if (!cell[rec.c][rec.m]) cell[rec.c][rec.m] = {{ n: 0, sum: 0 }};
@@ -372,13 +391,13 @@ function relLuminance(rgb) {{
   return 0.2126 * lin(rgb.r) + 0.7152 * lin(rgb.g) + 0.0722 * lin(rgb.b);
 }}
 
-function renderHeatmap(brand, resolver, channel) {{
-  const rows = computeHeatmap(brand, resolver, channel);
-  const head = document.getElementById('heatmap-head');
-  const body = document.getElementById('heatmap-body');
+function renderHeatmap(granular, headId, bodyId, cornerLabel, brand, resolver, channel) {{
+  const rows = computeHeatmap(granular, brand, resolver, channel);
+  const head = document.getElementById(headId);
+  const body = document.getElementById(bodyId);
   const tooltip = document.getElementById('tooltip');
 
-  head.innerHTML = '<th class="corner">Task Category</th>' + MONTH_ORDER.map(m => `<th>${{m.replace(' 20', " '")}}</th>`).join('');
+  head.innerHTML = `<th class="corner">${{cornerLabel}}</th>` + MONTH_ORDER.map(m => `<th>${{m.replace(' 20', " '")}}</th>`).join('');
 
   if (rows.length === 0) {{
     body.innerHTML = '<tr><td class="rowlabel">No completed CSAT responses match this filter combination.</td></tr>';
@@ -527,7 +546,8 @@ function refreshAll() {{
   const resolver = document.getElementById('f-resolver').value;
   const channel = document.getElementById('f-channel').value;
   renderKPIs(brand, resolver, channel);
-  renderHeatmap(brand, resolver, channel);
+  renderHeatmap(GRANULAR, 'heatmap-head', 'heatmap-body', 'Task Category', brand, resolver, channel);
+  renderHeatmap(GRANULAR_AGENT, 'heatmap-agent-head', 'heatmap-agent-body', 'Agent', brand, resolver, channel);
 }}
 
 function computeWords(brand, month) {{
