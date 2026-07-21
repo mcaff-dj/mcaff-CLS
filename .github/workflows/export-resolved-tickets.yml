@@ -44,7 +44,20 @@ jobs:
           git add data/resolved-ticket-export-state.json
           if ! git diff --cached --quiet; then
             git commit -m "Update export state ($(date -u +'%Y-%m-%d %H:%M UTC'))"
-            git push
+            # A manual "Re-run jobs" click reuses the ORIGINAL stale checkout,
+            # not latest main - if main has moved since (e.g. this same run
+            # already pushed once), a plain push is rejected as a non-fast-
+            # forward. Rebase onto the latest main and retry a few times
+            # instead of failing outright.
+            for attempt in 1 2 3 4 5; do
+              if git push; then
+                break
+              fi
+              echo "push attempt $attempt failed - fetching and rebasing onto latest main"
+              git fetch origin main
+              git rebase origin/main
+              sleep 3
+            done
           else
             echo "No state change; nothing to commit."
           fi
