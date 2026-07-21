@@ -12,6 +12,7 @@
 
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.2/dist/confetti.browser.min.js"></script>
@@ -211,7 +212,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       return null;
     }
 
-    /* ── HIGH PERFORMANCE RELIABLE STREAMING PARSER ── */
+    /* ── HIGH PERFORMANCE STREAMING PARSER ── */
     async function parseAndFilterSheetRows(dataValues, dateRange = 'ALL_TIME', loggedInUser = null, role = 'Admin') {
       if (!dataValues || dataValues.length < 2) return [];
       const [headers, ...rawRows] = dataValues;
@@ -227,7 +228,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         const row = rawRows[i];
         const ticketAgentLower = (row[16] || '').toLowerCase().trim(); // Column Q (Agent)
 
-        // For 'Agent' role, filter matching Column Q or Unassigned. For Admin / TL, include ALL!
         if (role === 'Agent' && loggedInUser && ticketAgentLower && ticketAgentLower !== 'unassigned') {
           const isMatch = (agentEmailLower && ticketAgentLower === agentEmailLower) ||
                           (agentNameLower && ticketAgentLower === agentNameLower) ||
@@ -243,6 +243,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           obj[`col_${idx}`] = (row[idx] || '').trim();
           if (idx === 3) obj['_col_D'] = (row[idx] || '').trim();
           if (idx === 16) obj['_col_Q'] = (row[idx] || '').trim();
+          if (idx === 17) obj['_col_R'] = (row[idx] || '').trim(); // Connected
+          if (idx === 19) obj['_col_T'] = (row[idx] || '').trim(); // Agent Reason
           if (idx === 24) obj['_col_Y'] = (row[idx] || '').trim();
         });
 
@@ -296,6 +298,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         rowDate: rowDate,
         rawIndex: idx,
         status: 'Assigned Today',
+        connectedStatus: row['_col_R'] || 'Pending',
+        agentDisposition: row['_col_T'] || '',
       };
     }
 
@@ -308,6 +312,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
     function SvgSun(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>; }
     function SvgMoon(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>; }
     function SvgShield(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>; }
+    function SvgPhone(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>; }
 
     /* ── Components ───────────────────────────────────── */
     function Badge({ children, variant = 'default' }) {
@@ -373,11 +378,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         };
       });
 
-      // ROLE SYSTEM: Default to 'Admin' for authenticated user (Vighnesh / Vikash)
+      // ROLE SYSTEM: Default to 'Admin' for Vighnesh & Vikash Pathak
       const [userRole, setUserRole] = useState('Admin');
       const [isAdminAccount, setIsAdminAccount] = useState(true);
 
-      // AGENTS ROSTER (MANAGED BY ADMIN PANEL ONLY)
+      // AGENTS ROSTER (INCLUDING VIKASH PATHAK AS ADMIN)
       const [agentRoster, setAgentRoster] = useState(() => {
         try {
           const s = localStorage.getItem('rto_agent_roster');
@@ -390,7 +395,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         } catch { return []; }
       });
 
-      // MAX LEADS CAPACITY PER AGENT (Default: 10)
+      // MAX LEADS CAPACITY PER AGENT
       const maxLeadsPerAgent = useMemo(() => {
         const match = agentRoster.find(a => (a.email || '').toLowerCase() === (googleUser.email || '').toLowerCase());
         return match ? match.maxQuota : 10;
@@ -414,7 +419,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         showToast(`Quota updated for ${targetEmail}`);
       };
 
-      // Auto-Sync authenticated session
+      // Auto-Sync authenticated session & verify Admin status for vikash.pathak & vighnesh.patil
       useEffect(() => {
         fetch('/api/auth/me')
           .then(r => r.json())
@@ -427,8 +432,18 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               };
               setGoogleUser(activeUser);
               localStorage.setItem('rto_google_user', JSON.stringify(activeUser));
-              setUserRole('Admin');
-              setIsAdminAccount(true);
+
+              const isUserAdmin = d.isAdmin || 
+                                 d.email.toLowerCase().includes('vighnesh') || 
+                                 d.email.toLowerCase().includes('vikash');
+              
+              if (isUserAdmin) {
+                setUserRole('Admin');
+                setIsAdminAccount(true);
+              } else {
+                setUserRole('Agent');
+                setIsAdminAccount(false);
+              }
             }
           })
           .catch(() => {});
@@ -482,12 +497,75 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [selectedDetailTicket, setSelectedDetailTicket] = useState(null);
       const [selectedRefundTicket, setSelectedRefundTicket] = useState(null);
       const [selectedReceiptTicket, setSelectedReceiptTicket] = useState(null);
+
+      // CALL DISPOSITION MODAL STATE
+      const [selectedDispositionTicket, setSelectedDispositionTicket] = useState(null);
+      const [dispositionConnected, setDispositionConnected] = useState(null); // 'YES' | 'NO'
+      const [dispositionReason, setDispositionReason] = useState('');
+      const [needNewOrder, setNeedNewOrder] = useState(null); // 'YES' | 'NO'
+      const [newOrderIdVal, setNewOrderIdVal] = useState('');
+      const [needAddressChange, setNeedAddressChange] = useState(null); // 'YES' | 'NO'
+      const [newAddressVal, setNewAddressVal] = useState('');
+
       const [toast, setToast] = useState(null);
 
       const showToast = useCallback((msg) => {
         setToast(msg);
         setTimeout(() => setToast(null), 3000);
       }, []);
+
+      // Open Disposition Form
+      const handleOpenDisposition = (ticket) => {
+        setSelectedDispositionTicket(ticket);
+        setDispositionConnected(ticket.connectedStatus === 'Yes' ? 'YES' : ticket.connectedStatus === 'No' ? 'NO' : null);
+        setDispositionReason(ticket.agentDisposition || '');
+        setNeedNewOrder(null);
+        setNewOrderIdVal('');
+        setNeedAddressChange(null);
+        setNewAddressVal('');
+      };
+
+      // Submit Call Disposition Form
+      const handleSubmitDisposition = () => {
+        if (!selectedDispositionTicket) return;
+
+        const isRefundSelected = dispositionReason === 'Refunded';
+        const updatedStatus = isRefundSelected ? 'Refunded' : dispositionConnected === 'YES' ? `Connected - ${dispositionReason}` : `Unreachable - ${dispositionReason}`;
+
+        const overridePayload = {
+          status: updatedStatus,
+          connectedStatus: dispositionConnected === 'YES' ? 'Yes' : 'No',
+          agentDisposition: dispositionReason,
+          needNewOrder: needNewOrder,
+          newOrderId: newOrderIdVal,
+          needAddressChange: needAddressChange,
+          newAddress: newAddressVal,
+          disposedAt: new Date().toLocaleString(),
+          disposedBy: googleUser.name,
+        };
+
+        setTicketOverrides(prev => {
+          const updated = { ...prev, [selectedDispositionTicket.id]: overridePayload };
+          localStorage.setItem('rto_ticket_overrides', JSON.stringify(updated));
+          return updated;
+        });
+
+        if (isRefundSelected) {
+          handleConfirmRefund(selectedDispositionTicket.id, {
+            refundId: `RFD-${Date.now().toString().slice(-6)}`,
+            amount: selectedDispositionTicket.orderAmount,
+            reason: dispositionReason,
+            date: new Date().toLocaleString(),
+            mode: selectedDispositionTicket.paymentMethod === 'COD' ? 'UPI' : 'Original payment source',
+            transactionRef: `TXN-${Math.random().toString(36).substring(2, 10).toUpperCase()}`,
+            processedBy: googleUser.name,
+          });
+        } else {
+          showToast(`Disposition saved: ${updatedStatus} for ${selectedDispositionTicket.orderNumber}`);
+        }
+
+        setSelectedDispositionTicket(null);
+      };
 
       // FAST ZERO-LAG LIVE GOOGLE SHEETS FETCH
       const handleLiveSync = useCallback(async (silent = false, overrideScope = null) => {
@@ -547,7 +625,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const myAssignedTickets = useMemo(() => {
         let base = tickets.map(t => {
           const override = ticketOverrides[t.id];
-          return override ? { ...t, status: override.status || t.status, refundDetails: override.refundDetails || t.refundDetails } : t;
+          return override ? { ...t, status: override.status || t.status, refundDetails: override.refundDetails || t.refundDetails, connectedStatus: override.connectedStatus || t.connectedStatus, agentDisposition: override.agentDisposition || t.agentDisposition } : t;
         });
 
         base = base.sort((a, b) => {
@@ -562,7 +640,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         if (userRole === 'Agent') {
           const pendingLeads = base.filter(t => t.status !== 'Refunded');
           const refundedLeads = base.filter(t => t.status === 'Refunded');
-          const cappedPending = pendingLeads.slice(0, maxLeadsPerAgent); // Max 10 Leads Quota!
+          const cappedPending = pendingLeads.slice(0, maxLeadsPerAgent);
           return [...cappedPending, ...refundedLeads];
         }
 
@@ -817,7 +895,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
                   <div className="flex items-center gap-2 flex-wrap">
                     
-                    {/* ⚡ DATA SCOPE / MONTH SELECTOR */}
+                    {/* ⚡ DATA SCOPE SELECTOR */}
                     <select
                       value={dateRange}
                       onChange={(e) => handleSetDateScope(e.target.value)}
@@ -928,22 +1006,16 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                                   ₹{ticket.orderAmount.toLocaleString('en-IN')}
                                 </td>
                                 <td className="py-3 px-4 text-center">
-                                  <Badge variant={isRefunded ? 'success' : 'warning'}>{isRefunded ? 'Refunded' : 'Pending'}</Badge>
+                                  <Badge variant={isRefunded ? 'success' : 'warning'}>{ticket.status}</Badge>
                                 </td>
                                 <td className="py-3 px-4 text-right">
                                   <div className="flex items-center justify-end gap-1.5">
-                                    <button onClick={() => setSelectedDetailTicket(ticket)} className="px-3 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 text-[11px] font-medium transition-colors">
+                                    <button onClick={() => setSelectedDetailTicket(ticket)} className="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-zinc-800 dark:text-zinc-300 text-[11px] font-medium">
                                       View
                                     </button>
-                                    {isRefunded ? (
-                                      <button onClick={() => setSelectedReceiptTicket(ticket)} className="px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-400 dark:border-emerald-800/50 text-[11px] font-medium transition-colors">
-                                        Receipt
-                                      </button>
-                                    ) : (
-                                      <button onClick={() => setSelectedRefundTicket(ticket)} className="px-3.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white text-[11px] font-semibold transition-colors shadow-xs">
-                                        Refund
-                                      </button>
-                                    )}
+                                    <button onClick={() => handleOpenDisposition(ticket)} className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold">
+                                      <SvgPhone /> Call Form
+                                    </button>
                                   </div>
                                 </td>
                               </tr>
@@ -989,12 +1061,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                             <div className="mt-4 pt-3 border-t border-slate-200 dark:border-zinc-800/40 flex items-center justify-between">
                               <span className="text-sm font-semibold text-slate-900 dark:text-zinc-200">₹{ticket.orderAmount.toLocaleString('en-IN')}</span>
                               <div className="flex gap-1.5">
-                                <button onClick={() => setSelectedDetailTicket(ticket)} className="px-3 py-1 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-zinc-800 dark:text-zinc-300 text-[11px] font-medium">View</button>
-                                {isRefunded ? (
-                                  <button onClick={() => setSelectedReceiptTicket(ticket)} className="px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-400 text-[11px] font-medium">Receipt</button>
-                                ) : (
-                                  <button onClick={() => setSelectedRefundTicket(ticket)} className="px-3.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white dark:bg-zinc-100 dark:text-zinc-900 text-[11px] font-semibold shadow-xs">Refund</button>
-                                )}
+                                <button onClick={() => setSelectedDetailTicket(ticket)} className="px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-zinc-800 dark:text-zinc-300 text-[11px] font-medium">View</button>
+                                <button onClick={() => handleOpenDisposition(ticket)} className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold">
+                                  <SvgPhone /> Call Form
+                                </button>
                               </div>
                             </div>
                           </div>
@@ -1006,6 +1076,146 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               </>
             )}
           </main>
+
+          {/* ── CALL DISPOSITION MODAL ────────────────── */}
+          {selectedDispositionTicket && (
+            <Overlay onClose={() => setSelectedDispositionTicket(null)}>
+              <div className="w-full max-w-lg bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-xl shadow-2xl text-slate-900 dark:text-zinc-100 p-5 space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-200 dark:border-zinc-800 pb-3">
+                  <div>
+                    <h3 className="text-sm font-bold flex items-center gap-2">
+                      <SvgPhone className="text-indigo-500" /> Call Disposition Form
+                    </h3>
+                    <p className="text-[11px] text-slate-500 dark:text-zinc-500">Order: <strong className="font-mono text-indigo-600 dark:text-indigo-400">{selectedDispositionTicket.orderNumber}</strong> ({selectedDispositionTicket.customerName})</p>
+                  </div>
+                  <button onClick={() => setSelectedDispositionTicket(null)} className="text-slate-400 hover:text-slate-700"><SvgX /></button>
+                </div>
+
+                <div className="space-y-4 text-xs">
+
+                  {/* STEP 1: CONNECTED YES / NO */}
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase text-slate-600 dark:text-zinc-400 mb-2">1. Was the Call Connected?</label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        onClick={() => { setDispositionConnected('YES'); setDispositionReason(''); }}
+                        className={`py-2.5 px-3 rounded-lg font-bold border transition-all text-center flex items-center justify-center gap-2 ${
+                          dispositionConnected === 'YES'
+                            ? 'bg-emerald-600 text-white border-emerald-600 shadow-md'
+                            : 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300'
+                        }`}
+                      >
+                        📞 Yes (Connected)
+                      </button>
+                      <button
+                        onClick={() => { setDispositionConnected('NO'); setDispositionReason(''); }}
+                        className={`py-2.5 px-3 rounded-lg font-bold border transition-all text-center flex items-center justify-center gap-2 ${
+                          dispositionConnected === 'NO'
+                            ? 'bg-rose-600 text-white border-rose-600 shadow-md'
+                            : 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300'
+                        }`}
+                      >
+                        📵 No (Unreachable)
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* CONNECTED = YES FLOW */}
+                  {dispositionConnected === 'YES' && (
+                    <div className="space-y-4 animate-fadeIn border-t border-slate-200 dark:border-zinc-800 pt-3">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300 mb-1">Select Call Outcome / Reason:</label>
+                        <select
+                          value={dispositionReason}
+                          onChange={(e) => setDispositionReason(e.target.value)}
+                          className="w-full bg-slate-100 dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded-lg p-2 text-xs font-semibold focus:outline-none focus:border-indigo-500"
+                        >
+                          <option value="">-- Select Reason --</option>
+                          <option value="Refunded">Refunded (Initiate Payout)</option>
+                          <option value="Wrong Number">Wrong Number</option>
+                          <option value="Not Interested">Not Interested / Cancelled</option>
+                          <option value="Customer Agreed to Accept">Customer Agreed to Accept Delivery</option>
+                          <option value="Product Issue / Exchange">Product Issue / Exchange Requested</option>
+                          <option value="Other">Other Reason</option>
+                        </select>
+                      </div>
+
+                      {dispositionReason && (
+                        <>
+                          {/* NEW ORDER QUESTION */}
+                          <div className="bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-slate-200 dark:border-zinc-800">
+                            <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300">Do they need a New Order?</label>
+                            <div className="flex gap-3">
+                              <button onClick={() => setNeedNewOrder('YES')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needNewOrder === 'YES' ? 'bg-indigo-600 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>Yes</button>
+                              <button onClick={() => setNeedNewOrder('NO')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needNewOrder === 'NO' ? 'bg-slate-800 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>No</button>
+                            </div>
+                            {needNewOrder === 'YES' && (
+                              <input
+                                type="text"
+                                value={newOrderIdVal}
+                                onChange={(e) => setNewOrderIdVal(e.target.value)}
+                                placeholder="Enter New Order ID or Product Details..."
+                                className="w-full bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded p-2 text-xs"
+                              />
+                            )}
+                          </div>
+
+                          {/* ADDRESS CHANGE QUESTION */}
+                          <div className="bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-slate-200 dark:border-zinc-800">
+                            <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300">Is an Address Change required?</label>
+                            <div className="flex gap-3">
+                              <button onClick={() => setNeedAddressChange('YES')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needAddressChange === 'YES' ? 'bg-indigo-600 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>Yes</button>
+                              <button onClick={() => setNeedAddressChange('NO')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needAddressChange === 'NO' ? 'bg-slate-800 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>No</button>
+                            </div>
+                            {needAddressChange === 'YES' && (
+                              <textarea
+                                value={newAddressVal}
+                                onChange={(e) => setNewAddressVal(e.target.value)}
+                                placeholder="Enter new delivery address details & pincode..."
+                                className="w-full bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded p-2 text-xs"
+                                rows="2"
+                              />
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* CONNECTED = NO FLOW */}
+                  {dispositionConnected === 'NO' && (
+                    <div className="space-y-3 animate-fadeIn border-t border-slate-200 dark:border-zinc-800 pt-3">
+                      <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300">Select Unreachable Reason:</label>
+                      <select
+                        value={dispositionReason}
+                        onChange={(e) => setDispositionReason(e.target.value)}
+                        className="w-full bg-slate-100 dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded-lg p-2 text-xs font-semibold focus:outline-none focus:border-indigo-500"
+                      >
+                        <option value="">-- Select Reason --</option>
+                        <option value="Ringing / No Answer">Ringing / No Answer</option>
+                        <option value="Not Reachable">Not Reachable / Out of Coverage</option>
+                        <option value="Switch Off">Switched Off</option>
+                        <option value="Line Busy / Engaged">Line Busy / Call Waiting</option>
+                        <option value="Invalid Number">Invalid Number / Wrong Number</option>
+                      </select>
+                    </div>
+                  )}
+
+                </div>
+
+                <div className="flex items-center justify-between border-t border-slate-200 dark:border-zinc-800 pt-3">
+                  <button onClick={() => setSelectedDispositionTicket(null)} className="text-xs text-slate-500">Cancel</button>
+                  <button
+                    onClick={handleSubmitDisposition}
+                    disabled={!dispositionConnected || !dispositionReason}
+                    className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 font-bold text-xs disabled:opacity-40 transition-colors shadow-md"
+                  >
+                    Submit Disposition
+                  </button>
+                </div>
+              </div>
+            </Overlay>
+          )}
 
           {/* ── Detail Modal ────────────────── */}
           {selectedDetailTicket && (
@@ -1057,60 +1267,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
                 <div className="flex items-center justify-between px-5 py-3 border-t border-slate-200 dark:border-zinc-800">
                   <button onClick={() => setSelectedDetailTicket(null)} className="text-xs text-slate-500">Close</button>
-                  {selectedDetailTicket.status === 'Refunded' ? (
-                    <button onClick={() => { const t = selectedDetailTicket; setSelectedDetailTicket(null); setSelectedReceiptTicket(t); }} className="px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 text-xs font-medium">Receipt</button>
-                  ) : (
-                    <button onClick={() => { const t = selectedDetailTicket; setSelectedDetailTicket(null); setSelectedRefundTicket(t); }} className="px-3.5 py-1 rounded-md bg-indigo-600 text-white dark:bg-zinc-100 dark:text-zinc-900 text-xs font-semibold">Initiate refund</button>
-                  )}
-                </div>
-              </div>
-            </Overlay>
-          )}
-
-          {/* ── Refund Modal ─────────────────────────── */}
-          {selectedRefundTicket && (
-            <Overlay onClose={() => setSelectedRefundTicket(null)}>
-              <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-xl shadow-2xl p-5 space-y-4 text-slate-900 dark:text-zinc-100">
-                <div className="flex items-center justify-between border-b border-slate-200 dark:border-zinc-800 pb-3">
-                  <h3 className="text-sm font-semibold">Confirm Refund</h3>
-                  <button onClick={() => setSelectedRefundTicket(null)} className="text-slate-400"><SvgX /></button>
-                </div>
-
-                <div className="space-y-3 text-xs">
-                  <div className="flex justify-between bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg">
-                    <span>Order: <strong>{selectedRefundTicket.orderNumber}</strong></span>
-                    <span className="font-semibold text-base">₹{selectedRefundTicket.orderAmount.toLocaleString('en-IN')}</span>
-                  </div>
-                  {selectedRefundTicket.paymentMethod === 'COD' && (
-                    <div className="space-y-1">
-                      <label className="text-[11px] text-slate-500">Customer UPI ID for COD payout:</label>
-                      <input type="text" defaultValue={`${(selectedRefundTicket.customerName || 'user').toLowerCase().replace(/\s+/g, '')}@upi`} id="cod-upi-input" className="w-full bg-slate-100 dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded px-3 py-1.5 font-mono text-xs" />
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex items-center justify-between border-t border-slate-200 dark:border-zinc-800 pt-3">
-                  <button onClick={() => setSelectedRefundTicket(null)} className="text-xs text-slate-500">Cancel</button>
-                  <button
-                    onClick={() => {
-                      const upiVal = document.getElementById('cod-upi-input')?.value || '';
-                      const rec = {
-                        refundId: `RFD-${Date.now().toString().slice(-6)}`,
-                        amount: selectedRefundTicket.orderAmount,
-                        reason: selectedRefundTicket.rtoReason,
-                        date: new Date().toLocaleString(),
-                        mode: selectedRefundTicket.paymentMethod === 'COD' ? `UPI (${upiVal})` : 'Original payment source',
-                        transactionRef: `TXN-${Math.random().toString(36).substring(2, 10).toUpperCase()}`,
-                        processedBy: googleUser.name,
-                      };
-                      try { window.confetti?.({ particleCount: 50, spread: 50, origin: { y: 0.7 } }); } catch {}
-                      handleConfirmRefund(selectedRefundTicket.id, rec);
-                      setSelectedRefundTicket(null);
-                    }}
-                    className="px-4 py-2 rounded-lg bg-slate-900 text-white dark:bg-zinc-100 dark:text-zinc-900 text-xs font-semibold"
-                  >
-                    Confirm Refund
-                  </button>
+                  <button onClick={() => { const t = selectedDetailTicket; setSelectedDetailTicket(null); handleOpenDisposition(t); }} className="px-3.5 py-1 rounded-md bg-indigo-600 text-white dark:bg-zinc-100 dark:text-zinc-900 text-xs font-semibold">Open Call Form</button>
                 </div>
               </div>
             </Overlay>
@@ -1155,7 +1312,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
           {/* Footer */}
           <footer className="border-t border-slate-200 dark:border-zinc-800/40 py-4 text-center">
-            <p className="text-[11px] text-slate-500 dark:text-zinc-600">RTO CRM · Multi-Agent Performance Architecture</p>
+            <p className="text-[11px] text-slate-500 dark:text-zinc-600">RTO CRM · Call Disposition & Performance Architecture</p>
           </footer>
         </div>
       );
