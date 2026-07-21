@@ -194,6 +194,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
     const CalendarIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></svg>;
     const CreditCardIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><rect width="20" height="14" x="2" y="5" rx="2"/><line x1="2" x2="22" y1="10" y2="10"/></svg>;
     const ChatIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>;
+    const ShieldIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>;
 
     /* ── Custom Select Component ─────────────────────── */
     function CustomSelect({ value, onChange, options, icon: IconComponent, placeholder, className="" }) {
@@ -271,7 +272,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
     /* ── Main Application ─────────────────────────────── */
     function App(){
       const [googleUser, setGoogleUser] = useState(()=>{try{const s=localStorage.getItem('rto_google_user');if(s)return JSON.parse(s);}catch{}return{name:'Vighnesh Patil',email:'vighnesh.patil@mcaffeine.com',picture:'https://api.dicebear.com/7.x/avataaars/svg?seed=vighnesh.patil@mcaffeine.com'};});
-      const [userRole, setUserRole] = useState('Admin');
+
+      const [userRole, setUserRole] = useState(() => {
+        try {
+          const saved = localStorage.getItem('rto_active_role');
+          if (saved) return saved;
+        } catch {}
+        return 'Admin';
+      });
 
       const [agentRoster, setAgentRoster] = useState(()=>{
         try { const s = localStorage.getItem('rto_agent_roster'); if (s) { const p = JSON.parse(s); if (Array.isArray(p) && p.length) return p; } } catch {}
@@ -283,19 +291,78 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         ];
       });
 
-      const [activityLogs, setActivityLogs] = useState(()=>{try{const s=localStorage.getItem('rto_agent_activity_logs');return s?JSON.parse(s):[];}catch{return[];}});
+      const [activityLogs, setActivityLogs] = useState(() => {
+        try {
+          const s = localStorage.getItem('rto_central_activity_logs_v3');
+          if (s) {
+            const p = JSON.parse(s);
+            if (Array.isArray(p) && p.length) return p;
+          }
+        } catch {}
+        return [
+          { time: '03:45 PM', agent: 'bhavesh.solanki@mcaffeine.com', action: 'Disposed ORD-8930809 → Connected — Address Change Requested', type: 'ticket', remarks: 'Customer updated delivery address to Bandra West office' },
+          { time: '03:15 PM', agent: 'badshasab.pathan@mcaffeine.com', action: 'Status → On Break', type: 'break' },
+          { time: '02:50 PM', agent: 'vikash.pathak@mcaffeine.com', action: 'Disposed HYP38944250 → Refunded ₹1,119', type: 'refund', remarks: 'Prepaid refund processed to Paytm wallet' },
+          { time: '02:10 PM', agent: 'vighnesh.patil@mcaffeine.com', action: 'Status → Online', type: 'online' },
+          { time: '01:30 PM', agent: 'bhavesh.solanki@mcaffeine.com', action: 'Status → Online', type: 'online' },
+          { time: '12:45 PM', agent: 'badshasab.pathan@mcaffeine.com', action: 'Disposed HYP39305890 → Unreachable — Ringing / No Answer', type: 'ticket', remarks: 'No response after 3 rings' }
+        ];
+      });
+
       const [agentFilter, setAgentFilter] = useState('ALL');
       const [agentStatus, setAgentStatus] = useState(()=>localStorage.getItem('rto_agent_status')||'Online');
       const maxLeads = useMemo(()=>{const m=agentRoster.find(a=>a.email.toLowerCase()===googleUser.email.toLowerCase());return m?m.maxQuota:10;},[agentRoster,googleUser]);
 
+      const [toast, setToast] = useState(null);
+      const showToast = useCallback(m=>{setToast(m);setTimeout(()=>setToast(null),3000);},[]);
+
+      // Role Switch Handler
+      const handleSwitchRole = (newRole) => {
+        setUserRole(newRole);
+        try { localStorage.setItem('rto_active_role', newRole); } catch {}
+        setAgentRoster(p => {
+          const updated = p.map(a => a.email.toLowerCase() === googleUser.email.toLowerCase() ? { ...a, role: newRole } : a);
+          try { localStorage.setItem('rto_agent_roster', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+        if (newRole === 'Agent') {
+          setAgentFilter(googleUser.email);
+        } else {
+          setAgentFilter('ALL');
+        }
+        showToast(`Role switched to ${newRole}`);
+      };
+
       // Auth sync
-      useEffect(()=>{fetch('/api/auth/me').then(r=>r.json()).then(d=>{if(d?.authenticated&&d.email){const u={name:d.name||d.email.split('@')[0],email:d.email,picture:`https://api.dicebear.com/7.x/avataaars/svg?seed=${d.email}`};setGoogleUser(u);localStorage.setItem('rto_google_user',JSON.stringify(u));setUserRole(d.isAdmin||d.email.toLowerCase().includes('vighnesh')||d.email.toLowerCase().includes('vikash')?'Admin':'Agent');}}).catch(()=>{});},[]);
+      useEffect(()=>{
+        fetch('/api/auth/me').then(r=>r.json()).then(d=>{
+          if(d?.authenticated&&d.email){
+            const u={name:d.name||d.email.split('@')[0],email:d.email,picture:`https://api.dicebear.com/7.x/avataaars/svg?seed=${d.email}`};
+            setGoogleUser(u);
+            localStorage.setItem('rto_google_user',JSON.stringify(u));
+            const savedRole = localStorage.getItem('rto_active_role');
+            if(!savedRole){
+              const defaultRole = (d.isAdmin||d.email.toLowerCase().includes('vighnesh')||d.email.toLowerCase().includes('vikash')) ? 'Admin' : 'Agent';
+              setUserRole(defaultRole);
+            }
+          }
+        }).catch(()=>{});
+      },[]);
 
       const handleSetStatus = (s)=>{
         setAgentStatus(s);localStorage.setItem('rto_agent_status',s);
         const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-        setActivityLogs(p=>{const u=[{time:t,agent:googleUser.email,action:`Status → ${s}`,type:s==='Online'?'online':s==='Busy'?'break':'offline'},...p.slice(0,49)];localStorage.setItem('rto_agent_activity_logs',JSON.stringify(u));return u;});
-        setAgentRoster(p=>{const u=p.map(a=>a.email.toLowerCase()===googleUser.email.toLowerCase()?{...a,status:s}:a);localStorage.setItem('rto_agent_roster',JSON.stringify(u));return u;});
+        const newLog = {time:t,agent:googleUser.email,action:`Status → ${s}`,type:s==='Online'?'online':s==='Busy'?'break':'offline'};
+        setActivityLogs(p=>{
+          const u=[newLog, ...p.slice(0,99)];
+          localStorage.setItem('rto_central_activity_logs_v3',JSON.stringify(u));
+          return u;
+        });
+        setAgentRoster(p=>{
+          const u=p.map(a=>a.email.toLowerCase()===googleUser.email.toLowerCase()?{...a,status:s}:a);
+          localStorage.setItem('rto_agent_roster',JSON.stringify(u));
+          return u;
+        });
       };
 
       // Data
@@ -311,8 +378,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [prioFilter, setPrioFilter] = useState('ALL');
       const [page, setPage] = useState(1);
       const [perPage, setPerPage] = useState(50);
-      const [toast, setToast] = useState(null);
-      const showToast = useCallback(m=>{setToast(m);setTimeout(()=>setToast(null),3000);},[]);
 
       // Modals & Disposition State
       const [detailTkt, setDetailTkt] = useState(null);
@@ -363,7 +428,20 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
         setOverrides(p=>{const u={...p,[dispTkt.id]:ov};localStorage.setItem('rto_ticket_overrides',JSON.stringify(u));return u;});
         const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-        setActivityLogs(p=>[{time:t,agent:googleUser.email,action:`Disposed ${dispTkt.orderNumber} → ${st}`,type:'ticket'},...p.slice(0,49)]);
+        
+        const newLog = {
+          time: t,
+          agent: googleUser.email,
+          action: `Disposed ${dispTkt.orderNumber} → ${st}`,
+          type: isRef ? 'refund' : 'ticket',
+          remarks: agentRemarks.trim()
+        };
+
+        setActivityLogs(p=>{
+          const u=[newLog, ...p.slice(0,99)];
+          localStorage.setItem('rto_central_activity_logs_v3',JSON.stringify(u));
+          return u;
+        });
         
         if(isRef){
           doRefund(dispTkt.id,{refundId:`RFD-${Date.now().toString().slice(-6)}`,amount:dispTkt.orderAmount,reason:dispReason,date:new Date().toLocaleString(),mode:dispTkt.paymentMethod==='COD'?'UPI Payout':'Original Gateway',transactionRef:`TXN-${Math.random().toString(36).substring(2,10).toUpperCase()}`,processedBy:googleUser.name,notes:refNotes});
@@ -450,6 +528,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         { value: 'Offline', label: 'Offline', icon: '⚪' },
       ];
 
+      const roleOptions = [
+        { value: 'Admin', label: 'Role: Admin', icon: '🛡️' },
+        { value: 'Team Lead', label: 'Role: Team Lead', icon: '👑' },
+        { value: 'Agent', label: 'Role: Agent', icon: '👤' },
+      ];
+
       const connectedOutcomes = [
         { value: 'Refund Requested', label: 'Refund Requested', icon: '💳', desc: 'Process immediate prepaid/COD refund' },
         { value: 'Customer Agreed to Accept', label: 'Customer Agreed to Accept', icon: '📦', desc: 'Customer agreed to receive shipment' },
@@ -492,7 +576,18 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         {key:'disposed',label:'Disposed & Remarks',count:dispCount},
         {key:'refunded',label:'Refunded',count:refd},
       ];
-      if(userRole==='Admin'||userRole==='Team Lead')tabs.push({key:'admin',label:'Admin Panel',count:agentRoster.length});
+      
+      // STRICT SCOPING: Admin Panel tab is ONLY included if userRole is Admin or Team Lead
+      if(userRole==='Admin'||userRole==='Team Lead'){
+        tabs.push({key:'admin',label:'Admin Panel & Roster',count:agentRoster.length});
+      }
+
+      // Automatically redirect away from admin tab if role switched to Agent
+      useEffect(()=>{
+        if(userRole==='Agent' && tab==='admin'){
+          setTab('all');
+        }
+      },[userRole, tab]);
 
       return(
         <div className="min-h-screen flex flex-col bg-[#09090b]">
@@ -512,12 +607,20 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               <div className="flex items-center gap-2">
                 <div className="relative hidden md:block">
                   <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500"/>
-                  <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search orders, remarks…" className="w-48 pl-8 pr-3 py-1 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/50"/>
+                  <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search orders, remarks…" className="w-44 pl-8 pr-3 py-1 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/50"/>
                 </div>
                 <button onClick={()=>sync(false)} disabled={isSyncing} className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors disabled:opacity-50" title="Refresh data">
                   <RefreshIcon className={isSyncing?'animate-spin text-indigo-400':''}/>
                   <span className="hidden sm:inline">{isSyncing?'Syncing…':'Refresh'}</span>
                 </button>
+
+                {/* UI Role Switcher */}
+                <CustomSelect
+                  value={userRole}
+                  onChange={handleSwitchRole}
+                  options={roleOptions}
+                  icon={ShieldIcon}
+                />
 
                 {/* Custom Status Dropdown */}
                 <CustomSelect
@@ -536,14 +639,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           <main className="flex-1 max-w-[1440px] w-full mx-auto px-5 py-5 space-y-4">
 
             {tab==='admin'&&(userRole==='Admin'||userRole==='Team Lead')?(
-              <div className="space-y-5 animate-fadeIn">
-                <div><h2 className="text-lg font-bold text-zinc-100">Team Management</h2><p className="text-[13px] text-zinc-500 mt-0.5">Configure roles, lead quotas, and monitor agent activity.</p></div>
+              <div className="space-y-6 animate-fadeIn">
+                <div><h2 className="text-lg font-bold text-zinc-100">Team Roster & Permission Control</h2><p className="text-[13px] text-zinc-500 mt-0.5">Manage agent roles, lead capacity limits, and monitor live activity logs across the entire team.</p></div>
 
+                {/* Agent Roster Table */}
                 <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 overflow-hidden">
                   <table className="w-full text-[13px]">
                     <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
                       <th className="py-3 px-4 text-left font-medium">Agent</th>
-                      <th className="py-3 px-4 text-left font-medium">Role</th>
+                      <th className="py-3 px-4 text-left font-medium">Assigned Role</th>
                       <th className="py-3 px-4 text-left font-medium">Status</th>
                       <th className="py-3 px-4 text-left font-medium">Avg. Handle Time</th>
                       <th className="py-3 px-4 text-left font-medium">Break Time</th>
@@ -553,12 +657,13 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     <tbody className="divide-y divide-zinc-800/50">
                       {agentRoster.map(a=>(
                         <tr key={a.email} className="hover:bg-zinc-800/30 transition-colors">
-                          <td className="py-3 px-4"><p className="font-semibold text-zinc-100">{a.name}</p><p className="text-zinc-500 text-[12px]">{a.email}</p></td>
+                          <td className="py-3 px-4"><p className="font-semibold text-zinc-100">{a.name}</p><p className="text-zinc-500 text-[12px] font-mono">{a.email}</p></td>
                           <td className="py-3 px-4">
                             <CustomSelect
                               value={a.role}
                               onChange={(newRole)=>{
                                 setAgentRoster(p=>{const u=p.map(x=>x.email===a.email?{...x,role:newRole}:x);localStorage.setItem('rto_agent_roster',JSON.stringify(u));return u;});
+                                showToast(`Role updated for ${a.name}`);
                               }}
                               options={[
                                 { value: 'Agent', label: 'Agent' },
@@ -584,26 +689,49 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                               ]}
                             />
                           </td>
-                          <td className="py-3 px-4 text-right"><button onClick={()=>{setAgentFilter(a.email);setTab('all');showToast(`Showing ${a.name}'s leads`);}} className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-medium transition-colors shadow-xs">View Leads</button></td>
+                          <td className="py-3 px-4 text-right"><button onClick={()=>{setAgentFilter(a.email);setTab('all');showToast(`Filtered leads for ${a.name}`);}} className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-medium transition-colors shadow-xs">View Leads</button></td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
 
-                {activityLogs.length>0&&(
-                  <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5">
-                    <h3 className="text-sm font-semibold text-zinc-200 mb-3">Activity Log</h3>
-                    <div className="space-y-1.5 max-h-56 overflow-y-auto">
-                      {activityLogs.map((l,i)=>(
-                        <div key={i} className="flex items-center justify-between px-3 py-2 rounded-lg bg-zinc-800/30 text-[13px]">
-                          <div className="flex items-center gap-2.5"><span className="text-zinc-500 font-mono text-[12px] w-12">{l.time}</span><span className="text-zinc-300 font-medium">{l.agent.split('@')[0]}</span><span className="text-zinc-500">{l.action}</span></div>
-                          <Badge color={l.type==='online'?'green':l.type==='break'?'amber':l.type==='ticket'?'blue':'zinc'}>{l.type}</Badge>
-                        </div>
-                      ))}
+                {/* All Agent Team Activity & Break Audit Logs */}
+                <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
+                        📊 Central Team Activity & Break Audit Trail
+                      </h3>
+                      <p className="text-[12px] text-zinc-500 mt-0.5">Real-time status transitions, break durations, and disposition events for all agents.</p>
                     </div>
+                    <span className="text-[12px] text-indigo-400 bg-indigo-950/40 border border-indigo-800/40 px-2.5 py-1 rounded-lg font-mono">
+                      {activityLogs.length} Events Recorded
+                    </span>
                   </div>
-                )}
+
+                  <div className="space-y-2 max-h-72 overflow-y-auto custom-scroll pr-1">
+                    {activityLogs.map((l,i)=>(
+                      <div key={l.id || i} className="flex items-start justify-between p-3 rounded-xl bg-zinc-900/80 border border-zinc-800/70 text-[13px] hover:border-zinc-700/80 transition-colors">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2.5">
+                            <span className="text-zinc-400 font-mono text-[12px] font-semibold bg-zinc-800/80 px-2 py-0.5 rounded">{l.time}</span>
+                            <span className="text-zinc-200 font-bold">👤 {l.agentName || (l.agent ? l.agent.split('@')[0] : 'Agent')}</span>
+                            <span className="text-zinc-500 font-mono text-[11px]">({l.agent})</span>
+                          </div>
+                          <p className="text-zinc-300 font-medium">{l.action}</p>
+                          {l.remarks && (
+                            <p className="text-[12px] text-indigo-300 bg-indigo-950/40 border border-indigo-900/40 px-2.5 py-1 rounded-md mt-1 font-sans">
+                              💬 "{l.remarks}"
+                            </p>
+                          )}
+                        </div>
+                        <Badge color={l.type==='online'?'green':l.type==='break'?'amber':l.type==='refund'?'green':'indigo'}>{l.type}</Badge>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
               </div>
             ):(
               <>
@@ -618,13 +746,21 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                 {/* Custom Styled Filter Bar */}
                 <div className="flex items-center justify-between gap-3 flex-wrap">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <CustomSelect
-                      value={agentFilter}
-                      onChange={setAgentFilter}
-                      options={agentOptions}
-                      icon={UserIcon}
-                      placeholder="Agent Filter"
-                    />
+                    {/* Agent Filter: ONLY editable if Admin or Team Lead */}
+                    {userRole !== 'Agent' ? (
+                      <CustomSelect
+                        value={agentFilter}
+                        onChange={setAgentFilter}
+                        options={agentOptions}
+                        icon={UserIcon}
+                        placeholder="Agent Filter"
+                      />
+                    ) : (
+                      <div className="h-8 px-3 py-1 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[13px] font-medium text-zinc-300 flex items-center gap-2">
+                        <UserIcon className="text-indigo-400 shrink-0" />
+                        <span>My Assigned Leads ({googleUser.email.split('@')[0]})</span>
+                      </div>
+                    )}
 
                     <CustomSelect
                       value={dateScope}
