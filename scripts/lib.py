@@ -6,6 +6,7 @@ kept here 1:1 so behavior matches what's already running in production.
 import base64
 import json
 import os
+import re
 import time
 import urllib.parse
 from pathlib import Path
@@ -13,6 +14,16 @@ from pathlib import Path
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+
+# Flowcall's "Created At" is always "D/M/YYYY, h:mm:ss am/pm". Shared by every
+# script that writes to or audits the ticket-export tabs (export_recurring.py,
+# backfill_gap_cleaned.py, check_export_integrity.py) as the one signal for a
+# column-shifted row - an unescaped comma/newline inside a free-text field in
+# Flowcall's CSV export pushes every later column over by one, and this is
+# the cheapest column to validate against a fixed, unambiguous format.
+CREATED_AT_PATTERN = re.compile(
+    r"^\d{1,2}/\d{1,2}/\d{4},?\s*\d{1,2}:\d{2}:\d{2}\s*(am|pm)$", re.IGNORECASE
+)
 
 
 def get_sa_credential():
@@ -204,6 +215,55 @@ def copy_paste_column(spreadsheet_id, sheet_gid, src_row, dest_row_start, dest_r
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }, json=body, timeout=60)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def delete_sheet_rows(spreadsheet_id, sheet_name, start_row, end_row):
+    """Deletes rows start_row..end_row (both 1-based, inclusive) from a tab -
+    a real structural delete (rows below shift up), not a clear-to-blank."""
+    gid, _ = _get_sheet_gid_and_grid(spreadsheet_id, sheet_name)
+    token = get_write_access_token()
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate"
+    body = {
+        "requests": [{
+            "deleteDimension": {
+                "range": {
+                    "sheetId": gid,
+                    "dimension": "ROWS",
+                    "startIndex": start_row - 1,
+                    "endIndex": end_row,
+                }
+            }
+        }]
+    }
+    resp = requests.post(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }, json=body, timeout=60)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def delete_sheet_rows_multi(spreadsheet_id, sheet_name, row_numbers):
+    """Deletes a set of (not necessarily contiguous) 1-based row numbers in a
+    single batchUpdate. Requests are applied in the order given, so they're
+    sorted descending here - deleting a higher row first never shifts the
+    still-pending lower row numbers, avoiding the need to re-index between
+    deletes."""
+    if not row_numbers:
+        return
+    gid, _ = _get_sheet_gid_and_grid(spreadsheet_id, sheet_name)
+    token = get_write_access_token()
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate"
+    requests_list = [
+        {"deleteDimension": {"range": {"sheetId": gid, "dimension": "ROWS", "startIndex": r - 1, "endIndex": r}}}
+        for r in sorted(set(row_numbers), reverse=True)
+    ]
+    resp = requests.post(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }, json={"requests": requests_list}, timeout=120)
     resp.raise_for_status()
     return resp.json()
 

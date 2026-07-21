@@ -25,6 +25,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib
+from lib import CREATED_AT_PATTERN
 
 SHEET_ID = "1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A"
 STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "resolved-ticket-export-state.json"
@@ -217,6 +218,16 @@ def main():
         [(src_row[i] if 0 <= i < len(src_row) else "") for i in col_indices]
         for src_row in raw_rows
     ]
+
+    idx_created_at_in_target = target_headers.index("Created At") if "Created At" in target_headers else -1
+    if idx_created_at_in_target >= 0:
+        before_validate = len(mapped_rows)
+        quarantined = [r for r in mapped_rows if not CREATED_AT_PATTERN.match(str(r[idx_created_at_in_target]).strip())]
+        mapped_rows = [r for r in mapped_rows if CREATED_AT_PATTERN.match(str(r[idx_created_at_in_target]).strip())]
+        if quarantined:
+            bad_tickets = [str(r[idx_ticket_number_in_target]) if idx_ticket_number_in_target >= 0 else "?" for r in quarantined]
+            print(f"[{tab_name}] QUARANTINED {before_validate - len(mapped_rows)} row(s) with malformed "
+                  f"'Created At' (likely a column-shift from CSV parsing) - NOT written: {', '.join(bad_tickets)}")
 
     if idx_ticket_number_in_target >= 0:
         existing_ids = lib.get_sheet_values(SHEET_ID, f"'{tab_name}'!{lib.get_column_letter(idx_ticket_number_in_target)}2:{lib.get_column_letter(idx_ticket_number_in_target)}")

@@ -3,6 +3,13 @@
 discrete arguments, and every run (including exceptions) is appended to a log
 file - same shape as run-export-logged.ps1's wrapper around
 export-resolved-tickets.ps1.
+
+After the export itself, also runs check_export_integrity.py for the same tab
+so any column-shifted row (see lib.CREATED_AT_PATTERN) that lands in the
+sheet - export_resolved_tickets.py has no pre-write guard against this,
+unlike export_recurring.py - gets caught and corrected/quarantined right
+after the run that introduced it, instead of sitting there until someone
+happens to look.
 """
 import argparse
 import subprocess
@@ -37,6 +44,19 @@ def main():
             log.write(result.stdout)
             if result.stderr:
                 log.write(result.stderr)
+            log.flush()
+        except Exception:
+            log.write(traceback.format_exc())
+            log.flush()
+
+        try:
+            check_result = subprocess.run(
+                [sys.executable, str(HERE / "check_export_integrity.py"), "--tab-name", args.tab_name],
+                capture_output=True, text=True,
+            )
+            log.write(check_result.stdout)
+            if check_result.stderr:
+                log.write(check_result.stderr)
             log.flush()
         except Exception:
             log.write(traceback.format_exc())

@@ -17,6 +17,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib
+from lib import CREATED_AT_PATTERN
 
 SHEET_ID = "1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A"
 
@@ -163,6 +164,31 @@ def main():
         [(src_row[i] if 0 <= i < len(src_row) else "") for i in col_indices]
         for src_row in raw_rows
     ]
+
+    idx_created_at_in_target = target_headers.index("Created At") if "Created At" in target_headers else -1
+    if idx_created_at_in_target >= 0:
+        before_validate = len(mapped_rows)
+        quarantined = [r for r in mapped_rows if not CREATED_AT_PATTERN.match(str(r[idx_created_at_in_target]).strip())]
+        mapped_rows = [r for r in mapped_rows if CREATED_AT_PATTERN.match(str(r[idx_created_at_in_target]).strip())]
+        if quarantined:
+            idx_ticket_number_in_target = target_headers.index("Ticket Number") if "Ticket Number" in target_headers else -1
+            bad_tickets = [str(r[idx_ticket_number_in_target]) if idx_ticket_number_in_target >= 0 else "?" for r in quarantined]
+            print(f"[{tab_name}] QUARANTINED {before_validate - len(mapped_rows)} row(s) with malformed "
+                  f"'Created At' (likely a column-shift from CSV parsing) - NOT written: {', '.join(bad_tickets)}")
+
+    idx_ticket_number_in_target = target_headers.index("Ticket Number") if "Ticket Number" in target_headers else -1
+    if idx_ticket_number_in_target >= 0:
+        existing_ids = lib.get_sheet_values(SHEET_ID, f"'{tab_name}'!{lib.get_column_letter(idx_ticket_number_in_target)}2:{lib.get_column_letter(idx_ticket_number_in_target)}")
+        existing_ids = {str(r[0]) for r in existing_ids if r}
+        before_dedup = len(mapped_rows)
+        mapped_rows = [r for r in mapped_rows if str(r[idx_ticket_number_in_target]) not in existing_ids]
+        if before_dedup - len(mapped_rows):
+            print(f"[{tab_name}] dropped {before_dedup - len(mapped_rows)} rows already present in the sheet "
+                  f"(matched by Ticket Number)")
+
+    if not mapped_rows:
+        print(f"[{tab_name}] nothing new to append after quarantine/dedup")
+        return
 
     next_row = lib.get_last_data_row(SHEET_ID, tab_name) + 1
     if next_row < 2:
