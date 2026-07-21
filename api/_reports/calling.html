@@ -673,15 +673,39 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     </div>
                     <h3 className="text-base font-extrabold text-zinc-100 flex items-center gap-2">
                       {dispTkt.customerName}
-                      <span className="text-xs font-normal text-zinc-400">({dispTkt.phone || dispTkt.email})</span>
                     </h3>
-                    <p className="text-[12px] text-amber-400/90 font-medium">Column D Reason: {dispTkt.rtoReason}</p>
+                    <p className="text-[12px] text-amber-400/90 font-medium">RTO Reason: {dispTkt.rtoReason}</p>
                   </div>
                   <div className="text-right">
                     <button onClick={()=>setDispTkt(null)} className="p-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors border border-zinc-800"><XIcon/></button>
                     <p className="text-lg font-bold text-zinc-100 font-mono mt-2">₹{dispTkt.orderAmount.toLocaleString('en-IN')}</p>
                   </div>
                 </div>
+
+                {/* Direct Dial Call & Copy Action Bar */}
+                {dispTkt.phone && (
+                  <div className="flex items-center justify-between p-3 rounded-xl bg-indigo-950/30 border border-indigo-800/40">
+                    <div>
+                      <p className="text-[11px] font-medium uppercase tracking-wider text-indigo-300">Customer Contact</p>
+                      <p className="text-sm font-bold font-mono text-zinc-100 mt-0.5">{dispTkt.phone}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <a
+                        href={`tel:${dispTkt.phone.replace(/[^0-9+]/g, '')}`}
+                        className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[12px] font-bold flex items-center gap-1.5 shadow-md shadow-emerald-950/40 transition-all"
+                      >
+                        <PhoneIcon/> Call Now
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => { navigator.clipboard.writeText(dispTkt.phone); showToast('Phone number copied!'); }}
+                        className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[12px] font-medium transition-colors border border-zinc-700"
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="space-y-5">
 
