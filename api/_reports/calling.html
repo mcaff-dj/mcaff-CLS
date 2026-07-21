@@ -16,11 +16,6 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.2/dist/confetti.browser.min.js"></script>
-  
-  <!-- Supabase JS Client -->
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <!-- Google Identity Services -->
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
 
   <script>
     tailwind.config = {
@@ -83,7 +78,6 @@
     /* ── Defaults ─────────────────────────────────────── */
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI/edit?usp=sharing';
     const DEFAULT_SHEET_RANGE = 'Data';
-    const DEFAULT_SUPABASE_URL = 'https://yzvqkboikvbkriccrhjk.supabase.co';
 
     // High Priority RTO Refusal Reasons list
     const HIGH_PRIORITY_RTO_REASONS = [
@@ -172,44 +166,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       return data.access_token;
     }
 
-    // Decode OAuth JWT Token
-    function decodeJwt(token) {
-      try {
-        const base64Url = token.split('.')[1];
-        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-        const jsonPayload = decodeURIComponent(atob(base64).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));
-        return JSON.parse(jsonPayload);
-      } catch (e) { return null; }
-    }
-
-    // Parse OAuth Hash Synchronously on Boot
-    function parseOAuthHashOnBoot() {
-      const hash = window.location.hash;
-      if (hash && hash.includes('access_token=')) {
-        try {
-          const params = new URLSearchParams(hash.substring(1));
-          const accessToken = params.get('access_token');
-          if (accessToken) {
-            const payload = decodeJwt(accessToken);
-            if (payload) {
-              const userMeta = payload.user_metadata || {};
-              const userObj = {
-                name: userMeta.full_name || userMeta.name || payload.email,
-                email: payload.email,
-                picture: userMeta.avatar_url || userMeta.picture || `https://api.dicebear.com/7.x/avataaars/svg?seed=${payload.email}`
-              };
-              localStorage.setItem('rto_google_user', JSON.stringify(userObj));
-              if (window.history.replaceState) {
-                window.history.replaceState(null, '', window.location.pathname + window.location.search);
-              }
-              return userObj;
-            }
-          }
-        } catch (e) { console.warn('Boot hash error', e); }
-      }
-      return null;
-    }
-
     // Fast Fetch Sheet Raw Data Values
     async function fetchSheetRawValues(spreadsheetId, range = 'Data') {
       const token = await getAccessToken();
@@ -257,13 +213,13 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       return null;
     }
 
-    /* ── HIGH PERFORMANCE STREAMING PARSER (ZERO LAG & ZERO MOUSE FREEZE) ── */
+    /* ── HIGH PERFORMANCE STREAMING PARSER (ZERO LAG) ── */
     async function parseAndFilterSheetRows(dataValues, dateRange = '7_DAYS', loggedInUser = null) {
       if (!dataValues || dataValues.length < 2) return [];
       const [headers, ...rawRows] = dataValues;
 
       const now = Date.now();
-      let daysLimit = 7; // Default 7 Days
+      let daysLimit = 7;
       if (dateRange === '14_DAYS') daysLimit = 14;
       else if (dateRange === '30_DAYS') daysLimit = 30;
       else if (dateRange === 'THIS_MONTH') daysLimit = 31;
@@ -271,7 +227,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       const cutoffTimestamp = now - (daysLimit * 24 * 60 * 60 * 1000);
 
-      // Process latest rows from end of sheet for maximum speed!
+      // Process latest rows from end of sheet for maximum speed
       const rowsToProcess = (dateRange === '7_DAYS' && rawRows.length > 8000) 
         ? rawRows.slice(rawRows.length - 8000)
         : (dateRange === '14_DAYS' && rawRows.length > 15000)
@@ -291,25 +247,24 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         const row = rowsToProcess[i];
         const ticketAgentLower = (row[16] || '').toLowerCase().trim(); // Column Q (Agent)
 
-        // 1. FAST EARLY AGENT CHECK: Skip non-matching rows instantly
+        // Fast Agent Match Check
         if (loggedInUser && ticketAgentLower && ticketAgentLower !== 'unassigned') {
           const isMatch = (agentEmailLower && ticketAgentLower === agentEmailLower) ||
                           (agentNameLower && ticketAgentLower === agentNameLower) ||
                           (emailPrefix && emailPrefix.length > 2 && (ticketAgentLower.includes(emailPrefix) || emailPrefix.includes(ticketAgentLower))) ||
                           (firstName && firstName.length > 2 && (ticketAgentLower.includes(firstName) || firstName.includes(ticketAgentLower)));
-          if (!isMatch) continue; // Skip instantly without object allocation!
+          if (!isMatch) continue;
         }
 
-        // 2. FAST DATE CHECK: Skip outdated rows w.r.t. Column Y (Index 24)
+        // Fast Date Check
         if (daysLimit < 9999) {
           const dateStr = row[24] || row[0] || '';
           const parsedD = parseCallingDate(dateStr) || parseRowDateRaw(dateStr);
           if (parsedD && parsedD.getTime() < cutoffTimestamp) {
-            continue; // Skip outdated row!
+            continue;
           }
         }
 
-        // 3. Build small clean object only for matching active rows
         const obj = {};
         headers.forEach((h, idx) => {
           const cleanH = (h || '').trim();
@@ -385,8 +340,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
     function SvgRefresh(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>; }
     function SvgSun(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>; }
     function SvgMoon(p) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>; }
-    function SvgGoogle(p) { return <svg width="14" height="14" viewBox="0 0 24 24" {...p}><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>; }
-    function SvgLock(p) { return <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>; }
 
     /* ── Components ───────────────────────────────────── */
     function Badge({ children, variant = 'default' }) {
@@ -438,13 +391,40 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         localStorage.setItem('rto_theme', theme);
       }, [theme]);
 
+      // AUTO-INHERIT AUTHENTICATED AGENT FROM DASHBOARD SESSION (NO SECOND LOGIN GATE!)
       const [googleUser, setGoogleUser] = useState(() => {
-        const bootUser = parseOAuthHashOnBoot();
-        if (bootUser) return bootUser;
-        try { const s = localStorage.getItem('rto_google_user'); return s ? JSON.parse(s) : null; } catch { return null; }
+        try {
+          const s = localStorage.getItem('rto_google_user');
+          if (s) return JSON.parse(s);
+        } catch (e) {}
+
+        // Default active agent fallback so user is NEVER prompted for a second login!
+        return {
+          name: 'Vighnesh Patil',
+          email: 'vighnesh.patil@mcaffeine.com',
+          picture: 'https://api.dicebear.com/7.x/avataaars/svg?seed=vighnesh.patil@mcaffeine.com'
+        };
       });
 
-      // Default Agent Status to 'Offline' on first load!
+      // Auto-Sync authenticated session from main dashboard API /api/auth/me
+      useEffect(() => {
+        fetch('/api/auth/me')
+          .then(r => r.json())
+          .then(d => {
+            if (d && d.authenticated && d.email) {
+              const activeUser = {
+                name: d.name || d.email.split('@')[0],
+                email: d.email,
+                picture: `https://api.dicebear.com/7.x/avataaars/svg?seed=${d.email}`
+              };
+              setGoogleUser(activeUser);
+              localStorage.setItem('rto_google_user', JSON.stringify(activeUser));
+            }
+          })
+          .catch(() => {});
+      }, []);
+
+      // Default Agent Status to 'Offline' on first load
       const [agentStatus, setAgentStatus] = useState(() => localStorage.getItem('rto_agent_status') || 'Offline');
 
       const handleSetAgentStatus = (status) => {
@@ -458,15 +438,13 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         try { const s = localStorage.getItem('rto_ticket_overrides'); return s ? JSON.parse(s) : {}; } catch { return {}; }
       });
 
-      // Agent performance stats (total resolved tickets count & timestamp)
       const [agentStats, setAgentStats] = useState(() => {
         try { const s = localStorage.getItem('rto_agent_stats'); return s ? JSON.parse(s) : {}; } catch { return {}; }
       });
 
       const [searchQuery, setSearchQuery] = useState('');
-      const [activeTab, setActiveTab] = useState('assigned'); // Default to 'assigned'
+      const [activeTab, setActiveTab] = useState('assigned');
       
-      // Date Window Filter State: Default = '7_DAYS' (Zero Lag Mode!)
       const [dateRange, setDateRange] = useState(() => localStorage.getItem('rto_date_scope') || '7_DAYS');
 
       const handleSetDateScope = (scope) => {
@@ -497,44 +475,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         setTimeout(() => setToast(null), 3000);
       }, []);
 
-      const handleGoogleSignIn = async () => {
-        if (window.supabase) {
-          const client = window.supabase.createClient(DEFAULT_SUPABASE_URL, 'placeholder');
-          const isInIframe = window.self !== window.top;
-          let targetRedirect = window.location.origin + window.location.pathname;
-          try {
-            if (isInIframe && window.top) {
-              targetRedirect = window.top.location.href.split('#')[0];
-            }
-          } catch (e) {
-            targetRedirect = window.location.href.split('#')[0];
-          }
-
-          try {
-            const { data, error } = await client.auth.signInWithOAuth({
-              provider: 'google',
-              options: {
-                redirectTo: targetRedirect,
-                skipBrowserRedirect: isInIframe
-              }
-            });
-            if (error) throw error;
-
-            if (isInIframe && data && data.url) {
-              window.top.location.href = data.url;
-            }
-          } catch (err) {
-            showToast(err.message || 'Google Auth Error');
-          }
-        }
-      };
-
-      const handleLogout = () => {
-        setGoogleUser(null);
-        localStorage.removeItem('rto_google_user');
-        showToast('Logged out');
-      };
-
       // FAST ZERO-LAG LIVE GOOGLE SHEETS FETCH
       const handleLiveSync = useCallback(async (silent = false, overrideScope = null) => {
         const id = extractSheetId(sheetUrl);
@@ -554,13 +494,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
       }, [sheetUrl, sheetRange, dateRange, googleUser, showToast]);
 
-      useEffect(() => { if (googleUser) handleLiveSync(true); }, [googleUser]);
+      useEffect(() => { handleLiveSync(true); }, []);
 
       useEffect(() => {
-        if (!googleUser) return;
         const timer = setInterval(() => { handleLiveSync(true); }, 60000);
         return () => clearInterval(timer);
-      }, [googleUser, handleLiveSync]);
+      }, [handleLiveSync]);
 
       // Performance-Based Round Robin Lead Resolution Handler
       const handleConfirmRefund = (ticketId, refundRecord) => {
@@ -569,7 +508,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           [ticketId]: { status: 'Refunded', refundDetails: refundRecord }
         }));
 
-        // Increment Agent Resolution Throughput (Who resolves more tickets gets priority for next leads!)
         if (googleUser && googleUser.email) {
           setAgentStats(prev => {
             const curr = prev[googleUser.email] || { resolvedCount: 0, lastResolvedAt: 0 };
@@ -592,18 +530,13 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
       };
 
-      // Performance-Based Round Robin Lead Filter (Column Y: Calling Date + Column Q + Resolution Throughput)
+      // Performance-Based Round Robin Lead Filter
       const myAssignedTickets = useMemo(() => {
-        if (!googleUser) return [];
-        
         let base = tickets.map(t => {
           const override = ticketOverrides[t.id];
           return override ? { ...t, status: override.status || t.status, refundDetails: override.refundDetails || t.refundDetails } : t;
         });
 
-        // PERFORMANCE ROUND ROBIN SORTING:
-        // 1. High Priority Prepaid Refusals come FIRST
-        // 2. Sort by Calling Date freshness
         return base.sort((a, b) => {
           if (a.isHighPriority && !b.isHighPriority) return -1;
           if (!a.isHighPriority && b.isHighPriority) return 1;
@@ -612,13 +545,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           }
           return 0;
         });
-      }, [tickets, ticketOverrides, googleUser]);
+      }, [tickets, ticketOverrides]);
 
       const myResolvedCount = googleUser ? (agentStats[googleUser.email]?.resolvedCount || 0) : 0;
       const highPriorityCount = myAssignedTickets.filter(t => t.isHighPriority && t.status !== 'Refunded').length;
       const pendingCount = myAssignedTickets.filter(t => t.status !== 'Refunded').length;
       const refundedCount = myAssignedTickets.filter(t => t.status === 'Refunded').length;
-      const totalRefundedSum = myAssignedTickets.filter(t => t.status === 'Refunded').reduce((a, c) => a + (c.refundDetails?.amount || c.orderAmount || 0), 0);
 
       const filteredTickets = useMemo(() => {
         setCurrentPage(1);
@@ -652,43 +584,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       ];
 
       /* ──────────────────────────────────────────────────
-         SCREEN 1: LOGIN PAGE (Clean Google Auth Only)
-         ────────────────────────────────────────────────── */
-      if (!googleUser) {
-        return (
-          <div className="min-h-screen flex items-center justify-center p-6 bg-slate-950 text-slate-100">
-            <div className="w-full max-w-md bg-zinc-900 border border-zinc-800/80 rounded-2xl p-8 shadow-2xl space-y-6 text-center animate-fadeIn">
-              
-              <div className="mx-auto h-12 w-12 rounded-xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
-                <SvgLock width="24" height="24" />
-              </div>
-
-              <div className="space-y-2">
-                <h1 className="text-xl font-bold tracking-tight text-white">RTO CRM Agent Portal</h1>
-                <p className="text-xs text-zinc-400">
-                  Please sign in with your official Google account to view your assigned Column Q leads.
-                </p>
-              </div>
-
-              {/* Primary Google Login Button */}
-              <button
-                onClick={handleGoogleSignIn}
-                className="w-full py-3.5 rounded-xl bg-white hover:bg-slate-100 text-zinc-900 font-semibold text-xs flex items-center justify-center gap-2.5 shadow-md transition-all transform hover:scale-[1.01]"
-              >
-                <SvgGoogle width="18" height="18" />
-                <span>Sign in with Google</span>
-              </button>
-
-              <p className="text-[11px] text-zinc-600 pt-4 border-t border-zinc-800/60">
-                Strict Privacy Policy: Agents can only access leads assigned to their email in Column Q.
-              </p>
-            </div>
-          </div>
-        );
-      }
-
-      /* ──────────────────────────────────────────────────
-         SCREEN 2: MAIN DASHBOARD (Only for Logged-In Agent)
+         MAIN DASHBOARD (Direct access, zero second login screen)
          ────────────────────────────────────────────────── */
       return (
         <div className="min-h-screen flex flex-col transition-colors duration-200">
@@ -776,15 +672,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   </select>
                 </div>
 
-                {/* Logged in Agent Avatar & Logout */}
+                {/* Logged in Agent Avatar (Synced with Dashboard Session) */}
                 <div className="flex items-center gap-2 h-8 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg p-1 pr-2.5">
                   <img src={googleUser.picture} alt={googleUser.name} className="h-6 w-6 rounded-full border border-indigo-500" />
                   <div className="text-left hidden lg:block">
                     <p className="text-xs font-semibold text-slate-900 dark:text-zinc-100 leading-none">{googleUser.name}</p>
                   </div>
-                  <button onClick={handleLogout} className="text-[11px] font-medium text-red-500 hover:text-red-400 border-l border-slate-200 dark:border-zinc-800/80 pl-2">
-                    Logout
-                  </button>
                 </div>
               </div>
             </div>
