@@ -262,7 +262,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           results.push(mapRowToTicket(obj, i + j));
         }
 
-        // Non-blocking yield to main thread to ensure 60 FPS UI responsiveness!
         if (i + chunkSize < rawRows.length) {
           await new Promise(r => setTimeout(r, 0));
         }
@@ -364,10 +363,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         rose: 'border-rose-200 dark:border-rose-900/50',
       };
       return (
-        <div className={`bg-white dark:bg-zinc-900/60 rounded-xl p-4 border ${accents[accent]} transition-colors hover:bg-slate-50 dark:hover:bg-zinc-900/90 shadow-xs`}>
-          <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-zinc-500 mb-1">{label}</p>
-          <p className="text-xl font-bold text-slate-900 dark:text-zinc-100 tracking-tight">{value}</p>
-          {sub && <p className="text-[11px] text-slate-500 dark:text-zinc-500 mt-1">{sub}</p>}
+        <div className={`bg-white dark:bg-zinc-900/80 rounded-xl p-4 border ${accents[accent]} transition-all hover:border-slate-300 dark:hover:border-zinc-700 shadow-sm`}>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-zinc-500 mb-1">{label}</p>
+          <p className="text-xl font-extrabold text-slate-900 dark:text-zinc-100 tracking-tight">{value}</p>
+          {sub && <p className="text-[11px] font-medium text-slate-500 dark:text-zinc-400 mt-1">{sub}</p>}
         </div>
       );
     }
@@ -375,6 +374,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
     /* ── Main Application ─────────────────────────────── */
     function App() {
       const [theme, setTheme] = useState(() => localStorage.getItem('rto_theme') || 'dark');
+      const isEmbedded = useMemo(() => window.self !== window.top, []);
 
       useEffect(() => {
         const root = document.documentElement;
@@ -658,11 +658,9 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           const activeScope = overrideScope || dateRange;
           const rawValues = await fetchSheetRawValues(id, sheetRange || 'Data');
           
-          // Non-blocking micro-chunk background streaming parser
           const mapped = await parseAndFilterSheetRowsAsync(rawValues, activeScope, googleUser, userRole);
           setTickets(mapped);
           
-          // Save to instant local cache asynchronously
           try {
             localStorage.setItem('rto_cached_tickets_v3', JSON.stringify(mapped.slice(0, 10000)));
           } catch (e) {}
@@ -684,7 +682,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         return () => clearInterval(timer);
       }, [handleLiveSync]);
 
-      // Performance-Based Round Robin Lead Resolution Handler
+      // Round Robin Lead Resolution Handler
       const handleConfirmRefund = (ticketId, refundRecord) => {
         setTicketOverrides(prev => ({
           ...prev,
@@ -779,7 +777,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       }, [filteredTickets, currentPage, pageSize]);
 
       const tabs = [
-        { key: 'assigned', label: userRole === 'Agent' ? `My Active Queue (${pendingCount}/${maxLeadsPerAgent})` : 'All System Leads', count: myAssignedTickets.length },
+        { key: 'assigned', label: userRole === 'Agent' ? `My Queue (${pendingCount}/${maxLeadsPerAgent})` : 'All System Leads', count: myAssignedTickets.length },
         { key: 'high_priority', label: '🔥 High Priority Prepaid', count: highPriorityCount },
         { key: 'pending', label: 'Pending Refunds', count: pendingCount },
         { key: 'refunded', label: 'Refunded', count: refundedCount },
@@ -790,107 +788,90 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       }
 
       return (
-        <div className="min-h-screen flex flex-col transition-colors duration-200">
+        <div className="min-h-screen flex flex-col transition-colors duration-200 bg-slate-950 text-slate-100">
 
-          {/* ── Navbar ──────────────────────────────── */}
-          <header className="sticky top-0 z-30 bg-white/90 dark:bg-[#09090b]/90 backdrop-blur-xl border-b border-slate-200 dark:border-zinc-800/80">
-            <div className="max-w-[1400px] mx-auto px-6 h-14 flex items-center justify-between gap-4">
+          {/* ── TOP ACTION BAR (Clean, non-cluttered integrated layout) ──────────────── */}
+          <header className="sticky top-0 z-30 bg-[#09090b]/95 backdrop-blur-xl border-b border-zinc-800/80">
+            <div className="max-w-[1400px] mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-3">
 
-              <div className="flex items-center gap-5">
-                <div className="flex items-center gap-2.5">
-                  <div className="h-7 w-7 rounded-lg bg-slate-900 dark:bg-zinc-100 flex items-center justify-center">
-                    <span className="text-white dark:text-zinc-900 font-bold text-xs">R</span>
-                  </div>
-                  <span className="font-semibold text-sm text-slate-900 dark:text-zinc-100 tracking-tight">RTO CRM</span>
-                </div>
+              {/* Left: Tab Pill Navigation */}
+              <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar py-1">
+                {tabs.map(tab => (
+                  <button
+                    key={tab.key}
+                    onClick={() => setActiveTab(tab.key)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${
+                      activeTab === tab.key
+                        ? 'bg-indigo-600 text-white shadow-sm'
+                        : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+                    }`}
+                  >
+                    {tab.label}
+                    <span className={`ml-1.5 px-1.5 py-0.2 rounded-full text-[10px] ${
+                      activeTab === tab.key ? 'bg-indigo-700 text-white' : 'bg-zinc-800 text-zinc-400'
+                    }`}>
+                      {tab.count.toLocaleString('en-IN')}
+                    </span>
+                  </button>
+                ))}
+              </nav>
 
-                {/* ROLE BADGE */}
-                <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg px-2.5 py-1">
-                  <SvgShield className="text-indigo-500" />
-                  <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400">
-                    {userRole === 'Admin' ? '🛡️ Admin Panel' : userRole === 'Team Lead' ? '👑 Team Lead' : '👤 Agent'}
-                  </span>
-                </div>
-
-                {/* SEAMLESS LIVE SYNC BADGE */}
-                <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 text-[11px] font-semibold border border-emerald-200 dark:border-emerald-800/50">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-ping" />
-                  <SvgZap className="text-emerald-500" /> Seamless 0-Lag Sync Active
-                </div>
-
-                <nav className="hidden md:flex items-center gap-1">
-                  {tabs.map(tab => (
-                    <button
-                      key={tab.key}
-                      onClick={() => setActiveTab(tab.key)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                        activeTab === tab.key
-                          ? 'bg-slate-100 text-slate-900 dark:bg-zinc-800 dark:text-zinc-100 font-semibold'
-                          : 'text-slate-500 hover:text-slate-900 dark:text-zinc-500 dark:hover:text-zinc-300'
-                      }`}
-                    >
-                      {tab.label}
-                      <span className={`ml-1.5 text-[10px] ${activeTab === tab.key ? 'text-slate-700 dark:text-zinc-400 font-bold' : 'text-slate-400 dark:text-zinc-600'}`}>{tab.count.toLocaleString('en-IN')}</span>
-                    </button>
-                  ))}
-                </nav>
-              </div>
-
-              <div className="flex items-center gap-2.5">
-                {/* Search */}
-                <div className="relative hidden sm:block">
-                  <SvgSearch className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 dark:text-zinc-500" />
+              {/* Right: Agent Controls & Status */}
+              <div className="flex items-center gap-2.5 flex-shrink-0">
+                
+                {/* Search Bar */}
+                <div className="relative hidden md:block">
+                  <SvgSearch className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500" />
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search Order #, Customer, Reason..."
-                    className="w-44 xl:w-52 pl-8 pr-3 py-1.5 text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg text-slate-900 dark:text-zinc-200 placeholder:text-slate-400 focus:outline-none focus:border-indigo-500"
+                    placeholder="Search Order #, Customer..."
+                    className="w-40 xl:w-52 pl-8 pr-3 py-1.5 text-xs bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-indigo-500"
                   />
                 </div>
+
+                {/* 👤 Single Agent Filter Dropdown */}
+                <select
+                  value={selectedAgentFilter}
+                  onChange={(e) => setSelectedAgentFilter(e.target.value)}
+                  className="text-xs bg-zinc-900 border border-emerald-500/50 text-emerald-400 rounded-lg px-2.5 py-1.5 focus:outline-none font-bold cursor-pointer"
+                >
+                  <option value="ALL">👤 All Agents</option>
+                  {uniqueAgentsList.map(agent => (
+                    <option key={agent} value={agent} className="bg-zinc-900 text-zinc-200">
+                      👤 {agent}
+                    </option>
+                  ))}
+                </select>
 
                 {/* Live Sync Button */}
                 <button
                   onClick={() => handleLiveSync(false)}
                   disabled={isSyncing}
-                  className="flex items-center gap-1.5 h-8 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg px-2.5 text-xs text-slate-700 dark:text-zinc-300 hover:text-slate-900 dark:hover:text-white transition-colors"
+                  className="flex items-center gap-1.5 h-8 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 text-xs text-zinc-300 hover:text-white transition-colors"
                   title="Sync Google Sheets"
                 >
-                  <SvgRefresh className={isSyncing ? 'animate-spin text-indigo-600 dark:text-indigo-400' : ''} />
-                  <span className="hidden sm:inline font-medium">{isSyncing ? 'Syncing...' : 'Sync'}</span>
-                </button>
-
-                {/* Theme Switcher */}
-                <button
-                  onClick={() => setTheme(prev => prev === 'dark' ? 'light' : 'dark')}
-                  className="h-8 w-8 rounded-lg bg-slate-100 dark:bg-zinc-900 text-slate-600 dark:text-zinc-400 border border-slate-200 dark:border-zinc-800/80 flex items-center justify-center hover:text-slate-900 transition-colors"
-                >
-                  {theme === 'dark' ? <SvgSun /> : <SvgMoon />}
+                  <SvgRefresh className={isSyncing ? 'animate-spin text-indigo-400' : ''} />
+                  <span className="hidden sm:inline font-medium">{isSyncing ? 'Syncing' : 'Sync'}</span>
                 </button>
 
                 {/* AGENT STATUS SWITCHER */}
-                <div className="flex items-center gap-1.5 h-8 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg px-2">
+                <div className="flex items-center gap-1.5 h-8 bg-zinc-900 border border-zinc-800 rounded-lg px-2">
                   <span className={`h-2 w-2 rounded-full ${
-                    agentStatus === 'Online' ? 'bg-emerald-500' : agentStatus === 'Busy' ? 'bg-amber-500 animate-pulse' : 'bg-slate-400'
+                    agentStatus === 'Online' ? 'bg-emerald-500' : agentStatus === 'Busy' ? 'bg-amber-500 animate-pulse' : 'bg-zinc-500'
                   }`} />
                   <select
                     value={agentStatus}
                     onChange={(e) => handleSetAgentStatus(e.target.value)}
-                    className="text-xs bg-transparent border-none text-slate-800 dark:text-zinc-200 font-semibold focus:outline-none cursor-pointer"
+                    className="text-xs bg-transparent border-none text-zinc-200 font-bold focus:outline-none cursor-pointer"
                   >
-                    <option value="Offline" className="bg-white dark:bg-zinc-900">Offline</option>
-                    <option value="Online" className="bg-white dark:bg-zinc-900">Online</option>
-                    <option value="Busy" className="bg-white dark:bg-zinc-900">Break / Busy</option>
+                    <option value="Offline" className="bg-zinc-900">Offline</option>
+                    <option value="Online" className="bg-zinc-900">Online</option>
+                    <option value="Busy" className="bg-zinc-900">Break / Busy</option>
                   </select>
                 </div>
 
-                {/* Logged in User Avatar */}
-                <div className="flex items-center gap-2 h-8 bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg p-1 pr-2.5">
-                  <img src={googleUser.picture} alt={googleUser.name} className="h-6 w-6 rounded-full border border-indigo-500" />
-                  <div className="text-left hidden lg:block">
-                    <p className="text-xs font-semibold text-slate-900 dark:text-zinc-100 leading-none">{googleUser.name}</p>
-                  </div>
-                </div>
               </div>
             </div>
           </header>
@@ -898,54 +879,54 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           {/* ── Toast ───────────────────────────────── */}
           {toast && (
             <div className="fixed top-16 right-6 z-50 animate-fadeIn">
-              <div className="px-4 py-2 rounded-lg bg-slate-900 text-white dark:bg-zinc-800 dark:text-zinc-200 border border-slate-800 dark:border-zinc-700 text-xs shadow-xl flex items-center gap-2">
+              <div className="px-4 py-2 rounded-lg bg-zinc-800 text-zinc-200 border border-zinc-700 text-xs shadow-xl flex items-center gap-2">
                 <SvgCheck className="text-emerald-400" />
                 {toast}
               </div>
             </div>
           )}
 
-          {/* ── Main Workspace ──────────────────────── */}
-          <main className="flex-1 max-w-[1400px] w-full mx-auto px-6 py-6 space-y-5">
+          {/* ── Main Content Workspace ──────────────── */}
+          <main className="flex-1 max-w-[1400px] w-full mx-auto px-4 sm:px-6 py-5 space-y-5">
 
             {/* ADMIN PANEL VIEW */}
             {activeTab === 'admin_panel' && (userRole === 'Admin' || userRole === 'Team Lead') ? (
               <div className="space-y-6 animate-fadeIn">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h2 className="text-base font-bold text-slate-900 dark:text-zinc-100 flex items-center gap-2">
-                      <SvgShield className="text-indigo-500" /> Admin & Team Lead Control Panel
+                    <h2 className="text-base font-bold text-zinc-100 flex items-center gap-2">
+                      <SvgShield className="text-indigo-400" /> Admin & Team Lead Roster Control
                     </h2>
-                    <p className="text-xs text-slate-500 dark:text-zinc-500">Manage agent roles, handling times (AHT), time logs, and live status audit trail.</p>
+                    <p className="text-xs text-zinc-400">Configure agent roles, maximum lead limits, handling times (AHT), and live break audit trail.</p>
                   </div>
                 </div>
 
                 {/* AGENT ROSTER TABLE WITH AHT AND BREAK TIME */}
-                <div className="bg-white dark:bg-zinc-900/40 rounded-xl border border-slate-200 dark:border-zinc-800/60 overflow-hidden shadow-xs">
+                <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 overflow-hidden shadow-sm">
                   <table className="w-full text-left text-xs">
                     <thead>
-                      <tr className="border-b border-slate-200 dark:border-zinc-800/60 bg-slate-50/80 dark:bg-transparent">
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase">Agent</th>
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase">Role</th>
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase">Live Status</th>
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase">Avg Handling Time (AHT)</th>
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase">Total Break Time</th>
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase">Max Leads Quota</th>
-                        <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase text-right">Actions</th>
+                      <tr className="border-b border-zinc-800/80 bg-zinc-900/40">
+                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase">Agent Name & Email</th>
+                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase">Role</th>
+                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase">Live Status</th>
+                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase">Avg Handling Time (AHT)</th>
+                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase">Total Break Time</th>
+                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase">Max Leads Quota</th>
+                        <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase text-right">Actions</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-zinc-800/30">
+                    <tbody className="divide-y divide-zinc-800/40">
                       {agentRoster.map(agent => (
-                        <tr key={agent.email} className="hover:bg-slate-50 dark:hover:bg-zinc-800/20">
+                        <tr key={agent.email} className="hover:bg-zinc-800/30 transition-colors">
                           <td className="py-3.5 px-4 font-medium">
-                            <p className="text-slate-900 dark:text-zinc-100 font-semibold">{agent.name}</p>
-                            <p className="text-[11px] text-slate-500">{agent.email}</p>
+                            <p className="text-zinc-100 font-semibold">{agent.name}</p>
+                            <p className="text-[11px] text-zinc-400">{agent.email}</p>
                           </td>
                           <td className="py-3.5 px-4">
                             <select
                               value={agent.role}
                               onChange={(e) => handleUpdateAgentRole(agent.email, e.target.value)}
-                              className="text-xs font-semibold bg-slate-100 dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded-md px-2 py-1 text-indigo-600 dark:text-indigo-400 focus:outline-none"
+                              className="text-xs font-semibold bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-indigo-400 focus:outline-none"
                             >
                               <option value="Agent">👤 Agent</option>
                               <option value="Team Lead">👑 Team Lead</option>
@@ -954,23 +935,23 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                           </td>
                           <td className="py-3.5 px-4">
                             <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-semibold ${
-                              agent.status === 'Online' ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400' : agent.status === 'Busy' ? 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400' : 'bg-slate-100 text-slate-600 dark:bg-zinc-800 dark:text-zinc-400'
+                              agent.status === 'Online' ? 'bg-emerald-950/50 text-emerald-400 border border-emerald-800/40' : agent.status === 'Busy' ? 'bg-amber-950/50 text-amber-400 border border-amber-800/40' : 'bg-zinc-800 text-zinc-400'
                             }`}>
-                              <span className={`h-1.5 w-1.5 rounded-full ${agent.status === 'Online' ? 'bg-emerald-500' : agent.status === 'Busy' ? 'bg-amber-500' : 'bg-slate-400'}`} />
+                              <span className={`h-1.5 w-1.5 rounded-full ${agent.status === 'Online' ? 'bg-emerald-500' : agent.status === 'Busy' ? 'bg-amber-500' : 'bg-zinc-400'}`} />
                               {agent.status}
                             </span>
                           </td>
-                          <td className="py-3.5 px-4 font-semibold text-emerald-600 dark:text-emerald-400">
+                          <td className="py-3.5 px-4 font-semibold text-emerald-400">
                             ⏱️ {agent.avgHandlingTime || '2.8m'} / ticket
                           </td>
-                          <td className="py-3.5 px-4 font-semibold text-amber-600 dark:text-amber-400">
+                          <td className="py-3.5 px-4 font-semibold text-amber-400">
                             ☕ {agent.totalBreakTime || '25m'}
                           </td>
                           <td className="py-3.5 px-4">
                             <select
                               value={agent.maxQuota}
                               onChange={(e) => handleUpdateAgentQuota(agent.email, Number(e.target.value))}
-                              className="text-xs font-bold bg-slate-100 dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded-md px-2 py-1 text-slate-900 dark:text-zinc-100 focus:outline-none"
+                              className="text-xs font-bold bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-zinc-100 focus:outline-none"
                             >
                               <option value="5">5 Leads</option>
                               <option value="10">10 Leads (Default)</option>
@@ -985,7 +966,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                                 setActiveTab('assigned');
                                 showToast(`Filtered leads for ${agent.name}`);
                               }}
-                              className="px-3 py-1 rounded-md bg-indigo-600 text-white hover:bg-indigo-500 font-semibold text-xs"
+                              className="px-3 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs"
                             >
                               View Leads
                             </button>
@@ -997,17 +978,17 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                 </div>
 
                 {/* AGENT ACTIVITY & STATUS AUDIT TRAIL */}
-                <div className="bg-white dark:bg-zinc-900/40 rounded-xl border border-slate-200 dark:border-zinc-800/60 p-5 space-y-3">
-                  <h3 className="text-sm font-bold text-slate-900 dark:text-zinc-100 flex items-center gap-2">
+                <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-3">
+                  <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
                     <SvgClock className="text-amber-500" /> Live Agent Time & Status Audit Trail
                   </h3>
                   <div className="space-y-2 max-h-60 overflow-y-auto pr-2">
                     {activityLogs.map((log, idx) => (
-                      <div key={idx} className="flex items-center justify-between p-2.5 rounded-lg bg-slate-50 dark:bg-zinc-800/30 border border-slate-200 dark:border-zinc-800 text-xs">
+                      <div key={idx} className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-800/30 border border-zinc-800 text-xs">
                         <div className="flex items-center gap-2">
-                          <span className="font-mono text-slate-400 font-semibold">{log.time}</span>
-                          <span className="font-semibold text-slate-800 dark:text-zinc-200">{log.agent}</span>
-                          <span className="text-slate-500 dark:text-zinc-400">· {log.action}</span>
+                          <span className="font-mono text-zinc-500 font-semibold">{log.time}</span>
+                          <span className="font-semibold text-zinc-200">{log.agent}</span>
+                          <span className="text-zinc-400">· {log.action}</span>
                         </div>
                         <Badge variant={log.type === 'Online' ? 'success' : log.type === 'Break' ? 'warning' : 'default'}>{log.type}</Badge>
                       </div>
@@ -1018,46 +999,32 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               </div>
             ) : (
               <>
-                {/* Stats Overview */}
+                {/* Stats Overview Grid */}
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                   <StatCard
-                    label={userRole === 'Agent' ? `Active Queue Capacity (${pendingCount}/${maxLeadsPerAgent})` : `Loaded Tickets`}
+                    label={userRole === 'Agent' ? `Active Queue Capacity (${pendingCount}/${maxLeadsPerAgent})` : `Total System Leads`}
                     value={`${filteredTickets.length.toLocaleString('en-IN')}`}
-                    sub={selectedAgentFilter !== 'ALL' ? `Filtered by ${selectedAgentFilter}` : `All system tickets`}
+                    sub={selectedAgentFilter !== 'ALL' ? `Filtered: ${selectedAgentFilter}` : `All system tickets`}
                     accent="sky"
                   />
-                  <StatCard label="⚡ Avg Handling Time (AHT)" value="2.8 mins" sub="Average Resolution / Ticket" accent="emerald" />
+                  <StatCard label="⚡ Avg Handling Time (AHT)" value="2.8 mins" sub="Average Resolution Speed" accent="emerald" />
                   <StatCard label="🔥 High Priority Prepaid" value={highPriorityCount.toLocaleString('en-IN')} sub="Prepaid + Refusal Reasons" accent="rose" />
-                  <StatCard label="Current Role & Status" value={`${userRole}`} sub={`Agent Status: ${agentStatus}`} accent="amber" />
+                  <StatCard label="Role & Status" value={`${userRole}`} sub={`Agent Status: ${agentStatus}`} accent="amber" />
                 </div>
 
-                {/* Controls Bar WITH SINGLE AGENT FILTER */}
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
-                  <p className="text-xs text-slate-500 dark:text-zinc-500">
-                    Role: <strong className="text-indigo-600 dark:text-indigo-400">{userRole}</strong> · Active Filter: <strong className="text-emerald-600 dark:text-emerald-400">{selectedAgentFilter === 'ALL' ? 'All Agents' : selectedAgentFilter}</strong>
-                  </p>
+                {/* Sub-Header Controls Bar */}
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-zinc-900/40 p-3 rounded-xl border border-zinc-800/60">
+                  <div className="flex items-center gap-2 text-xs text-zinc-400">
+                    <span>Active Agent Filter: <strong className="text-emerald-400 font-bold">{selectedAgentFilter === 'ALL' ? 'All Agents' : selectedAgentFilter}</strong></span>
+                  </div>
 
                   <div className="flex items-center gap-2 flex-wrap">
                     
-                    {/* 👤 SINGLE AGENT FILTER DROPDOWN */}
-                    <select
-                      value={selectedAgentFilter}
-                      onChange={(e) => setSelectedAgentFilter(e.target.value)}
-                      className="text-xs bg-slate-100 dark:bg-zinc-900 border border-emerald-500/60 text-emerald-600 dark:text-emerald-400 rounded-lg px-2.5 py-1.5 focus:outline-none font-bold cursor-pointer"
-                    >
-                      <option value="ALL">👤 All Agents (View All Leads)</option>
-                      {uniqueAgentsList.map(agent => (
-                        <option key={agent} value={agent} className="bg-white dark:bg-zinc-900">
-                          👤 Agent: {agent}
-                        </option>
-                      ))}
-                    </select>
-
-                    {/* ⚡ DATA SCOPE SELECTOR */}
+                    {/* DATA SCOPE SELECTOR */}
                     <select
                       value={dateRange}
                       onChange={(e) => handleSetDateScope(e.target.value)}
-                      className="text-xs bg-slate-100 dark:bg-zinc-900 border border-indigo-500/50 text-indigo-600 dark:text-indigo-400 rounded-lg px-2.5 py-1.5 focus:outline-none font-bold cursor-pointer"
+                      className="text-xs bg-zinc-900 border border-indigo-500/50 text-indigo-400 rounded-lg px-2.5 py-1.5 focus:outline-none font-bold cursor-pointer"
                     >
                       <option value="ALL_TIME">🕒 All Time (All Leads)</option>
                       <option value="7_DAYS">⚡ Last 7 Days Calling Date</option>
@@ -1069,7 +1036,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     <select
                       value={priorityFilter}
                       onChange={(e) => setPriorityFilter(e.target.value)}
-                      className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none font-medium cursor-pointer"
+                      className="text-xs bg-zinc-900 border border-zinc-800 text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none font-medium cursor-pointer"
                     >
                       <option value="ALL">All Priorities</option>
                       <option value="HIGH">🔥 High Priority (Prepaid Refusal)</option>
@@ -1079,7 +1046,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     <select
                       value={paymentFilter}
                       onChange={(e) => setPaymentFilter(e.target.value)}
-                      className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
+                      className="text-xs bg-zinc-900 border border-zinc-800 text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
                     >
                       <option value="ALL">All Payments</option>
                       <option value="Prepaid">Prepaid</option>
@@ -1090,7 +1057,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     <select
                       value={pageSize}
                       onChange={(e) => setPageSize(Number(e.target.value))}
-                      className="text-xs bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 text-slate-800 dark:text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
+                      className="text-xs bg-zinc-900 border border-zinc-800 text-zinc-300 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
                     >
                       <option value="25">25 / page</option>
                       <option value="50">50 / page</option>
@@ -1098,69 +1065,69 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     </select>
 
                     {/* View Switcher */}
-                    <div className="flex bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800/80 rounded-lg p-0.5">
-                      <button onClick={() => setViewMode('table')} className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${viewMode === 'table' ? 'bg-white text-slate-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100' : 'text-slate-500'}`}>List</button>
-                      <button onClick={() => setViewMode('cards')} className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${viewMode === 'cards' ? 'bg-white text-slate-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100' : 'text-slate-500'}`}>Grid</button>
+                    <div className="flex bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
+                      <button onClick={() => setViewMode('table')} className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${viewMode === 'table' ? 'bg-zinc-700 text-zinc-100 shadow-xs' : 'text-zinc-400'}`}>List</button>
+                      <button onClick={() => setViewMode('cards')} className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${viewMode === 'cards' ? 'bg-zinc-700 text-zinc-100 shadow-xs' : 'text-zinc-400'}`}>Grid</button>
                     </div>
                   </div>
                 </div>
 
                 {/* ── Table View ─────────────────────────── */}
                 {viewMode === 'table' && (
-                  <div className="bg-white dark:bg-zinc-900/40 rounded-xl border border-slate-200 dark:border-zinc-800/60 overflow-hidden shadow-xs">
+                  <div className="bg-zinc-900/40 rounded-xl border border-zinc-800/60 overflow-hidden shadow-xs">
                     <div className="overflow-x-auto">
                       <table className="w-full text-left text-xs">
                         <thead>
-                          <tr className="border-b border-slate-200 dark:border-zinc-800/60 bg-slate-50/80 dark:bg-transparent">
-                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Order</th>
-                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Customer</th>
-                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Assigned Agent (Col Q)</th>
-                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Column Y (Calling Date)</th>
-                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Column D (RTO Reason)</th>
-                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider">Payment</th>
-                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider text-right">Amount</th>
-                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider text-center">Status</th>
-                            <th className="py-3 px-4 text-[11px] font-semibold text-slate-600 dark:text-zinc-500 uppercase tracking-wider text-right">Actions</th>
+                          <tr className="border-b border-zinc-800/60 bg-zinc-900/60">
+                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Order</th>
+                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Customer</th>
+                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Assigned Agent (Col Q)</th>
+                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Column Y (Calling Date)</th>
+                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Column D (RTO Reason)</th>
+                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Payment</th>
+                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider text-right">Amount</th>
+                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider text-center">Status</th>
+                            <th className="py-3 px-4 text-[11px] font-bold text-zinc-400 uppercase tracking-wider text-right">Actions</th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-slate-100 dark:divide-zinc-800/30">
+                        <tbody className="divide-y divide-zinc-800/30">
                           {paginatedTickets.length === 0 ? (
                             <tr>
-                              <td colSpan="9" className="py-16 text-center text-slate-500 dark:text-zinc-500 text-xs">
+                              <td colSpan="9" className="py-16 text-center text-zinc-500 text-xs">
                                 No active leads matching current criteria.
                               </td>
                             </tr>
                           ) : paginatedTickets.map(ticket => {
                             const isRefunded = ticket.status === 'Refunded';
                             return (
-                              <tr key={ticket.id} className={`hover:bg-slate-50/80 dark:hover:bg-zinc-800/20 transition-colors ${ticket.isHighPriority && !isRefunded ? 'bg-rose-50/30 dark:bg-rose-950/10' : ''}`}>
+                              <tr key={ticket.id} className={`hover:bg-zinc-800/30 transition-colors ${ticket.isHighPriority && !isRefunded ? 'bg-rose-950/20 border-l-2 border-l-rose-500' : ''}`}>
                                 <td className="py-3 px-4">
-                                  <span className="font-mono text-xs font-semibold text-slate-900 dark:text-zinc-200">{ticket.orderNumber}</span>
+                                  <span className="font-mono text-xs font-bold text-zinc-200">{ticket.orderNumber}</span>
                                   {ticket.isHighPriority && !isRefunded && (
                                     <span className="block mt-0.5"><Badge variant="high">🔥 High Priority</Badge></span>
                                   )}
                                 </td>
                                 <td className="py-3 px-4">
-                                  <span className="text-slate-900 dark:text-zinc-200 font-medium">{ticket.customerName}</span>
-                                  <span className="block text-[11px] text-slate-500 dark:text-zinc-500 mt-0.5">{ticket.email || ticket.phone}</span>
+                                  <span className="text-zinc-200 font-medium">{ticket.customerName}</span>
+                                  <span className="block text-[11px] text-zinc-500 mt-0.5">{ticket.email || ticket.phone}</span>
                                 </td>
                                 <td className="py-3 px-4">
-                                  <span className="text-xs font-semibold text-indigo-600 dark:text-indigo-400">👤 {ticket.assignedAgentName || 'Unassigned'}</span>
+                                  <span className="text-xs font-semibold text-indigo-400">👤 {ticket.assignedAgentName || 'Unassigned'}</span>
                                 </td>
                                 <td className="py-3 px-4">
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800/50">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border bg-amber-950/40 text-amber-300 border-amber-800/50">
                                     📅 {ticket.callingDate}
                                   </span>
                                 </td>
                                 <td className="py-3 px-4 max-w-[240px]">
-                                  <span className={`text-xs font-medium ${ticket.isHighPriority ? 'text-rose-700 dark:text-rose-400 font-semibold' : 'text-slate-700 dark:text-zinc-300'}`}>
+                                  <span className={`text-xs font-medium ${ticket.isHighPriority ? 'text-rose-400 font-semibold' : 'text-zinc-300'}`}>
                                     {ticket.rtoReason}
                                   </span>
                                 </td>
                                 <td className="py-3 px-4">
                                   <Badge variant={ticket.paymentMethod === 'COD' ? 'cod' : 'prepaid'}>{ticket.paymentMethod}</Badge>
                                 </td>
-                                <td className="py-3 px-4 text-right font-semibold text-slate-900 dark:text-zinc-200">
+                                <td className="py-3 px-4 text-right font-semibold text-zinc-200">
                                   ₹{ticket.orderAmount.toLocaleString('en-IN')}
                                 </td>
                                 <td className="py-3 px-4 text-center">
@@ -1168,7 +1135,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                                 </td>
                                 <td className="py-3 px-4 text-right">
                                   <div className="flex items-center justify-end gap-1.5">
-                                    <button onClick={() => setSelectedDetailTicket(ticket)} className="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-zinc-800 dark:text-zinc-300 text-[11px] font-medium">
+                                    <button onClick={() => setSelectedDetailTicket(ticket)} className="px-2.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] font-medium">
                                       View
                                     </button>
                                     <button onClick={() => handleOpenDisposition(ticket)} className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold">
@@ -1184,11 +1151,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     </div>
 
                     {totalPages > 1 && (
-                      <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200 dark:border-zinc-800/60 text-xs bg-slate-50 dark:bg-zinc-900/60">
-                        <span className="text-slate-600 dark:text-zinc-500">Page <strong>{currentPage}</strong> of <strong>{totalPages.toLocaleString('en-IN')}</strong></span>
+                      <div className="flex items-center justify-between px-4 py-3 border-t border-zinc-800/60 text-xs bg-zinc-900/60">
+                        <span className="text-zinc-500">Page <strong>{currentPage}</strong> of <strong>{totalPages.toLocaleString('en-IN')}</strong></span>
                         <div className="flex items-center gap-1.5">
-                          <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-2.5 py-1 rounded-md bg-white text-slate-700 border border-slate-200 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 disabled:opacity-40 font-medium">Previous</button>
-                          <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-2.5 py-1 rounded-md bg-white text-slate-700 border border-slate-200 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 disabled:opacity-40 font-medium">Next</button>
+                          <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-2.5 py-1 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 disabled:opacity-40 font-medium">Previous</button>
+                          <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-2.5 py-1 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 disabled:opacity-40 font-medium">Next</button>
                         </div>
                       </div>
                     )}
@@ -1202,24 +1169,24 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                       {paginatedTickets.map(ticket => {
                         const isRefunded = ticket.status === 'Refunded';
                         return (
-                          <div key={ticket.id} className={`bg-white dark:bg-zinc-900/50 rounded-xl border ${ticket.isHighPriority && !isRefunded ? 'border-rose-300 dark:border-rose-900/60 bg-rose-50/20' : 'border-slate-200 dark:border-zinc-800/60'} p-4 flex flex-col justify-between hover:border-slate-300 dark:hover:border-zinc-700/60 transition-colors shadow-xs`}>
+                          <div key={ticket.id} className={`bg-zinc-900/50 rounded-xl border ${ticket.isHighPriority && !isRefunded ? 'border-rose-900/60 bg-rose-950/10' : 'border-zinc-800/60'} p-4 flex flex-col justify-between hover:border-zinc-700/60 transition-colors shadow-xs`}>
                             <div>
                               <div className="flex items-center justify-between mb-3">
-                                <span className="font-mono text-xs font-semibold text-slate-900 dark:text-zinc-300">{ticket.orderNumber}</span>
-                                <span className="text-[10px] text-amber-800 dark:text-amber-300 font-semibold bg-amber-50 dark:bg-amber-950/40 px-2 py-0.5 rounded border border-amber-200 dark:border-amber-800/50">📅 Calling Date: {ticket.callingDate}</span>
+                                <span className="font-mono text-xs font-semibold text-zinc-300">{ticket.orderNumber}</span>
+                                <span className="text-[10px] text-amber-300 font-semibold bg-amber-950/40 px-2 py-0.5 rounded border border-amber-800/50">📅 Calling Date: {ticket.callingDate}</span>
                               </div>
-                              <h3 className="text-sm font-semibold text-slate-900 dark:text-zinc-100">{ticket.customerName}</h3>
-                              <p className="text-[11px] text-slate-500 dark:text-zinc-500 mt-1">{ticket.email} · {ticket.phone}</p>
-                              <div className="mt-3 p-2.5 rounded-lg bg-slate-50 dark:bg-zinc-800/40 border border-slate-200 dark:border-zinc-800/40 text-[11px] text-slate-600 dark:text-zinc-400">
+                              <h3 className="text-sm font-semibold text-zinc-100">{ticket.customerName}</h3>
+                              <p className="text-[11px] text-zinc-500 mt-1">{ticket.email} · {ticket.phone}</p>
+                              <div className="mt-3 p-2.5 rounded-lg bg-zinc-800/40 border border-zinc-800/40 text-[11px] text-zinc-400">
                                 <p>{ticket.address || 'Standard Delivery Address'}</p>
-                                <p className="text-slate-900 dark:text-zinc-300 mt-1 font-medium">{ticket.city}, {ticket.state} — {ticket.pincode}</p>
+                                <p className="text-zinc-300 mt-1 font-medium">{ticket.city}, {ticket.state} — {ticket.pincode}</p>
                               </div>
-                              <p className="mt-2.5 text-[11px] text-amber-700 dark:text-amber-400 leading-relaxed font-medium">Column D: {ticket.rtoReason}</p>
+                              <p className="mt-2.5 text-[11px] text-amber-400 leading-relaxed font-medium">Column D: {ticket.rtoReason}</p>
                             </div>
-                            <div className="mt-4 pt-3 border-t border-slate-200 dark:border-zinc-800/40 flex items-center justify-between">
-                              <span className="text-sm font-semibold text-slate-900 dark:text-zinc-200">₹{ticket.orderAmount.toLocaleString('en-IN')}</span>
+                            <div className="mt-4 pt-3 border-t border-zinc-800/40 flex items-center justify-between">
+                              <span className="text-sm font-semibold text-zinc-200">₹{ticket.orderAmount.toLocaleString('en-IN')}</span>
                               <div className="flex gap-1.5">
-                                <button onClick={() => setSelectedDetailTicket(ticket)} className="px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-zinc-800 dark:text-zinc-300 text-[11px] font-medium">View</button>
+                                <button onClick={() => setSelectedDetailTicket(ticket)} className="px-2.5 py-1 rounded-md bg-zinc-800 text-zinc-300 hover:bg-zinc-700 text-[11px] font-medium">View</button>
                                 <button onClick={() => handleOpenDisposition(ticket)} className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold">
                                   <SvgPhone /> Call Form
                                 </button>
@@ -1238,29 +1205,29 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           {/* ── CALL DISPOSITION MODAL ────────────────── */}
           {selectedDispositionTicket && (
             <Overlay onClose={() => setSelectedDispositionTicket(null)}>
-              <div className="w-full max-w-lg bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-xl shadow-2xl text-slate-900 dark:text-zinc-100 p-5 space-y-4">
-                <div className="flex items-center justify-between border-b border-slate-200 dark:border-zinc-800 pb-3">
+              <div className="w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl text-zinc-100 p-5 space-y-4">
+                <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
                   <div>
                     <h3 className="text-sm font-bold flex items-center gap-2">
-                      <SvgPhone className="text-indigo-500" /> Call Disposition Form
+                      <SvgPhone className="text-indigo-400" /> Call Disposition Form
                     </h3>
-                    <p className="text-[11px] text-slate-500 dark:text-zinc-500">Order: <strong className="font-mono text-indigo-600 dark:text-indigo-400">{selectedDispositionTicket.orderNumber}</strong> ({selectedDispositionTicket.customerName}) · Payment: <strong className="text-sky-500">{selectedDispositionTicket.paymentMethod}</strong></p>
+                    <p className="text-[11px] text-zinc-400">Order: <strong className="font-mono text-indigo-400">{selectedDispositionTicket.orderNumber}</strong> ({selectedDispositionTicket.customerName}) · Payment: <strong className="text-sky-400">{selectedDispositionTicket.paymentMethod}</strong></p>
                   </div>
-                  <button onClick={() => setSelectedDispositionTicket(null)} className="text-slate-400 hover:text-slate-700"><SvgX /></button>
+                  <button onClick={() => setSelectedDispositionTicket(null)} className="text-zinc-400 hover:text-zinc-200"><SvgX /></button>
                 </div>
 
                 <div className="space-y-4 text-xs">
 
                   {/* STEP 1: CONNECTED YES / NO */}
                   <div>
-                    <label className="block text-[11px] font-bold uppercase text-slate-600 dark:text-zinc-400 mb-2">1. Was the Call Connected?</label>
+                    <label className="block text-[11px] font-bold uppercase text-zinc-400 mb-2">1. Was the Call Connected?</label>
                     <div className="grid grid-cols-2 gap-3">
                       <button
                         onClick={() => { setDispositionConnected('YES'); setDispositionReason(''); }}
                         className={`py-2.5 px-3 rounded-lg font-bold border transition-all text-center flex items-center justify-center gap-2 ${
                           dispositionConnected === 'YES'
                             ? 'bg-emerald-600 text-white border-emerald-600 shadow-md'
-                            : 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300'
+                            : 'bg-zinc-800 text-zinc-300 border-zinc-700'
                         }`}
                       >
                         📞 Yes (Connected)
@@ -1270,23 +1237,23 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                         className={`py-2.5 px-3 rounded-lg font-bold border transition-all text-center flex items-center justify-center gap-2 ${
                           dispositionConnected === 'NO'
                             ? 'bg-rose-600 text-white border-rose-600 shadow-md'
-                            : 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300'
+                            : 'bg-zinc-800 text-zinc-300 border-zinc-700'
                         }`}
                       >
-                        📵 No (Unreachable)
+                        python No (Unreachable)
                       </button>
                     </div>
                   </div>
 
                   {/* CONNECTED = YES FLOW */}
                   {dispositionConnected === 'YES' && (
-                    <div className="space-y-4 animate-fadeIn border-t border-slate-200 dark:border-zinc-800 pt-3">
+                    <div className="space-y-4 animate-fadeIn border-t border-zinc-800 pt-3">
                       <div>
-                        <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300 mb-1">Select Call Outcome / Reason:</label>
+                        <label className="block text-[11px] font-bold text-zinc-300 mb-1">Select Call Outcome / Reason:</label>
                         <select
                           value={dispositionReason}
                           onChange={(e) => setDispositionReason(e.target.value)}
-                          className="w-full bg-slate-100 dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded-lg p-2 text-xs font-semibold focus:outline-none focus:border-indigo-500"
+                          className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 text-xs font-semibold focus:outline-none focus:border-indigo-500"
                         >
                           <option value="">-- Select Reason --</option>
                           <option value="Refund Requested">💳 Refund Requested (Process Refund)</option>
@@ -1300,16 +1267,16 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
                       {/* REFUND FLOW */}
                       {(dispositionReason === 'Refund Requested' || dispositionReason === 'Refunded') && (
-                        <div className="bg-emerald-50 dark:bg-emerald-950/30 p-3.5 rounded-lg space-y-3 border border-emerald-200 dark:border-emerald-900/40 animate-fadeIn">
+                        <div className="bg-emerald-950/30 p-3.5 rounded-lg space-y-3 border border-emerald-900/40 animate-fadeIn">
                           <div className="flex items-center justify-between">
-                            <span className="font-bold text-emerald-800 dark:text-emerald-300">
+                            <span className="font-bold text-emerald-300">
                               {selectedDispositionTicket.paymentMethod === 'Prepaid' ? '💳 Prepaid Refund Payout' : '💵 COD Refund Payout'}
                             </span>
-                            <span className="font-mono text-sm font-bold text-emerald-700 dark:text-emerald-400">
+                            <span className="font-mono text-sm font-bold text-emerald-400">
                               ₹{selectedDispositionTicket.orderAmount.toLocaleString('en-IN')}
                             </span>
                           </div>
-                          <p className="text-[11px] text-slate-600 dark:text-zinc-400">
+                          <p className="text-[11px] text-zinc-400">
                             {selectedDispositionTicket.paymentMethod === 'Prepaid'
                               ? 'Refund will be credited back to the original prepaid payment gateway source.'
                               : 'Refund will be credited to customer via UPI Payout.'}
@@ -1319,18 +1286,18 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                             value={refundNotes}
                             onChange={(e) => setRefundNotes(e.target.value)}
                             placeholder="Optional agent notes for refund receipt..."
-                            className="w-full bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded p-2 text-xs"
+                            className="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-xs"
                           />
                         </div>
                       )}
 
                       {/* NEW ORDER QUESTION */}
                       {(dispositionReason === 'Customer Agreed to Accept' || dispositionReason === 'Product Issue / Exchange') && (
-                        <div className="bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-slate-200 dark:border-zinc-800 animate-fadeIn">
-                          <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300">Do they need a New Order?</label>
+                        <div className="bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-zinc-800 animate-fadeIn">
+                          <label className="block text-[11px] font-bold text-zinc-300">Do they need a New Order?</label>
                           <div className="flex gap-3">
-                            <button onClick={() => setNeedNewOrder('YES')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needNewOrder === 'YES' ? 'bg-indigo-600 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>Yes</button>
-                            <button onClick={() => setNeedNewOrder('NO')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needNewOrder === 'NO' ? 'bg-slate-800 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>No</button>
+                            <button onClick={() => setNeedNewOrder('YES')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needNewOrder === 'YES' ? 'bg-indigo-600 text-white' : 'bg-zinc-700 text-zinc-300'}`}>Yes</button>
+                            <button onClick={() => setNeedNewOrder('NO')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needNeedNewOrder === 'NO' ? 'bg-zinc-800 text-white' : 'bg-zinc-700 text-zinc-300'}`}>No</button>
                           </div>
                           {needNewOrder === 'YES' && (
                             <input
@@ -1338,7 +1305,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                               value={newOrderIdVal}
                               onChange={(e) => setNewOrderIdVal(e.target.value)}
                               placeholder="Enter New Order ID or Replacement Product Details..."
-                              className="w-full bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded p-2 text-xs"
+                              className="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-xs"
                             />
                           )}
                         </div>
@@ -1346,18 +1313,18 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
                       {/* ADDRESS CHANGE QUESTION */}
                       {(dispositionReason === 'Customer Agreed to Accept' || dispositionReason === 'Address Change Requested' || dispositionReason === 'Product Issue / Exchange') && (
-                        <div className="bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-slate-200 dark:border-zinc-800 animate-fadeIn">
-                          <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300">Is an Address Change required?</label>
+                        <div className="bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-zinc-800 animate-fadeIn">
+                          <label className="block text-[11px] font-bold text-zinc-300">Is an Address Change required?</label>
                           <div className="flex gap-3">
-                            <button onClick={() => setNeedAddressChange('YES')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needAddressChange === 'YES' ? 'bg-indigo-600 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>Yes</button>
-                            <button onClick={() => setNeedAddressChange('NO')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needAddressChange === 'NO' ? 'bg-slate-800 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>No</button>
+                            <button onClick={() => setNeedAddressChange('YES')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needAddressChange === 'YES' ? 'bg-indigo-600 text-white' : 'bg-zinc-700 text-zinc-300'}`}>Yes</button>
+                            <button onClick={() => setNeedAddressChange('NO')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needAddressChange === 'NO' ? 'bg-zinc-800 text-white' : 'bg-zinc-700 text-zinc-300'}`}>No</button>
                           </div>
                           {needAddressChange === 'YES' && (
                             <textarea
                               value={newAddressVal}
                               onChange={(e) => setNewAddressVal(e.target.value)}
                               placeholder="Enter new delivery address details & pincode..."
-                              className="w-full bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded p-2 text-xs"
+                              className="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-xs"
                               rows="2"
                             />
                           )}
@@ -1368,12 +1335,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
                   {/* CONNECTED = NO FLOW */}
                   {dispositionConnected === 'NO' && (
-                    <div className="space-y-3 animate-fadeIn border-t border-slate-200 dark:border-zinc-800 pt-3">
-                      <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300">Select Unreachable Reason:</label>
+                    <div className="space-y-3 animate-fadeIn border-t border-zinc-800 pt-3">
+                      <label className="block text-[11px] font-bold text-zinc-300">Select Unreachable Reason:</label>
                       <select
                         value={dispositionReason}
                         onChange={(e) => setDispositionReason(e.target.value)}
-                        className="w-full bg-slate-100 dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded-lg p-2 text-xs font-semibold focus:outline-none focus:border-indigo-500"
+                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-2 text-xs font-semibold focus:outline-none focus:border-indigo-500"
                       >
                         <option value="">-- Select Reason --</option>
                         <option value="Ringing / No Answer">Ringing / No Answer</option>
@@ -1387,8 +1354,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
                 </div>
 
-                <div className="flex items-center justify-between border-t border-slate-200 dark:border-zinc-800 pt-3">
-                  <button onClick={() => setSelectedDispositionTicket(null)} className="text-xs text-slate-500">Cancel</button>
+                <div className="flex items-center justify-between border-t border-zinc-800 pt-3">
+                  <button onClick={() => setSelectedDispositionTicket(null)} className="text-xs text-zinc-400">Cancel</button>
                   <button
                     onClick={handleSubmitDisposition}
                     disabled={!dispositionConnected || !dispositionReason}
@@ -1410,54 +1377,54 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           {/* ── Detail Modal ────────────────── */}
           {selectedDetailTicket && (
             <Overlay onClose={() => setSelectedDetailTicket(null)}>
-              <div className="w-full max-w-lg bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-xl shadow-2xl text-slate-900 dark:text-zinc-100">
-                <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-zinc-800">
+              <div className="w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl text-zinc-100">
+                <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
                   <div>
                     <h3 className="text-sm font-semibold font-mono">{selectedDetailTicket.orderNumber}</h3>
                   </div>
-                  <button onClick={() => setSelectedDetailTicket(null)} className="text-slate-400 hover:text-slate-700"><SvgX /></button>
+                  <button onClick={() => setSelectedDetailTicket(null)} className="text-zinc-400 hover:text-zinc-200"><SvgX /></button>
                 </div>
 
                 <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto text-xs">
                   {selectedDetailTicket.isHighPriority && (
-                    <div className="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/40 text-rose-700 dark:text-rose-400 font-semibold">
+                    <div className="p-2.5 rounded-lg bg-rose-950/30 border border-rose-900/40 text-rose-400 font-semibold">
                       🔥 High Priority Prepaid Refusal (Column D Matched)
                     </div>
                   )}
 
                   <div>
-                    <h4 className="text-[10px] font-semibold uppercase text-slate-500 mb-1">Column Y (Calling Date)</h4>
-                    <p className="font-semibold text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/20 p-2.5 rounded border border-amber-200 dark:border-amber-900/20">📅 {selectedDetailTicket.callingDate}</p>
+                    <h4 className="text-[10px] font-semibold uppercase text-zinc-400 mb-1">Column Y (Calling Date)</h4>
+                    <p className="font-semibold text-amber-300 bg-amber-950/20 p-2.5 rounded border border-amber-900/20">📅 {selectedDetailTicket.callingDate}</p>
                   </div>
 
                   <div>
-                    <h4 className="text-[10px] font-semibold uppercase text-slate-500 mb-1">Column D (RTO Reason)</h4>
-                    <p className="font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/20 p-2.5 rounded border border-amber-200 dark:border-amber-900/20">{selectedDetailTicket.rtoReason}</p>
+                    <h4 className="text-[10px] font-semibold uppercase text-zinc-400 mb-1">Column D (RTO Reason)</h4>
+                    <p className="font-semibold text-amber-400 bg-amber-950/20 p-2.5 rounded border border-amber-900/20">{selectedDetailTicket.rtoReason}</p>
                   </div>
 
                   <div>
-                    <h4 className="text-[10px] font-semibold uppercase text-slate-500 mb-1">Assigned Agent (Col Q)</h4>
-                    <p className="font-semibold text-indigo-600 dark:text-indigo-400">👤 {selectedDetailTicket.assignedAgentName || 'Unassigned'}</p>
+                    <h4 className="text-[10px] font-semibold uppercase text-zinc-400 mb-1">Assigned Agent (Col Q)</h4>
+                    <p className="font-semibold text-indigo-400">👤 {selectedDetailTicket.assignedAgentName || 'Unassigned'}</p>
                   </div>
                   <div>
-                    <h4 className="text-[10px] font-semibold uppercase text-slate-500 mb-1">Customer</h4>
-                    <p className="font-medium text-slate-900 dark:text-zinc-100 text-sm">{selectedDetailTicket.customerName}</p>
-                    <p className="text-slate-500">{selectedDetailTicket.email} · {selectedDetailTicket.phone}</p>
+                    <h4 className="text-[10px] font-semibold uppercase text-zinc-400 mb-1">Customer</h4>
+                    <p className="font-medium text-zinc-100 text-sm">{selectedDetailTicket.customerName}</p>
+                    <p className="text-zinc-400">{selectedDetailTicket.email} · {selectedDetailTicket.phone}</p>
                   </div>
                   <div>
-                    <h4 className="text-[10px] font-semibold uppercase text-slate-500 mb-1">Shipping Address</h4>
-                    <p className="text-slate-800 dark:text-zinc-300">{selectedDetailTicket.address}</p>
-                    <p className="text-slate-900 dark:text-zinc-200 font-medium mt-0.5">{selectedDetailTicket.city}, {selectedDetailTicket.state} — {selectedDetailTicket.pincode}</p>
+                    <h4 className="text-[10px] font-semibold uppercase text-zinc-400 mb-1">Shipping Address</h4>
+                    <p className="text-zinc-300">{selectedDetailTicket.address}</p>
+                    <p className="text-zinc-200 font-medium mt-0.5">{selectedDetailTicket.city}, {selectedDetailTicket.state} — {selectedDetailTicket.pincode}</p>
                   </div>
-                  <div className="grid grid-cols-2 gap-3 bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg">
-                    <div><p className="text-[10px] text-slate-500">Payment</p><p className="font-medium">{selectedDetailTicket.paymentMethod}</p></div>
-                    <div><p className="text-[10px] text-slate-500">Amount</p><p className="font-semibold text-slate-900 dark:text-zinc-100">₹{selectedDetailTicket.orderAmount.toLocaleString('en-IN')}</p></div>
+                  <div className="grid grid-cols-2 gap-3 bg-zinc-800/40 p-3 rounded-lg">
+                    <div><p className="text-[10px] text-zinc-400">Payment</p><p className="font-medium">{selectedDetailTicket.paymentMethod}</p></div>
+                    <div><p className="text-[10px] text-zinc-400">Amount</p><p className="font-semibold text-zinc-100">₹{selectedDetailTicket.orderAmount.toLocaleString('en-IN')}</p></div>
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between px-5 py-3 border-t border-slate-200 dark:border-zinc-800">
-                  <button onClick={() => setSelectedDetailTicket(null)} className="text-xs text-slate-500">Close</button>
-                  <button onClick={() => { const t = selectedDetailTicket; setSelectedDetailTicket(null); handleOpenDisposition(t); }} className="px-3.5 py-1 rounded-md bg-indigo-600 text-white dark:bg-zinc-100 dark:text-zinc-900 text-xs font-semibold">Open Call Form</button>
+                <div className="flex items-center justify-between px-5 py-3 border-t border-zinc-800">
+                  <button onClick={() => setSelectedDetailTicket(null)} className="text-xs text-zinc-400">Close</button>
+                  <button onClick={() => { const t = selectedDetailTicket; setSelectedDetailTicket(null); handleOpenDisposition(t); }} className="px-3.5 py-1 rounded-md bg-indigo-600 text-white text-xs font-semibold">Open Call Form</button>
                 </div>
               </div>
             </Overlay>
@@ -1466,43 +1433,43 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           {/* ── Receipt Modal ────────────────────────── */}
           {selectedReceiptTicket?.refundDetails && (
             <Overlay onClose={() => setSelectedReceiptTicket(null)}>
-              <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-xl shadow-2xl p-5 space-y-4 text-slate-900 dark:text-zinc-100">
-                <div className="flex items-center justify-between border-b border-slate-200 dark:border-zinc-800 pb-3">
+              <div className="w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl p-5 space-y-4 text-zinc-100">
+                <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
                   <div className="flex items-center gap-2">
-                    <SvgCheck className="text-emerald-500" />
+                    <SvgCheck className="text-emerald-400" />
                     <h3 className="text-sm font-semibold">Refund Receipt</h3>
                   </div>
-                  <button onClick={() => setSelectedReceiptTicket(null)} className="text-slate-400"><SvgX /></button>
+                  <button onClick={() => setSelectedReceiptTicket(null)} className="text-zinc-400"><SvgX /></button>
                 </div>
 
                 <div id="printable-receipt" className="space-y-4">
-                  <div className="text-center py-4 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/20 rounded-lg">
-                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">Refund Amount</p>
-                    <p className="text-3xl font-bold text-emerald-600 dark:text-emerald-400 mt-1">₹{selectedReceiptTicket.refundDetails.amount.toLocaleString('en-IN')}</p>
-                    <p className="text-[10px] text-slate-400 font-mono mt-1">{selectedReceiptTicket.refundDetails.transactionRef}</p>
+                  <div className="text-center py-4 bg-emerald-950/20 border border-emerald-900/20 rounded-lg">
+                    <p className="text-[10px] uppercase tracking-wider text-zinc-400 font-medium">Refund Amount</p>
+                    <p className="text-3xl font-bold text-emerald-400 mt-1">₹{selectedReceiptTicket.refundDetails.amount.toLocaleString('en-IN')}</p>
+                    <p className="text-[10px] text-zinc-400 font-mono mt-1">{selectedReceiptTicket.refundDetails.transactionRef}</p>
                   </div>
 
-                  <div className="space-y-2 text-xs text-slate-600 dark:text-zinc-400">
-                    <div className="flex justify-between"><span>Customer</span><span className="font-semibold text-slate-900 dark:text-zinc-100">{selectedReceiptTicket.customerName}</span></div>
-                    <div className="flex justify-between"><span>Order</span><span className="font-mono text-slate-900 dark:text-zinc-200">{selectedReceiptTicket.orderNumber}</span></div>
-                    <div className="flex justify-between"><span>Payment</span><span className="text-slate-900 dark:text-zinc-200">{selectedReceiptTicket.paymentMethod}</span></div>
-                    <div className="flex justify-between"><span>Mode</span><span className="text-slate-900 dark:text-zinc-200">{selectedReceiptTicket.refundDetails.mode}</span></div>
-                    <div className="flex justify-between"><span>Processed by</span><span className="text-slate-900 dark:text-zinc-200">{selectedReceiptTicket.refundDetails.processedBy}</span></div>
-                    <div className="flex justify-between"><span>Date</span><span className="text-slate-900 dark:text-zinc-200">{selectedReceiptTicket.refundDetails.date}</span></div>
+                  <div className="space-y-2 text-xs text-zinc-400">
+                    <div className="flex justify-between"><span>Customer</span><span className="font-semibold text-zinc-100">{selectedReceiptTicket.customerName}</span></div>
+                    <div className="flex justify-between"><span>Order</span><span className="font-mono text-zinc-200">{selectedReceiptTicket.orderNumber}</span></div>
+                    <div className="flex justify-between"><span>Payment</span><span className="text-zinc-200">{selectedReceiptTicket.paymentMethod}</span></div>
+                    <div className="flex justify-between"><span>Mode</span><span className="text-zinc-200">{selectedReceiptTicket.refundDetails.mode}</span></div>
+                    <div className="flex justify-between"><span>Processed by</span><span className="text-zinc-200">{selectedReceiptTicket.refundDetails.processedBy}</span></div>
+                    <div className="flex justify-between"><span>Date</span><span className="text-zinc-200">{selectedReceiptTicket.refundDetails.date}</span></div>
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between border-t border-slate-200 dark:border-zinc-800 pt-3">
-                  <button onClick={() => window.print()} className="flex items-center gap-1 text-xs text-slate-600 hover:text-slate-900"><SvgPrinter /> Print</button>
-                  <button onClick={() => setSelectedReceiptTicket(null)} className="text-xs text-slate-500">Close</button>
+                <div className="flex items-center justify-between border-t border-zinc-800 pt-3">
+                  <button onClick={() => window.print()} className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200"><SvgPrinter /> Print</button>
+                  <button onClick={() => setSelectedReceiptTicket(null)} className="text-xs text-zinc-400">Close</button>
                 </div>
               </div>
             </Overlay>
           )}
 
           {/* Footer */}
-          <footer className="border-t border-slate-200 dark:border-zinc-800/40 py-4 text-center">
-            <p className="text-[11px] text-slate-500 dark:text-zinc-600">RTO CRM · High Performance Seamless Sync Engine</p>
+          <footer className="border-t border-zinc-800/40 py-3 text-center">
+            <p className="text-[11px] text-zinc-500">RTO CRM · High Performance Unified Engine</p>
           </footer>
         </div>
       );
