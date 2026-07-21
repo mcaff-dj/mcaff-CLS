@@ -243,8 +243,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           obj[`col_${idx}`] = (row[idx] || '').trim();
           if (idx === 3) obj['_col_D'] = (row[idx] || '').trim();
           if (idx === 16) obj['_col_Q'] = (row[idx] || '').trim();
-          if (idx === 17) obj['_col_R'] = (row[idx] || '').trim(); // Connected
-          if (idx === 19) obj['_col_T'] = (row[idx] || '').trim(); // Agent Reason
+          if (idx === 17) obj['_col_R'] = (row[idx] || '').trim();
+          if (idx === 19) obj['_col_T'] = (row[idx] || '').trim();
           if (idx === 24) obj['_col_Y'] = (row[idx] || '').trim();
         });
 
@@ -506,6 +506,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [newOrderIdVal, setNewOrderIdVal] = useState('');
       const [needAddressChange, setNeedAddressChange] = useState(null); // 'YES' | 'NO'
       const [newAddressVal, setNewAddressVal] = useState('');
+      const [refundNotes, setRefundNotes] = useState('');
 
       const [toast, setToast] = useState(null);
 
@@ -523,13 +524,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         setNewOrderIdVal('');
         setNeedAddressChange(null);
         setNewAddressVal('');
+        setRefundNotes('');
       };
 
       // Submit Call Disposition Form
       const handleSubmitDisposition = () => {
         if (!selectedDispositionTicket) return;
 
-        const isRefundSelected = dispositionReason === 'Refunded';
+        const isRefundSelected = dispositionReason === 'Refund Requested' || dispositionReason === 'Refunded';
         const updatedStatus = isRefundSelected ? 'Refunded' : dispositionConnected === 'YES' ? `Connected - ${dispositionReason}` : `Unreachable - ${dispositionReason}`;
 
         const overridePayload = {
@@ -556,9 +558,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
             amount: selectedDispositionTicket.orderAmount,
             reason: dispositionReason,
             date: new Date().toLocaleString(),
-            mode: selectedDispositionTicket.paymentMethod === 'COD' ? 'UPI' : 'Original payment source',
+            mode: selectedDispositionTicket.paymentMethod === 'COD' ? 'UPI Payout' : 'Original Prepaid Gateway Source',
             transactionRef: `TXN-${Math.random().toString(36).substring(2, 10).toUpperCase()}`,
             processedBy: googleUser.name,
+            notes: refundNotes,
           });
         } else {
           showToast(`Disposition saved: ${updatedStatus} for ${selectedDispositionTicket.orderNumber}`);
@@ -617,6 +620,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         const target = tickets.find(t => t.id === ticketId);
         if (target) {
           setSelectedReceiptTicket({ ...target, status: 'Refunded', refundDetails: refundRecord });
+          try { window.confetti?.({ particleCount: 50, spread: 50, origin: { y: 0.7 } }); } catch {}
           showToast(`₹${refundRecord.amount.toLocaleString('en-IN')} refunded! Active lead slot freed.`);
         }
       };
@@ -1086,7 +1090,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     <h3 className="text-sm font-bold flex items-center gap-2">
                       <SvgPhone className="text-indigo-500" /> Call Disposition Form
                     </h3>
-                    <p className="text-[11px] text-slate-500 dark:text-zinc-500">Order: <strong className="font-mono text-indigo-600 dark:text-indigo-400">{selectedDispositionTicket.orderNumber}</strong> ({selectedDispositionTicket.customerName})</p>
+                    <p className="text-[11px] text-slate-500 dark:text-zinc-500">Order: <strong className="font-mono text-indigo-600 dark:text-indigo-400">{selectedDispositionTicket.orderNumber}</strong> ({selectedDispositionTicket.customerName}) · Payment: <strong className="text-sky-500">{selectedDispositionTicket.paymentMethod}</strong></p>
                   </div>
                   <button onClick={() => setSelectedDispositionTicket(null)} className="text-slate-400 hover:text-slate-700"><SvgX /></button>
                 </div>
@@ -1131,53 +1135,79 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                           className="w-full bg-slate-100 dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded-lg p-2 text-xs font-semibold focus:outline-none focus:border-indigo-500"
                         >
                           <option value="">-- Select Reason --</option>
-                          <option value="Refunded">Refunded (Initiate Payout)</option>
-                          <option value="Wrong Number">Wrong Number</option>
-                          <option value="Not Interested">Not Interested / Cancelled</option>
+                          <option value="Refund Requested">💳 Refund Requested (Process Refund)</option>
                           <option value="Customer Agreed to Accept">Customer Agreed to Accept Delivery</option>
                           <option value="Product Issue / Exchange">Product Issue / Exchange Requested</option>
-                          <option value="Other">Other Reason</option>
+                          <option value="Address Change Requested">Address Change Requested</option>
+                          <option value="Not Interested">Not Interested / Cancelled</option>
+                          <option value="Wrong Number">Wrong Number</option>
                         </select>
                       </div>
 
-                      {dispositionReason && (
-                        <>
-                          {/* NEW ORDER QUESTION */}
-                          <div className="bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-slate-200 dark:border-zinc-800">
-                            <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300">Do they need a New Order?</label>
-                            <div className="flex gap-3">
-                              <button onClick={() => setNeedNewOrder('YES')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needNewOrder === 'YES' ? 'bg-indigo-600 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>Yes</button>
-                              <button onClick={() => setNeedNewOrder('NO')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needNewOrder === 'NO' ? 'bg-slate-800 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>No</button>
-                            </div>
-                            {needNewOrder === 'YES' && (
-                              <input
-                                type="text"
-                                value={newOrderIdVal}
-                                onChange={(e) => setNewOrderIdVal(e.target.value)}
-                                placeholder="Enter New Order ID or Product Details..."
-                                className="w-full bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded p-2 text-xs"
-                              />
-                            )}
+                      {/* REFUND FLOW (PREPAID OR COD) */}
+                      {(dispositionReason === 'Refund Requested' || dispositionReason === 'Refunded') && (
+                        <div className="bg-emerald-50 dark:bg-emerald-950/30 p-3.5 rounded-lg space-y-3 border border-emerald-200 dark:border-emerald-900/40 animate-fadeIn">
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-emerald-800 dark:text-emerald-300">
+                              {selectedDispositionTicket.paymentMethod === 'Prepaid' ? '💳 Prepaid Refund Payout' : '💵 COD Refund Payout'}
+                            </span>
+                            <span className="font-mono text-sm font-bold text-emerald-700 dark:text-emerald-400">
+                              ₹{selectedDispositionTicket.orderAmount.toLocaleString('en-IN')}
+                            </span>
                           </div>
+                          <p className="text-[11px] text-slate-600 dark:text-zinc-400">
+                            {selectedDispositionTicket.paymentMethod === 'Prepaid'
+                              ? 'Refund will be credited back to the original prepaid payment gateway source.'
+                              : 'Refund will be credited to customer via UPI Payout.'}
+                          </p>
+                          <input
+                            type="text"
+                            value={refundNotes}
+                            onChange={(e) => setRefundNotes(e.target.value)}
+                            placeholder="Optional agent notes for refund receipt..."
+                            className="w-full bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded p-2 text-xs"
+                          />
+                        </div>
+                      )}
 
-                          {/* ADDRESS CHANGE QUESTION */}
-                          <div className="bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-slate-200 dark:border-zinc-800">
-                            <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300">Is an Address Change required?</label>
-                            <div className="flex gap-3">
-                              <button onClick={() => setNeedAddressChange('YES')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needAddressChange === 'YES' ? 'bg-indigo-600 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>Yes</button>
-                              <button onClick={() => setNeedAddressChange('NO')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needAddressChange === 'NO' ? 'bg-slate-800 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>No</button>
-                            </div>
-                            {needAddressChange === 'YES' && (
-                              <textarea
-                                value={newAddressVal}
-                                onChange={(e) => setNewAddressVal(e.target.value)}
-                                placeholder="Enter new delivery address details & pincode..."
-                                className="w-full bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded p-2 text-xs"
-                                rows="2"
-                              />
-                            )}
+                      {/* NEW ORDER QUESTION — ONLY SHOWN WHEN REASON WARRANTS IT */}
+                      {(dispositionReason === 'Customer Agreed to Accept' || dispositionReason === 'Product Issue / Exchange') && (
+                        <div className="bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-slate-200 dark:border-zinc-800 animate-fadeIn">
+                          <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300">Do they need a New Order?</label>
+                          <div className="flex gap-3">
+                            <button onClick={() => setNeedNewOrder('YES')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needNewOrder === 'YES' ? 'bg-indigo-600 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>Yes</button>
+                            <button onClick={() => setNeedNewOrder('NO')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needNewOrder === 'NO' ? 'bg-slate-800 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>No</button>
                           </div>
-                        </>
+                          {needNewOrder === 'YES' && (
+                            <input
+                              type="text"
+                              value={newOrderIdVal}
+                              onChange={(e) => setNewOrderIdVal(e.target.value)}
+                              placeholder="Enter New Order ID or Replacement Product Details..."
+                              className="w-full bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded p-2 text-xs"
+                            />
+                          )}
+                        </div>
+                      )}
+
+                      {/* ADDRESS CHANGE QUESTION — ONLY SHOWN WHEN REASON WARRANTS IT */}
+                      {(dispositionReason === 'Customer Agreed to Accept' || dispositionReason === 'Address Change Requested' || dispositionReason === 'Product Issue / Exchange') && (
+                        <div className="bg-slate-50 dark:bg-zinc-800/40 p-3 rounded-lg space-y-2 border border-slate-200 dark:border-zinc-800 animate-fadeIn">
+                          <label className="block text-[11px] font-bold text-slate-700 dark:text-zinc-300">Is an Address Change required?</label>
+                          <div className="flex gap-3">
+                            <button onClick={() => setNeedAddressChange('YES')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needAddressChange === 'YES' ? 'bg-indigo-600 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>Yes</button>
+                            <button onClick={() => setNeedAddressChange('NO')} className={`px-4 py-1.5 rounded-md text-xs font-bold ${needAddressChange === 'NO' ? 'bg-slate-800 text-white' : 'bg-slate-200 dark:bg-zinc-700 text-slate-700 dark:text-zinc-300'}`}>No</button>
+                          </div>
+                          {needAddressChange === 'YES' && (
+                            <textarea
+                              value={newAddressVal}
+                              onChange={(e) => setNewAddressVal(e.target.value)}
+                              placeholder="Enter new delivery address details & pincode..."
+                              className="w-full bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded p-2 text-xs"
+                              rows="2"
+                            />
+                          )}
+                        </div>
                       )}
                     </div>
                   )}
@@ -1208,9 +1238,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   <button
                     onClick={handleSubmitDisposition}
                     disabled={!dispositionConnected || !dispositionReason}
-                    className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 font-bold text-xs disabled:opacity-40 transition-colors shadow-md"
+                    className={`px-4 py-2 rounded-lg font-bold text-xs disabled:opacity-40 transition-colors shadow-md ${
+                      dispositionReason === 'Refund Requested' || dispositionReason === 'Refunded'
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                        : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                    }`}
                   >
-                    Submit Disposition
+                    {dispositionReason === 'Refund Requested' || dispositionReason === 'Refunded'
+                      ? 'Confirm Refund & Save'
+                      : 'Submit Disposition'}
                   </button>
                 </div>
               </div>
