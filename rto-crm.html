@@ -781,8 +781,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       }, [agentRoster, tickets, allTickets, overrides]);
 
       const pend=allTickets.filter(t=>t.status==='Pending'&&!t.disposition&&!t.agentRemarks).length;
-      const refd=allTickets.filter(t=>t.status==='Refunded').length;
       const dispCount=allTickets.filter(t=>t.disposition||t.agentRemarks||t.status!=='Pending').length;
+      const freshAssignedCount=allTickets.filter(t=>{
+        const agt=(t.assignedAgent||'').trim().toLowerCase();
+        return agt&&agt!=='unassigned'&&t.status==='Pending'&&!t.disposition&&!t.agentRemarks;
+      }).length;
 
       const agents = useMemo(()=>{
         const s=new Set();
@@ -902,13 +905,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       const filtered = useMemo(()=>{
         setPage(1);
-        
-        // Fresh Leads Tab: Shows all unassigned leads in the sheet sorted by latest calling date!
+
+        // Fresh Leads Tab: Shows leads ASSIGNED to the current agent/filter that have NOT been disposed yet!
         if (tab === 'fresh') {
-          return tickets.filter(t => {
-            const agt = overrides[t.id]?.assignedAgent || t.assignedAgent;
-            const isUnassigned = !agt || agt === 'Unassigned';
-            if (!isUnassigned) return false;
+          return allTickets.filter(t => {
+            const agt = (t.assignedAgent || '').trim();
+            const isAssigned = agt && agt.toLowerCase() !== 'unassigned';
+            if (!isAssigned) return false;
+            if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
+            if (agentFilter !== 'ALL') { const a = agt.toLowerCase(), s = agentFilter.toLowerCase(); if (!a.includes(s) && !s.includes(a)) return false; }
             if (payFilter !== 'ALL' && t.paymentMethod !== payFilter) return false;
             if (search.trim()) {
               const q = search.toLowerCase();
@@ -923,12 +928,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           });
         }
 
-        // All Leads / Pending / Disposed / Refunded Tabs
+        // All Leads Tab: Shows every lead that has ALREADY been disposed (disposition, remarks, or non-Pending status)
         return allTickets.filter(t=>{
           if(agentFilter!=='ALL'){const a=t.assignedAgent.toLowerCase(),s=agentFilter.toLowerCase();if(!a.includes(s)&&!s.includes(a))return false;}
-          if(tab==='pending'&&(t.status!=='Pending'||t.disposition||t.agentRemarks))return false;
-          if(tab==='refunded'&&t.status!=='Refunded')return false;
-          if(tab==='disposed'&&(!t.disposition&&!t.agentRemarks&&t.status==='Pending'))return false;
+          if(!t.disposition&&!t.agentRemarks&&t.status==='Pending')return false;
           if(payFilter!=='ALL'&&t.paymentMethod!==payFilter)return false;
           if(search.trim()){const q=search.toLowerCase();if(![t.orderNumber,t.customerName,t.email,t.phone,t.rtoReason,t.callingDate,t.assignedAgent,t.agentRemarks,t.disposition].some(f=>(f||'').toLowerCase().includes(q)))return false;}
           return true;
@@ -943,11 +946,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         tabs.push({key:'overview',label:'📊 Overview (Agents Data)',count:effectiveAgentRoster.length});
       }
       tabs.push(
-        {key:'all',label:'All Leads (Assigned)',count:allTickets.length},
-        {key:'pending',label:'Pending Queue',count:pend},
-        {key:'fresh',label:'⚡ Fresh Unassigned Leads',count:freshUnassignedCount},
-        {key:'disposed',label:'Disposed & Remarks',count:dispCount},
-        {key:'refunded',label:'Refunded',count:refd}
+        {key:'all',label:'All Leads (Disposed)',count:dispCount},
+        {key:'fresh',label:'⚡ Fresh Leads (Assigned)',count:freshAssignedCount}
       );
       if(userRole==='Admin'||userRole==='Team Lead'){
         tabs.push({key:'admin',label:'Admin Panel & Roster',count:effectiveAgentRoster.length});
