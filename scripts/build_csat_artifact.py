@@ -57,15 +57,21 @@ decline_html = (
     f"as does <b>{d2['task']}</b> ({avg(d2['first_v'])} &rarr; {avg(d2['last_v'])}). Worth investigating what changed in these AI flows over the period."
 )
 
+DIP_MARK_NOTE = (
+    "A &#9660; on the current month's cell means that row's rating dropped &ge;0.3 vs a prior month "
+    "(both months need n&ge;15) &mdash; hover the cell for which month(s) and by how much."
+)
+
 coverage_html = (
     f"The heatmap below covers the top 20 of {D['n_tasks_total']} distinct task categories "
     f"({D['task_coverage_pct']}% of all completed CSAT volume); the remainder are grouped into <b>Other</b>. "
-    f"'(none)' means no task was tagged on the ticket."
+    f"'(none)' means no task was tagged on the ticket. {DIP_MARK_NOTE}"
 )
 
 agent_coverage_html = (
     f"All {D['n_agents_total']} agents are shown (no bucketing needed). "
-    f"'AI' is every AI-resolved ticket; '(unassigned)' means the ticket was human-resolved but no agent name was recorded."
+    f"'AI' is every AI-resolved ticket; '(unassigned)' means the ticket was human-resolved but no agent name was recorded. "
+    f"{DIP_MARK_NOTE}"
 )
 
 GRANULAR_JSON = json.dumps(D["granular"], ensure_ascii=False, separators=(",", ":"))
@@ -198,6 +204,8 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
   table.heatmap td.rowlabel {{ color: var(--text-primary); font-weight: 550; border-right: 1px solid var(--gridline); max-width: 220px; overflow: hidden; text-overflow: ellipsis; }}
   table.heatmap td.cell {{ border-radius: 4px; }}
   table.heatmap td.cell.empty {{ color: var(--text-muted); }}
+  table.heatmap td.cell.dip {{ box-shadow: inset 0 0 0 2px var(--warn-border); }}
+  .dip-flag {{ display: inline-block; font-size: 8px; line-height: 1; padding: 1.5px 3px; border-radius: 3px; margin-left: 3px; vertical-align: 1px; }}
   table.heatmap tr + tr td, table.heatmap tr + tr th {{ border-top: 1px solid var(--gridline); }}
 
   .legend {{ display: flex; gap: 18px; flex-wrap: wrap; margin: 4px 0 18px; font-size: 12.5px; color: var(--text-secondary); }}
@@ -413,6 +421,27 @@ function relLuminance(rgb) {{
   return 0.2126 * lin(rgb.r) + 0.7152 * lin(rgb.g) + 0.0722 * lin(rgb.b);
 }}
 
+// A row's current-month cell is flagged as a dip when it drops at least this many
+// rating points vs some prior month's cell for that same row (both need min sample size).
+const CELL_DIP_MIN_N = 15;
+const CELL_DIP_THRESHOLD = 0.3;
+const CURRENT_MONTH = MONTH_ORDER[MONTH_ORDER.length - 1];
+
+function rowDips(row) {{
+  const curr = row.cell[CURRENT_MONTH];
+  if (!curr || curr.n < CELL_DIP_MIN_N) return null;
+  const currAvg = curr.sum / curr.n;
+  const dips = [];
+  MONTH_ORDER.forEach(m => {{
+    if (m === CURRENT_MONTH) return;
+    const b = row.cell[m];
+    if (!b || b.n < CELL_DIP_MIN_N) return;
+    const avg = b.sum / b.n;
+    if (avg - currAvg >= CELL_DIP_THRESHOLD) dips.push({{ month: m, avg, drop: avg - currAvg }});
+  }});
+  return dips.length ? dips.sort((a, b) => b.drop - a.drop) : null;
+}}
+
 function renderHeatmap(granular, headId, bodyId, cornerLabel, brand, resolver, channel) {{
   const rows = computeHeatmap(granular, brand, resolver, channel);
   const head = document.getElementById(headId);
@@ -436,6 +465,7 @@ function renderHeatmap(granular, headId, bodyId, cornerLabel, brand, resolver, c
   }}
 
   body.innerHTML = rows.map(row => {{
+    const dips = rowDips(row);
     const cells = MONTH_ORDER.map(m => {{
       const b = row.cell[m];
       if (!b || b.n === 0) return '<td class="cell empty">&ndash;</td>';
@@ -443,14 +473,25 @@ function renderHeatmap(granular, headId, bodyId, cornerLabel, brand, resolver, c
       const rgb = colorForAvg(avg);
       const lum = relLuminance(rgb);
       const textColor = lum > 0.45 ? '#0b0b0b' : '#ffffff';
-      return `<td class="cell" data-cls="${{row.cls}}" data-month="${{m}}" data-avg="${{avg.toFixed(2)}}" data-n="${{b.n}}" style="background:rgb(${{rgb.r}},${{rgb.g}},${{rgb.b}}); color:${{textColor}}">${{avg.toFixed(1)}}</td>`;
+      const isDipCell = m === CURRENT_MONTH && dips;
+      const cellClass = 'cell' + (isDipCell ? ' dip' : '');
+      let dipMark = '';
+      let dipTitle = '';
+      if (isDipCell) {{
+        const badgeBg = lum > 0.45 ? 'rgba(0,0,0,0.55)' : 'rgba(255,255,255,0.7)';
+        dipTitle = ' data-dip="Down vs ' + dips.map(d => d.month + ' (' + d.avg.toFixed(2) + ', &minus;' + d.drop.toFixed(2) + ')').join(', ') + '"';
+        dipMark = ` <span class="dip-flag" style="background:${{badgeBg}}; color:${{textColor}}">&#9660;</span>`;
+      }}
+      return `<td class="${{cellClass}}" data-cls="${{row.cls}}" data-month="${{m}}" data-avg="${{avg.toFixed(2)}}" data-n="${{b.n}}"${{dipTitle}} style="background:rgb(${{rgb.r}},${{rgb.g}},${{rgb.b}}); color:${{textColor}}">${{avg.toFixed(1)}}${{dipMark}}</td>`;
     }}).join('');
     return `<tr><td class="rowlabel" title="${{row.cls}}">${{row.cls}} <span style="color:var(--text-muted); font-weight:400;">(n=${{row.n}})</span></td>${{cells}}</tr>`;
   }}).join('');
 
   body.querySelectorAll('td.cell:not(.empty)').forEach(td => {{
     td.addEventListener('mousemove', (e) => {{
-      tooltip.innerHTML = `<b>${{td.dataset.cls}} &middot; ${{td.dataset.month}}</b><br>Avg ${{td.dataset.avg}} &middot; n=${{td.dataset.n}}`;
+      let html = `<b>${{td.dataset.cls}} &middot; ${{td.dataset.month}}</b><br>Avg ${{td.dataset.avg}} &middot; n=${{td.dataset.n}}`;
+      if (td.dataset.dip) html += `<br>${{td.dataset.dip}}`;
+      tooltip.innerHTML = html;
       tooltip.style.left = e.clientX + 'px';
       tooltip.style.top = (e.clientY - 10) + 'px';
       tooltip.classList.add('show');
