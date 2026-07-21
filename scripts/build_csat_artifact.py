@@ -100,6 +100,9 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
     --resolver-ai:    #2a78d6;
     --resolver-human: #1baf7a;
 
+    --warn-bg:     #fdf3e2; --warn-border: #edc871; --warn-text: #7a5205;
+    --good-bg:     #eaf6ee; --good-border: #a6dcb6; --good-text: #1e6b38;
+
     --seq-300: #6da7ec; --seq-400: #3987e5; --seq-500: #256abf; --seq-600: #184f95; --seq-700: #0d366b;
 
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -122,6 +125,8 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
       --brand-mcaff:    #eba845;
       --resolver-ai:    #3987e5;
       --resolver-human: #199e70;
+      --warn-bg:     #3a2c0d; --warn-border: #7a5a17; --warn-text: #f0c869;
+      --good-bg:     #123321; --good-border: #2f6b45; --good-text: #7fdba0;
       --seq-300: #1c5cab; --seq-400: #3987e5; --seq-500: #5598e7; --seq-600: #86b6ef; --seq-700: #cde2fb;
     }}
   }}
@@ -130,6 +135,8 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
     --text-secondary: #c3c2b7; --text-muted: #898781; --gridline: #2c2c2a; --border: rgba(255,255,255,0.10);
     --rating-1: #e66767; --rating-3: #898781; --rating-5: #3987e5;
     --brand-hyphen: #9a7fe0; --brand-mcaff: #eba845; --resolver-ai: #3987e5; --resolver-human: #199e70;
+    --warn-bg: #3a2c0d; --warn-border: #7a5a17; --warn-text: #f0c869;
+    --good-bg: #123321; --good-border: #2f6b45; --good-text: #7fdba0;
     --seq-300: #1c5cab; --seq-400: #3987e5; --seq-500: #5598e7; --seq-600: #86b6ef; --seq-700: #cde2fb;
   }}
   :root[data-theme="light"] .viz-root {{
@@ -137,6 +144,8 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
     --text-secondary: #52514e; --text-muted: #898781; --gridline: #e1e0d9; --border: rgba(11,11,11,0.10);
     --rating-1: #e34948; --rating-3: #898781; --rating-5: #2a78d6;
     --brand-hyphen: #6b4bc7; --brand-mcaff: #d98c1f; --resolver-ai: #2a78d6; --resolver-human: #1baf7a;
+    --warn-bg: #fdf3e2; --warn-border: #edc871; --warn-text: #7a5205;
+    --good-bg: #eaf6ee; --good-border: #a6dcb6; --good-text: #1e6b38;
     --seq-300: #6da7ec; --seq-400: #3987e5; --seq-500: #256abf; --seq-600: #184f95; --seq-700: #0d366b;
   }}
 
@@ -217,6 +226,17 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
 
   .footnote {{ font-size: 11.5px; color: var(--text-muted); margin-top: 14px; }}
 
+  .dip-banner {{
+    display: flex; align-items: flex-start; gap: 10px;
+    border-radius: 10px; padding: 12px 16px; margin-bottom: 20px;
+    font-size: 13px; line-height: 1.5; border: 1px solid transparent;
+  }}
+  .dip-banner .dip-icon {{ font-size: 15px; line-height: 1.5; flex: none; }}
+  .dip-banner b {{ font-weight: 650; }}
+  .dip-banner.warn {{ background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn-text); }}
+  .dip-banner.good {{ background: var(--good-bg); border-color: var(--good-border); color: var(--good-text); }}
+  .dip-banner.neutral {{ background: var(--surface-1); border-color: var(--border); color: var(--text-secondary); }}
+
   .findings-list {{ margin: 0 0 4px; padding-left: 20px; }}
   .findings-list li {{ font-size: 13.5px; line-height: 1.55; color: var(--text-primary); margin-bottom: 12px; }}
   .findings-list li b {{ font-weight: 650; }}
@@ -236,6 +256,8 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
       AI-resolved avg {avg(k['ai_avg'])} (n={n(k['ai_n'])}) &nbsp;vs&nbsp; Human-resolved avg {avg(k['human_avg'])} (n={n(k['human_n'])}) &nbsp;&middot;&nbsp;
       Chat avg {avg(chat.get('avg',0))} (n={n(chat.get('n',0))}) &nbsp;vs&nbsp; Email avg {avg(email.get('avg',0))} (n={n(email.get('n',0))})
     </p>
+
+    <div id="dip-banner" class="dip-banner neutral"><span class="dip-icon">…</span><span>Checking month-on-month CSAT…</span></div>
 
     <div class="kpi-row">
       <div class="kpi"><div class="kpi-label">Total responses</div><div class="kpi-value" id="kpi-total">{n(k['total'])}</div><div class="kpi-sub" id="kpi-total-sub">closed tickets</div></div>
@@ -541,11 +563,61 @@ function renderKPIs(brand, resolver, channel) {{
   document.getElementById('kpi-detractors').textContent = s.totalN ? fmtPct(s.detractorsPct) : '–';
 }}
 
+// Minimum sample size per month before it's trusted for the dip comparison.
+const DIP_MIN_N = 20;
+// Minimum ratings-point drop before it counts as a real dip (not rounding noise).
+const DIP_THRESHOLD = 0.05;
+
+function computeMonthly(brand, resolver, channel) {{
+  const byMonth = {{}};
+  GRANULAR.forEach(rec => {{
+    if (!passesFilter(rec, brand, resolver, channel)) return;
+    if (!byMonth[rec.m]) byMonth[rec.m] = {{ n: 0, sum: 0 }};
+    byMonth[rec.m].n += rec.n;
+    byMonth[rec.m].sum += rec.n * Number(rec.rt);
+  }});
+  return MONTH_ORDER
+    .filter(m => byMonth[m] && byMonth[m].n >= DIP_MIN_N)
+    .map(m => ({{ month: m, avg: byMonth[m].sum / byMonth[m].n, n: byMonth[m].n }}));
+}}
+
+function renderDipBanner(brand, resolver, channel) {{
+  const el = document.getElementById('dip-banner');
+  const months = computeMonthly(brand, resolver, channel);
+
+  if (months.length < 2) {{
+    el.className = 'dip-banner neutral';
+    el.innerHTML = '<span class="dip-icon">–</span><span>Not enough months with sufficient volume (n&ge;' + DIP_MIN_N + ') under this filter to compare.</span>';
+    return;
+  }}
+
+  const current = months[months.length - 1];
+  const prior = months.slice(0, -1);
+  const isPartial = current.month === MONTH_ORDER[MONTH_ORDER.length - 1];
+  const partialNote = isPartial ? ' (month in progress, so far)' : '';
+
+  const dips = prior
+    .map(p => ({{ month: p.month, avg: p.avg, n: p.n, drop: p.avg - current.avg }}))
+    .filter(p => p.drop >= DIP_THRESHOLD)
+    .sort((a, b) => b.drop - a.drop);
+
+  if (dips.length > 0) {{
+    const list = dips.map(p => `${{p.month}} (${{p.avg.toFixed(2)}}, &minus;${{p.drop.toFixed(2)}})`).join(', ');
+    el.className = 'dip-banner warn';
+    el.innerHTML = `<span class="dip-icon">&#9888;</span><span><b>${{current.month}}${{partialNote}} CSAT (${{current.avg.toFixed(2)}}) is down vs ${{dips.length}} prior month${{dips.length > 1 ? 's' : ''}}</b> under this filter: ${{list}}.</span>`;
+  }} else {{
+    const best = prior.reduce((a, b) => (b.avg > a.avg ? b : a), prior[0]);
+    el.className = 'dip-banner good';
+    el.innerHTML = `<span class="dip-icon">&#10003;</span><span><b>${{current.month}}${{partialNote}} CSAT (${{current.avg.toFixed(2)}}) is holding steady or better</b> than every prior month shown here (best comparison: ${{best.month}} at ${{best.avg.toFixed(2)}}) under this filter.</span>`;
+  }}
+}}
+
 function refreshAll() {{
   const brand = document.getElementById('f-brand').value;
   const resolver = document.getElementById('f-resolver').value;
   const channel = document.getElementById('f-channel').value;
   renderKPIs(brand, resolver, channel);
+  renderDipBanner(brand, resolver, channel);
   renderHeatmap(GRANULAR, 'heatmap-head', 'heatmap-body', 'Task Category', brand, resolver, channel);
   renderHeatmap(GRANULAR_AGENT, 'heatmap-agent-head', 'heatmap-agent-body', 'Agent', brand, resolver, channel);
 }}
