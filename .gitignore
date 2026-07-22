@@ -19,3 +19,5 @@ data/combined_data_mcaffeine.xlsx
 
 # Excel lock files
 ~$*.xlsx
+.vercel
+.env*

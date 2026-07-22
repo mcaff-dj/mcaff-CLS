@@ -504,6 +504,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [refNotes, setRefNotes] = useState('');
       const [agentRemarks, setAgentRemarks] = useState('');
       const [receiptTkt, setReceiptTkt] = useState(null);
+      const [refundProcessing, setRefundProcessing] = useState(false);
 
       // Explicit Claim & Assign Function for Lead (Column Q Sync)
       const claimLeadForAgent = (tkt) => {
@@ -545,9 +546,38 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         setAgentRemarks(existing?.agentRemarks || '');
       };
 
-      const submitDisp = ()=>{
+      const submitDisp = async ()=>{
         if(!dispTkt)return;
         const isRef=dispReason==='Refund Requested';
+        if(isRef && dispTkt.paymentMethod!=='Prepaid'){
+          showToast('Refund can only be initiated for Prepaid orders');
+          return;
+        }
+
+        let gokwik=null;
+        if(isRef){
+          setRefundProcessing(true);
+          try{
+            const r=await fetch('/api/refund/gokwik-initiate',{
+              method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({moid:dispTkt.orderNumber,amount:dispTkt.orderAmount})
+            });
+            const data=await r.json();
+            if(!r.ok||!data.ok){
+              setRefundProcessing(false);
+              showToast(data?.error||'Refund failed at gateway — order not disposed. Please retry.');
+              return;
+            }
+            gokwik=data;
+          }catch(e){
+            setRefundProcessing(false);
+            showToast('Could not reach refund service — order not disposed. Please retry.');
+            return;
+          }
+          setRefundProcessing(false);
+        }
+
         const st=isRef?'Refunded':dispConn==='YES'?`Connected — ${dispReason}`:`Unreachable — ${dispReason}`;
         
         // Auto-assign Column Q to active agent's Email ID
@@ -597,7 +627,18 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         });
         
         if(isRef){
-          doRefund(dispTkt.id,{refundId:`RFD-${Date.now().toString().slice(-6)}`,amount:dispTkt.orderAmount,reason:dispReason,date:new Date().toLocaleString(),mode:dispTkt.paymentMethod==='COD'?'UPI Payout':'Original Gateway',transactionRef:`TXN-${Math.random().toString(36).substring(2,10).toUpperCase()}`,processedBy:googleUser.name,notes:refNotes});
+          const gkData=gokwik?.gokwik||{};
+          doRefund(dispTkt.id,{
+            refundId: gkData.refund_id || gkData.refundId || gkData.id || `RFD-${Date.now().toString().slice(-6)}`,
+            amount:dispTkt.orderAmount,
+            reason:dispReason,
+            date:new Date().toLocaleString(),
+            mode:`GoKwik (${gokwik?.vendor||'gateway'})`,
+            transactionRef: gkData.transaction_id || gkData.txn_id || gkData.transactionRef || `TXN-${Math.random().toString(36).substring(2,10).toUpperCase()}`,
+            processedBy:googleUser.name,
+            notes:refNotes,
+            gokwikResponse: gkData
+          });
         } else {
           showToast(`Disposed ${dispTkt.orderNumber} & refilled fresh lead into box!`);
         }
@@ -962,7 +1003,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const connectedOutcomes = [
         { value: 'Customer Agreed to Accept', label: 'Customer Agreed to Accept (Reorder)', icon: '📦', desc: 'Customer agreed to receive shipment / converted reorder' },
         { value: 'Already Refunded', label: 'Already Refunded', icon: '💸', desc: 'Order was already refunded previously' },
-        { value: 'Refund Requested', label: 'Refund Requested', icon: '💳', desc: 'Process immediate prepaid/COD refund' },
+        { value: 'Refund Requested', label: 'Refund Requested', icon: '💳', desc: 'Process immediate refund (Prepaid orders only)' },
         { value: 'Product Issue / Exchange', label: 'Product Issue / Exchange', icon: '🔄', desc: 'Customer requested item exchange' },
         { value: 'Address Change Requested', label: 'Address Change Requested', icon: '📍', desc: 'Updated delivery address needed' },
         { value: 'Not Interested', label: 'Not Interested / Cancelled', icon: '🚫', desc: 'Customer refused delivery' },
@@ -970,7 +1011,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       ];
 
       const unreachableOutcomes = [
-        { value: 'Refund Requested', label: 'Refund Requested (Initiate Refund)', icon: '💳', desc: 'Process immediate prepaid refund or COD payout' },
+        { value: 'Refund Requested', label: 'Refund Requested (Initiate Refund)', icon: '💳', desc: 'Process immediate refund (Prepaid orders only)' },
         { value: 'Already Refunded', label: 'Already Refunded', icon: '💸', desc: 'Order was already refunded previously' },
         { value: 'Ringing / No Answer', label: 'Ringing / No Answer', icon: '🔔', desc: 'Phone rang but no response' },
         { value: 'Not Reachable', label: 'Not Reachable', icon: '📡', desc: 'Out of coverage area' },
@@ -1983,17 +2024,20 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-52 overflow-y-auto custom-scroll pr-1">
                         {connectedOutcomes.map(item => {
                           const isSel = dispReason === item.value;
+                          const isRefundLocked = item.value === 'Refund Requested' && dispTkt.paymentMethod !== 'Prepaid';
                           return (
                             <button
                               key={item.value}
                               type="button"
-                              onClick={() => setDispReason(item.value)}
-                              className={`p-3 rounded-xl border text-left transition-all flex items-start gap-3 ${isSel ? 'bg-indigo-950/40 border-indigo-500 text-indigo-100 shadow-md shadow-indigo-950/30 ring-1 ring-indigo-500/40' : 'bg-zinc-900/70 border-zinc-800/80 text-zinc-300 hover:border-zinc-700'}`}
+                              disabled={isRefundLocked}
+                              title={isRefundLocked ? 'Refund initiation is only available for Prepaid orders' : undefined}
+                              onClick={() => { if(!isRefundLocked) setDispReason(item.value); }}
+                              className={`p-3 rounded-xl border text-left transition-all flex items-start gap-3 ${isRefundLocked ? 'opacity-40 cursor-not-allowed bg-zinc-900/40 border-zinc-800/60 text-zinc-500' : isSel ? 'bg-indigo-950/40 border-indigo-500 text-indigo-100 shadow-md shadow-indigo-950/30 ring-1 ring-indigo-500/40' : 'bg-zinc-900/70 border-zinc-800/80 text-zinc-300 hover:border-zinc-700'}`}
                             >
                               <span className="text-base shrink-0">{item.icon}</span>
                               <div className="truncate">
                                 <p className="text-[13px] font-bold truncate">{item.label}</p>
-                                <p className="text-[11px] text-zinc-500 truncate mt-0.5">{item.desc}</p>
+                                <p className="text-[11px] text-zinc-500 truncate mt-0.5">{isRefundLocked ? 'Prepaid orders only' : item.desc}</p>
                               </div>
                             </button>
                           );
@@ -2001,18 +2045,16 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                       </div>
 
                       {/* Refund Action Card */}
-                      {dispReason==='Refund Requested'&&(
+                      {dispReason==='Refund Requested' && dispTkt.paymentMethod==='Prepaid' && (
                         <div className="bg-emerald-950/30 p-4 rounded-xl border border-emerald-800/60 space-y-3 animate-fadeIn mt-3">
                           <div className="flex items-center justify-between">
                             <span className="font-bold text-emerald-300 text-sm flex items-center gap-2">
-                              💳 {dispTkt.paymentMethod==='Prepaid'?'Prepaid Instant Refund':'COD UPI Payout'}
+                              💳 Prepaid Instant Refund
                             </span>
                             <span className="font-mono text-xl font-extrabold text-emerald-400">₹{dispTkt.orderAmount.toLocaleString('en-IN')}</span>
                           </div>
                           <p className="text-[12px] text-zinc-400 leading-relaxed">
-                            {dispTkt.paymentMethod==='Prepaid'
-                              ?'Refund will be credited back to customer original payment gateway source.'
-                              :'Refund will be credited to customer via instant UPI payout link.'}
+                            Refund will be credited back to customer original payment gateway source.
                           </p>
                           <input
                             value={refNotes}
@@ -2059,17 +2101,20 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-52 overflow-y-auto custom-scroll pr-1">
                         {unreachableOutcomes.map(item => {
                           const isSel = dispReason === item.value;
+                          const isRefundLocked = item.value === 'Refund Requested' && dispTkt.paymentMethod !== 'Prepaid';
                           return (
                             <button
                               key={item.value}
                               type="button"
-                              onClick={() => setDispReason(item.value)}
-                              className={`p-3 rounded-xl border text-left transition-all flex items-start gap-3 ${isSel ? 'bg-rose-950/40 border-rose-500 text-rose-100 shadow-md ring-1 ring-rose-500/40' : 'bg-zinc-900/70 border-zinc-800/80 text-zinc-300 hover:border-zinc-700'}`}
+                              disabled={isRefundLocked}
+                              title={isRefundLocked ? 'Refund initiation is only available for Prepaid orders' : undefined}
+                              onClick={() => { if(!isRefundLocked) setDispReason(item.value); }}
+                              className={`p-3 rounded-xl border text-left transition-all flex items-start gap-3 ${isRefundLocked ? 'opacity-40 cursor-not-allowed bg-zinc-900/40 border-zinc-800/60 text-zinc-500' : isSel ? 'bg-rose-950/40 border-rose-500 text-rose-100 shadow-md ring-1 ring-rose-500/40' : 'bg-zinc-900/70 border-zinc-800/80 text-zinc-300 hover:border-zinc-700'}`}
                             >
                               <span className="text-base shrink-0">{item.icon}</span>
                               <div className="truncate">
                                 <p className="text-[13px] font-bold truncate">{item.label}</p>
-                                <p className="text-[11px] text-zinc-500 truncate mt-0.5">{item.desc}</p>
+                                <p className="text-[11px] text-zinc-500 truncate mt-0.5">{isRefundLocked ? 'Prepaid orders only' : item.desc}</p>
                               </div>
                             </button>
                           );
@@ -2077,18 +2122,16 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                       </div>
 
                       {/* Refund Action Card for Unreachable Call */}
-                      {dispReason==='Refund Requested'&&(
+                      {dispReason==='Refund Requested' && dispTkt.paymentMethod==='Prepaid' && (
                         <div className="bg-emerald-950/30 p-4 rounded-xl border border-emerald-800/60 space-y-3 animate-fadeIn mt-3">
                           <div className="flex items-center justify-between">
                             <span className="font-bold text-emerald-300 text-sm flex items-center gap-2">
-                              💳 {dispTkt.paymentMethod==='Prepaid'?'Prepaid Instant Refund':'COD UPI Payout'}
+                              💳 Prepaid Instant Refund
                             </span>
                             <span className="font-mono text-xl font-extrabold text-emerald-400">₹{dispTkt.orderAmount.toLocaleString('en-IN')}</span>
                           </div>
                           <p className="text-[12px] text-zinc-400 leading-relaxed">
-                            {dispTkt.paymentMethod==='Prepaid'
-                              ?'Refund will be credited back to customer original payment gateway source.'
-                              :'Refund will be credited to customer via instant UPI payout link.'}
+                            Refund will be credited back to customer original payment gateway source.
                           </p>
                           <input
                             value={refNotes}
@@ -2125,14 +2168,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   <button
                     type="button"
                     onClick={submitDisp}
-                    disabled={!dispConn || !dispReason}
+                    disabled={!dispConn || !dispReason || (dispReason==='Refund Requested' && dispTkt.paymentMethod!=='Prepaid') || refundProcessing}
                     className={`px-6 py-2.5 rounded-xl font-bold text-[13px] disabled:opacity-30 transition-all flex items-center gap-2 ${
                       dispReason==='Refund Requested'
                         ?'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-950/50 ring-1 ring-emerald-400/50'
                         :'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-950/50'
                     }`}
                   >
-                    {dispReason==='Refund Requested' ? '💳 Confirm Refund & Save' : '🚀 Save Disposition & Sync Live Sheet'}
+                    {refundProcessing ? '⏳ Processing Refund…' : dispReason==='Refund Requested' ? '💳 Confirm Refund & Save' : '🚀 Save Disposition & Sync Live Sheet'}
                   </button>
                 </div>
               </div>
