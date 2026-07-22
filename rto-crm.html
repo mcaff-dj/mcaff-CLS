@@ -868,26 +868,47 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       useEffect(()=>{sync(true);},[]);
       useEffect(()=>{const t=setInterval(()=>sync(true),60000);return()=>clearInterval(t);},[sync]);
 
-      // Derived data & STRICT Calling Date (Latest First) Sorting
+      // Derived data & STRICT Calling Date (Latest First) Sorting & Duplicate Lead Protection
       const allTickets = useMemo(()=>{
-        let base=tickets.map(t=>{
-          const o=overrides[t.id];
-          return o?{
+        // 1. Merge overrides with base tickets
+        let base = tickets.map(t => {
+          const o = overrides[t.id];
+          return o ? {
             ...t,
-            status:o.status||t.status,
-            refundDetails:o.refundDetails,
-            connected:o.connectedStatus||t.connected,
-            disposition:o.agentDisposition||t.disposition,
-            agentRemarks:o.agentRemarks!==undefined?o.agentRemarks:t.agentRemarks,
-            newOrderId:o.newOrderId||t.newOrderId,
-            newAddress:o.newAddress||t.newAddress,
-            disposedAt:o.disposedAt||t.disposedAt,
-            disposedBy:o.disposedBy||t.disposedBy,
-            assignedAgent:o.assignedAgent||t.assignedAgent
-          }:t;
+            status: o.status || t.status,
+            refundDetails: o.refundDetails,
+            connected: o.connectedStatus || t.connected,
+            disposition: o.agentDisposition || t.disposition,
+            agentRemarks: o.agentRemarks !== undefined ? o.agentRemarks : t.agentRemarks,
+            newOrderId: o.newOrderId || t.newOrderId,
+            newAddress: o.newAddress || t.newAddress,
+            disposedAt: o.disposedAt || t.disposedAt,
+            disposedBy: o.disposedBy || t.disposedBy,
+            assignedAgent: o.assignedAgent || t.assignedAgent,
+            attemptType: o.attemptType || t.attemptType
+          } : t;
         });
 
-        // STRICT CALLING DATE SORTING: Latest calling date (e.g. 21 Jul, 20 Jul) ALWAYS at the top!
+        // 2. STAGE 1 DEDUPLICATION: Group by orderNumber to ensure NO duplicate Order IDs exist!
+        const uniqueOrderMap = new Map();
+        base.forEach(t => {
+          if (!t.orderNumber) return;
+          const key = t.orderNumber.toString().trim().toUpperCase();
+          if (!uniqueOrderMap.has(key)) {
+            uniqueOrderMap.set(key, t);
+          } else {
+            // If duplicate row exists, prefer the one that is assigned to an agent, disposed, or has remarks
+            const existing = uniqueOrderMap.get(key);
+            const isExistingActive = (existing.assignedAgent && existing.assignedAgent !== 'Unassigned') || existing.disposition || existing.agentRemarks || existing.status !== 'Pending';
+            const isNewActive = (t.assignedAgent && t.assignedAgent !== 'Unassigned') || t.disposition || t.agentRemarks || t.status !== 'Pending';
+            if (isNewActive && !isExistingActive) {
+              uniqueOrderMap.set(key, t);
+            }
+          }
+        });
+        base = Array.from(uniqueOrderMap.values());
+
+        // 3. STRICT CALLING DATE SORTING: Latest calling date (e.g. 22 Jul, 21 Jul) ALWAYS at the top!
         base.sort((a,b)=>{
           if(a.rowDate && b.rowDate && a.rowDate.getTime() !== b.rowDate.getTime()) {
             return b.rowDate.getTime() - a.rowDate.getTime();
@@ -895,14 +916,20 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return b.rawIndex - a.rawIndex;
         });
 
-        // REPLENISHMENT ENGINE WITH STRICT DATE WATERFALL (Today -> Yesterday -> 20th -> 19th...)
+        // 4. REPLENISHMENT ENGINE WITH STRICT DATE WATERFALL & EXCLUSIVE LEAD LOCKING
         if(userRole==='Agent' && googleUser?.email){
           const e = googleUser.email.toLowerCase();
           const p = e.split('@')[0];
           const isMine = (agt) => agt && agt !== 'Unassigned' && (agt.toLowerCase().includes(e) || agt.toLowerCase().includes(p));
 
-          // 1. Pending unresolved leads currently assigned to me (sorted by date descending)
+          // Pending unresolved leads currently assigned to me
           let myPending = base.filter(t => t.status === 'Pending' && !t.disposition && !t.agentRemarks && isMine(t.assignedAgent));
+          
+          // Deduplicate myPending by orderNumber
+          const myPendingMap = new Map();
+          myPending.forEach(t => { if (!myPendingMap.has(t.orderNumber)) myPendingMap.set(t.orderNumber, t); });
+          myPending = Array.from(myPendingMap.values());
+
           myPending.sort((a,b)=>{
             if(a.rowDate && b.rowDate && a.rowDate.getTime() !== b.rowDate.getTime()) {
               return b.rowDate.getTime() - a.rowDate.getTime();
@@ -910,11 +937,16 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
             return b.rawIndex - a.rawIndex;
           });
           
-          // 2. Disposed or refunded leads assigned to me (kept for history view)
+          // Disposed or refunded leads assigned to me (kept for history view)
           const myDisposed = base.filter(t => (t.status !== 'Pending' || t.disposition || t.agentRemarks) && isMine(t.assignedAgent));
 
-          // 3. Unassigned pending leads available in the sheet
-          let unassignedLeads = base.filter(t => t.orderNumber && t.status === 'Pending' && !t.disposition && !t.agentRemarks && (!t.assignedAgent || t.assignedAgent === 'Unassigned'));
+          // Unassigned pending leads available in the sheet (STRICTLY verifying NO OTHER agent is assigned)
+          let unassignedLeads = base.filter(t => {
+            if (!t.orderNumber) return false;
+            if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
+            const agt = (t.assignedAgent || '').trim();
+            return !agt || agt === 'Unassigned' || agt.toLowerCase() === 'unassigned';
+          });
 
           const needed = Math.max(0, maxLeads - myPending.length);
           if (needed > 0 && unassignedLeads.length > 0) {
@@ -931,12 +963,18 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
             // Waterfall: Fill from newest date available. Only move to previous date if current date is exhausted!
             const claimed = [];
+            const claimedOrderNumbers = new Set(myPending.map(t => t.orderNumber));
+
             for (const ts of sortedTimestamps) {
               if (claimed.length >= needed) break;
               const leadsForDate = dateMap.get(ts);
-              const remainingNeeded = needed - claimed.length;
-              const toTake = leadsForDate.slice(0, remainingNeeded);
-              claimed.push(...toTake);
+              for (const t of leadsForDate) {
+                if (claimed.length >= needed) break;
+                if (!claimedOrderNumbers.has(t.orderNumber)) {
+                  claimedOrderNumbers.add(t.orderNumber);
+                  claimed.push(t);
+                }
+              }
             }
 
             const claimedTagged = claimed.map(t => ({
@@ -947,7 +985,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
             myPending = [...myPending, ...claimedTagged];
           }
 
-          // Return 10 PENDING leads + ALL DISPOSED leads
+          // Return PENDING leads (up to maxLeads) + ALL DISPOSED leads
           return [...myPending.slice(0, maxLeads), ...myDisposed];
         }
 
