@@ -53,6 +53,33 @@
     .custom-scroll::-webkit-scrollbar { width: 4px; }
     .custom-scroll::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 4px; }
 
+    /* ── Multi-Theme System (Dark, Light, Royal Purple) ── */
+    html.dark body, body.theme-dark { background: #09090b; color: #fafafa; }
+
+    /* Light Theme Overrides */
+    body.theme-light { background: #f8fafc !important; color: #0f172a !important; }
+    body.theme-light header { background-color: rgba(255, 255, 255, 0.95) !important; border-color: #cbd5e1 !important; }
+    body.theme-light main { background-color: #f8fafc !important; }
+    body.theme-light .bg-zinc-900\/90, body.theme-light .bg-zinc-900\/80, body.theme-light .bg-zinc-900\/70, body.theme-light .bg-zinc-900\/60, body.theme-light .bg-zinc-900 { background-color: #ffffff !important; border-color: #e2e8f0 !important; color: #0f172a !important; }
+    body.theme-light .bg-zinc-950 { background-color: #f1f5f9 !important; border-color: #cbd5e1 !important; color: #0f172a !important; }
+    body.theme-light .border-zinc-800\/80, body.theme-light .border-zinc-800\/90, body.theme-light .border-zinc-800, body.theme-light .border-zinc-700\/80, body.theme-light .border-zinc-700 { border-color: #e2e8f0 !important; }
+    body.theme-light .text-zinc-100, body.theme-light .text-zinc-200 { color: #0f172a !important; }
+    body.theme-light .text-zinc-300, body.theme-light .text-zinc-400 { color: #334155 !important; }
+    body.theme-light .text-zinc-500 { color: #64748b !important; }
+    body.theme-light input, body.theme-light select, body.theme-light textarea { background-color: #ffffff !important; color: #0f172a !important; border-color: #cbd5e1 !important; }
+
+    /* Royal Purple Theme Overrides */
+    body.theme-purple { background: #0c0714 !important; color: #faf5ff !important; }
+    body.theme-purple header { background-color: rgba(15, 8, 26, 0.95) !important; border-color: #3b1b63 !important; }
+    body.theme-purple main { background-color: #0c0714 !important; }
+    body.theme-purple .bg-zinc-900\/90, body.theme-purple .bg-zinc-900\/80, body.theme-purple .bg-zinc-900\/70, body.theme-purple .bg-zinc-900\/60, body.theme-purple .bg-zinc-900 { background-color: #190c2e !important; border-color: #3b1b63 !important; color: #faf5ff !important; }
+    body.theme-purple .bg-zinc-950 { background-color: #120724 !important; border-color: #4c1d95 !important; color: #faf5ff !important; }
+    body.theme-purple .border-zinc-800\/80, body.theme-purple .border-zinc-800\/90, body.theme-purple .border-zinc-800, body.theme-purple .border-zinc-700\/80, body.theme-purple .border-zinc-700 { border-color: #3b1b63 !important; }
+    body.theme-purple .text-zinc-100, body.theme-purple .text-zinc-200 { color: #faf5ff !important; }
+    body.theme-purple .text-zinc-300, body.theme-purple .text-zinc-400 { color: #e9d5ff !important; }
+    body.theme-purple .text-zinc-500 { color: #c084fc !important; }
+    body.theme-purple input, body.theme-purple select, body.theme-purple textarea { background-color: #120724 !important; color: #faf5ff !important; border-color: #4c1d95 !important; }
+
     @media print {
       body * { visibility: hidden; }
       #printable-receipt, #printable-receipt * { visibility: visible; }
@@ -403,6 +430,16 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         } catch {}
         return 'Admin';
       });
+
+      const [theme, setTheme] = useState(() => {
+        try { return localStorage.getItem('rto_theme') || 'dark'; } catch { return 'dark'; }
+      });
+
+      useEffect(() => {
+        document.documentElement.className = theme === 'light' ? 'light' : 'dark';
+        document.body.className = `font-sans antialiased min-h-screen theme-${theme}`;
+        try { localStorage.setItem('rto_theme', theme); } catch {}
+      }, [theme]);
 
       const [agentRoster, setAgentRoster] = useState(()=>{
         try { const s = localStorage.getItem('rto_agent_roster'); if (s) { const p = JSON.parse(s); if (Array.isArray(p) && p.length) return p; } } catch {}
@@ -1039,6 +1076,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         { value: 'Agent', label: 'Role: Agent', icon: '👤' },
       ];
 
+      const themeOptions = [
+        { value: 'dark', label: 'Theme: Dark', icon: '🌙' },
+        { value: 'light', label: 'Theme: Light', icon: '☀️' },
+        { value: 'purple', label: 'Theme: Purple', icon: '🔮' },
+      ];
+
       const connectedOutcomes = [
         { value: 'Customer Agreed to Accept', label: 'Customer Agreed to Accept (Reorder)', icon: '📦', desc: 'Customer agreed to receive shipment / converted reorder' },
         { value: 'Already Refunded', label: 'Already Refunded', icon: '💸', desc: 'Order was already refunded previously' },
@@ -1199,6 +1242,13 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   onChange={handleSwitchRole}
                   options={roleOptions}
                   icon={ShieldIcon}
+                />
+
+                {/* Theme Selector (Dark / Light / Purple) */}
+                <CustomSelect
+                  value={theme}
+                  onChange={setTheme}
+                  options={themeOptions}
                 />
 
                 {/* Custom Status Dropdown */}
