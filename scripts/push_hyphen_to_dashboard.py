@@ -5,10 +5,18 @@ per the agreed column mapping. Appends only; never clears.
 
 Columns the dashboard computes itself via sheet formulas (SKU, Month, Week,
 Total Sales M/W, etc.) are never written with literal data - instead, the
-formula is dragged down for the newly appended rows: copied from the row
-directly above (normal case, so relative references auto-adjust exactly like
-the fill handle), or generated from a known template when there's no
-existing row to copy from at all (a brand-new/empty dashboard tab).
+known formula template for each column is filled in and written directly to
+the newly appended rows.
+
+NOTE: this used to "drag" the formula down via the Sheets API's copyPaste
+request (copying the cell from the row above, letting Sheets auto-adjust
+relative references like a fill handle). copyPaste turned out to be
+incompatible with this dashboard: it has a live Basic Filter hiding some
+"Query Category" values, and Sheets flatly rejects any copyPaste touching a
+filtered-out row ("This operation is not supported on a range with a
+filtered out row") - not a transient error, so retrying never helps. A
+plain values write isn't affected by filters, so writing the templated
+formula text directly sidesteps the problem entirely.
 """
 import re
 import sys
@@ -59,10 +67,10 @@ FORMULA_COLUMNS = [
     "Partner Allocation", "WH Allocation",
 ]
 
-# Fallback templates for the formula columns above, used ONLY when the
-# dashboard tab has no existing row to copy a formula down from. "{r}" is
-# replaced with the actual 1-based row number. Captured verbatim from the
-# live dashboard sheet's own formulas.
+# Formula templates, written directly into every newly appended row (see
+# module docstring for why - copyPaste "drag down" doesn't work on this
+# dashboard). "{r}" is replaced with the actual 1-based row number. Captured
+# verbatim from the live dashboard sheet's own formulas.
 FORMULA_TEMPLATES = {
     "SKU": '=iferror(VLOOKUP(G{r},SKU!A:B,2,0))',
     "Month": '=IF(Q{r}="2026",TEXT(B{r},"M")&"_"&TEXT(B{r},"MMM\'YY"),TEXT(B{r},"MM")&"_"&TEXT(B{r},"MMM\'YY"))',
@@ -180,25 +188,20 @@ def main():
     dest_row_end = start_row + len(new_rows) - 1
     print(f"[dashboard] appended {len(new_rows)} rows at row {start_row}")
 
-    sheet_gid = lib.get_sheet_gid(DASHBOARD_SHEET_ID, DASHBOARD_TAB)
     for col_name in FORMULA_COLUMNS:
         if col_name not in dash_headers:
             continue
+        template = FORMULA_TEMPLATES.get(col_name)
+        if not template:
+            continue
         col_index = dash_headers.index(col_name)
-        if dash_last_row >= 2:
-            lib.copy_paste_column(DASHBOARD_SHEET_ID, sheet_gid, dash_last_row, start_row, dest_row_end, col_index)
-        else:
-            template = FORMULA_TEMPLATES.get(col_name)
-            if not template:
-                continue
-            formulas = [[template.replace("{r}", str(start_row + i))] for i in range(len(new_rows))]
-            col_letter = lib.get_column_letter(col_index)
-            lib.set_sheet_values_batch(DASHBOARD_SHEET_ID, [{
-                "range": f"'{DASHBOARD_TAB}'!{col_letter}{start_row}:{col_letter}{dest_row_end}",
-                "values": formulas,
-            }])
-    print(f"[dashboard] dragged formulas for {len(FORMULA_COLUMNS)} columns, rows {start_row}-{dest_row_end} "
-          f"({'copied down from row ' + str(dash_last_row) if dash_last_row >= 2 else 'generated from templates - first batch'})")
+        formulas = [[template.replace("{r}", str(start_row + i))] for i in range(len(new_rows))]
+        col_letter = lib.get_column_letter(col_index)
+        lib.set_sheet_values_batch(DASHBOARD_SHEET_ID, [{
+            "range": f"'{DASHBOARD_TAB}'!{col_letter}{start_row}:{col_letter}{dest_row_end}",
+            "values": formulas,
+        }])
+    print(f"[dashboard] wrote templated formulas for {len(FORMULA_COLUMNS)} columns, rows {start_row}-{dest_row_end}")
 
 
 if __name__ == "__main__":

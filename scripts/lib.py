@@ -191,7 +191,12 @@ def copy_paste_column(spreadsheet_id, sheet_gid, src_row, dest_row_start, dest_r
     """Copies a single source cell down through a destination row range in the
     same column via the Sheets API's copyPaste request - Sheets auto-adjusts
     relative references (B2 -> B3, B4, ...) exactly like dragging the fill
-    handle down manually. Rows are 1-based; col_index is 0-based."""
+    handle down manually. Rows are 1-based; col_index is 0-based.
+
+    Retried + logs the response body on failure, same as set_sheet_rows_at_row -
+    this call immediately follows a grid resize (ensure_grid_size), and a bare
+    raise_for_status() with no body logging previously made a same-day 400 from
+    Sheets impossible to diagnose from CI logs alone."""
     token = get_write_access_token()
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate"
     body = {
@@ -211,12 +216,23 @@ def copy_paste_column(spreadsheet_id, sheet_gid, src_row, dest_row_start, dest_r
             }
         }]
     }
-    resp = requests.post(url, headers={
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }, json=body, timeout=60)
-    resp.raise_for_status()
-    return resp.json()
+    last_err = None
+    for attempt in range(1, 6):
+        try:
+            resp = requests.post(url, headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            }, json=body, timeout=60)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            last_err = e
+            print(f"  copy_paste_column col {col_index} rows {dest_row_start}-{dest_row_end} attempt {attempt} failed: {e}")
+            if isinstance(e, requests.exceptions.HTTPError):
+                print(f"    response body: {e.response.text}")
+            if attempt == 5:
+                raise
+            time.sleep(5 * attempt)
 
 
 def delete_sheet_rows(spreadsheet_id, sheet_name, start_row, end_row):
