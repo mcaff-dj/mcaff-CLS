@@ -58,27 +58,91 @@
 
     /* Light Theme Overrides */
     body.theme-light { background: #f8fafc !important; color: #0f172a !important; }
-    body.theme-light header { background-color: rgba(255, 255, 255, 0.95) !important; border-color: #cbd5e1 !important; }
+    body.theme-light header { background-color: rgba(255, 255, 255, 0.95) !important; border-color: #cbd5e1 !important; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
     body.theme-light main { background-color: #f8fafc !important; }
-    body.theme-light .bg-zinc-900\/90, body.theme-light .bg-zinc-900\/80, body.theme-light .bg-zinc-900\/70, body.theme-light .bg-zinc-900\/60, body.theme-light .bg-zinc-900 { background-color: #ffffff !important; border-color: #e2e8f0 !important; color: #0f172a !important; }
-    body.theme-light .bg-zinc-950 { background-color: #f1f5f9 !important; border-color: #cbd5e1 !important; color: #0f172a !important; }
-    body.theme-light .border-zinc-800\/80, body.theme-light .border-zinc-800\/90, body.theme-light .border-zinc-800, body.theme-light .border-zinc-700\/80, body.theme-light .border-zinc-700 { border-color: #e2e8f0 !important; }
-    body.theme-light .text-zinc-100, body.theme-light .text-zinc-200 { color: #0f172a !important; }
-    body.theme-light .text-zinc-300, body.theme-light .text-zinc-400 { color: #334155 !important; }
+    
+    body.theme-light .bg-zinc-900\/90, 
+    body.theme-light .bg-zinc-900\/80, 
+    body.theme-light .bg-zinc-900\/70, 
+    body.theme-light .bg-zinc-900\/60, 
+    body.theme-light .bg-zinc-900\/50, 
+    body.theme-light .bg-zinc-900\/40, 
+    body.theme-light .bg-zinc-900\/30, 
+    body.theme-light .bg-zinc-900\/20, 
+    body.theme-light .bg-zinc-900 { background-color: #ffffff !important; border-color: #e2e8f0 !important; color: #0f172a !important; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+    
+    body.theme-light .bg-zinc-800\/80,
+    body.theme-light .bg-zinc-800\/70,
+    body.theme-light .bg-zinc-800\/60,
+    body.theme-light .bg-zinc-800\/50,
+    body.theme-light .bg-zinc-800\/25,
+    body.theme-light .bg-zinc-800 { background-color: #f1f5f9 !important; border-color: #cbd5e1 !important; color: #1e293b !important; }
+
+    body.theme-light table { background-color: #ffffff !important; color: #0f172a !important; }
+    body.theme-light thead tr { background-color: #f1f5f9 !important; border-color: #e2e8f0 !important; }
+    body.theme-light thead th { color: #334155 !important; font-weight: 700 !important; }
+    body.theme-light tbody tr { border-color: #f1f5f9 !important; }
+    body.theme-light tbody tr:hover { background-color: #f8fafc !important; }
+    body.theme-light .divide-zinc-800\/40 > :not([hidden]) ~ :not([hidden]) { border-color: #f1f5f9 !important; }
+    
+    body.theme-light .bg-zinc-950 { background-color: #f8fafc !important; border-color: #cbd5e1 !important; color: #0f172a !important; }
+    body.theme-light .border-zinc-800\/80, 
+    body.theme-light .border-zinc-800\/90, 
+    body.theme-light .border-zinc-800, 
+    body.theme-light .border-zinc-700\/80, 
+    body.theme-light .border-zinc-700 { border-color: #e2e8f0 !important; }
+    
+    body.theme-light .text-zinc-100, 
+    body.theme-light .text-zinc-200 { color: #0f172a !important; }
+    body.theme-light .text-zinc-300, 
+    body.theme-light .text-zinc-400 { color: #334155 !important; }
     body.theme-light .text-zinc-500 { color: #64748b !important; }
     body.theme-light input, body.theme-light select, body.theme-light textarea { background-color: #ffffff !important; color: #0f172a !important; border-color: #cbd5e1 !important; }
+    body.theme-light input::placeholder, body.theme-light textarea::placeholder { color: #94a3b8 !important; }
 
     /* Royal Purple Theme Overrides */
     body.theme-purple { background: #0c0714 !important; color: #faf5ff !important; }
     body.theme-purple header { background-color: rgba(15, 8, 26, 0.95) !important; border-color: #3b1b63 !important; }
     body.theme-purple main { background-color: #0c0714 !important; }
-    body.theme-purple .bg-zinc-900\/90, body.theme-purple .bg-zinc-900\/80, body.theme-purple .bg-zinc-900\/70, body.theme-purple .bg-zinc-900\/60, body.theme-purple .bg-zinc-900 { background-color: #190c2e !important; border-color: #3b1b63 !important; color: #faf5ff !important; }
+    
+    body.theme-purple .bg-zinc-900\/90, 
+    body.theme-purple .bg-zinc-900\/80, 
+    body.theme-purple .bg-zinc-900\/70, 
+    body.theme-purple .bg-zinc-900\/60, 
+    body.theme-purple .bg-zinc-900\/50, 
+    body.theme-purple .bg-zinc-900\/40, 
+    body.theme-purple .bg-zinc-900\/30, 
+    body.theme-purple .bg-zinc-900\/20, 
+    body.theme-purple .bg-zinc-900 { background-color: #190c2e !important; border-color: #3b1b63 !important; color: #faf5ff !important; }
+    
+    body.theme-purple .bg-zinc-800\/80,
+    body.theme-purple .bg-zinc-800\/70,
+    body.theme-purple .bg-zinc-800\/60,
+    body.theme-purple .bg-zinc-800\/50,
+    body.theme-purple .bg-zinc-800\/25,
+    body.theme-purple .bg-zinc-800 { background-color: #231240 !important; border-color: #4c1d95 !important; color: #f3e8ff !important; }
+
+    body.theme-purple table { background-color: #190c2e !important; color: #faf5ff !important; }
+    body.theme-purple thead tr { background-color: #231240 !important; border-color: #3b1b63 !important; }
+    body.theme-purple thead th { color: #d8b4fe !important; font-weight: 700 !important; }
+    body.theme-purple tbody tr { border-color: #2a144c !important; }
+    body.theme-purple tbody tr:hover { background-color: #281347 !important; }
+    body.theme-purple .divide-zinc-800\/40 > :not([hidden]) ~ :not([hidden]) { border-color: #2a144c !important; }
+    
     body.theme-purple .bg-zinc-950 { background-color: #120724 !important; border-color: #4c1d95 !important; color: #faf5ff !important; }
-    body.theme-purple .border-zinc-800\/80, body.theme-purple .border-zinc-800\/90, body.theme-purple .border-zinc-800, body.theme-purple .border-zinc-700\/80, body.theme-purple .border-zinc-700 { border-color: #3b1b63 !important; }
-    body.theme-purple .text-zinc-100, body.theme-purple .text-zinc-200 { color: #faf5ff !important; }
-    body.theme-purple .text-zinc-300, body.theme-purple .text-zinc-400 { color: #e9d5ff !important; }
+    body.theme-purple .border-zinc-800\/80, 
+    body.theme-purple .border-zinc-800\/90, 
+    body.theme-purple .border-zinc-800, 
+    body.theme-purple .border-zinc-700\/80, 
+    body.theme-purple .border-zinc-700 { border-color: #3b1b63 !important; }
+    
+    body.theme-purple .text-zinc-100, 
+    body.theme-purple .text-zinc-200 { color: #faf5ff !important; }
+    body.theme-purple .text-zinc-300, 
+    body.theme-purple .text-zinc-400 { color: #e9d5ff !important; }
     body.theme-purple .text-zinc-500 { color: #c084fc !important; }
     body.theme-purple input, body.theme-purple select, body.theme-purple textarea { background-color: #120724 !important; color: #faf5ff !important; border-color: #4c1d95 !important; }
+    body.theme-purple input::placeholder, body.theme-purple textarea::placeholder { color: #a855f7 !important; }
 
     @media print {
       body * { visibility: hidden; }
