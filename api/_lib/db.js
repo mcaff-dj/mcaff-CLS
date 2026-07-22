@@ -83,6 +83,15 @@ async function getUserByEmail(email) {
   return rows[0] || null;
 }
 
+// Deletes the user row outright (not just their permissions) - permissions and
+// report_tab_permissions cascade-delete via their FK; audit_log rows are kept
+// (user_id set to NULL via ON DELETE SET NULL) so past access history survives.
+async function deleteUser(userId) {
+  await ensureSchema();
+  const { rows } = await sql`DELETE FROM users WHERE id = ${userId} RETURNING email`;
+  return rows[0] || null;
+}
+
 async function getUserPermissions(userId) {
   await ensureSchema();
   const { rows } = await sql`SELECT card_key FROM permissions WHERE user_id = ${userId}`;
@@ -150,4 +159,8 @@ async function logAccess(userId, email, cardKey, ip) {
   return logEvent(userId, email, cardKey, 'view', null, ip);
 }
 
-module.exports = { sql, ensureSchema, CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, bootstrapAdminIfNeeded, logAccess, logEvent };
+module.exports = {
+  sql, ensureSchema, CARD_KEYS, CARD_LABELS,
+  getUserByEmail, getUserPermissions, getUserTabPermissions, setTabPermissions,
+  bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser,
+};

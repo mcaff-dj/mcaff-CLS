@@ -91,7 +91,7 @@
     <section>
       <h2>Users &amp; permissions</h2>
       <table>
-        <thead><tr><th>Email</th><th>Name</th><th>Admin</th><th>Reports</th></tr></thead>
+        <thead><tr><th>Email</th><th>Name</th><th>Admin</th><th>Reports</th><th></th></tr></thead>
         <tbody id="users-body"></tbody>
       </table>
     </section>
@@ -203,7 +203,8 @@
             var tabsLink = (on && tabs && tabs.length) ? ' <a href="#" class="tabs-edit-link" data-uid="'+u.id+'" data-key="'+esc(k)+'">tabs</a>' : '';
             return '<span class="perm-toggle'+(on?' on':'')+'" data-uid="'+u.id+'" data-key="'+esc(k)+'" data-on="'+on+'">'+esc(k)+(on?' ✓':' +')+'</span>'+tabsLink;
           }).join('');
-          rows.push('<tr><td>'+esc(u.email)+'</td><td>'+esc(u.name||'')+'</td><td>'+(u.is_admin?'Yes':'')+'</td><td>'+perms+'</td></tr>');
+          rows.push('<tr><td>'+esc(u.email)+'</td><td>'+esc(u.name||'')+'</td><td>'+(u.is_admin?'Yes':'')+'</td><td>'+perms+'</td>'+
+            '<td><a href="#" class="delete-user-link" data-uid="'+u.id+'" data-email="'+esc(u.email)+'">Delete</a></td></tr>');
           // One hidden edit-row per restrictable card, pre-checked from the user's
           // current tabPermissions - revealed by the "tabs" link above.
           CARD_KEYS.forEach(function(k){
@@ -214,7 +215,7 @@
               var checked = current.indexOf(t.key) !== -1;
               return '<label class="tab-chip"><input type="checkbox" class="edit-tab-chk" value="'+esc(t.key)+'"'+(checked?' checked':'')+'> '+esc(t.label)+'</label>';
             }).join('');
-            rows.push('<tr class="tab-edit-row" data-uid="'+u.id+'" data-key="'+esc(k)+'" style="display:none;"><td colspan="4">'+
+            rows.push('<tr class="tab-edit-row" data-uid="'+u.id+'" data-key="'+esc(k)+'" style="display:none;"><td colspan="5">'+
               '<b>'+esc(k)+'</b> tabs (none checked = full access): '+checks+
               '<button type="button" class="save-tabs-btn" data-uid="'+u.id+'" data-key="'+esc(k)+'">Save</button></td></tr>');
           });
@@ -240,6 +241,19 @@
               method: 'PUT', headers: {'Content-Type':'application/json'},
               body: JSON.stringify({ userId: el.dataset.uid, cardKey: el.dataset.key, tabKeys: tabKeys })
             }).then(function(r){ return r.json(); }).then(function(){ loadUsers(); });
+          });
+        });
+        body.querySelectorAll('.delete-user-link').forEach(function(el){
+          el.addEventListener('click', function(e){
+            e.preventDefault();
+            if(!confirm('Delete ' + el.dataset.email + '? This removes their account and all report access. This cannot be undone.')) return;
+            fetch('/api/admin/users', {
+              method: 'DELETE', headers: {'Content-Type':'application/json'},
+              body: JSON.stringify({ userId: el.dataset.uid })
+            }).then(function(r){ return r.json(); }).then(function(d){
+              if(d.error){ alert(d.error); return; }
+              loadUsers();
+            });
           });
         });
       });

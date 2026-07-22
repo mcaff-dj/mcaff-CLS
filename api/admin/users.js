@@ -1,10 +1,11 @@
-// GET  /api/admin/users -> list all users + their permissions (admin only)
-// POST /api/admin/users -> create/invite a user: { email, name, permissions: ['mcaffeine',...], tabPermissions: {hyphen:['csat']} }
-//                       -> or bulk-invite: { users: [{email,name},...], permissions: [...], tabPermissions: {...} }
-//        tabPermissions restricts a granted card to only the listed tabs (UI-level
-//        only - see report_tab_permissions in db.js); a card key absent from it, or
-//        given an empty array, gets full access to every tab as before.
-const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions } = require('../_lib/db');
+// GET    /api/admin/users -> list all users + their permissions (admin only)
+// POST   /api/admin/users -> create/invite a user: { email, name, permissions: ['mcaffeine',...], tabPermissions: {hyphen:['csat']} }
+//                         -> or bulk-invite: { users: [{email,name},...], permissions: [...], tabPermissions: {...} }
+//          tabPermissions restricts a granted card to only the listed tabs (UI-level
+//          only - see report_tab_permissions in db.js); a card key absent from it, or
+//          given an empty array, gets full access to every tab as before.
+// DELETE /api/admin/users -> delete a user outright: { userId }
+const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser } = require('../_lib/db');
 const { CARD_TABS } = require('../_lib/tabs');
 const { getSession } = require('../_lib/session');
 const { sendMail, siteBaseUrl } = require('../_lib/mail');
@@ -127,6 +128,30 @@ module.exports = async (req, res) => {
     }
     const user = await upsertAndInvite(email, name, perms, tabPerms, req);
     res.status(200).json({ user });
+    return;
+  }
+
+  if (req.method === 'DELETE') {
+    let body = req.body;
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body); } catch { body = {}; }
+    }
+    body = body || {};
+    const userId = parseInt(body.userId, 10);
+    if (!userId) {
+      res.status(400).json({ error: 'Invalid userId' });
+      return;
+    }
+    if (userId === session.uid) {
+      res.status(400).json({ error: "You can't delete your own account." });
+      return;
+    }
+    const deleted = await deleteUser(userId);
+    if (!deleted) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+    res.status(200).json({ ok: true, email: deleted.email });
     return;
   }
 
