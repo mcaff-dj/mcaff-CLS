@@ -1,8 +1,8 @@
 import json
 
 DATA_PATH = r"mcaff-CLS/data/csat_dashboard_data.json"
-OUT_PATH = r"C:\Users\VIKASH~1\AppData\Local\Temp\claude\c--Users-VIKASH-PATHAK-Desktop-Service-account\d37f2b98-f3bc-4ec6-aa15-63a43fd2fab0\scratchpad\csat_dashboard.html"
-REPORT_OUT_PATH = r"mcaff-CLS/api/_reports/npsdeepdive.html"
+OUT_PATH = r"C:\Users\VIKASH~1\AppData\Local\Temp\claude\c--Users-VIKASH-PATHAK-Desktop-Service-account\bd9f7c2d-a5ad-4cff-a5c9-0206d6b3cc94\scratchpad\csat_dashboard.html"
+REPORT_OUT_PATH = r"mcaff-CLS/api/_reports/deepdive.html"
 
 with open(DATA_PATH, "r", encoding="utf-8") as f:
     D = json.load(f)
@@ -90,7 +90,7 @@ whatsapp = channels.get("whatsapp", {})
 email = channels.get("email", {})
 livechat = channels.get("liveChat", {})
 
-html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</title>
+html = f"""<title>Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</title>
 <style>
   .viz-root {{
     --surface-1:      #fcfcfb;
@@ -259,6 +259,13 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
   .findings-list li {{ font-size: 13.5px; line-height: 1.55; color: var(--text-primary); margin-bottom: 12px; }}
   .findings-list li b {{ font-weight: 650; }}
 
+  .tab-nav {{ display: flex; flex-wrap: wrap; gap: 6px; margin: 20px 0 24px; border-bottom: 1px solid var(--gridline); padding-bottom: 0; overflow-x: auto; }}
+  .tab-btn {{ appearance: none; border: 1px solid transparent; background: transparent; color: var(--text-secondary); font-size: 13px; font-family: inherit; padding: 9px 14px; border-radius: 8px 8px 0 0; cursor: pointer; position: relative; top: 1px; white-space: nowrap; flex: none; }}
+  .tab-btn:hover {{ color: var(--text-primary); background: var(--surface-1); }}
+  .tab-btn.active {{ color: var(--text-primary); font-weight: 650; background: var(--surface-1); border: 1px solid var(--border); border-bottom: 1px solid var(--surface-1); }}
+  .tab-panel {{ display: none; }}
+  .tab-panel.active {{ display: block; }}
+
   @media (max-width: 760px) {{
     .kpi-row {{ grid-template-columns: repeat(2, 1fr); }}
   }}
@@ -266,7 +273,7 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
 
 <div class="viz-root">
   <div class="wrap">
-    <h1>CSAT Deep Dive — Query Class, Resolver &amp; Comment Themes</h1>
+    <h1>Deep Dive — Query Class, Resolver &amp; Comment Themes</h1>
     <p class="sub">{n(k['total'])} completed CSAT responses &middot; {k['date_min']} &ndash; {k['date_max']} &middot; overall avg rating <b>{avg(k['overall_avg'])}</b> / 5</p>
     <p class="sub-brands">
       <span class="chip hyphen">Hyphen</span> {n(hyphen.get('n',0))} responses, avg {avg(hyphen.get('avg',0))} &nbsp;&middot;&nbsp;
@@ -275,109 +282,118 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
       WhatsApp avg {avg(whatsapp.get('avg',0))} (n={n(whatsapp.get('n',0))}) &nbsp;&middot;&nbsp; Email avg {avg(email.get('avg',0))} (n={n(email.get('n',0))}) &nbsp;&middot;&nbsp; Live Chat avg {avg(livechat.get('avg',0))} (n={n(livechat.get('n',0))})
     </p>
 
-    <div id="dip-banner" class="dip-banner neutral"><span class="dip-icon">…</span><span>Checking month-on-month CSAT…</span></div>
+    <nav class="tab-nav">
+      <button class="tab-btn active" data-tab="csat">CSAT Deep Dive</button>
+      <button class="tab-btn" data-tab="agent">Agent wise analysis</button>
+    </nav>
 
-    <div class="kpi-row">
-      <div class="kpi"><div class="kpi-label">Total responses</div><div class="kpi-value" id="kpi-total">{n(k['total'])}</div><div class="kpi-sub" id="kpi-total-sub">closed tickets</div></div>
-      <div class="kpi"><div class="kpi-label">Overall avg rating</div><div class="kpi-value" id="kpi-overall-avg">{avg(k['overall_avg'])}</div><div class="kpi-sub">out of 5</div></div>
-      <div class="kpi"><div class="kpi-label">AI-resolved avg</div><div class="kpi-value" id="kpi-ai-avg">{avg(k['ai_avg'])}</div><div class="kpi-sub" id="kpi-ai-sub">n={n(k['ai_n'])}</div></div>
-      <div class="kpi"><div class="kpi-label">Human-resolved avg</div><div class="kpi-value" id="kpi-human-avg">{avg(k['human_avg'])}</div><div class="kpi-sub" id="kpi-human-sub">n={n(k['human_n'])}</div></div>
-      <div class="kpi"><div class="kpi-label">Promoters (4&ndash;5)</div><div class="kpi-value" id="kpi-promoters">{k['promoters_pct']}%</div><div class="kpi-sub">of filtered responses</div></div>
-      <div class="kpi"><div class="kpi-label">Detractors (1&ndash;2)</div><div class="kpi-value" id="kpi-detractors">{k['detractors_pct']}%</div><div class="kpi-sub">of filtered responses</div></div>
-    </div>
+    <div class="tab-panel active" id="panel-csat">
+      <div id="dip-banner" class="dip-banner neutral"><span class="dip-icon">…</span><span>Checking month-on-month CSAT…</span></div>
 
-    <div class="filterbar">
-      <div class="filter-group">
-        <label for="f-brand">Brand</label>
-        <select id="f-brand">
-          <option value="All">All</option>
-          <option value="Hyphen">Hyphen</option>
-          <option value="mCaffeine">mCaffeine</option>
-        </select>
+      <div class="kpi-row">
+        <div class="kpi"><div class="kpi-label">Total responses</div><div class="kpi-value" id="kpi-total">{n(k['total'])}</div><div class="kpi-sub" id="kpi-total-sub">closed tickets</div></div>
+        <div class="kpi"><div class="kpi-label">Overall avg rating</div><div class="kpi-value" id="kpi-overall-avg">{avg(k['overall_avg'])}</div><div class="kpi-sub">out of 5</div></div>
+        <div class="kpi"><div class="kpi-label">AI-resolved avg</div><div class="kpi-value" id="kpi-ai-avg">{avg(k['ai_avg'])}</div><div class="kpi-sub" id="kpi-ai-sub">n={n(k['ai_n'])}</div></div>
+        <div class="kpi"><div class="kpi-label">Human-resolved avg</div><div class="kpi-value" id="kpi-human-avg">{avg(k['human_avg'])}</div><div class="kpi-sub" id="kpi-human-sub">n={n(k['human_n'])}</div></div>
+        <div class="kpi"><div class="kpi-label">Promoters (4&ndash;5)</div><div class="kpi-value" id="kpi-promoters">{k['promoters_pct']}%</div><div class="kpi-sub">of filtered responses</div></div>
+        <div class="kpi"><div class="kpi-label">Detractors (1&ndash;2)</div><div class="kpi-value" id="kpi-detractors">{k['detractors_pct']}%</div><div class="kpi-sub">of filtered responses</div></div>
       </div>
-      <div class="filter-group">
-        <label for="f-resolver">Resolver</label>
-        <select id="f-resolver">
-          <option value="All">All (compare AI vs Human)</option>
-          <option value="AI">AI CSAT only</option>
-          <option value="Human">Human CSAT only</option>
-        </select>
-      </div>
-      <div class="filter-group">
-        <label for="f-channel">Channel</label>
-        <select id="f-channel">
-          <option value="All">All</option>
-          <option value="whatsapp">WhatsApp</option>
-          <option value="email">Email</option>
-          <option value="liveChat">Live Chat</option>
-        </select>
-      </div>
-      <div class="filter-group" style="color:var(--text-muted); font-size:12px;">Applies to the KPIs and heatmap below</div>
-    </div>
 
-    <div class="card">
-      <h2>Average CSAT rating, month on month</h2>
-      <p class="card-sub">Query Class &times; month, sorted by overall avg rating &mdash; blank cells = no completed CSAT that month. Hover a cell for n, expand a row for its Query Category breakdown.</p>
-      <div class="heatmap-scroll">
-        <table class="heatmap" id="heatmap-table">
-          <thead><tr id="heatmap-head"></tr></thead>
-          <tbody id="heatmap-body"></tbody>
-        </table>
-      </div>
-      <p class="footnote">{coverage_html}</p>
-    </div>
-
-    <div class="card">
-      <h2>Average CSAT rating, month on month &mdash; by Agent</h2>
-      <p class="card-sub">Agent &times; month, sorted by overall avg rating &mdash; blank cells = no completed CSAT that month. Hover a cell for n, expand a row for its Query Class breakdown.</p>
-      <div class="heatmap-scroll">
-        <table class="heatmap" id="heatmap-agent-table">
-          <thead><tr id="heatmap-agent-head"></tr></thead>
-          <tbody id="heatmap-agent-body"></tbody>
-        </table>
-      </div>
-      <p class="footnote">{agent_coverage_html}</p>
-    </div>
-
-    <div class="card">
-      <h2>Query Category patterns</h2>
-      <p class="card-sub">Findings below are computed directly from the CSAT-completed data (Hyphen + mCaffeine, all resolvers unless noted) &mdash; not from the filters above.</p>
-      <ul class="findings-list">
-        <li>{weakest_html}</li>
-        <li>{ai_worse_html}</li>
-        <li>{ai_tied_html}</li>
-        <li>{decline_html}</li>
-      </ul>
-      <p class="footnote">All AI-vs-Human comparisons use a minimum sample size of n&ge;30 per side to avoid drawing conclusions from a handful of responses.</p>
-    </div>
-
-    <div class="card">
-      <h2>What shows up in CSAT comments</h2>
-      <p class="card-sub">Top words across completed CSAT comments (stopwords removed) &mdash; size and shade both scale with frequency.</p>
-      <div class="card-controls">
+      <div class="filterbar">
         <div class="filter-group">
-          <label for="f-word-brand">Brand</label>
-          <select id="f-word-brand">
+          <label for="f-brand">Brand</label>
+          <select id="f-brand">
             <option value="All">All</option>
             <option value="Hyphen">Hyphen</option>
             <option value="mCaffeine">mCaffeine</option>
           </select>
         </div>
         <div class="filter-group">
-          <label for="f-word-month">Month</label>
-          <select id="f-word-month"><option value="All">All months</option></select>
+          <label for="f-resolver">Resolver</label>
+          <select id="f-resolver">
+            <option value="All">All (compare AI vs Human)</option>
+            <option value="AI">AI CSAT only</option>
+            <option value="Human">Human CSAT only</option>
+          </select>
         </div>
+        <div class="filter-group">
+          <label for="f-channel">Channel</label>
+          <select id="f-channel">
+            <option value="All">All</option>
+            <option value="whatsapp">WhatsApp</option>
+            <option value="email">Email</option>
+            <option value="liveChat">Live Chat</option>
+          </select>
+        </div>
+        <div class="filter-group" style="color:var(--text-muted); font-size:12px;">Applies to the KPIs and heatmap below</div>
       </div>
-      <div id="cloud"></div>
-      <div id="cloud-empty" class="empty-note" style="display:none;">No CSAT comments with text for this Brand/Month combination.</div>
-      <details class="table-toggle">
-        <summary>Show as table</summary>
-        <table class="data-table" id="words-table">
-          <thead><tr><th>Word</th><th class="num">Mentions</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </details>
-      <p class="footnote">mCaffeine's CSAT comment field is empty in the source DB for every response here &mdash; all comment text below comes from Hyphen.</p>
+
+      <div class="card">
+        <h2>Average CSAT rating, month on month</h2>
+        <p class="card-sub">Query Class &times; month, sorted by overall avg rating &mdash; blank cells = no completed CSAT that month. Hover a cell for n, expand a row for its Query Category breakdown.</p>
+        <div class="heatmap-scroll">
+          <table class="heatmap" id="heatmap-table">
+            <thead><tr id="heatmap-head"></tr></thead>
+            <tbody id="heatmap-body"></tbody>
+          </table>
+        </div>
+        <p class="footnote">{coverage_html}</p>
+      </div>
+
+      <div class="card">
+        <h2>Query Category patterns</h2>
+        <p class="card-sub">Findings below are computed directly from the CSAT-completed data (Hyphen + mCaffeine, all resolvers unless noted) &mdash; not from the filters above.</p>
+        <ul class="findings-list">
+          <li>{weakest_html}</li>
+          <li>{ai_worse_html}</li>
+          <li>{ai_tied_html}</li>
+          <li>{decline_html}</li>
+        </ul>
+        <p class="footnote">All AI-vs-Human comparisons use a minimum sample size of n&ge;30 per side to avoid drawing conclusions from a handful of responses.</p>
+      </div>
+
+      <div class="card">
+        <h2>What shows up in CSAT comments</h2>
+        <p class="card-sub">Top words across completed CSAT comments (stopwords removed) &mdash; size and shade both scale with frequency.</p>
+        <div class="card-controls">
+          <div class="filter-group">
+            <label for="f-word-brand">Brand</label>
+            <select id="f-word-brand">
+              <option value="All">All</option>
+              <option value="Hyphen">Hyphen</option>
+              <option value="mCaffeine">mCaffeine</option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <label for="f-word-month">Month</label>
+            <select id="f-word-month"><option value="All">All months</option></select>
+          </div>
+        </div>
+        <div id="cloud"></div>
+        <div id="cloud-empty" class="empty-note" style="display:none;">No CSAT comments with text for this Brand/Month combination.</div>
+        <details class="table-toggle">
+          <summary>Show as table</summary>
+          <table class="data-table" id="words-table">
+            <thead><tr><th>Word</th><th class="num">Mentions</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </details>
+        <p class="footnote">mCaffeine's CSAT comment field is empty in the source DB for every response here &mdash; all comment text below comes from Hyphen.</p>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="panel-agent">
+      <div class="card">
+        <h2>Average CSAT rating, month on month &mdash; by Agent</h2>
+        <p class="card-sub">Agent &times; month, sorted by overall avg rating &mdash; blank cells = no completed CSAT that month. Hover a cell for n, expand a row for its Query Class breakdown.</p>
+        <div class="heatmap-scroll">
+          <table class="heatmap" id="heatmap-agent-table">
+            <thead><tr id="heatmap-agent-head"></tr></thead>
+            <tbody id="heatmap-agent-body"></tbody>
+          </table>
+        </div>
+        <p class="footnote">{agent_coverage_html}</p>
+      </div>
     </div>
   </div>
 </div>
@@ -778,6 +794,22 @@ document.getElementById('f-channel').addEventListener('change', refreshAll);
 document.getElementById('f-word-brand').addEventListener('change', refreshWords);
 document.getElementById('f-word-month').addEventListener('change', refreshWords);
 window.addEventListener('resize', () => {{ refreshWords(); refreshAll(); }});
+
+document.querySelectorAll('.tab-btn').forEach(function(b) {{
+  b.addEventListener('click', function() {{
+    document.querySelectorAll('.tab-btn').forEach(function(x) {{ x.classList.remove('active'); }});
+    document.querySelectorAll('.tab-panel').forEach(function(p) {{ p.classList.remove('active'); }});
+    b.classList.add('active');
+    document.getElementById('panel-' + b.dataset.tab).classList.add('active');
+  }});
+}});
+// The dashboard's sidebar mirrors these tabs in its own "Report Views" nav (see
+// dashboard.html's onIframeLoaded) - this in-report row is redundant there, but
+// stays visible when the report is opened directly (no other nav available then).
+if (window.top !== window.self) {{
+  var tn = document.querySelector('.tab-nav');
+  if (tn) tn.style.display = 'none';
+}}
 </script>
 """
 

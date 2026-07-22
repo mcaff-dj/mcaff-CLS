@@ -7,7 +7,7 @@
 // imported here, so nothing enforces this automatically. `calling`'s entries
 // mirror index.html's own CALLING_TEAM_SUBITEMS (a hardcoded sidebar structure,
 // not a generated report tab bar) - keep those two in sync by hand too. A card
-// with no entry here has no tab-level structure (mom/onboarding/npsdeepdive are
+// with no entry here has no tab-level structure (mom/onboarding are
 // single-view reports) and only ever gets whole-card access.
 const CARD_TABS = {
   mcaffeine: [
@@ -45,6 +45,10 @@ const CARD_TABS = {
     { key: 'overview', label: 'Overview' },
     { key: 'ndr', label: 'NDR-Calling' },
     { key: 'rto', label: 'RTO-Calling' },
+  ],
+  deepdive: [
+    { key: 'csat', label: 'CSAT Deep Dive' },
+    { key: 'agent', label: 'Agent wise analysis' },
   ],
 };
 

@@ -68,13 +68,19 @@ async function ensureSchema() {
       PRIMARY KEY (user_id, card_key, tab_key)
     )
   `;
+  // The npsdeepdive card was renamed to deepdive (gained a CSAT/Agent tab split) -
+  // carry forward any rows granted under the old key so no one silently loses
+  // access. Safe to run on every cold start: a no-op once the old key is gone.
+  await sql`UPDATE permissions SET card_key = 'deepdive' WHERE card_key = 'npsdeepdive'`;
+  await sql`UPDATE report_tab_permissions SET card_key = 'deepdive' WHERE card_key = 'npsdeepdive'`;
+  await sql`UPDATE audit_log SET card_key = 'deepdive' WHERE card_key = 'npsdeepdive'`;
   schemaReady = true;
 }
 
-const CARD_KEYS = ['mcaffeine', 'hyphen', 'productkyc', 'mom', 'calling', 'onboarding', 'npsdeepdive'];
+const CARD_KEYS = ['mcaffeine', 'hyphen', 'productkyc', 'mom', 'calling', 'onboarding', 'deepdive'];
 const CARD_LABELS = {
   mcaffeine: 'mCaffeine', hyphen: 'Hyphen', productkyc: 'Product Calling KYC',
-  mom: 'MOM', calling: 'Calling Team', onboarding: 'Onboarding Test', npsdeepdive: 'CSAT Deep Dive',
+  mom: 'MOM', calling: 'Calling Team', onboarding: 'Onboarding Test', deepdive: 'Deep Dive',
 };
 
 async function getUserByEmail(email) {
