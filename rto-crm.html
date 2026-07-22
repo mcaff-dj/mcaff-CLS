@@ -362,11 +362,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         const hasAnyData = r.some(cell => (cell || '').trim().length > 0);
         if (!hasAnyData) continue;
 
-        const ag=(r[16]||'').toLowerCase().trim();
-        if(role==='Agent'&&user&&ag&&ag!=='unassigned'){
-          if(!(aE&&ag===aE)||(aP.length>2&&ag.includes(aP))||(aF.length>2&&ag.includes(aF)))
-            if(ag!==aE&&!ag.includes(aP)&&!ag.includes(aF))continue;
-        }
         const o={};hdr.forEach((h,x)=>{const c=(h||'').trim();if(c)o[c]=(r[x]||'').trim();o[`c${x}`]=(r[x]||'').trim();});
         res.push(mapTkt(o,i));
         if(i%5000===4999)await new Promise(r=>setTimeout(r,0));
@@ -865,9 +860,9 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       // Sync
       const sync = useCallback(async(silent=false)=>{
         const sid=extractSheetId(DEFAULT_SHEET_URL);if(!sid)return;setIsSyncing(true);
-        try{const raw=await fetchSheet(sid,DEFAULT_SHEET_RANGE);const mapped=await parseRows(raw,googleUser,userRole);setTickets(mapped);try{localStorage.setItem('rto_cache_v4',JSON.stringify(mapped.slice(0,10000)));}catch{}setLastSync(new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));if(!silent)showToast(`${mapped.length.toLocaleString('en-IN')} leads synced`);}
+        try{const raw=await fetchSheet(sid,DEFAULT_SHEET_RANGE);const mapped=await parseRows(raw);setTickets(mapped);try{localStorage.setItem('rto_cache_v4',JSON.stringify(mapped.slice(0,10000)));}catch{}setLastSync(new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));if(!silent)showToast(`${mapped.length.toLocaleString('en-IN')} leads synced`);}
         catch(e){if(!silent)showToast(e.message);}finally{setIsSyncing(false);}
-      },[googleUser,userRole,showToast]);
+      },[showToast]);
 
       useEffect(()=>{sync(true);},[]);
       useEffect(()=>{const t=setInterval(()=>sync(true),60000);return()=>clearInterval(t);},[sync]);
