@@ -383,16 +383,9 @@ html = f"""<title>Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</tit
     </div>
 
     <div class="tab-panel" id="panel-agent">
-      <div class="card">
-        <h2>Average CSAT rating, month on month &mdash; by Agent</h2>
-        <p class="card-sub">Agent &times; month, sorted by overall avg rating &mdash; blank cells = no completed CSAT that month. Hover a cell for n, expand a row for its Query Class breakdown.</p>
-        <div class="heatmap-scroll">
-          <table class="heatmap" id="heatmap-agent-table">
-            <thead><tr id="heatmap-agent-head"></tr></thead>
-            <tbody id="heatmap-agent-body"></tbody>
-          </table>
-        </div>
-        <p class="footnote">{agent_coverage_html}</p>
+      <div class="card" style="text-align:center; padding:48px 24px;">
+        <h2 style="margin-bottom:8px;">Agent wise analysis</h2>
+        <p class="card-sub" style="margin:0;">Coming soon.</p>
       </div>
     </div>
   </div>
@@ -748,7 +741,7 @@ function refreshAll() {{
   renderKPIs(brand, resolver, channel);
   renderDipBanner(brand, resolver, channel);
   renderClassHeatmap(brand, resolver, channel);
-  renderAgentHeatmap(brand, resolver, channel);
+  if (document.getElementById('heatmap-agent-table')) renderAgentHeatmap(brand, resolver, channel);
 }}
 
 function computeWords(brand, month) {{
