@@ -7,13 +7,15 @@ const { getSession } = require('../_lib/session');
 
 const GOKWIK_URL = 'https://api.gokwik.co/v2/order/refund/initiate';
 
-// Order number prefix -> env var prefix for that vendor's GoKwik credentials. Checked in
-// order; anything that doesn't match a known prefix is a plain-numeric mcaffeine-direct
-// (Shopify) order number, so that vendor is the catch-all and must stay last.
+// Order number prefix -> env var prefix for that vendor's GoKwik credentials, plus how to
+// build the moid GoKwik actually expects. Checked in order; anything that doesn't match a
+// known prefix is a plain-numeric mcaffeine-direct (Shopify) order number, so that vendor is
+// the catch-all and must stay last. mcaffeine orders carry no prefix in the sheet, but
+// GoKwik's mcaffeine merchant account expects moid as "MCaff<order number>".
 const VENDORS = [
-  { key: 'hyphen', prefixPattern: /^HYP/i, envPrefix: 'GOKWIK_HYPHEN' },
-  { key: 'fien', prefixPattern: /^Fien/i, envPrefix: 'GOKWIK_FIEN' },
-  { key: 'mcaffeine', prefixPattern: /.*/, envPrefix: 'GOKWIK_MCAFFEINE' },
+  { key: 'hyphen', prefixPattern: /^HYP/i, envPrefix: 'GOKWIK_HYPHEN', formatMoid: (m) => m },
+  { key: 'fien', prefixPattern: /^Fien/i, envPrefix: 'GOKWIK_FIEN', formatMoid: (m) => m },
+  { key: 'mcaffeine', prefixPattern: /.*/, envPrefix: 'GOKWIK_MCAFFEINE', formatMoid: (m) => `MCaff${m}` },
 ];
 
 function resolveVendor(moid) {
@@ -58,6 +60,7 @@ module.exports = async (req, res) => {
   }
 
   const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
+  const gokwikMoid = vendor.formatMoid(moid);
 
   let gkRes, text;
   try {
@@ -68,7 +71,7 @@ module.exports = async (req, res) => {
         appsecret: appSecret,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ amount, moid }),
+      body: JSON.stringify({ amount, moid: gokwikMoid }),
     });
     text = await gkRes.text();
   } catch (e) {
@@ -87,5 +90,5 @@ module.exports = async (req, res) => {
   }
 
   logEvent(session.uid, session.email, vendor.key, 'refund_initiate', `${moid} ₹${amount}`, ip).catch(() => {});
-  res.status(200).json({ ok: true, vendor: vendor.key, gokwik: data });
+  res.status(200).json({ ok: true, vendor: vendor.key, moid: gokwikMoid, gokwik: data });
 };
