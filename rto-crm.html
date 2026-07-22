@@ -182,9 +182,57 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
     function extractSheetId(i){const m=i.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);return m?m[1]:/^[a-zA-Z0-9_-]{20,}$/.test(i.trim())?i.trim():null;}
 
-    function parseDate(s){if(!s)return null;let d=new Date(s);if(!isNaN(d))return d;const p=s.trim().split(/\s+/);if(p.length===2){const day=parseInt(p[0]),ms=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'],mi=ms.indexOf(p[1].toLowerCase().slice(0,3));if(!isNaN(day)&&mi!==-1)return new Date(new Date().getFullYear(),mi,day);}return null;}
+    function startOfDay(d){
+      if(!d)return null;
+      const x=new Date(d);
+      if(isNaN(x.getTime()))return null;
+      x.setHours(0,0,0,0);
+      return x;
+    }
 
-    function startOfDay(d){const x=new Date(d);x.setHours(0,0,0,0);return x;}
+    function parseDate(s){
+      if(!s||typeof s!=='string')return null;
+      const str=s.trim();
+      if(!str||str==='—')return null;
+
+      // 1. Try "22 Jul" or "22 July 2026"
+      const p=str.split(/\s+/);
+      if(p.length>=2){
+        const day=parseInt(p[0]);
+        const ms=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+        const mi=ms.indexOf(p[1].toLowerCase().slice(0,3));
+        if(!isNaN(day)&&mi!==-1){
+          const year=p.length>=3&&!isNaN(parseInt(p[2]))?parseInt(p[2]):new Date().getFullYear();
+          return startOfDay(new Date(year,mi,day));
+        }
+      }
+
+      // 2. Try "22/07/2026" or "22-07-2026" or "22.07.2026"
+      const parts=str.split(/[\/\.-]/);
+      if(parts.length===3){
+        const p1=parseInt(parts[0]),p2=parseInt(parts[1]),p3=parseInt(parts[2]);
+        if(!isNaN(p1)&&!isNaN(p2)&&!isNaN(p3)){
+          let year,month,day;
+          if(p3>1000){
+            year=p3;
+            if(p2<=12&&p1<=31){day=p1;month=p2-1;}
+            else{day=p2;month=p1-1;}
+          }else if(p1>1000){
+            year=p1;month=p2-1;day=p3;
+          }else{
+            year=new Date().getFullYear();
+            day=p1;month=p2-1;
+          }
+          const testDate=new Date(year,month,day);
+          if(!isNaN(testDate.getTime()))return startOfDay(testDate);
+        }
+      }
+
+      // 3. Standard JS Date constructor fallback
+      let d=new Date(str);
+      if(!isNaN(d.getTime()))return startOfDay(d);
+      return null;
+    }
 
     function isDateInScope(rowDate, scope, customFrom, customTo){
       if(scope==='ALL_TIME')return true;
@@ -666,31 +714,59 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return b.rawIndex - a.rawIndex;
         });
 
-        // REPLENISHMENT ENGINE: An agent's active PENDING box maintains 10 PENDING (unresolved) leads!
+        // REPLENISHMENT ENGINE WITH STRICT DATE WATERFALL (Today -> Yesterday -> 20th -> 19th...)
         if(userRole==='Agent' && googleUser?.email){
           const e = googleUser.email.toLowerCase();
           const p = e.split('@')[0];
           const isMine = (agt) => agt && agt !== 'Unassigned' && (agt.toLowerCase().includes(e) || agt.toLowerCase().includes(p));
 
-          // 1. Pending unresolved leads currently assigned to me
+          // 1. Pending unresolved leads currently assigned to me (sorted by date descending)
           let myPending = base.filter(t => t.status === 'Pending' && !t.disposition && !t.agentRemarks && isMine(t.assignedAgent));
+          myPending.sort((a,b)=>{
+            if(a.rowDate && b.rowDate && a.rowDate.getTime() !== b.rowDate.getTime()) {
+              return b.rowDate.getTime() - a.rowDate.getTime();
+            }
+            return b.rawIndex - a.rawIndex;
+          });
           
           // 2. Disposed or refunded leads assigned to me (kept for history view)
           const myDisposed = base.filter(t => (t.status !== 'Pending' || t.disposition || t.agentRemarks) && isMine(t.assignedAgent));
 
-          // 3. If pending leads count is below maxLeads (10), claim fresh unassigned leads (sorted by latest calling date) to refill active box!
+          // 3. Unassigned pending leads available in the sheet
           let unassignedLeads = base.filter(t => t.status === 'Pending' && !t.disposition && !t.agentRemarks && (!t.assignedAgent || t.assignedAgent === 'Unassigned'));
 
           const needed = Math.max(0, maxLeads - myPending.length);
           if (needed > 0 && unassignedLeads.length > 0) {
-            const claimed = unassignedLeads.slice(0, needed).map(t => ({
+            // WATERFALL DATE REPLENISHMENT: Group unassigned leads by date (newest date first)
+            const dateMap = new Map();
+            unassignedLeads.forEach(t => {
+              const ts = t.rowDate ? t.rowDate.getTime() : 0;
+              if (!dateMap.has(ts)) dateMap.set(ts, []);
+              dateMap.get(ts).push(t);
+            });
+
+            // Sort unique date timestamps in descending order (Today -> Yesterday -> 20th -> 19th...)
+            const sortedTimestamps = Array.from(dateMap.keys()).sort((a, b) => b - a);
+
+            // Waterfall: Fill from newest date available. Only move to previous date if current date is exhausted!
+            const claimed = [];
+            for (const ts of sortedTimestamps) {
+              if (claimed.length >= needed) break;
+              const leadsForDate = dateMap.get(ts);
+              const remainingNeeded = needed - claimed.length;
+              const toTake = leadsForDate.slice(0, remainingNeeded);
+              claimed.push(...toTake);
+            }
+
+            const claimedTagged = claimed.map(t => ({
               ...t,
               assignedAgent: googleUser.email
             }));
-            myPending = [...myPending, ...claimed];
+
+            myPending = [...myPending, ...claimedTagged];
           }
 
-          // Return 10 PENDING leads + ALL DISPOSED leads (so ALL assigned leads pop with disposed and not actioned ones!)
+          // Return 10 PENDING leads + ALL DISPOSED leads
           return [...myPending.slice(0, maxLeads), ...myDisposed];
         }
 
