@@ -1065,49 +1065,52 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const pages=Math.ceil(filtered.length/perPage)||1;
       const visible=filtered.slice((page-1)*perPage,page*perPage);
 
-      const tabs=[];
-      if(userRole==='Admin'||userRole==='Team Lead'){
-        tabs.push({key:'overview',label:'📊 Overview (Agents Data)',count:effectiveAgentRoster.length});
-      }
-      tabs.push(
-        {key:'all',label:'All Leads (Disposed)',count:dispCount},
-        {key:'fresh',label:'⚡ Fresh Leads (Assigned)',count:freshAssignedCount}
-      );
-      if(userRole==='Admin'||userRole==='Team Lead'){
-        tabs.push({key:'admin',label:'Admin Panel & Roster',count:effectiveAgentRoster.length});
+      const tabs = [
+        { key: 'overview', label: userRole === 'Agent' ? '📊 My Overview & Team Metrics' : '📊 Overview (Agents Data)', count: effectiveAgentRoster.length },
+        { key: 'all', label: 'All Leads (Disposed)', count: dispCount },
+        { key: 'fresh', label: '⚡ Fresh Leads (Assigned)', count: freshAssignedCount }
+      ];
+      if (userRole === 'Admin' || userRole === 'Team Lead') {
+        tabs.push({ key: 'admin', label: 'Admin Panel & Roster', count: effectiveAgentRoster.length });
       }
 
-      // Automatically redirect away from admin or overview tab if role switched to Agent
-      useEffect(()=>{
-        if(userRole==='Agent' && (tab==='admin' || tab==='overview')){
+      // Automatically redirect away from admin tab if role switched to Agent
+      useEffect(() => {
+        if (userRole === 'Agent' && tab === 'admin') {
           setTab('all');
         }
-      },[userRole, tab]);
+      }, [userRole, tab]);
 
       return(
         <div className="min-h-screen flex flex-col bg-[#09090b]">
 
-          {/* ═══ HEADER ═══ */}
+          {/* ═══ CLEAN TOP UTILITY HEADER ═══ */}
           <header className="sticky top-0 z-30 bg-[#09090b]/95 backdrop-blur-xl border-b border-zinc-800/80">
-            <div className="max-w-[1440px] mx-auto px-5 h-12 flex items-center justify-between gap-3">
-              <nav className="flex items-center gap-0.5 overflow-x-auto no-scrollbar">
-                {tabs.map(t=>(
-                  <button key={t.key} onClick={()=>setTab(t.key)} className={`relative px-3 py-1.5 rounded-lg text-[13px] font-medium whitespace-nowrap transition-all ${tab===t.key?'text-white bg-zinc-800/90 border border-zinc-700/60 shadow-xs':'text-zinc-400 hover:text-zinc-200'}`}>
-                    {t.key==='fresh'&&<span className="mr-1.5 text-amber-400">⚡</span>}
-                    {t.key==='overview'&&<span className="mr-1.5 text-indigo-400">📊</span>}
-                    {t.label}
-                    <span className={`ml-1.5 text-[10px] tabular-nums px-1.5 py-0.2 rounded-md ${tab===t.key?'text-zinc-300 bg-zinc-700/50':'text-zinc-500 bg-zinc-900'}`}>{t.count.toLocaleString('en-IN')}</span>
-                  </button>
-                ))}
-              </nav>
-              <div className="flex items-center gap-2">
-                <div className="relative hidden md:block">
+            <div className="max-w-[1440px] mx-auto px-5 h-13 flex items-center justify-between gap-4">
+              
+              {/* Header Title & Branding */}
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-600 to-violet-700 flex items-center justify-center text-white font-extrabold text-xs shadow-md shadow-indigo-950/50">
+                  RTO
+                </div>
+                <div>
+                  <h1 className="text-sm font-extrabold text-zinc-100 tracking-tight flex items-center gap-2">
+                    RTO Support Command Center
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                  </h1>
+                  <p className="text-[11px] text-zinc-500 font-mono">Last sync: {lastSync}</p>
+                </div>
+              </div>
+
+              {/* Header Controls: Search, Sync, Role Switcher, Status */}
+              <div className="flex items-center gap-2.5">
+                <div className="relative hidden sm:block">
                   <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500"/>
-                  <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search orders, remarks…" className="w-44 pl-8 pr-3 py-1 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/50"/>
+                  <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search orders, remarks…" className="w-48 pl-8 pr-3 py-1.5 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/50 transition-all"/>
                 </div>
                 <button onClick={()=>sync(false)} disabled={isSyncing} className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors disabled:opacity-50" title="Refresh data">
                   <RefreshIcon className={isSyncing?'animate-spin text-indigo-400':''}/>
-                  <span className="hidden sm:inline">{isSyncing?'Syncing…':'Refresh'}</span>
+                  <span className="hidden md:inline">{isSyncing?'Syncing…':'Refresh'}</span>
                 </button>
 
                 {/* UI Role Switcher */}
@@ -1129,12 +1132,51 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           </header>
 
           {/* ═══ TOAST ═══ */}
-          {toast&&<div className="fixed top-14 right-5 z-50 animate-slideUp"><div className="px-4 py-2.5 rounded-xl bg-zinc-800/90 text-zinc-100 border border-zinc-700 text-[13px] shadow-2xl flex items-center gap-2.5 backdrop-blur-md"><CheckIcon className="text-emerald-400 shrink-0"/>{toast}</div></div>}
+          {toast&&<div className="fixed top-16 right-5 z-50 animate-slideUp"><div className="px-4 py-2.5 rounded-xl bg-zinc-800/90 text-zinc-100 border border-zinc-700 text-[13px] shadow-2xl flex items-center gap-2.5 backdrop-blur-md"><CheckIcon className="text-emerald-400 shrink-0"/>{toast}</div></div>}
 
-          {/* ═══ MAIN ═══ */}
-          <main className="flex-1 max-w-[1440px] w-full mx-auto px-5 py-5 space-y-4">
+          {/* ═══ MAIN WORKSPACE ═══ */}
+          <main className="flex-1 max-w-[1440px] w-full mx-auto px-5 py-5 space-y-5">
 
-            {tab==='overview'&&(userRole==='Admin'||userRole==='Team Lead')?(
+            {/* ══════════════════════════════════════════════════════════════════════
+               🚀 PROMINENT DEDICATED WORKSPACE NAVIGATION BAR
+               ══════════════════════════════════════════════════════════════════════ */}
+            <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-1.5 shadow-xl backdrop-blur-md flex items-center justify-between flex-wrap gap-2">
+              <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+                {tabs.map(t => {
+                  const isActive = tab === t.key;
+                  return (
+                    <button
+                      key={t.key}
+                      onClick={() => setTab(t.key)}
+                      className={`relative px-4 py-2 rounded-xl text-[13px] font-bold whitespace-nowrap transition-all flex items-center gap-2.5 ${
+                        isActive
+                          ? 'text-white bg-indigo-600 shadow-md shadow-indigo-950/50 border border-indigo-500/40'
+                          : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 border border-transparent'
+                      }`}
+                    >
+                      {t.key === 'fresh' && <span className="text-amber-300">⚡</span>}
+                      {t.key === 'overview' && <span className="text-indigo-300">📊</span>}
+                      {t.key === 'admin' && <span className="text-emerald-300">🛡️</span>}
+                      {t.key === 'all' && <span className="text-sky-300">📦</span>}
+                      <span>{t.label}</span>
+                      <span className={`text-[11px] tabular-nums px-2 py-0.5 rounded-md font-mono font-bold ${
+                        isActive ? 'text-white bg-indigo-950/80 border border-indigo-400/30' : 'text-zinc-400 bg-zinc-800 border border-zinc-700/50'
+                      }`}>
+                        {t.count.toLocaleString('en-IN')}
+                      </span>
+                    </button>
+                  );
+                })}
+              </nav>
+
+              {/* View Context Indicator */}
+              <div className="hidden lg:flex items-center gap-2 px-3 py-1 text-[12px] text-zinc-400 font-medium bg-zinc-950/60 rounded-xl border border-zinc-800/80">
+                <span className="h-2 w-2 rounded-full bg-emerald-400"></span>
+                <span>Active View: <strong className="text-zinc-200 font-semibold">{tabs.find(t => t.key === tab)?.label}</strong></span>
+              </div>
+            </div>
+
+            {tab==='overview'?(
               /* ══════════════════════════════════════════════════════════════════════
                  📊 OVERVIEW DASHBOARD: ALL AGENTS DATA & EXECUTIVE ANALYTICS
                  ══════════════════════════════════════════════════════════════════════ */
@@ -1301,15 +1343,23 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                           <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">🏆 All Agents Performance & Lead Metrics ({effectiveAgentRoster.length})</h3>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                          {agentMetrics.map(am => {
+                          {agentMetrics.slice().sort((a, b) => {
+                            const myEmail = (googleUser?.email || '').toLowerCase();
+                            const isAMine = a.email.toLowerCase() === myEmail || (myEmail && a.email.toLowerCase().includes(myEmail.split('@')[0]));
+                            const isBMine = b.email.toLowerCase() === myEmail || (myEmail && b.email.toLowerCase().includes(myEmail.split('@')[0]));
+                            if (isAMine && !isBMine) return -1;
+                            if (!isAMine && isBMine) return 1;
+                            return b.disposed - a.disposed;
+                          }).map(am => {
                             const dispEntries = Object.entries(am.dispBreakdown).sort((a, b) => b[1] - a[1]);
                             const maxDisp = dispEntries.length > 0 ? dispEntries[0][1] : 1;
+                            const isMe = googleUser?.email && (am.email.toLowerCase() === googleUser.email.toLowerCase() || am.email.toLowerCase().includes(googleUser.email.split('@')[0].toLowerCase()));
 
                             return (
-                              <div key={am.email} className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 overflow-hidden hover:border-indigo-500/50 transition-all flex flex-col justify-between">
+                              <div key={am.email} className={`bg-zinc-900/60 rounded-xl border overflow-hidden transition-all flex flex-col justify-between ${isMe ? 'border-amber-500/80 ring-1 ring-amber-500/40 shadow-lg shadow-amber-950/20' : 'border-zinc-800/80 hover:border-indigo-500/50'}`}>
                                 <div>
                                   {/* Agent Header */}
-                                  <div className="px-4 py-3.5 border-b border-zinc-800/60 flex items-center justify-between bg-zinc-900/80">
+                                  <div className={`px-4 py-3.5 border-b border-zinc-800/60 flex items-center justify-between ${isMe ? 'bg-amber-950/20' : 'bg-zinc-900/80'}`}>
                                     <div className="flex items-center gap-2.5 truncate">
                                       <div className="relative shrink-0">
                                         <div className="w-9 h-9 rounded-full bg-gradient-to-br from-indigo-600 to-violet-700 flex items-center justify-center text-white font-bold text-xs shadow-md">
@@ -1318,7 +1368,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                                         <span className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-zinc-900 ${am.status === 'Online' ? 'bg-emerald-500' : am.status === 'Busy' ? 'bg-amber-400' : 'bg-zinc-500'}`}></span>
                                       </div>
                                       <div className="truncate">
-                                        <p className="font-bold text-zinc-100 text-xs truncate">{am.name}</p>
+                                        <p className="font-bold text-zinc-100 text-xs truncate flex items-center gap-1.5">
+                                          {am.name}
+                                          {isMe && <span className="text-[10px] text-amber-300 font-bold bg-amber-950/80 border border-amber-800/60 px-1.5 py-0.2 rounded font-sans">⭐ You</span>}
+                                        </p>
                                         <p className="text-[10px] text-zinc-500 font-mono truncate">{am.email}</p>
                                       </div>
                                     </div>
