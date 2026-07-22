@@ -970,6 +970,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       ];
 
       const unreachableOutcomes = [
+        { value: 'Refund Requested', label: 'Refund Requested (Initiate Refund)', icon: '💳', desc: 'Process immediate prepaid refund or COD payout' },
+        { value: 'Already Refunded', label: 'Already Refunded', icon: '💸', desc: 'Order was already refunded previously' },
         { value: 'Ringing / No Answer', label: 'Ringing / No Answer', icon: '🔔', desc: 'Phone rang but no response' },
         { value: 'Not Reachable', label: 'Not Reachable', icon: '📡', desc: 'Out of coverage area' },
         { value: 'Switch Off', label: 'Switched Off', icon: '📴', desc: 'Mobile device turned off' },
@@ -2000,7 +2002,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
                   {dispConn==='NO' && (
                     <div className="space-y-3 animate-fadeIn border-t border-zinc-800/80 pt-4">
-                      <p className="text-[12px] font-bold uppercase tracking-wider text-zinc-400">2. Select Unreachable Reason</p>
+                      <p className="text-[12px] font-bold uppercase tracking-wider text-zinc-400">2. Select Unreachable Reason / Outcome</p>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-52 overflow-y-auto custom-scroll pr-1">
                         {unreachableOutcomes.map(item => {
                           const isSel = dispReason === item.value;
@@ -2020,6 +2022,29 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                           );
                         })}
                       </div>
+
+                      {/* Refund Action Card for Unreachable Call */}
+                      {dispReason==='Refund Requested'&&(
+                        <div className="bg-emerald-950/30 p-4 rounded-xl border border-emerald-800/60 space-y-3 animate-fadeIn mt-3">
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-emerald-300 text-sm flex items-center gap-2">
+                              💳 {dispTkt.paymentMethod==='Prepaid'?'Prepaid Instant Refund':'COD UPI Payout'}
+                            </span>
+                            <span className="font-mono text-xl font-extrabold text-emerald-400">₹{dispTkt.orderAmount.toLocaleString('en-IN')}</span>
+                          </div>
+                          <p className="text-[12px] text-zinc-400 leading-relaxed">
+                            {dispTkt.paymentMethod==='Prepaid'
+                              ?'Refund will be credited back to customer original payment gateway source.'
+                              :'Refund will be credited to customer via instant UPI payout link.'}
+                          </p>
+                          <input
+                            value={refNotes}
+                            onChange={e=>setRefNotes(e.target.value)}
+                            placeholder="Optional agent notes for refund receipt..."
+                            className="w-full bg-zinc-900 border border-zinc-700/80 rounded-lg p-2.5 text-[13px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      )}
                     </div>
                   )}
 
