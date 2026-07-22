@@ -1,7 +1,7 @@
 import json
 
 DATA_PATH = r"mcaff-CLS/data/csat_dashboard_data.json"
-OUT_PATH = r"C:\Users\VIKASH PATHAK\AppData\Local\Temp\claude\c--Users-VIKASH-PATHAK-Desktop-Service-account\16b80c7f-e823-4d15-be9d-cfcc291e6052\scratchpad\csat_dashboard.html"
+OUT_PATH = r"C:\Users\VIKASH~1\AppData\Local\Temp\claude\c--Users-VIKASH-PATHAK-Desktop-Service-account\d37f2b98-f3bc-4ec6-aa15-63a43fd2fab0\scratchpad\csat_dashboard.html"
 REPORT_OUT_PATH = r"mcaff-CLS/api/_reports/npsdeepdive.html"
 
 with open(DATA_PATH, "r", encoding="utf-8") as f:
@@ -72,7 +72,7 @@ coverage_html = (
 agent_coverage_html = (
     f"Click &#9656; on an agent row to expand its Query Class breakdown. "
     f"All {D['n_agents_total']} agents are shown (no bucketing needed). "
-    f"'AI' is every AI-resolved ticket; '(unassigned)' means the ticket was human-resolved but no agent name was recorded. "
+    f"'AI' is every AI-resolved ticket plus any human-resolved ticket with no agent name recorded. "
     f"{DIP_MARK_NOTE}"
 )
 

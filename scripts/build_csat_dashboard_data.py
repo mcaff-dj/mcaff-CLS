@@ -18,8 +18,9 @@ OUT = r"mcaff-CLS/data/csat_dashboard_data.json"
 DWH_DATABASE = "mcaff_dwh"
 
 # agent := 'AI' whenever the ticket was AI-resolved (overrides whatever's in
-# assigned_to for that handful of tickets where a human name leaked through),
-# else the real agent name, else '(unassigned)' when no agent was recorded.
+# assigned_to for that handful of tickets where a human name leaked through)
+# or when no agent name was recorded at all, else the real agent name.
+# "(unassigned)" used to be its own bucket but is now folded into "AI".
 BRAND_TABLES = [
     ("mcaff_tickets_csat", "mcaff_tickets", "mCaffeine"),
     ("hyphen_tickets_csat", "hyphen_tickets", "Hyphen"),
@@ -56,7 +57,8 @@ def fetch_brand_csat(cred, csat_table, tickets_table, brand_name):
         cur.execute(f"""
             SELECT
               CASE WHEN t.status = 'Resolved by AI' THEN 'AI'
-                   ELSE COALESCE(NULLIF(t.assigned_to, 'Unassigned'), '(unassigned)') END AS `Agent Name`,
+                   WHEN t.assigned_to IS NULL OR t.assigned_to = 'Unassigned' THEN 'AI'
+                   ELSE t.assigned_to END AS `Agent Name`,
               CASE WHEN t.status = 'Resolved by AI' THEN 'Yes' ELSE 'No' END AS `Is AI Agent`,
               {QUERY_CLASS_CASE} AS `Query Class`,
               t.subcategory AS `Query Category`,
@@ -93,7 +95,7 @@ df["month"] = df["month_p"].dt.strftime("%b %Y")
 df["resolver"] = df["Is AI Agent"].map({"Yes": "AI", "No": "Human"})
 df["qclass"] = df["Query Class"].fillna("(none)")
 df["qcat"] = df["Query Category"].fillna("(none)")
-df["agent"] = df["Agent Name"].fillna("(unassigned)")
+df["agent"] = df["Agent Name"].fillna("AI")
 df["rating"] = df["Rating"].astype(int)
 
 month_order = sorted(df["month_p"].dropna().unique())
@@ -116,7 +118,8 @@ GRANULAR = [
 ]
 
 # ---- GRANULAR_AGENT: month x brand x resolver x channel x agent x rating -> n ----
-# Only 41 distinct agents total (incl. "AI" and "(unassigned)"), so no Other bucket needed.
+# Only ~40 distinct agents total (incl. "AI", which also absorbs unassigned
+# tickets), so no Other bucket needed.
 grp_agent = df.groupby(["month", "Brand name", "resolver", "Channel", "agent", "rating"]).size().reset_index(name="n")
 GRANULAR_AGENT = [
     {"m": r["month"], "b": r["Brand name"], "r": r["resolver"], "ch": r["Channel"], "c": r["agent"], "rt": str(r["rating"]), "n": int(r["n"])}
