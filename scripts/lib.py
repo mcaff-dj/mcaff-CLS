@@ -335,6 +335,8 @@ def set_sheet_rows_at_row(spreadsheet_id, sheet_name, rows, start_row, chunk_siz
             except Exception as e:
                 last_err = e
                 print(f"  write rows {row_start}-{row_end} attempt {attempt} failed: {e}")
+                if isinstance(e, requests.exceptions.HTTPError):
+                    print(f"    response body: {e.response.text}")
                 if attempt == 5:
                     raise
                 time.sleep(5 * attempt)
