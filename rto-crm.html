@@ -153,6 +153,9 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         if (updates.connectedStatus !== undefined) {
           valueRanges.push({ range: `Data!R${rowNumber}`, values: [[updates.connectedStatus]] });
         }
+        if (updates.attemptType !== undefined) {
+          valueRanges.push({ range: `Data!S${rowNumber}`, values: [[updates.attemptType]] });
+        }
         if (updates.disposition !== undefined) {
           valueRanges.push({ range: `Data!T${rowNumber}`, values: [[updates.disposition]] });
         }
@@ -174,7 +177,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
         });
-        if (res.ok) console.log(`Live Sheet row ${rowNumber} updated in Google Sheet Column Q!`);
+        if (res.ok) console.log(`Live Sheet row ${rowNumber} updated (Q, R, S, T, U, V, X)`);
       } catch (err) {
         console.error('Sheet write error:', err);
       }
@@ -298,6 +301,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         orderAmount:parseFloat(amt.replace(/[^0-9.]/g,''))||0,rtoReason:rto,
         assignedAgent:agt,callingDate:cd||'—',isHighPriority:hp,
         rowDate:parseDate(cd)||parseDate(g('Date','Order Date','c0')),rawIndex:i,
+        attemptType:r['c18']||'',
         status:'Pending',connected:r['c17']||'',disposition:r['c19']||'',agentRemarks:''};
     }
 
@@ -512,6 +516,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [newAddr, setNewAddr] = useState('');
       const [refNotes, setRefNotes] = useState('');
       const [agentRemarks, setAgentRemarks] = useState('');
+      const [attemptType, setAttemptType] = useState('');
       const [receiptTkt, setReceiptTkt] = useState(null);
       const [refundProcessing, setRefundProcessing] = useState(false);
 
@@ -553,6 +558,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         setNewAddr(existing?.newAddress || '');
         setRefNotes(existing?.refundDetails?.notes || '');
         setAgentRemarks(existing?.agentRemarks || '');
+        setAttemptType(existing?.attemptType || t.attemptType || '');
       };
 
       const submitDisp = async ()=>{
@@ -593,26 +599,36 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         const agentAssignedTag = `${googleUser.email}`;
         const isAlreadyRef = alreadyRefunded === 'YES' || dispReason === 'Already Refunded';
 
+        // Resolve Column S (Attempt) value:
+        // - If refund was initiated, auto-set to 'Already Refunded'
+        // - If user explicitly selected an attempt type, use that
+        // - If disposition is 'Already Refunded', set to 'Already Refunded'
+        const resolvedAttempt = isRef ? 'Already Refunded'
+          : isAlreadyRef ? 'Already Refunded'
+          : attemptType || '';
+
         const ov={
           status: isAlreadyRef ? 'Refunded' : st,
           connectedStatus: dispConn==='YES'?'Yes':'No',
           agentDisposition: dispReason,
+          attemptType: resolvedAttempt,
           alreadyRefunded: isAlreadyRef ? 'Yes' : 'No',
           agentRemarks: agentRemarks.trim(),
           newOrderId: newOrder==='YES'?newOrderId:'',
           newAddress: addrChange==='YES'?newAddr:'',
           disposedAt: new Date().toLocaleString([],{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}),
           disposedBy: agentAssignedTag,
-          assignedAgent: agentAssignedTag, // Updated in Column Q!
+          assignedAgent: agentAssignedTag,
           assignedEmail: googleUser.email
         };
 
         setOverrides(p=>{const u={...p,[dispTkt.id]:ov};localStorage.setItem('rto_ticket_overrides',JSON.stringify(u));return u;});
         
-        // Live Google Sheet Write-Back to Column Q, R, T, U, V, X!
+        // Live Google Sheet Write-Back to Column Q, R, S, T, U, V, X!
         writeToSheetRow(dispTkt.rawIndex, {
           assignedAgent: agentAssignedTag,
           connectedStatus: dispConn==='YES'?'Yes':'No',
+          attemptType: resolvedAttempt,
           disposition: dispReason,
           remarks: (isAlreadyRef ? '[Already Refunded] ' : '') + agentRemarks.trim(),
           newOrderId: newOrder==='YES'?newOrderId:'',
@@ -656,7 +672,20 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       const doRefund = (id, rec)=>{
         const agentAssignedTag = `${googleUser.email}`;
-        setOverrides(p=>({...p,[id]:{status:'Refunded',refundDetails:rec,assignedAgent:agentAssignedTag,assignedEmail:googleUser.email}}));
+        // MERGE with existing overrides — do NOT replace all fields!
+        setOverrides(p=>{
+          const existing = p[id] || {};
+          const u = {...p, [id]: {
+            ...existing,
+            status:'Refunded',
+            refundDetails:rec,
+            attemptType: 'Already Refunded',
+            assignedAgent: existing.assignedAgent || agentAssignedTag,
+            assignedEmail: existing.assignedEmail || googleUser.email
+          }};
+          try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
+          return u;
+        });
         if(googleUser.email){setStats(p=>{const c=p[googleUser.email]||{resolvedCount:0};const u={...p,[googleUser.email]:{resolvedCount:c.resolvedCount+1,lastResolvedAt:Date.now()}};localStorage.setItem('rto_agent_stats',JSON.stringify(u));return u;});}
         const tgt=tickets.find(t=>t.id===id);
         if(tgt){setReceiptTkt({...tgt,refundDetails:rec});try{window.confetti?.({particleCount:60,spread:55,origin:{y:.7}});}catch{}showToast(`₹${rec.amount.toLocaleString('en-IN')} refunded successfully`);}
@@ -2075,6 +2104,34 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                         </div>
                       )}
 
+                      {/* Attempt Type Selector (Column S) — Shown for Refund Requested */}
+                      {dispReason==='Refund Requested' && (
+                        <div className="bg-violet-950/20 p-4 rounded-xl border border-violet-800/50 space-y-2.5 animate-fadeIn mt-3">
+                          <p className="text-[12px] font-bold text-violet-200 flex items-center gap-2">
+                            📋 Attempt Type <span className="text-[10px] font-mono text-zinc-500 font-normal">(Column S)</span>
+                          </p>
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                            {['Fake Attempt','Genuine Attempt','Already Placed','Already Refunded','Delivered','To be refunded','In Transit'].map(opt => (
+                              <button
+                                key={opt}
+                                type="button"
+                                onClick={() => setAttemptType(opt)}
+                                className={`px-3 py-2 rounded-lg text-[12px] font-bold border transition-all text-left ${
+                                  attemptType === opt
+                                    ? 'bg-violet-600 text-white border-violet-500 shadow-xs ring-1 ring-violet-400/40'
+                                    : 'bg-zinc-900/70 text-zinc-300 border-zinc-800 hover:border-zinc-700'
+                                }`}
+                              >
+                                {opt}
+                              </button>
+                            ))}
+                          </div>
+                          {attemptType && (
+                            <p className="text-[11px] text-violet-300 mt-1">Selected: <strong>{attemptType}</strong> → will be written to Column S</p>
+                          )}
+                        </div>
+                      )}
+
                       {/* New Order Dynamic Panel */}
                       {(dispReason==='Customer Agreed to Accept'||dispReason==='Product Issue / Exchange')&&(
                         <div className="bg-zinc-900/80 p-4 rounded-xl border border-zinc-800 space-y-3 animate-fadeIn mt-3">
@@ -2149,6 +2206,34 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                             placeholder="Optional agent notes for refund receipt..."
                             className="w-full bg-zinc-900 border border-zinc-700/80 rounded-lg p-2.5 text-[13px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500"
                           />
+                        </div>
+                      )}
+
+                      {/* Attempt Type Selector (Column S) — Shown for Refund Requested (Unreachable) */}
+                      {dispReason==='Refund Requested' && (
+                        <div className="bg-violet-950/20 p-4 rounded-xl border border-violet-800/50 space-y-2.5 animate-fadeIn mt-3">
+                          <p className="text-[12px] font-bold text-violet-200 flex items-center gap-2">
+                            📋 Attempt Type <span className="text-[10px] font-mono text-zinc-500 font-normal">(Column S)</span>
+                          </p>
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                            {['Fake Attempt','Genuine Attempt','Already Placed','Already Refunded','Delivered','To be refunded','In Transit'].map(opt => (
+                              <button
+                                key={opt}
+                                type="button"
+                                onClick={() => setAttemptType(opt)}
+                                className={`px-3 py-2 rounded-lg text-[12px] font-bold border transition-all text-left ${
+                                  attemptType === opt
+                                    ? 'bg-violet-600 text-white border-violet-500 shadow-xs ring-1 ring-violet-400/40'
+                                    : 'bg-zinc-900/70 text-zinc-300 border-zinc-800 hover:border-zinc-700'
+                                }`}
+                              >
+                                {opt}
+                              </button>
+                            ))}
+                          </div>
+                          {attemptType && (
+                            <p className="text-[11px] text-violet-300 mt-1">Selected: <strong>{attemptType}</strong> → will be written to Column S</p>
+                          )}
                         </div>
                       )}
                     </div>
