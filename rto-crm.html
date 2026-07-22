@@ -1335,7 +1335,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                🚀 PROMINENT DEDICATED WORKSPACE NAVIGATION BAR
                ══════════════════════════════════════════════════════════════════════ */}
             <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-1.5 shadow-xl backdrop-blur-md flex items-center justify-between flex-wrap gap-2">
-              <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+              <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar w-full">
                 {tabs.map(t => {
                   const isActive = tab === t.key;
                   return (
@@ -1362,12 +1362,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   );
                 })}
               </nav>
-
-              {/* View Context Indicator */}
-              <div className="hidden lg:flex items-center gap-2 px-3 py-1 text-[12px] text-zinc-400 font-medium bg-zinc-950/60 rounded-xl border border-zinc-800/80">
-                <span className="h-2 w-2 rounded-full bg-emerald-400"></span>
-                <span>Active View: <strong className="text-zinc-200 font-semibold">{tabs.find(t => t.key === tab)?.label}</strong></span>
-              </div>
             </div>
 
             {tab==='overview'?(
@@ -1865,34 +1859,44 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               <>
                 {/* Stats Header Cards with Date-Scoped Agent Performance */}
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
-                  <div className="bg-zinc-900/70 rounded-xl p-4 border border-emerald-900/50 shadow-xs">
-                    <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 mb-1">📞 Connected Calls</p>
-                    <p className="text-2xl font-extrabold text-emerald-400 tabular-nums">{agentPerf.connectedCalls.toLocaleString('en-IN')}</p>
-                    <p className="text-[11px] text-zinc-400 mt-0.5 font-medium">{agentPerf.connectRate}% connect success rate</p>
+                  <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs flex flex-col justify-between">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-emerald-500 mb-1 flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span> Connected Calls
+                    </p>
+                    <p className="text-2xl font-extrabold text-emerald-500 tabular-nums tracking-tight">{agentPerf.connectedCalls.toLocaleString('en-IN')}</p>
+                    <p className="text-[11px] text-zinc-500 font-medium mt-1">{agentPerf.connectRate}% connect rate</p>
                   </div>
                   
-                  <div className="bg-zinc-900/70 rounded-xl p-4 border border-indigo-900/50 shadow-xs">
-                    <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-400 mb-1">📦 Reorders Converted</p>
-                    <p className="text-2xl font-extrabold text-indigo-400 tabular-nums">{agentPerf.reordersConverted.toLocaleString('en-IN')}</p>
-                    <p className="text-[11px] text-indigo-300/80 mt-0.5 font-medium">{agentPerf.reorderRate}% reorder conversion rate</p>
+                  <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs flex flex-col justify-between">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-indigo-500 mb-1 flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 rounded-full bg-indigo-500"></span> Reorders Converted
+                    </p>
+                    <p className="text-2xl font-extrabold text-indigo-500 tabular-nums tracking-tight">{agentPerf.reordersConverted.toLocaleString('en-IN')}</p>
+                    <p className="text-[11px] text-zinc-500 font-medium mt-1">{agentPerf.reorderRate}% conversion rate</p>
                   </div>
 
-                  <div className="bg-zinc-900/70 rounded-xl p-4 border border-amber-900/50 shadow-xs">
-                    <p className="text-[10px] font-bold uppercase tracking-wider text-amber-400 mb-1">💸 Already Refunded</p>
-                    <p className="text-2xl font-extrabold text-amber-400 tabular-nums">{agentPerf.alreadyRefundedCount.toLocaleString('en-IN')}</p>
-                    <p className="text-[11px] text-amber-400/80 mt-0.5 font-medium">Refund remarks recorded</p>
+                  <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs flex flex-col justify-between">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-amber-500 mb-1 flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 rounded-full bg-amber-500"></span> Already Refunded
+                    </p>
+                    <p className="text-2xl font-extrabold text-amber-500 tabular-nums tracking-tight">{agentPerf.alreadyRefundedCount.toLocaleString('en-IN')}</p>
+                    <p className="text-[11px] text-zinc-500 font-medium mt-1">Refund remarks recorded</p>
                   </div>
 
-                  <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs">
-                    <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Active Pending Box</p>
-                    <p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{pend.toLocaleString('en-IN')}</p>
-                    <p className="text-[11px] text-zinc-500 mt-0.5">{userRole === 'Agent' ? 'My Active Queue' : (agentFilter !== 'ALL' ? agentFilter.split('@')[0] : 'All agents')}</p>
+                  <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs flex flex-col justify-between">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 rounded-full bg-zinc-400"></span> Active Pending Box
+                    </p>
+                    <p className="text-2xl font-extrabold text-zinc-100 tabular-nums tracking-tight">{pend.toLocaleString('en-IN')}</p>
+                    <p className="text-[11px] text-zinc-500 font-medium mt-1">{userRole === 'Agent' ? 'My Active Queue' : (agentFilter !== 'ALL' ? agentFilter.split('@')[0] : 'All agents')}</p>
                   </div>
 
-                  <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs">
-                    <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Fresh Unassigned Leads</p>
-                    <p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{freshUnassignedCount.toLocaleString('en-IN')}</p>
-                    <p className="text-[11px] text-zinc-500 mt-0.5">Ready to claim</p>
+                  <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs flex flex-col justify-between">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 rounded-full bg-zinc-400"></span> Fresh Unassigned
+                    </p>
+                    <p className="text-2xl font-extrabold text-zinc-100 tabular-nums tracking-tight">{freshUnassignedCount.toLocaleString('en-IN')}</p>
+                    <p className="text-[11px] text-zinc-500 font-medium mt-1">Ready to claim</p>
                   </div>
                 </div>
 
