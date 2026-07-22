@@ -70,6 +70,7 @@ coverage_html = (
 )
 
 agent_coverage_html = (
+    f"Click &#9656; on an agent row to expand its Query Class breakdown. "
     f"All {D['n_agents_total']} agents are shown (no bucketing needed). "
     f"'AI' is every AI-resolved ticket; '(unassigned)' means the ticket was human-resolved but no agent name was recorded. "
     f"{DIP_MARK_NOTE}"
@@ -77,6 +78,7 @@ agent_coverage_html = (
 
 GRANULAR_JSON = json.dumps(D["granular"], ensure_ascii=False, separators=(",", ":"))
 GRANULAR_AGENT_JSON = json.dumps(D["granular_agent"], ensure_ascii=False, separators=(",", ":"))
+GRANULAR_AGENT_CLASS_JSON = json.dumps(D["granular_agent_class"], ensure_ascii=False, separators=(",", ":"))
 WORDS_JSON = json.dumps(D["words_by_filter"], ensure_ascii=False, separators=(",", ":"))
 MONTH_ORDER_JSON = json.dumps(D["month_order"], ensure_ascii=False)
 
@@ -327,7 +329,7 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
 
     <div class="card">
       <h2>Average CSAT rating, month on month &mdash; by Agent</h2>
-      <p class="card-sub">Agent &times; month, sorted by overall avg rating &mdash; blank cells = no completed CSAT that month. Hover a cell for n.</p>
+      <p class="card-sub">Agent &times; month, sorted by overall avg rating &mdash; blank cells = no completed CSAT that month. Hover a cell for n, expand a row for its Query Class breakdown.</p>
       <div class="heatmap-scroll">
         <table class="heatmap" id="heatmap-agent-table">
           <thead><tr id="heatmap-agent-head"></tr></thead>
@@ -385,6 +387,7 @@ html = f"""<title>CSAT Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)
 <script>
 const GRANULAR = {GRANULAR_JSON};
 const GRANULAR_AGENT = {GRANULAR_AGENT_JSON};
+const GRANULAR_AGENT_CLASS = {GRANULAR_AGENT_CLASS_JSON};
 const WORDS_BY_FILTER = {WORDS_JSON};
 const MONTH_ORDER = {MONTH_ORDER_JSON};
 
@@ -426,6 +429,12 @@ function computeHeatmap(granular, brand, resolver, channel) {{
 function computeSubHeatmap(className, brand, resolver, channel) {{
   const filtered = GRANULAR.filter(rec => passesFilter(rec, brand, resolver, channel) && rec.c === className);
   return computeGroupedRows(filtered, rec => rec.cat);
+}}
+
+// Query Class breakdown within a single Agent row (used by the by-Agent table's expand toggle).
+function computeSubHeatmapByAgent(agentName, brand, resolver, channel) {{
+  const filtered = GRANULAR_AGENT_CLASS.filter(rec => passesFilter(rec, brand, resolver, channel) && rec.ag === agentName);
+  return computeGroupedRows(filtered, rec => rec.c);
 }}
 
 function hexToRgb(hex) {{
@@ -507,8 +516,10 @@ function wireCellTooltips(body, tooltip) {{
   }});
 }}
 
-function renderHeatmap(granular, headId, bodyId, cornerLabel, brand, resolver, channel) {{
-  const rows = computeHeatmap(granular, brand, resolver, channel);
+// Shared renderer for both expandable heatmaps (Query Class -> Query Category,
+// Agent -> Query Class) - rows are the top-level (already-filtered) groups;
+// computeSubRowsFn(row.cls) returns that row's expand-on-click breakdown.
+function renderExpandableHeatmap(rows, headId, bodyId, cornerLabel, computeSubRowsFn) {{
   const head = document.getElementById(headId);
   const body = document.getElementById(bodyId);
   const tooltip = document.getElementById('tooltip');
@@ -521,30 +532,8 @@ function renderHeatmap(granular, headId, bodyId, cornerLabel, brand, resolver, c
   }}
 
   const colorForAvg = colorScale();
-  body.innerHTML = rows.map(row =>
-    `<tr><td class="rowlabel" title="${{row.cls}}">${{row.cls}} <span style="color:var(--text-muted); font-weight:400;">(n=${{row.n}})</span></td>${{cellsHtmlForRow(row, colorForAvg)}}</tr>`
-  ).join('');
-
-  wireCellTooltips(body, tooltip);
-}}
-
-// Query Class heatmap: each class row expands to show its Query Category breakdown.
-function renderClassHeatmap(brand, resolver, channel) {{
-  const rows = computeHeatmap(GRANULAR, brand, resolver, channel);
-  const head = document.getElementById('heatmap-head');
-  const body = document.getElementById('heatmap-body');
-  const tooltip = document.getElementById('tooltip');
-
-  head.innerHTML = '<th class="corner">Query Class</th>' + MONTH_ORDER.map(m => `<th>${{m.replace(' 20', " '")}}</th>`).join('');
-
-  if (rows.length === 0) {{
-    body.innerHTML = '<tr><td class="rowlabel">No completed CSAT responses match this filter combination.</td></tr>';
-    return;
-  }}
-
-  const colorForAvg = colorScale();
   body.innerHTML = rows.map((row, i) => {{
-    const subRows = computeSubHeatmap(row.cls, brand, resolver, channel);
+    const subRows = computeSubRowsFn(row.cls);
     const subHtml = subRows.map(sub =>
       `<tr class="qcat-row" data-parent-idx="${{i}}" style="display:none;"><td class="rowlabel sub" title="${{sub.cls}}">${{sub.cls}} <span style="color:var(--text-muted); font-weight:400;">(n=${{sub.n}})</span></td>${{cellsHtmlForRow(sub, colorForAvg)}}</tr>`
     ).join('');
@@ -556,7 +545,7 @@ function renderClassHeatmap(brand, resolver, channel) {{
 
   wireCellTooltips(body, tooltip);
 
-  function toggleClass(i) {{
+  function toggleRow(i) {{
     const toggleEl = body.querySelector(`.row-toggle[data-toggle-idx="${{i}}"]`);
     if (!toggleEl) return;
     const expanded = toggleEl.classList.toggle('expanded');
@@ -565,8 +554,22 @@ function renderClassHeatmap(brand, resolver, channel) {{
     }});
   }}
   body.querySelectorAll('tr.cls-row').forEach(tr => {{
-    tr.querySelector('td.rowlabel').addEventListener('click', () => toggleClass(tr.dataset.toggleIdx));
+    tr.querySelector('td.rowlabel').addEventListener('click', () => toggleRow(tr.dataset.toggleIdx));
   }});
+}}
+
+// Query Class heatmap: each class row expands to show its Query Category breakdown.
+function renderClassHeatmap(brand, resolver, channel) {{
+  const rows = computeHeatmap(GRANULAR, brand, resolver, channel);
+  renderExpandableHeatmap(rows, 'heatmap-head', 'heatmap-body', 'Query Class',
+    cls => computeSubHeatmap(cls, brand, resolver, channel));
+}}
+
+// Agent heatmap: each agent row expands to show its Query Class breakdown.
+function renderAgentHeatmap(brand, resolver, channel) {{
+  const rows = computeHeatmap(GRANULAR_AGENT, brand, resolver, channel);
+  renderExpandableHeatmap(rows, 'heatmap-agent-head', 'heatmap-agent-body', 'Agent',
+    agentName => computeSubHeatmapByAgent(agentName, brand, resolver, channel));
 }}
 
 function renderWordsTable(words) {{
@@ -729,7 +732,7 @@ function refreshAll() {{
   renderKPIs(brand, resolver, channel);
   renderDipBanner(brand, resolver, channel);
   renderClassHeatmap(brand, resolver, channel);
-  renderHeatmap(GRANULAR_AGENT, 'heatmap-agent-head', 'heatmap-agent-body', 'Agent', brand, resolver, channel);
+  renderAgentHeatmap(brand, resolver, channel);
 }}
 
 function computeWords(brand, month) {{

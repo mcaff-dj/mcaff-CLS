@@ -123,6 +123,14 @@ GRANULAR_AGENT = [
     for _, r in grp_agent.iterrows()
 ]
 
+# ---- GRANULAR_AGENT_CLASS: month x brand x resolver x channel x agent x qclass x rating -> n ----
+# Query Class breakdown shown when an agent row in the by-Agent heatmap is expanded.
+grp_agent_class = df.groupby(["month", "Brand name", "resolver", "Channel", "agent", "qclass", "rating"]).size().reset_index(name="n")
+GRANULAR_AGENT_CLASS = [
+    {"m": r["month"], "b": r["Brand name"], "r": r["resolver"], "ch": r["Channel"], "ag": r["agent"], "c": r["qclass"], "rt": str(r["rating"]), "n": int(r["n"])}
+    for _, r in grp_agent_class.iterrows()
+]
+
 # ---- KPI tiles ----
 def avg_rating(sub):
     return round(sub["rating"].mean(), 2) if len(sub) else None
@@ -231,6 +239,7 @@ result = {
     "month_order": MONTH_ORDER,
     "granular": GRANULAR,
     "granular_agent": GRANULAR_AGENT,
+    "granular_agent_class": GRANULAR_AGENT_CLASS,
     "n_agents_total": int(df["agent"].nunique()),
     "words_by_filter": WORDS_BY_FILTER,
     "weakest": weakest,
@@ -249,5 +258,6 @@ with open(OUT, "w", encoding="utf-8") as f:
 print("wrote", OUT)
 print("granular rows:", len(GRANULAR))
 print("granular_agent rows:", len(GRANULAR_AGENT))
+print("granular_agent_class rows:", len(GRANULAR_AGENT_CLASS))
 print("word rows:", len(WORDS_BY_FILTER))
 print(json.dumps({k: v for k, v in result.items() if k not in ("granular", "words_by_filter")}, indent=2, default=str)[:4000])
