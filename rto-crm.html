@@ -259,6 +259,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const res=[];
       for(let i=0;i<rows.length;i++){
         const r=rows[i];
+
+        // ── CRITICAL GUARD: Skip rows where Order ID (column E, index 4) is missing or blank ──
+        const orderIdRaw = (r[4] || '').trim();
+        if (!orderIdRaw) continue; // No order ID = not a valid lead row
+
+        // Also skip rows that are entirely blank (no meaningful data in any cell)
+        const hasAnyData = r.some(cell => (cell || '').trim().length > 0);
+        if (!hasAnyData) continue;
+
         const ag=(r[16]||'').toLowerCase().trim();
         if(role==='Agent'&&user&&ag&&ag!=='unassigned'){
           if(!(aE&&ag===aE)||(aP.length>2&&ag.includes(aP))||(aF.length>2&&ag.includes(aF)))
@@ -275,7 +284,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const g=(...ks)=>{for(const k of ks){const f=Object.keys(r).find(h=>h.toLowerCase().replace(/[^a-z0-9]/g,'').includes(k.toLowerCase().replace(/[^a-z0-9]/g,'')));if(f&&r[f])return r[f];}return'';};
       const pay=g('Payment Method','Payment Mode','Payment','Type').toUpperCase();
       const amt=g('Order Amount','Amount','Price','Total','Order Value');
-      const ord=g('Order Number','Order #','Order ID','OrderNo')||`ORD-${i+1000}`;
+      const ord=g('Order Number','Order #','Order ID','OrderNo');
       const agt=g('Agent Name','Agent','Assigned Agent','AgentName','Assigned To','c16')||'Unassigned';
       const rto=g('RTO Reason','c3','Reason','RTOReason')||'Return To Origin';
       const cd=g('Calling Date','CallingDate','c24')||'';
@@ -775,7 +784,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           const myDisposed = base.filter(t => (t.status !== 'Pending' || t.disposition || t.agentRemarks) && isMine(t.assignedAgent));
 
           // 3. Unassigned pending leads available in the sheet
-          let unassignedLeads = base.filter(t => t.status === 'Pending' && !t.disposition && !t.agentRemarks && (!t.assignedAgent || t.assignedAgent === 'Unassigned'));
+          let unassignedLeads = base.filter(t => t.orderNumber && t.status === 'Pending' && !t.disposition && !t.agentRemarks && (!t.assignedAgent || t.assignedAgent === 'Unassigned'));
 
           const needed = Math.max(0, maxLeads - myPending.length);
           if (needed > 0 && unassignedLeads.length > 0) {
@@ -819,7 +828,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       useEffect(() => {
         if (allTickets.length === 0 || !googleUser?.email || userRole !== 'Agent') return;
 
-        const unassignedInBox = allTickets.filter(t => (!t.disposition && !t.agentRemarks && t.status === 'Pending') && (!overrides[t.id]?.assignedAgent || overrides[t.id]?.assignedAgent === 'Unassigned'));
+        const unassignedInBox = allTickets.filter(t => t.orderNumber && (!t.disposition && !t.agentRemarks && t.status === 'Pending') && (!overrides[t.id]?.assignedAgent || overrides[t.id]?.assignedAgent === 'Unassigned'));
         if (unassignedInBox.length === 0) return;
 
         const newOverrides = {};
@@ -865,6 +874,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       // Fresh Unassigned Leads Count in Sheet
       const freshUnassignedCount = useMemo(() => {
         return tickets.filter(t => {
+          if (!t.orderNumber) return false; // Skip tickets without valid order ID
           const agt = overrides[t.id]?.assignedAgent || t.assignedAgent;
           return !agt || agt === 'Unassigned';
         }).length;
