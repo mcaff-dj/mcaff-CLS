@@ -79,7 +79,14 @@ async function handleCallback(req, res) {
       }),
     });
     if (!tokenResp.ok) {
-      res.status(502).send('Google token exchange failed.');
+      const errBody = await tokenResp.text();
+      console.error('Google token exchange failed:', tokenResp.status, errBody);
+      let detail = errBody;
+      try {
+        const parsed = JSON.parse(errBody);
+        detail = parsed.error_description || parsed.error || errBody;
+      } catch { /* not JSON, use raw body */ }
+      res.status(502).send('Google token exchange failed: ' + detail);
       return;
     }
     const tokenData = await tokenResp.json();
