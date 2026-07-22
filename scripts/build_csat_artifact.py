@@ -14,48 +14,6 @@ def avg(x):
     return f"{x:.2f}"
 
 k = D["kpis"]
-weakest = D["weakest"]
-ai_worse = D["ai_worse"]
-ai_better = D["ai_better_or_tied"]
-declines = D["declines"]
-tv = D["top_volume_compare"]
-
-w0, w1, w2, w3 = weakest[0], weakest[1], weakest[2], weakest[3]
-weakest_html = (
-    f"<b>{w0['task']}</b> is the single weakest category by volume — avg {avg(w0['mean'])} across {n(w0['count'])} completed CSATs, "
-    f"well below the {avg(k['overall_avg'])} overall average. "
-    f"<b>{w2['task']}</b> ({avg(w2['mean'])}, n={n(w2['count'])}), <b>{w3['task']}</b> ({avg(w3['mean'])}, n={n(w3['count'])}) "
-    f"round out the lowest-rated categories with meaningful sample size."
-)
-
-a0, a1, a2, a3 = ai_worse[0], ai_worse[1], ai_worse[2], ai_worse[3]
-ai_worse_html = (
-    "<b>AI trails Human by roughly a point or more on categories that need judgment or account correction</b> — "
-    f"{a0['task']} (AI {avg(a0['mean_AI'])}/n={n(a0['count_AI'])} vs Human {avg(a0['mean_Human'])}/n={n(a0['count_Human'])}), "
-    f"{a1['task']} (AI {avg(a1['mean_AI'])}/n={n(a1['count_AI'])} vs Human {avg(a1['mean_Human'])}/n={n(a1['count_Human'])}), "
-    f"{a2['task']} (AI {avg(a2['mean_AI'])}/n={n(a2['count_AI'])} vs Human {avg(a2['mean_Human'])}/n={n(a2['count_Human'])}) and "
-    f"{a3['task']} (AI {avg(a3['mean_AI'])}/n={n(a3['count_AI'])} vs Human {avg(a3['mean_Human'])}/n={n(a3['count_Human'])}) "
-    "all show a wide gap with enough volume on both sides that this isn't noise. These are exactly the categories where "
-    "a wrong automated answer — a refund status, a dispatch claim, a delivery mark — is verifiably wrong to the customer."
-)
-
-b0, b1 = ai_better[0], ai_better[1]
-tv_pct = round(100 * tv['n'] / k['total'], 1)
-ai_tied_html = (
-    f"<b>On the single largest category, {tv['task']}</b> (n={n(tv['n'])}, {tv_pct}% of all responses), "
-    f"AI ({avg(tv['ai_avg'])}) is essentially level with Human ({avg(tv['human_avg'])}) — "
-    "a pure status lookup is where AI performs closest to parity. AI also leads Human on "
-    f"'{b1['task']}' ({avg(b1['mean_AI'])} vs {avg(b1['mean_Human'])}, n={n(b1['count_AI'])} AI). "
-    "The AI shortfall looks concentrated in categories needing account changes or judgment calls, not simple lookups."
-)
-
-d0, d1, d2 = declines[0], declines[1], declines[2]
-decline_html = (
-    f"<b>{d0['task']}</b> for AI-resolved tickets fell from {avg(d0['first_v'])} (n={n(d0['first_n'])}) in {d0['first_m']} "
-    f"to {avg(d0['last_v'])} (n={n(d0['last_n'])}) in {d0['last_m']} — a {avg(d0['drop'])}-point drop on comparable volume. "
-    f"<b>{d1['task']}</b> shows a similar slide ({avg(d1['first_v'])} &rarr; {avg(d1['last_v'])}, drop {avg(d1['drop'])}), "
-    f"as does <b>{d2['task']}</b> ({avg(d2['first_v'])} &rarr; {avg(d2['last_v'])}). Worth investigating what changed in these AI flows over the period."
-)
 
 DIP_MARK_NOTE = (
     "A &#9660; on the current month's cell means that row's rating dropped &ge;0.3 vs a prior month "
@@ -255,10 +213,6 @@ html = f"""<title>Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</tit
   .dip-banner.good {{ background: var(--good-bg); border-color: var(--good-border); color: var(--good-text); }}
   .dip-banner.neutral {{ background: var(--surface-1); border-color: var(--border); color: var(--text-secondary); }}
 
-  .findings-list {{ margin: 0 0 4px; padding-left: 20px; }}
-  .findings-list li {{ font-size: 13.5px; line-height: 1.55; color: var(--text-primary); margin-bottom: 12px; }}
-  .findings-list li b {{ font-weight: 650; }}
-
   .tab-nav {{ display: flex; flex-wrap: wrap; gap: 6px; margin: 20px 0 24px; border-bottom: 1px solid var(--gridline); padding-bottom: 0; overflow-x: auto; }}
   .tab-btn {{ appearance: none; border: 1px solid transparent; background: transparent; color: var(--text-secondary); font-size: 13px; font-family: inherit; padding: 9px 14px; border-radius: 8px 8px 0 0; cursor: pointer; position: relative; top: 1px; white-space: nowrap; flex: none; }}
   .tab-btn:hover {{ color: var(--text-primary); background: var(--surface-1); }}
@@ -338,18 +292,6 @@ html = f"""<title>Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</tit
           </table>
         </div>
         <p class="footnote">{coverage_html}</p>
-      </div>
-
-      <div class="card">
-        <h2>Query Category patterns</h2>
-        <p class="card-sub">Findings below are computed directly from the CSAT-completed data (Hyphen + mCaffeine, all resolvers unless noted) &mdash; not from the filters above.</p>
-        <ul class="findings-list">
-          <li>{weakest_html}</li>
-          <li>{ai_worse_html}</li>
-          <li>{ai_tied_html}</li>
-          <li>{decline_html}</li>
-        </ul>
-        <p class="footnote">All AI-vs-Human comparisons use a minimum sample size of n&ge;30 per side to avoid drawing conclusions from a handful of responses.</p>
       </div>
 
       <div class="card">

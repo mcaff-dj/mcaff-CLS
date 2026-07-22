@@ -170,10 +170,6 @@
   .dip-banner.good { background: var(--good-bg); border-color: var(--good-border); color: var(--good-text); }
   .dip-banner.neutral { background: var(--surface-1); border-color: var(--border); color: var(--text-secondary); }
 
-  .findings-list { margin: 0 0 4px; padding-left: 20px; }
-  .findings-list li { font-size: 13.5px; line-height: 1.55; color: var(--text-primary); margin-bottom: 12px; }
-  .findings-list li b { font-weight: 650; }
-
   .tab-nav { display: flex; flex-wrap: wrap; gap: 6px; margin: 20px 0 24px; border-bottom: 1px solid var(--gridline); padding-bottom: 0; overflow-x: auto; }
   .tab-btn { appearance: none; border: 1px solid transparent; background: transparent; color: var(--text-secondary); font-size: 13px; font-family: inherit; padding: 9px 14px; border-radius: 8px 8px 0 0; cursor: pointer; position: relative; top: 1px; white-space: nowrap; flex: none; }
   .tab-btn:hover { color: var(--text-primary); background: var(--surface-1); }
@@ -253,18 +249,6 @@
           </table>
         </div>
         <p class="footnote">Click &#9656; on a Query Class row to expand its Query Category breakdown. The top 20 of 93 distinct Query Categories (94.5% of all completed CSAT volume) are shown per class; the remainder are grouped into <b>Other</b>. '(none)' means no category was tagged on the ticket. 10 Query Classes total. A &#9660; on the current month's cell means that row's rating dropped &ge;0.3 vs a prior month (both months need n&ge;15) &mdash; hover the cell for which month(s) and by how much.</p>
-      </div>
-
-      <div class="card">
-        <h2>Query Category patterns</h2>
-        <p class="card-sub">Findings below are computed directly from the CSAT-completed data (Hyphen + mCaffeine, all resolvers unless noted) &mdash; not from the filters above.</p>
-        <ul class="findings-list">
-          <li><b>Coupon Code Error</b> is the single weakest category by volume — avg 2.49 across 43 completed CSATs, well below the 3.97 overall average. <b>Refund enquiry</b> (3.25, n=1,201), <b>Delayed Order</b> (3.32, n=1,849) round out the lowest-rated categories with meaningful sample size.</li>
-          <li><b>AI trails Human by roughly a point or more on categories that need judgment or account correction</b> — Wrong Product Dispatched (AI 2.56/n=34 vs Human 4.37/n=714), Marked Delivered but customer did not receive order (AI 2.69/n=35 vs Human 4.22/n=343), Refund enquiry (AI 2.73/n=475 vs Human 3.60/n=726) and Change in detail(Account/Order) (AI 3.64/n=1,016 vs Human 4.50/n=1,639) all show a wide gap with enough volume on both sides that this isn't noise. These are exactly the categories where a wrong automated answer — a refund status, a dispatch claim, a delivery mark — is verifiably wrong to the customer.</li>
-          <li><b>On the single largest category, (none)</b> (n=32,148, 50.8% of all responses), AI (3.83) is essentially level with Human (4.35) — a pure status lookup is where AI performs closest to parity. AI also leads Human on 'Payment Captured, wrong message sent' (4.42 vs 4.46, n=59 AI). The AI shortfall looks concentrated in categories needing account changes or judgment calls, not simple lookups.</li>
-          <li><b>Unable to see order history</b> for AI-resolved tickets fell from 4.05 (n=110) in May 2026 to 3.23 (n=61) in Jul 2026 — a 0.83-point drop on comparable volume. <b>Change in detail(Account/Order)</b> shows a similar slide (4.18 &rarr; 3.38, drop 0.80), as does <b>Offer Confusion</b> (3.98 &rarr; 3.41). Worth investigating what changed in these AI flows over the period.</li>
-        </ul>
-        <p class="footnote">All AI-vs-Human comparisons use a minimum sample size of n&ge;30 per side to avoid drawing conclusions from a handful of responses.</p>
       </div>
 
       <div class="card">
