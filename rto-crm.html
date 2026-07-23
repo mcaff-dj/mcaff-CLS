@@ -737,6 +737,60 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
       }, [supabaseUrl, supabaseKey]);
 
+      // Live status for every OTHER agent only ever reaches this browser through Supabase -
+      // cross-tab sync mechanisms are same-device-only, so without this poll the roster has no
+      // signal at all for teammates and silently shows everyone as the seeded default forever.
+      const [liveAgentStatuses, setLiveAgentStatuses] = useState({});
+      const [isRefreshingRoster, setIsRefreshingRoster] = useState(false);
+
+      const fetchLiveAgentStatuses = async () => {
+        const url = supabaseUrl || DEFAULT_SUPABASE_URL;
+        const key = supabaseKey || DEFAULT_SUPABASE_KEY;
+        if (!url || !key) return null;
+        try {
+          // Ordered oldest-first so that if the table has no unique constraint on email (i.e.
+          // every status change inserts a new row instead of upserting), the last write wins
+          // when rows are folded into a per-email map below, instead of an arbitrary one.
+          const res = await fetch(`${url}/rest/v1/agent_status?select=email,status,updated_at&order=updated_at.asc`, {
+            headers: { apikey: key, Authorization: `Bearer ${key}` }
+          });
+          if (!res.ok) return null;
+          return await res.json();
+        } catch (e) {
+          console.error('Fetch agent_status error:', e);
+          return null;
+        }
+      };
+
+      // Shared by the 20s background poll and the roster's manual Refresh button.
+      const refreshLiveAgentStatuses = useCallback(async (withFeedback = false) => {
+        if (withFeedback) setIsRefreshingRoster(true);
+        const rows = await fetchLiveAgentStatuses();
+        if (Array.isArray(rows)) {
+          const map = {};
+          rows.forEach(r => { if (r.email) map[r.email.toLowerCase()] = { status: r.status, updatedAt: r.updated_at }; });
+          setLiveAgentStatuses(map);
+          if (withFeedback) showToast('🔄 Agent statuses refreshed');
+        } else if (withFeedback) {
+          showToast('Could not refresh agent statuses — check Supabase connection');
+        }
+        if (withFeedback) setIsRefreshingRoster(false);
+      }, [supabaseUrl, supabaseKey]);
+
+      useEffect(() => {
+        let cancelled = false;
+        const load = async () => {
+          const rows = await fetchLiveAgentStatuses();
+          if (cancelled || !Array.isArray(rows)) return;
+          const map = {};
+          rows.forEach(r => { if (r.email) map[r.email.toLowerCase()] = { status: r.status, updatedAt: r.updated_at }; });
+          setLiveAgentStatuses(map);
+        };
+        load();
+        const t = setInterval(load, 20000);
+        return () => { cancelled = true; clearInterval(t); };
+      }, [supabaseUrl, supabaseKey]);
+
       const saveSupabaseConfig = (url, key) => {
         setSupabaseUrl(url);
         setSupabaseKey(key);
@@ -833,8 +887,21 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         } catch {}
       };
 
-      // 10-Minute User Inactivity Auto-Offline Engine
+      // 10-Minute User Inactivity Auto-Offline Engine + Presence Heartbeat
       const lastActivityRef = useRef(Date.now());
+      const lastHeartbeatRef = useRef(0);
+
+      // syncStatusToSupabase only ever fires on an explicit status-dropdown change or the
+      // inactivity auto-offline below - an agent who opens the app and just starts working
+      // without ever touching that dropdown never tells Supabase they're online at all, so
+      // every OTHER viewer's roster (which trusts Supabase over a guess) shows them Offline
+      // forever. Push an immediate heartbeat the moment the agent signs in.
+      useEffect(() => {
+        if (googleUser?.email) {
+          syncStatusToSupabase(agentStatus, null);
+          lastHeartbeatRef.current = Date.now();
+        }
+      }, [googleUser]);
 
       useEffect(() => {
         const updateActivity = () => {
@@ -853,6 +920,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               console.log('10 minutes of inactivity detected — marking agent Offline');
               handleSetStatus('Offline');
               showToast('⚠️ Marked Offline due to 10 minutes of inactivity');
+              return;
+            }
+
+            // Silent presence heartbeat, well inside the 10-minute staleness window other
+            // browsers use to decide whether to trust this agent's last known status.
+            const twoMinutesMs = 2 * 60 * 1000;
+            if (Date.now() - lastHeartbeatRef.current >= twoMinutesMs) {
+              syncStatusToSupabase(agentStatus, null);
+              lastHeartbeatRef.current = Date.now();
             }
           }
         }, 15000); // Check every 15 seconds
@@ -1314,8 +1390,26 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           }
         });
 
+        // Overwrite the seeded/placeholder status with what's actually known: the signed-in
+        // user's own status is authoritative locally (no round-trip lag); every other agent's
+        // status comes from their last Supabase heartbeat, and anyone with no heartbeat or a
+        // stale one (>10 min, matching the self inactivity-to-offline threshold) reads Offline
+        // rather than a guessed 'Online'.
+        const STALE_MS = 10 * 60 * 1000;
+        const now = Date.now();
+        const myEmail = googleUser?.email ? googleUser.email.toLowerCase() : null;
+        rosterMap.forEach((agent, email) => {
+          if (myEmail && email === myEmail) {
+            agent.status = agentStatus;
+            return;
+          }
+          const live = liveAgentStatuses[email];
+          const isFresh = live?.updatedAt && (now - new Date(live.updatedAt).getTime()) <= STALE_MS;
+          agent.status = isFresh ? (live.status || 'Offline') : 'Offline';
+        });
+
         return Array.from(rosterMap.values());
-      }, [agentRoster, tickets, overrides, googleUser]);
+      }, [agentRoster, tickets, overrides, googleUser, agentStatus, liveAgentStatuses]);
 
       // ONLY Agent-role users participate in round-robin. Admins/Team Leads are excluded from the interleave index.
       const sortedAgentEmails = useMemo(() => {
@@ -1342,7 +1436,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
             newAddress: o.newAddress || t.newAddress,
             disposedAt: o.disposedAt || t.disposedAt,
             disposedBy: o.disposedBy || t.disposedBy,
-            assignedAgent: o.assignedAgent || t.assignedAgent,
+            // The sheet's own Column Q is authoritative once it shows a real agent - a stale
+            // local override (e.g. this browser's own optimistic self-claim that got beaten by
+            // another agent's write in a race) must never permanently mask what the sheet says
+            // after a fresh sync. The override only fills the gap while Column Q is still blank.
+            assignedAgent: (t.assignedAgent && t.assignedAgent !== 'Unassigned') ? t.assignedAgent : (o.assignedAgent || t.assignedAgent),
             attemptType: o.attemptType || t.attemptType
           } : t;
         });
@@ -2186,14 +2284,25 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                           <h2 className="text-lg font-bold text-zinc-100">Team Roster & Bulk Lead Reassignment Control</h2>
                           <p className="text-[13px] text-zinc-500 mt-0.5">Manage agent roles, lead capacity limits, reassign active agent boxes, or wipe Column Q in Google Sheet.</p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={resetStalePendingLeads}
-                          className="px-3 py-1.5 rounded-xl bg-amber-950/70 hover:bg-amber-900 text-amber-200 border border-amber-800/80 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
-                          title="Unassign undisposed leads from previous days and clear Column Q in Google Sheet"
-                        >
-                          🧹 Reset Stale Pending Leads (&lt; Today)
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => refreshLiveAgentStatuses(true)}
+                            disabled={isRefreshingRoster}
+                            className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2 disabled:opacity-50"
+                            title="Fetch each agent's latest status from Supabase right now"
+                          >
+                            {isRefreshingRoster ? '⏳ Refreshing…' : '🔄 Refresh Status'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={resetStalePendingLeads}
+                            className="px-3 py-1.5 rounded-xl bg-amber-950/70 hover:bg-amber-900 text-amber-200 border border-amber-800/80 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
+                            title="Unassign undisposed leads from previous days and clear Column Q in Google Sheet"
+                          >
+                            🧹 Reset Stale Pending Leads (&lt; Today)
+                          </button>
+                        </div>
                       </div>
 
                       {/* Agent Roster & Reassignment Table */}
