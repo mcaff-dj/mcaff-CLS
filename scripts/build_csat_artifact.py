@@ -231,17 +231,12 @@ html = f"""<title>Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</tit
   .tab-panel {{ display: none; }}
   .tab-panel.active {{ display: block; }}
 
-  /* Agent wise analysis tab: brand sub-tabs + Daily/Weekly toggle + shift-status table.
-     Deliberately NOT class="tab-nav" - the dashboard shell's onIframeLoaded() scrapes
-     every .tab-nav .tab-btn in this document (unscoped) to build its own sidebar nav;
-     giving this sub-nav that class made "Hyphen"/"mCaffeine" show up there as if they
-     were top-level report tabs. Buttons keep class="tab-btn" for shared styling below -
-     only the wrapping <nav> needs a different class so the dashboard's selector misses it. */
-  .brand-subnav {{ display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 18px; border-bottom: 1px solid var(--gridline); overflow-x: auto; }}
-  #ash-brandTabs .tab-btn::before {{ content: ""; width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 1px; }}
-  #ash-brandTabs .tab-btn[data-brand="Hyphen"]::before {{ background: var(--brand-hyphen); }}
-  #ash-brandTabs .tab-btn[data-brand="mCaffeine"]::before {{ background: var(--brand-mcaff); }}
-  #ash-brandTabs .tab-btn {{ display: flex; align-items: center; gap: 7px; }}
+  /* Agent wise analysis tab: Brand filter + Daily/Weekly toggle + shift-status table.
+     Brand is a plain <select> (not tab-nav/tab-btn) so it can't collide with the
+     dashboard shell's onIframeLoaded(), which scrapes every .tab-nav .tab-btn in this
+     document (unscoped) to build its own sidebar nav, or with this report's own
+     top-level tab-click wiring (#main-tab-nav .tab-btn) - both previously picked up
+     "Hyphen"/"mCaffeine" when they were rendered as tab-styled buttons. */
   .gran-toggle {{ display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }}
   .gran-btn {{ appearance: none; border: none; background: var(--page-plane); color: var(--text-secondary); font: inherit; font-size: 13px; font-weight: 600; padding: 6px 14px; cursor: pointer; }}
   .gran-btn.active {{ background: var(--brand-hyphen); color: #fff; }}
@@ -268,7 +263,7 @@ html = f"""<title>Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</tit
       WhatsApp avg {avg(whatsapp.get('avg',0))} (n={n(whatsapp.get('n',0))}) &nbsp;&middot;&nbsp; Email avg {avg(email.get('avg',0))} (n={n(email.get('n',0))}) &nbsp;&middot;&nbsp; Live Chat avg {avg(livechat.get('avg',0))} (n={n(livechat.get('n',0))})
     </p>
 
-    <nav class="tab-nav">
+    <nav class="tab-nav" id="main-tab-nav">
       <button class="tab-btn active" data-tab="csat">CSAT Deep Dive</button>
       <button class="tab-btn" data-tab="agent">Agent wise analysis</button>
     </nav>
@@ -371,9 +366,11 @@ html = f"""<title>Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</tit
     <div class="tab-panel" id="panel-agent">
       <p class="card-sub" style="margin:0 0 16px;">From the daily agent-status export (Hyphen &amp; mCaffeine).</p>
 
-      <nav class="brand-subnav" id="ash-brandTabs"></nav>
-
       <div class="filterbar">
+        <div class="filter-group">
+          <label for="ash-f-brand">Brand</label>
+          <select id="ash-f-brand"></select>
+        </div>
         <div class="filter-group">
           <div class="gran-toggle" id="ash-granToggle">
             <button type="button" class="gran-btn active" data-gran="daily">Daily</button>
@@ -713,20 +710,16 @@ function rowFor(agent, period) {{
   }};
 }}
 
-function buildTabs() {{
-  const nav = document.getElementById('ash-brandTabs');
-  nav.innerHTML = Object.keys(AGENT_SHIFT_DATA).map(b =>
-    `<button class="tab-btn${{b === currentBrand ? ' active' : ''}}" data-brand="${{b}}">${{b}}</button>`
+function buildBrandSelect() {{
+  const sel = document.getElementById('ash-f-brand');
+  sel.innerHTML = Object.keys(AGENT_SHIFT_DATA).map(b =>
+    `<option value="${{b}}"${{b === currentBrand ? ' selected' : ''}}>${{b}}</option>`
   ).join('');
-  nav.querySelectorAll('.tab-btn').forEach(btn => {{
-    btn.addEventListener('click', () => {{
-      currentBrand = btn.dataset.brand;
-      nav.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      resetPeriod();
-      buildPeriodSelect();
-      render();
-    }});
+  sel.addEventListener('change', () => {{
+    currentBrand = sel.value;
+    resetPeriod();
+    buildPeriodSelect();
+    render();
   }});
 }}
 
@@ -918,7 +911,7 @@ function renderHeatmap() {{
 }}
 
 resetPeriod();
-buildTabs();
+buildBrandSelect();
 buildPeriodSelect();
 render();
 document.getElementById('ash-f-period').addEventListener('change', (e) => {{ currentPeriod = e.target.value; render(); }});
@@ -1132,9 +1125,13 @@ document.getElementById('f-word-brand').addEventListener('change', refreshWords)
 document.getElementById('f-word-month').addEventListener('change', refreshWords);
 window.addEventListener('resize', () => {{ refreshWords(); refreshAll(); }});
 
-document.querySelectorAll('.tab-btn').forEach(function(b) {{
+// Scoped to #main-tab-nav specifically - a plain .tab-btn selector here would also
+// catch the Agent wise analysis tab's own brand sub-tabs (Hyphen/mCaffeine), which
+// share the tab-btn class for styling but use data-brand, not data-tab; clicking one
+// would resolve to getElementById('panel-undefined') -> null -> classList throws.
+document.querySelectorAll('#main-tab-nav .tab-btn').forEach(function(b) {{
   b.addEventListener('click', function() {{
-    document.querySelectorAll('.tab-btn').forEach(function(x) {{ x.classList.remove('active'); }});
+    document.querySelectorAll('#main-tab-nav .tab-btn').forEach(function(x) {{ x.classList.remove('active'); }});
     document.querySelectorAll('.tab-panel').forEach(function(p) {{ p.classList.remove('active'); }});
     b.classList.add('active');
     document.getElementById('panel-' + b.dataset.tab).classList.add('active');
