@@ -238,12 +238,79 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
     }
 
     /* ── Live Google Sheets Write-Back Engine ──────────── */
-    async function writeToSheetRow(sheetRowIndex, updates) {
+    // A ticket's rawIndex is only as fresh as the last full sync. If the sheet's row order has
+    // shifted since then (e.g. the daily import job inserting/removing rows elsewhere), writing
+    // blind to `rawIndex + 2` lands on whatever unrelated order now sits at that row and
+    // silently corrupts it. This resolves the CURRENT row for a set of order numbers by
+    // scanning live Column E (Order ID) once, so callers can verify before writing.
+    async function fetchLiveOrderRowMap(sid, token) {
+      try {
+        const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/Data!E2:E`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        const col = data.values || [];
+        const map = new Map();
+        col.forEach((r, i) => {
+          const key = ((r && r[0]) || '').toString().trim().toUpperCase();
+          if (key && !map.has(key)) map.set(key, i + 2); // 1-based sheet row number
+        });
+        return map;
+      } catch (e) {
+        console.error('fetchLiveOrderRowMap error:', e);
+        return null;
+      }
+    }
+
+    // Same as fetchLiveOrderRowMap but also returns each row's current Column Q value, for
+    // callers that need to verify a lead is still actually unassigned in the live sheet right
+    // before writing, not just that the row hasn't shifted.
+    async function fetchLiveOrderAndAgentMap(sid, token) {
+      try {
+        const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchGet?ranges=Data!E2:E&ranges=Data!Q2:Q`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        const orderCol = (data.valueRanges?.[0]?.values) || [];
+        const agentCol = (data.valueRanges?.[1]?.values) || [];
+        const map = new Map();
+        orderCol.forEach((r, i) => {
+          const key = ((r && r[0]) || '').toString().trim().toUpperCase();
+          if (key && !map.has(key)) {
+            const agentVal = (agentCol[i] && agentCol[i][0]) || '';
+            map.set(key, { row: i + 2, agent: agentVal.toString().trim() });
+          }
+        });
+        return map;
+      } catch (e) {
+        console.error('fetchLiveOrderAndAgentMap error:', e);
+        return null;
+      }
+    }
+
+    async function writeToSheetRow(orderNumber, sheetRowIndex, updates) {
       try {
         const token = await getAccessToken();
         const sid = extractSheetId(DEFAULT_SHEET_URL);
         if (!sid) return;
-        const rowNumber = sheetRowIndex + 2; // 1-based index (row 1 is header)
+
+        let rowNumber = sheetRowIndex + 2; // 1-based index (row 1 is header) - fallback only
+        const expected = (orderNumber || '').toString().trim().toUpperCase();
+        if (expected) {
+          const rowMap = await fetchLiveOrderRowMap(sid, token);
+          if (rowMap) {
+            const liveRow = rowMap.get(expected);
+            if (!liveRow) {
+              console.error(`writeToSheetRow: order ${orderNumber} not found in live sheet - aborting write to avoid corrupting the wrong row.`);
+              return;
+            }
+            rowNumber = liveRow;
+          }
+          // If the map fetch itself failed (network hiccup), fall back to the cached index
+          // rather than blocking the write entirely - degraded but not silently corrupting.
+        }
         const valueRanges = [];
 
         if (updates.assignedAgent !== undefined) {
@@ -832,56 +899,50 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [refundProcessing, setRefundProcessing] = useState(false);
 
       // Explicit Claim & Assign Function for Lead (Column Q Sync)
-      const claimLeadForAgent = (tkt) => {
+      const claimLeadForAgent = async (tkt) => {
         const agentAssignedTag = `${googleUser.email}`;
-        const rowNumber = tkt.rawIndex + 2;
-        setOverrides(p => {
-          const u = {
-            ...p,
-            [tkt.id]: {
-              ...(p[tkt.id] || {}),
-              assignedAgent: agentAssignedTag,
-              assignedEmail: googleUser.email
-            }
-          };
-          localStorage.setItem('rto_ticket_overrides', JSON.stringify(u));
-          return u;
-        });
+
+        const setLocalAssignee = (assignedAgent, assignedEmail) => {
+          setOverrides(p => {
+            const u = { ...p, [tkt.id]: { ...(p[tkt.id] || {}), assignedAgent, assignedEmail } };
+            localStorage.setItem('rto_ticket_overrides', JSON.stringify(u));
+            return u;
+          });
+        };
 
         const sid = extractSheetId(DEFAULT_SHEET_URL);
         if (!sid) {
-          writeToSheetRow(tkt.rawIndex, { assignedAgent: agentAssignedTag });
+          setLocalAssignee(agentAssignedTag, googleUser.email);
+          writeToSheetRow(tkt.orderNumber, tkt.rawIndex, { assignedAgent: agentAssignedTag });
           showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email}`);
           return;
         }
 
-        const finishClaim = (token) => {
-          fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/Data!Q${rowNumber}`, {
-            headers: { Authorization: `Bearer ${token}` }
-          }).then(r => r.ok ? r.json() : Promise.reject(new Error(`Verify failed (${r.status})`))).then(d => {
-            const current = (d.values && d.values[0] && d.values[0][0] || '').toLowerCase();
-            if (!current || current === 'unassigned') {
-              writeToSheetRow(tkt.rawIndex, { assignedAgent: agentAssignedTag });
-              showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email} & updated Column Q!`);
-            } else {
-              const existingAgent = d.values[0][0] || 'another agent';
-              showToast(`⚠️ Lead ${tkt.orderNumber} was just claimed by ${existingAgent}. Refresh to sync view.`);
-              setOverrides(p => {
-                const u = { ...p, [tkt.id]: { ...(p[tkt.id] || {}), assignedAgent: existingAgent, assignedEmail: existingAgent } };
-                localStorage.setItem('rto_ticket_overrides', JSON.stringify(u));
-                return u;
-              });
-            }
-          }).catch(() => {
-            writeToSheetRow(tkt.rawIndex, { assignedAgent: agentAssignedTag });
-            showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email} & updated Column Q!`);
-          });
-        };
+        try {
+          const token = await getAccessToken();
+          // Resolve by order number (not the cached rawIndex, which can drift) and check
+          // whether someone else has genuinely already claimed it since this browser's last
+          // sync, instead of overwriting them.
+          const liveMap = await fetchLiveOrderAndAgentMap(sid, token);
+          const key = (tkt.orderNumber || '').toString().trim().toUpperCase();
+          const live = liveMap ? liveMap.get(key) : null;
 
-        getAccessToken().then(finishClaim).catch(() => {
-          writeToSheetRow(tkt.rawIndex, { assignedAgent: agentAssignedTag });
+          if (live && live.agent && live.agent.toLowerCase() !== 'unassigned') {
+            setLocalAssignee(live.agent, live.agent);
+            showToast(`⚠️ Lead ${tkt.orderNumber} was just claimed by ${live.agent}. Refresh to sync view.`);
+            return;
+          }
+
+          setLocalAssignee(agentAssignedTag, googleUser.email);
+          writeToSheetRow(tkt.orderNumber, tkt.rawIndex, { assignedAgent: agentAssignedTag });
           showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email} & updated Column Q!`);
-        });
+        } catch (e) {
+          // Live verification itself failed (network hiccup) - still claim locally and let
+          // writeToSheetRow's own row-by-order-number resolution do the write safely.
+          setLocalAssignee(agentAssignedTag, googleUser.email);
+          writeToSheetRow(tkt.orderNumber, tkt.rawIndex, { assignedAgent: agentAssignedTag });
+          showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email} & updated Column Q!`);
+        }
       };
 
       const openDisp = (t)=>{
@@ -969,7 +1030,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         setOverrides(p=>{const u={...p,[dispTkt.id]:ov};localStorage.setItem('rto_ticket_overrides',JSON.stringify(u));return u;});
         
         // Live Google Sheet Write-Back to Column Q, R, S, T, U, V, X!
-        writeToSheetRow(dispTkt.rawIndex, {
+        writeToSheetRow(dispTkt.orderNumber, dispTkt.rawIndex, {
           assignedAgent: agentAssignedTag,
           connectedStatus: dispConn==='YES'?'Yes':'No',
           attemptType: resolvedAttempt,
@@ -1055,21 +1116,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return;
         }
 
-        const newOverrides = {};
-        const valueRanges = [];
         const newAssignedTag = isUnassign ? '' : targetAgentEmail;
-
+        const newOverrides = {};
         targetTickets.forEach(t => {
           newOverrides[t.id] = {
             ...(overrides[t.id] || {}),
             assignedAgent: isUnassign ? 'Unassigned' : newAssignedTag,
             assignedEmail: isUnassign ? '' : targetAgentEmail
           };
-          const rowNumber = t.rawIndex + 2;
-          valueRanges.push({
-            range: `Data!Q${rowNumber}`,
-            values: [[newAssignedTag]]
-          });
         });
 
         // Update UI overrides state instantly
@@ -1080,27 +1134,40 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         });
 
         // Batch update live Google Sheet Column Q
-        if (valueRanges.length > 0) {
-          try {
-            const token = await getAccessToken();
-            const sid = extractSheetId(DEFAULT_SHEET_URL);
-            if (sid) {
-              const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
-              });
-              if (res.ok) {
-                if (isUnassign) {
-                  showToast(`🧹 Unassigned all ${valueRanges.length} leads from ${sourceAgentEmail} & cleared Column Q!`);
-                } else {
-                  showToast(`🔄 Reassigned ${valueRanges.length} leads to ${targetAgentEmail} & updated Google Sheet!`);
-                }
+        try {
+          const token = await getAccessToken();
+          const sid = extractSheetId(DEFAULT_SHEET_URL);
+          if (!sid) return;
+
+          // Resolve each ticket's CURRENT row by order number rather than trusting the cached
+          // rawIndex, which can drift if the sheet's row order shifted since the last sync.
+          const rowMap = await fetchLiveOrderRowMap(sid, token);
+          const valueRanges = [];
+          let skipped = 0;
+          targetTickets.forEach(t => {
+            const key = (t.orderNumber || '').toString().trim().toUpperCase();
+            const rowNumber = rowMap ? rowMap.get(key) : (t.rawIndex + 2);
+            if (!rowNumber) { skipped++; return; }
+            valueRanges.push({ range: `Data!Q${rowNumber}`, values: [[newAssignedTag]] });
+          });
+          if (skipped > 0) console.warn(`Bulk reassign: skipped ${skipped} lead(s) not found in live sheet.`);
+
+          if (valueRanges.length > 0) {
+            const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
+            });
+            if (res.ok) {
+              if (isUnassign) {
+                showToast(`🧹 Unassigned all ${valueRanges.length} leads from ${sourceAgentEmail} & cleared Column Q!`);
+              } else {
+                showToast(`🔄 Reassigned ${valueRanges.length} leads to ${targetAgentEmail} & updated Google Sheet!`);
               }
             }
-          } catch (err) {
-            console.error('Bulk reassign error:', err);
           }
+        } catch (err) {
+          console.error('Bulk reassign error:', err);
         }
       };
 
@@ -1124,19 +1191,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
 
         const newOverrides = {};
-        const valueRanges = [];
-
         staleTickets.forEach(t => {
           newOverrides[t.id] = {
             ...(overrides[t.id] || {}),
             assignedAgent: 'Unassigned',
             assignedEmail: ''
           };
-          const rowNumber = t.rawIndex + 2;
-          valueRanges.push({
-            range: `Data!Q${rowNumber}`,
-            values: [['']]
-          });
         });
 
         setOverrides(p => {
@@ -1145,23 +1205,36 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return u;
         });
 
-        if (valueRanges.length > 0) {
-          try {
-            const token = await getAccessToken();
-            const sid = extractSheetId(DEFAULT_SHEET_URL);
-            if (sid) {
-              const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
-              });
-              if (res.ok) {
-                showToast(`🧹 Reset ${valueRanges.length} stale undisposed leads from previous days & cleared Google Sheet Column Q!`);
-              }
+        try {
+          const token = await getAccessToken();
+          const sid = extractSheetId(DEFAULT_SHEET_URL);
+          if (!sid) return;
+
+          // Resolve each ticket's CURRENT row by order number rather than trusting the cached
+          // rawIndex, which can drift if the sheet's row order shifted since the last sync.
+          const rowMap = await fetchLiveOrderRowMap(sid, token);
+          const valueRanges = [];
+          let skipped = 0;
+          staleTickets.forEach(t => {
+            const key = (t.orderNumber || '').toString().trim().toUpperCase();
+            const rowNumber = rowMap ? rowMap.get(key) : (t.rawIndex + 2);
+            if (!rowNumber) { skipped++; return; }
+            valueRanges.push({ range: `Data!Q${rowNumber}`, values: [['']] });
+          });
+          if (skipped > 0) console.warn(`Reset stale leads: skipped ${skipped} lead(s) not found in live sheet.`);
+
+          if (valueRanges.length > 0) {
+            const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
+            });
+            if (res.ok) {
+              showToast(`🧹 Reset ${valueRanges.length} stale undisposed leads from previous days & cleared Google Sheet Column Q!`);
             }
-          } catch (err) {
-            console.error('Reset stale error:', err);
           }
+        } catch (err) {
+          console.error('Reset stale error:', err);
         }
       };
 
@@ -1399,81 +1472,64 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
         if (unassignedInBox.length === 0) return;
 
-        const newOverrides = {};
-        const valueRanges = [];
-        const rowNumbers = [];
+        let cancelled = false;
         const agentTag = `${googleUser.email}`;
 
-        unassignedInBox.forEach(t => {
-          newOverrides[t.id] = {
-            ...(overrides[t.id] || {}),
-            assignedAgent: agentTag,
-            assignedEmail: googleUser.email
-          };
-          const rowNumber = t.rawIndex + 2;
-          rowNumbers.push(rowNumber);
-          valueRanges.push({
-            range: `Data!Q${rowNumber}`,
-            values: [[agentTag]]
-          });
-        });
-
-        // Update local overrides immediately
-        setOverrides(p => {
-          const u = { ...p, ...newOverrides };
-          try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
-          return u;
-        });
-
-        // Write to live Google Sheet Column Q via batchUpdate with PRIOR VERIFICATION to prevent race-condition overwrites
-        if (valueRanges.length > 0) {
+        (async () => {
+          const token = await getAccessToken().catch(() => null);
           const sid = extractSheetId(DEFAULT_SHEET_URL);
-          if (sid) {
-            getAccessToken().then(token => {
-              const minRow = Math.min(...rowNumbers);
-              const maxRow = Math.max(...rowNumbers);
-              const verifyRange = `Data!Q${minRow}:Q${maxRow}`;
+          if (!token || !sid || cancelled) return;
 
-              fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${verifyRange}`, {
-                headers: { Authorization: `Bearer ${token}` }
-              }).then(r => r.ok ? r.json() : Promise.reject(new Error(`Verify failed (${r.status})`))).then(d => {
-                const currentValues = d.values || [];
-                const safeRanges = [];
-                const reassignedCount = { value: 0 };
+          // unassignedInBox was computed from this browser's own possibly-stale snapshot, so
+          // (a) the row it thinks is at t.rawIndex may have shifted to a different order by now,
+          // and (b) another agent may have genuinely claimed the same lead in the meantime.
+          // Re-check the live sheet immediately before writing and only claim what is still
+          // actually blank, at its actual current row.
+          const liveMap = await fetchLiveOrderAndAgentMap(sid, token);
+          if (cancelled) return;
 
-                valueRanges.forEach((vr, idx) => {
-                  const rowOffset = rowNumbers[idx] - minRow;
-                  const currentVal = (currentValues[rowOffset] && currentValues[rowOffset][0] || '').toLowerCase();
-                  if (!currentVal || currentVal === 'unassigned') {
-                    safeRanges.push(vr);
-                  } else {
-                    reassignedCount.value++;
-                  }
-                });
+          const newOverrides = {};
+          const valueRanges = [];
+          let alreadyTaken = 0;
 
-                if (safeRanges.length === 0) {
-                  if (reassignedCount.value > 0) {
-                    showToast(`Skipped ${reassignedCount.value} leads — already claimed by another agent. Refresh to sync.`);
-                  }
-                  return;
-                }
+          unassignedInBox.forEach(t => {
+            const key = (t.orderNumber || '').toString().trim().toUpperCase();
+            const live = liveMap ? liveMap.get(key) : null;
+            if (liveMap && !live) return; // order not found live - skip rather than guess
+            if (live && live.agent && live.agent.toLowerCase() !== 'unassigned') { alreadyTaken++; return; }
+            const rowNumber = live ? live.row : (t.rawIndex + 2);
+            newOverrides[t.id] = {
+              ...(overrides[t.id] || {}),
+              assignedAgent: agentTag,
+              assignedEmail: googleUser.email
+            };
+            valueRanges.push({ range: `Data!Q${rowNumber}`, values: [[agentTag]] });
+          });
 
-                return fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
-                  method: 'POST',
-                  headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: safeRanges })
-                });
-              }).then(r => {
-                if (r && r.ok) {
-                  console.log(`Successfully written ${valueRanges.length} Column Q agent tags to Google Sheet.`);
-                  showToast(`Synced ${valueRanges.length} assigned leads to Google Sheet Column Q!`);
-                }
-              }).catch(err => {
-                console.error('Batch sync error:', err);
-              });
-            }).catch(console.error);
-          }
-        }
+          if (alreadyTaken > 0) showToast(`Skipped ${alreadyTaken} lead(s) — already claimed by another agent. Refresh to sync.`);
+          if (valueRanges.length === 0) return;
+
+          // Update local overrides immediately
+          setOverrides(p => {
+            const u = { ...p, ...newOverrides };
+            try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
+            return u;
+          });
+
+          // Write to live Google Sheet Column Q via batchUpdate
+          fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
+          }).then(r => {
+            if (r.ok) {
+              console.log(`Successfully written ${valueRanges.length} Column Q agent tags to Google Sheet.`);
+              showToast(`Synced ${valueRanges.length} assigned leads to Google Sheet Column Q!`);
+            }
+          }).catch(err => console.error('Batch sync error:', err));
+        })();
+
+        return () => { cancelled = true; };
       }, [allTickets, tickets, googleUser, userRole]);
 
       // Fresh Unassigned Leads Count in Sheet
