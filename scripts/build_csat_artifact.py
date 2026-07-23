@@ -34,6 +34,17 @@ agent_coverage_html = (
     f"{DIP_MARK_NOTE}"
 )
 
+# Shared by the Agent wise analysis tab (JS mirrors these as AGENT_MIN_N / CELL_DIP_MIN_N / CELL_DIP_THRESHOLD).
+AGENT_MIN_N = 30
+CELL_DIP_MIN_N = 15
+CELL_DIP_THRESHOLD = 0.3
+
+agent_leaderboard_footnote = (
+    f"'Top agent' / 'Needs attention' require at least {AGENT_MIN_N} responses under the current filter, "
+    f"so a low-volume agent can't win or lose on noise. Trend flags a &#9660;/&#9650; when this agent's current-month avg "
+    f"is &ge;{CELL_DIP_THRESHOLD} off a prior month's avg (both months need n&ge;{CELL_DIP_MIN_N}) &mdash; hover the badge for which month(s)."
+)
+
 GRANULAR_JSON = json.dumps(D["granular"], ensure_ascii=False, separators=(",", ":"))
 GRANULAR_AGENT_JSON = json.dumps(D["granular_agent"], ensure_ascii=False, separators=(",", ":"))
 GRANULAR_AGENT_CLASS_JSON = json.dumps(D["granular_agent_class"], ensure_ascii=False, separators=(",", ":"))
@@ -220,6 +231,16 @@ html = f"""<title>Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</tit
   .tab-panel {{ display: none; }}
   .tab-panel.active {{ display: block; }}
 
+  table.data-table tr.agent-cls-row td:first-child {{ cursor: pointer; }}
+  table.data-table tr.agent-sub-row td {{ background: color-mix(in srgb, var(--text-primary) 3%, transparent); }}
+  table.data-table th[data-sort] {{ cursor: pointer; user-select: none; }}
+  table.data-table th[data-sort]:hover {{ color: var(--text-primary); }}
+  table.data-table th .sort-arrow {{ font-size: 9px; opacity: 0.55; margin-left: 3px; }}
+  .trend-badge {{ display: inline-flex; align-items: center; gap: 3px; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 20px; white-space: nowrap; }}
+  .trend-badge.down {{ color: var(--warn-text); background: var(--warn-bg); }}
+  .trend-badge.up {{ color: var(--good-text); background: var(--good-bg); }}
+  .trend-badge.flat {{ color: var(--text-muted); background: transparent; }}
+
   @media (max-width: 760px) {{
     .kpi-row {{ grid-template-columns: repeat(2, 1fr); }}
   }}
@@ -337,9 +358,53 @@ html = f"""<title>Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</tit
     </div>
 
     <div class="tab-panel" id="panel-agent">
-      <div class="card" style="text-align:center; padding:48px 24px;">
-        <h2 style="margin-bottom:8px;">Agent wise analysis</h2>
-        <p class="card-sub" style="margin:0;">Coming soon.</p>
+      <div class="filterbar">
+        <div class="filter-group">
+          <label for="fa-brand">Brand</label>
+          <select id="fa-brand">
+            <option value="All">All</option>
+            <option value="Hyphen">Hyphen</option>
+            <option value="mCaffeine">mCaffeine</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label for="fa-channel">Channel</label>
+          <select id="fa-channel">
+            <option value="All">All</option>
+            <option value="whatsapp">WhatsApp</option>
+            <option value="email">Email</option>
+            <option value="liveChat">Live Chat</option>
+          </select>
+        </div>
+        <div class="filter-group" style="color:var(--text-muted); font-size:12px;">Applies to the KPIs and table below &middot; AI-resolved tickets are excluded here &mdash; see CSAT Deep Dive for AI vs Human.</div>
+      </div>
+
+      <div class="kpi-row" style="grid-template-columns: repeat(4, 1fr);">
+        <div class="kpi"><div class="kpi-label">Human agents</div><div class="kpi-value" id="akpi-count">&ndash;</div><div class="kpi-sub" id="akpi-count-sub">with completed CSAT</div></div>
+        <div class="kpi"><div class="kpi-label">Avg rating (human)</div><div class="kpi-value" id="akpi-avg">&ndash;</div><div class="kpi-sub" id="akpi-avg-sub">out of 5</div></div>
+        <div class="kpi"><div class="kpi-label">Top agent</div><div class="kpi-value" id="akpi-top" style="font-size:16px;">&ndash;</div><div class="kpi-sub" id="akpi-top-sub">&ndash;</div></div>
+        <div class="kpi"><div class="kpi-label">Needs attention</div><div class="kpi-value" id="akpi-bottom" style="font-size:16px;">&ndash;</div><div class="kpi-sub" id="akpi-bottom-sub">&ndash;</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Agent leaderboard</h2>
+        <p class="card-sub">Sorted by total responses by default &mdash; click a column header to re-sort. Click an agent row to expand its Query Class breakdown (top 6 by volume).</p>
+        <div class="heatmap-scroll">
+          <table class="data-table" id="agent-leaderboard-table">
+            <thead>
+              <tr>
+                <th data-sort="agent">Agent<span class="sort-arrow"></span></th>
+                <th data-sort="n" class="num">Responses<span class="sort-arrow"></span></th>
+                <th data-sort="avg" class="num">Avg rating<span class="sort-arrow"></span></th>
+                <th data-sort="promotersPct" class="num">Promoters %<span class="sort-arrow"></span></th>
+                <th data-sort="detractorsPct" class="num">Detractors %<span class="sort-arrow"></span></th>
+                <th>Trend</th>
+              </tr>
+            </thead>
+            <tbody id="agent-leaderboard-body"></tbody>
+          </table>
+        </div>
+        <p class="footnote">{agent_leaderboard_footnote}</p>
       </div>
     </div>
   </div>
@@ -416,9 +481,11 @@ function relLuminance(rgb) {{
 
 // A row's current-month cell is flagged as a dip when it drops at least this many
 // rating points vs some prior month's cell for that same row (both need min sample size).
-const CELL_DIP_MIN_N = 15;
-const CELL_DIP_THRESHOLD = 0.3;
+const CELL_DIP_MIN_N = {CELL_DIP_MIN_N};
+const CELL_DIP_THRESHOLD = {CELL_DIP_THRESHOLD};
 const CURRENT_MONTH = MONTH_ORDER[MONTH_ORDER.length - 1];
+// Min responses for an agent to be eligible as "Top agent" / "Needs attention" in the Agent wise analysis tab.
+const AGENT_MIN_N = {AGENT_MIN_N};
 
 function rowDips(row) {{
   const curr = row.cell[CURRENT_MONTH];
@@ -534,6 +601,185 @@ function renderAgentHeatmap(brand, resolver, channel) {{
   renderExpandableHeatmap(rows, 'heatmap-agent-head', 'heatmap-agent-body', 'Agent',
     agentName => computeSubHeatmapByAgent(agentName, brand, resolver, channel));
 }}
+
+// ---------------- Agent wise analysis tab ----------------
+// Per-agent totals + month cells (n/sum), built straight from GRANULAR_AGENT so
+// rowDips()/riseInfo() (month-over-month) work unchanged - same {{cell: {{month: {{n,sum}}}}}} shape
+// the CSAT tab's heatmap rows already use.
+function computeAgentStats(brand, channel) {{
+  const stats = {{}};
+  GRANULAR_AGENT.forEach(rec => {{
+    if (!passesFilter(rec, brand, "All", channel)) return;
+    const agent = rec.c;
+    if (!stats[agent]) stats[agent] = {{ n: 0, sum: 0, promN: 0, detN: 0, cell: {{}} }};
+    const s = stats[agent];
+    const rt = Number(rec.rt);
+    s.n += rec.n;
+    s.sum += rec.n * rt;
+    if (rt >= 4) s.promN += rec.n;
+    if (rt <= 2) s.detN += rec.n;
+    if (!s.cell[rec.m]) s.cell[rec.m] = {{ n: 0, sum: 0 }};
+    s.cell[rec.m].n += rec.n;
+    s.cell[rec.m].sum += rec.n * rt;
+  }});
+  return Object.keys(stats).map(agent => {{
+    const s = stats[agent];
+    return {{
+      agent, n: s.n, avg: s.n ? s.sum / s.n : 0,
+      promotersPct: s.n ? 100 * s.promN / s.n : 0,
+      detractorsPct: s.n ? 100 * s.detN / s.n : 0,
+      cell: s.cell,
+    }};
+  }});
+}}
+
+// Query Class breakdown for one agent (used by the leaderboard's row expand).
+function computeAgentClassBreakdown(agentName, brand, channel) {{
+  const filtered = GRANULAR_AGENT_CLASS.filter(rec => passesFilter(rec, brand, "All", channel) && rec.ag === agentName);
+  const byClass = {{}};
+  filtered.forEach(rec => {{
+    if (!byClass[rec.c]) byClass[rec.c] = {{ n: 0, sum: 0 }};
+    byClass[rec.c].n += rec.n;
+    byClass[rec.c].sum += rec.n * Number(rec.rt);
+  }});
+  return Object.keys(byClass)
+    .map(c => ({{ cls: c, n: byClass[c].n, avg: byClass[c].sum / byClass[c].n }}))
+    .sort((a, b) => b.n - a.n);
+}}
+
+// Mirror of rowDips() (same row shape, same thresholds) but for an improvement instead of a drop.
+function riseInfo(row) {{
+  const curr = row.cell[CURRENT_MONTH];
+  if (!curr || curr.n < CELL_DIP_MIN_N) return null;
+  const currAvg = curr.sum / curr.n;
+  const rises = [];
+  MONTH_ORDER.forEach(m => {{
+    if (m === CURRENT_MONTH) return;
+    const b = row.cell[m];
+    if (!b || b.n < CELL_DIP_MIN_N) return;
+    const avg = b.sum / b.n;
+    if (currAvg - avg >= CELL_DIP_THRESHOLD) rises.push({{ month: m, avg, rise: currAvg - avg }});
+  }});
+  return rises.length ? rises.sort((a, b) => b.rise - a.rise) : null;
+}}
+
+function trendBadgeHtml(row) {{
+  const dips = rowDips(row);
+  if (dips) {{
+    const detail = dips.map(d => `${{d.month}} (${{d.avg.toFixed(2)}})`).join(', ');
+    return `<span class="trend-badge down" title="Down vs ${{detail}}">&#9660; vs prior</span>`;
+  }}
+  const rises = riseInfo(row);
+  if (rises) {{
+    const detail = rises.map(d => `${{d.month}} (${{d.avg.toFixed(2)}})`).join(', ');
+    return `<span class="trend-badge up" title="Up vs ${{detail}}">&#9650; vs prior</span>`;
+  }}
+  const curr = row.cell[CURRENT_MONTH];
+  if (!curr || curr.n < CELL_DIP_MIN_N) return `<span class="trend-badge flat" title="Not enough current-month volume (n<${{CELL_DIP_MIN_N}}) to compare">&ndash;</span>`;
+  return `<span class="trend-badge flat" title="Within &plusmn;${{CELL_DIP_THRESHOLD}} of every comparable prior month">flat</span>`;
+}}
+
+const agentSort = {{ key: 'n', dir: 'desc' }};
+
+function sortAgentRows(rows) {{
+  const {{ key, dir }} = agentSort;
+  const mul = dir === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => key === 'agent' ? mul * a.agent.localeCompare(b.agent) : mul * (a[key] - b[key]));
+}}
+
+function renderAgentKPIs(rows) {{
+  const totalN = rows.reduce((s, r) => s + r.n, 0);
+  const totalSum = rows.reduce((s, r) => s + r.avg * r.n, 0);
+  const eligible = rows.filter(r => r.n >= AGENT_MIN_N);
+  const top = eligible.length ? eligible.reduce((a, b) => (b.avg > a.avg ? b : a)) : null;
+  const bottom = eligible.length ? eligible.reduce((a, b) => (b.avg < a.avg ? b : a)) : null;
+
+  document.getElementById('akpi-count').textContent = fmtInt(rows.length);
+  document.getElementById('akpi-avg').textContent = totalN ? fmtAvg(totalSum / totalN) : '&ndash;';
+  document.getElementById('akpi-avg-sub').textContent = 'n=' + fmtInt(totalN);
+
+  if (top) {{
+    document.getElementById('akpi-top').textContent = top.agent;
+    document.getElementById('akpi-top-sub').textContent = fmtAvg(top.avg) + ' avg · n=' + fmtInt(top.n);
+  }} else {{
+    document.getElementById('akpi-top').textContent = '&ndash;';
+    document.getElementById('akpi-top-sub').textContent = 'needs n≥' + AGENT_MIN_N;
+  }}
+  if (bottom) {{
+    document.getElementById('akpi-bottom').textContent = bottom.agent;
+    document.getElementById('akpi-bottom-sub').textContent = fmtAvg(bottom.avg) + ' avg · n=' + fmtInt(bottom.n);
+  }} else {{
+    document.getElementById('akpi-bottom').textContent = '&ndash;';
+    document.getElementById('akpi-bottom-sub').textContent = 'needs n≥' + AGENT_MIN_N;
+  }}
+}}
+
+function renderAgentLeaderboard(brand, channel) {{
+  const allRows = computeAgentStats(brand, channel);
+  const rows = allRows.filter(r => r.agent !== 'AI');
+  renderAgentKPIs(rows);
+
+  const sorted = sortAgentRows(rows);
+  const tbody = document.getElementById('agent-leaderboard-body');
+
+  if (sorted.length === 0) {{
+    tbody.innerHTML = '<tr><td colspan="6">No completed CSAT responses match this filter combination.</td></tr>';
+    return;
+  }}
+
+  tbody.innerHTML = sorted.map((row, i) => {{
+    const classBreak = computeAgentClassBreakdown(row.agent, brand, channel).slice(0, 6);
+    const subHtml = classBreak.length
+      ? `<tr class="agent-sub-row" data-parent-idx="${{i}}" style="display:none;"><td colspan="6" style="padding:10px 10px 14px 30px;">` +
+        classBreak.map(c => `<span style="display:inline-block; margin:2px 14px 2px 0; font-size:12px; color:var(--text-secondary);"><b style="color:var(--text-primary)">${{c.cls}}</b> &mdash; n=${{c.n}}, avg ${{c.avg.toFixed(2)}}</span>`).join('') +
+        `</td></tr>`
+      : '';
+    const toggle = classBreak.length
+      ? `<span class="row-toggle" data-toggle-idx="${{i}}">&#9656;</span>`
+      : '<span class="row-toggle-spacer"></span>';
+    return `<tr class="agent-cls-row" data-toggle-idx="${{i}}">` +
+      `<td>${{toggle}}${{row.agent}}</td>` +
+      `<td class="num">${{fmtInt(row.n)}}</td>` +
+      `<td class="num">${{fmtAvg(row.avg)}}</td>` +
+      `<td class="num">${{fmtPct(row.promotersPct)}}</td>` +
+      `<td class="num">${{fmtPct(row.detractorsPct)}}</td>` +
+      `<td>${{trendBadgeHtml(row)}}</td>` +
+      `</tr>${{subHtml}}`;
+  }}).join('');
+
+  tbody.querySelectorAll('tr.agent-cls-row').forEach(tr => {{
+    tr.querySelector('td:first-child').addEventListener('click', () => {{
+      const idx = tr.dataset.toggleIdx;
+      const toggleEl = tr.querySelector('.row-toggle');
+      if (!toggleEl) return;
+      const expanded = toggleEl.classList.toggle('expanded');
+      tbody.querySelectorAll(`tr.agent-sub-row[data-parent-idx="${{idx}}"]`).forEach(sub => {{
+        sub.style.display = expanded ? '' : 'none';
+      }});
+    }});
+  }});
+}}
+
+function refreshAgentTab() {{
+  const brand = document.getElementById('fa-brand').value;
+  const channel = document.getElementById('fa-channel').value;
+  renderAgentLeaderboard(brand, channel);
+}}
+
+document.querySelectorAll('#agent-leaderboard-table th[data-sort]').forEach(th => {{
+  th.addEventListener('click', () => {{
+    const key = th.dataset.sort;
+    if (agentSort.key === key) {{
+      agentSort.dir = agentSort.dir === 'asc' ? 'desc' : 'asc';
+    }} else {{
+      agentSort.key = key;
+      agentSort.dir = key === 'agent' ? 'asc' : 'desc';
+    }}
+    document.querySelectorAll('#agent-leaderboard-table th[data-sort] .sort-arrow').forEach(a => a.textContent = '');
+    th.querySelector('.sort-arrow').textContent = agentSort.dir === 'asc' ? '▲' : '▼';
+    refreshAgentTab();
+  }});
+}});
 
 function renderWordsTable(words) {{
   const tbody = document.querySelector('#words-table tbody');
@@ -734,12 +980,15 @@ MONTH_ORDER.forEach(m => {{
 
 refreshWords();
 refreshAll();
+refreshAgentTab();
 
 document.getElementById('f-brand').addEventListener('change', refreshAll);
 document.getElementById('f-resolver').addEventListener('change', refreshAll);
 document.getElementById('f-channel').addEventListener('change', refreshAll);
 document.getElementById('f-word-brand').addEventListener('change', refreshWords);
 document.getElementById('f-word-month').addEventListener('change', refreshWords);
+document.getElementById('fa-brand').addEventListener('change', refreshAgentTab);
+document.getElementById('fa-channel').addEventListener('change', refreshAgentTab);
 window.addEventListener('resize', () => {{ refreshWords(); refreshAll(); }});
 
 document.querySelectorAll('.tab-btn').forEach(function(b) {{
