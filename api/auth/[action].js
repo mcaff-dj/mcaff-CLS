@@ -5,6 +5,38 @@ const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPe
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
 
 const PRESENCE_STATUSES = new Set(['Online', 'Busy', 'Offline']);
+const GH_REPO = 'Vikash-P/mcaff-CLS';
+const GH_ASSIGN_WORKFLOW = 'assign-leads.yml';
+
+// Fires the same assign-leads workflow the 5-minute cron runs, on demand, so an agent
+// who comes online with an empty queue doesn't have to wait up to 5 minutes for the
+// next scheduled pass. Needs a GitHub PAT (Actions: write on this repo only) in
+// GH_ACTIONS_TOKEN - best-effort: if it's not configured, or the dispatch call fails,
+// this silently no-ops and the agent just gets picked up by the next scheduled run
+// instead, so a missing/expired token never blocks the agent from working.
+async function triggerImmediateAssignment() {
+  const token = process.env.GH_ACTIONS_TOKEN;
+  if (!token) return;
+  try {
+    const resp = await fetch(
+      `https://api.github.com/repos/${GH_REPO}/actions/workflows/${GH_ASSIGN_WORKFLOW}/dispatches`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ ref: 'main' }),
+      }
+    );
+    if (!resp.ok) {
+      console.error('triggerImmediateAssignment failed:', resp.status, await resp.text());
+    }
+  } catch (e) {
+    console.error('triggerImmediateAssignment error:', e.message || e);
+  }
+}
 
 async function handleLogin(req, res) {
   const clientId = process.env.GOOGLE_CLIENT_ID;
@@ -151,9 +183,20 @@ async function handleCallback(req, res) {
   }
 }
 
-// RTO CRM agent presence (replaces the removed Supabase agent_status writes). Always
-// keyed by the caller's own session email/name - never client-supplied - so an agent
-// can only ever report their own status, not spoof anyone else's.
+// RTO CRM agent presence (replaces the removed Supabase agent_status writes). Keyed
+// by the caller's own session email/name by default - a non-admin can only ever
+// report their own status, never spoof anyone else's. An admin caller may pass
+// body.email to set a DIFFERENT agent's status instead (the roster table's per-row
+// Status dropdown works for every row, not just the admin's own) - only honored when
+// session.isAdmin is true, so a regular agent still can't touch anyone else's row.
+//
+// body.pendingBox (optional, a plain count the client already computes for its own
+// UI - see rto-crm.html's `pend`) triggers an immediate off-cycle assignment run when
+// the agent is going Online with an empty queue, instead of waiting up to 5 minutes
+// for the next scheduled pass. Trusting the client's self-reported count here is low-
+// risk: the worst a wrong/spoofed value can do is fire an extra (harmless, idempotent)
+// assignment pass - assign_leads.py itself remains the sole authority on who actually
+// gets which lead.
 async function handlePresence(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method not allowed' });
@@ -173,7 +216,16 @@ async function handlePresence(req, res) {
     res.status(400).json({ error: 'status must be one of Online, Busy, Offline' });
     return;
   }
-  await upsertAgentPresence(session.email, session.name || session.email, body.status);
+  let targetEmail = session.email;
+  let targetName = session.name || session.email;
+  if (session.isAdmin && body.email) {
+    targetEmail = String(body.email).toLowerCase();
+    targetName = body.name || targetEmail;
+  }
+  await upsertAgentPresence(targetEmail, targetName, body.status);
+  if (body.status === 'Online' && body.pendingBox === 0) {
+    triggerImmediateAssignment().catch(() => {});
+  }
   res.status(200).json({ ok: true });
 }
 

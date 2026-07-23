@@ -80,7 +80,7 @@ HIGH_PRIORITY_COD_RTO_REASONS = [
     "rto pending - otp validated cancellation",
 ]
 
-DEFAULT_QUOTA = 10
+DEFAULT_QUOTA = 20
 
 
 def is_prepaid(payment_raw):

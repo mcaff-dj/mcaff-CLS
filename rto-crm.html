@@ -620,8 +620,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         return [
           {email:'vighnesh.patil@mcaffeine.com',name:'Vighnesh Patil',role:'Admin',maxQuota:10,status:'Online',aht:'2.5m',breakTime:'15m'},
           {email:'vikash.pathak@mcaffeine.com',name:'Vikash Pathak',role:'Admin',maxQuota:10,status:'Online',aht:'3.1m',breakTime:'20m'},
-          {email:'bhavesh.solanki@mcaffeine.com',name:'Bhavesh Solanki',role:'Agent',maxQuota:10,status:'Online',aht:'2.8m',breakTime:'45m'},
-          {email:'badshasab.pathan@mcaffeine.com',name:'Badshasab Pathan',role:'Agent',maxQuota:10,status:'Online',aht:'3.4m',breakTime:'30m'}
+          {email:'bhavesh.solanki@mcaffeine.com',name:'Bhavesh Solanki',role:'Agent',maxQuota:20,status:'Online',aht:'2.8m',breakTime:'45m'},
+          {email:'badshasab.pathan@mcaffeine.com',name:'Badshasab Pathan',role:'Agent',maxQuota:20,status:'Online',aht:'3.4m',breakTime:'30m'}
         ];
       });
 
@@ -726,18 +726,21 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [newAgentRole, setNewAgentRole] = useState('Agent');
 
       // Manually set any single agent's status (Online / On Break / Offline) from the roster
-      // table. Only syncs to the server (agent_presence, see syncPresenceToServer) when
-      // it's your OWN row - there's no admin-override-someone-else's-presence endpoint,
-      // so setting another agent's status here only updates this browser's local roster
-      // view, not what assign_leads.py sees for them.
+      // table - syncs to the server (agent_presence) for every row, not just your own: the
+      // server honors a client-supplied target email only for an admin session (see
+      // api/auth/[action].js's presence handler), which is exactly who can reach this table.
       const setAgentStatusManually = (email, newStatus) => {
         const lower = (email || '').toLowerCase();
         if (!lower) return;
+        const isSelf = googleUser?.email && googleUser.email.toLowerCase() === lower;
 
-        if (googleUser?.email && googleUser.email.toLowerCase() === lower) {
+        if (isSelf) {
           setAgentStatus(newStatus);
           try { localStorage.setItem('rto_agent_status', newStatus); } catch {}
-          syncPresenceToServer(newStatus);
+          syncPresenceToServer(newStatus, { pendingBox: newStatus === 'Online' ? pend : undefined });
+        } else {
+          const target = effectiveAgentRoster.find(a => (a.email || '').toLowerCase() === lower);
+          syncPresenceToServer(newStatus, { email: lower, name: target?.name });
         }
 
         setAgentRoster(p => {
@@ -807,23 +810,34 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
       };
 
-      // Reports this browser's own status to the server (Postgres-backed
-      // agent_presence, keyed by session - see api/auth/[action].js's presence
-      // handler) - this is what scripts/assign_leads.py reads to decide who's
-      // eligible for new leads. Best-effort: a failed sync just means this agent
-      // won't show as eligible for the next assignment pass, not a UI error.
-      const syncPresenceToServer = (status) => {
+      // Reports an agent's status to the server (Postgres-backed agent_presence -
+      // see api/auth/[action].js's presence handler) - this is what
+      // scripts/assign_leads.py reads to decide who's eligible for new leads.
+      // Best-effort: a failed sync just means that agent won't show as eligible for
+      // the next assignment pass, not a UI error.
+      //   opts.pendingBox - this browser's own already-computed "My Active Queue"
+      //     count (see `pend` below); passing it when going Online with an empty
+      //     queue lets the server trigger an immediate off-cycle assignment run
+      //     instead of waiting up to 5 minutes for the next scheduled one.
+      //   opts.email/opts.name - set a DIFFERENT agent's status (the roster
+      //     table's per-row dropdown) instead of the caller's own; the server only
+      //     honors this for an admin session, so a non-admin trying it just ends up
+      //     reporting their own status regardless.
+      const syncPresenceToServer = (status, opts = {}) => {
+        const body = { status };
+        if (typeof opts.pendingBox === 'number') body.pendingBox = opts.pendingBox;
+        if (opts.email) { body.email = opts.email; body.name = opts.name; }
         fetch('/api/auth/presence', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status }),
+          body: JSON.stringify(body),
         }).catch(() => {});
       };
 
       const handleSetStatus = (s)=>{
         setAgentStatus(s);
         try { localStorage.setItem('rto_agent_status', s); } catch {}
-        syncPresenceToServer(s);
+        syncPresenceToServer(s, { pendingBox: s === 'Online' ? pend : undefined });
         const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const newLog = {
           time: t,
@@ -1194,7 +1208,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return;
         }
         const name = lower.split('@')[0].split('.').map(p => p ? p.charAt(0).toUpperCase() + p.slice(1) : p).join(' ');
-        const newAgent = { email: lower, name, role: role || 'Agent', maxQuota: 10, status: 'Offline', aht: '2.8m', breakTime: '15m' };
+        const effectiveRole = role || 'Agent';
+        const newAgent = { email: lower, name, role: effectiveRole, maxQuota: effectiveRole === 'Agent' ? 20 : 10, status: 'Offline', aht: '2.8m', breakTime: '15m' };
         setAgentRoster(p => {
           const u = [...p, newAgent];
           try { localStorage.setItem('rto_agent_roster', JSON.stringify(u)); } catch {}
@@ -1443,7 +1458,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           const name = googleUser.name || email.split('@')[0].split('.').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
           const isAdmin = email.includes('vighnesh') || email.includes('vikash');
           rosterMap.set(email, {
-            email, name, role: isAdmin ? 'Admin' : 'Agent', maxQuota: 10, status: 'Online', aht: '2.5m', breakTime: '15m'
+            email, name, role: isAdmin ? 'Admin' : 'Agent', maxQuota: isAdmin ? 10 : 20, status: 'Online', aht: '2.5m', breakTime: '15m'
           });
         }
 
@@ -1465,7 +1480,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               name = agt;
             }
             if (!rosterMap.has(email)) {
-              rosterMap.set(email, { email, name, role: 'Agent', maxQuota: 10, status: 'Online', aht: '2.8m', breakTime: '15m' });
+              rosterMap.set(email, { email, name, role: 'Agent', maxQuota: 20, status: 'Online', aht: '2.8m', breakTime: '15m' });
             }
           }
         });
