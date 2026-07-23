@@ -651,6 +651,45 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
       }, [supabaseUrl, supabaseKey]);
 
+      // Live status for every OTHER agent only ever reaches this browser through Supabase -
+      // BroadcastChannel/localStorage sync below is same-device-only, so without this poll the
+      // roster has no signal at all for teammates and silently shows everyone as the seeded
+      // default ('Online') forever.
+      const [liveAgentStatuses, setLiveAgentStatuses] = useState({});
+
+      const fetchLiveAgentStatuses = async () => {
+        const url = supabaseUrl || DEFAULT_SUPABASE_URL;
+        const key = supabaseKey || DEFAULT_SUPABASE_KEY;
+        if (!url || !key) return null;
+        try {
+          // Ordered oldest-first so that if the table has no unique constraint on email (i.e.
+          // every status change inserts a new row instead of upserting), the last write wins
+          // when rows are folded into a per-email map below, instead of an arbitrary one.
+          const res = await fetch(`${url}/rest/v1/agent_status?select=email,status,updated_at&order=updated_at.asc`, {
+            headers: { apikey: key, Authorization: `Bearer ${key}` }
+          });
+          if (!res.ok) return null;
+          return await res.json();
+        } catch (e) {
+          console.error('Fetch agent_status error:', e);
+          return null;
+        }
+      };
+
+      useEffect(() => {
+        let cancelled = false;
+        const load = async () => {
+          const rows = await fetchLiveAgentStatuses();
+          if (cancelled || !Array.isArray(rows)) return;
+          const map = {};
+          rows.forEach(r => { if (r.email) map[r.email.toLowerCase()] = { status: r.status, updatedAt: r.updated_at }; });
+          setLiveAgentStatuses(map);
+        };
+        load();
+        const t = setInterval(load, 20000);
+        return () => { cancelled = true; clearInterval(t); };
+      }, [supabaseUrl, supabaseKey]);
+
       const saveSupabaseConfig = (url, key) => {
         setSupabaseUrl(url);
         setSupabaseKey(key);
@@ -1169,8 +1208,26 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           }
         });
 
+        // Overwrite the seeded/placeholder status with what's actually known: the signed-in
+        // user's own status is authoritative locally (no round-trip lag); every other agent's
+        // status comes from their last Supabase heartbeat, and anyone with no heartbeat or a
+        // stale one (>10 min, matching the self inactivity-to-offline threshold) reads Offline
+        // rather than a guessed 'Online'.
+        const STALE_MS = 10 * 60 * 1000;
+        const now = Date.now();
+        const myEmail = googleUser?.email ? googleUser.email.toLowerCase() : null;
+        rosterMap.forEach((agent, email) => {
+          if (myEmail && email === myEmail) {
+            agent.status = agentStatus;
+            return;
+          }
+          const live = liveAgentStatuses[email];
+          const isFresh = live?.updatedAt && (now - new Date(live.updatedAt).getTime()) <= STALE_MS;
+          agent.status = isFresh ? (live.status || 'Offline') : 'Offline';
+        });
+
         return Array.from(rosterMap.values());
-      }, [agentRoster, tickets, overrides, googleUser]);
+      }, [agentRoster, tickets, overrides, googleUser, agentStatus, liveAgentStatuses]);
 
       // ONLY Agent-role users participate in round-robin. Admins/Team Leads are excluded from the interleave index.
       const sortedAgentEmails = useMemo(() => {
