@@ -851,6 +851,65 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         });
       };
 
+      const unassignMyPendingLeads = async () => {
+        if (!googleUser?.email) return;
+        const myEmail = googleUser.email.toLowerCase();
+
+        // Find all pending undisposed tickets currently assigned to this agent
+        const pendingToRelease = (allTickets || []).filter(t => {
+          if (!t.orderNumber) return false;
+          if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
+          const currAgt = (overrides[t.id]?.assignedAgent || t.assignedAgent || '').trim().toLowerCase();
+          return currAgt.includes(myEmail) || myEmail.includes(currAgt);
+        });
+
+        if (pendingToRelease.length === 0) return;
+
+        const newOverrides = {};
+        pendingToRelease.forEach(t => {
+          newOverrides[t.id] = {
+            ...(overrides[t.id] || {}),
+            assignedAgent: 'Unassigned',
+            assignedEmail: ''
+          };
+        });
+
+        setOverrides(prev => {
+          const updated = { ...prev, ...newOverrides };
+          try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+
+        try {
+          const token = await getAccessToken();
+          const sid = extractSheetId(DEFAULT_SHEET_URL);
+          if (!sid) return;
+
+          const rowMap = await fetchLiveOrderRowMap(sid, token);
+          const valueRanges = [];
+          pendingToRelease.forEach(t => {
+            const key = (t.orderNumber || '').toString().trim().toUpperCase();
+            const rowNumber = rowMap ? rowMap.get(key) : (t.rawIndex + 2);
+            if (rowNumber) {
+              valueRanges.push({ range: `Data!Q${rowNumber}`, values: [['']] });
+            }
+          });
+
+          if (valueRanges.length > 0) {
+            const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
+            });
+            if (res.ok) {
+              showToast(`🧹 Released ${valueRanges.length} pending lead(s) back to pool (Status: Offline)`);
+            }
+          }
+        } catch (err) {
+          console.error('Error clearing Column Q on going Offline:', err);
+        }
+      };
+
       const handleSetStatus = (s)=>{
         setAgentStatus(s);
         try { localStorage.setItem('rto_agent_status', s); } catch {}
@@ -877,6 +936,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
         // Sync to Supabase DB
         syncStatusToSupabase(s, newLog);
+
+        if (s === 'Offline') {
+          unassignMyPendingLeads();
+        }
 
         try {
           const channel = new BroadcastChannel('rto_crm_sync_channel');
@@ -975,6 +1038,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       // Explicit Claim & Assign Function for Lead (Column Q Sync)
       const claimLeadForAgent = async (tkt) => {
+        if (agentStatus === 'Offline') {
+          showToast('⚠️ Cannot claim leads while Offline. Switch status to Online first.');
+          return;
+        }
         const agentAssignedTag = `${googleUser.email}`;
 
         const setLocalAssignee = (assignedAgent, assignedEmail) => {
@@ -1021,6 +1088,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       };
 
       const openDisp = (t)=>{
+        if (agentStatus === 'Offline') {
+          showToast('⚠️ Cannot process leads while Offline. Switch status to Online first.');
+          return;
+        }
         // Auto-assign lead to active agent when opening call form if unassigned
         if(!t.assignedAgent || t.assignedAgent === 'Unassigned') {
           claimLeadForAgent(t);
