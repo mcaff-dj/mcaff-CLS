@@ -170,6 +170,13 @@
       'refused to accept (with cancellation code)','rto pending - otp validated cancellation'
     ];
 
+    /* ── Security Note ──────────────────────────────────
+     * This service-account key is embedded in client-side code so the
+     * browser can call Google Sheets directly. Anyone who opens DevTools
+     * or fetches the HTML can read it. Restrict the key in Google Cloud
+     * to ONLY the target spreadsheet, and rotate it immediately if this
+     * file is ever committed to a public repo.
+     * ──────────────────────────────────────────────────── */
     /* ── Google Sheets Auth (Full Read & Write Scope) ──── */
     const SERVICE_ACCOUNT = {
       client_email: 'datafetchcls@sheetdata-501810.iam.gserviceaccount.com',
@@ -231,79 +238,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
     }
 
     /* ── Live Google Sheets Write-Back Engine ──────────── */
-    // A ticket's rawIndex is only as fresh as the last full sync. If the sheet's row order has
-    // shifted since then (e.g. the daily import job inserting/removing rows elsewhere), writing
-    // blind to `rawIndex + 2` lands on whatever unrelated order now sits at that row and
-    // silently corrupts it. This resolves the CURRENT row for a set of order numbers by
-    // scanning live Column E (Order ID) once, so callers can verify before writing.
-    async function fetchLiveOrderRowMap(sid, token) {
-      try {
-        const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/Data!E2:E`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
-        if (!res.ok) return null;
-        const data = await res.json();
-        const col = data.values || [];
-        const map = new Map();
-        col.forEach((r, i) => {
-          const key = ((r && r[0]) || '').toString().trim().toUpperCase();
-          if (key && !map.has(key)) map.set(key, i + 2); // 1-based sheet row number
-        });
-        return map;
-      } catch (e) {
-        console.error('fetchLiveOrderRowMap error:', e);
-        return null;
-      }
-    }
-
-    // Same as fetchLiveOrderRowMap but also returns each row's current Column Q value, for
-    // callers (the silent auto-claim effect) that need to verify a lead is still actually
-    // unassigned in the live sheet right before writing, not just that the row hasn't shifted.
-    async function fetchLiveOrderAndAgentMap(sid, token) {
-      try {
-        const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchGet?ranges=Data!E2:E&ranges=Data!Q2:Q`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
-        if (!res.ok) return null;
-        const data = await res.json();
-        const orderCol = (data.valueRanges?.[0]?.values) || [];
-        const agentCol = (data.valueRanges?.[1]?.values) || [];
-        const map = new Map();
-        orderCol.forEach((r, i) => {
-          const key = ((r && r[0]) || '').toString().trim().toUpperCase();
-          if (key && !map.has(key)) {
-            const agentVal = (agentCol[i] && agentCol[i][0]) || '';
-            map.set(key, { row: i + 2, agent: agentVal.toString().trim() });
-          }
-        });
-        return map;
-      } catch (e) {
-        console.error('fetchLiveOrderAndAgentMap error:', e);
-        return null;
-      }
-    }
-
-    async function writeToSheetRow(orderNumber, sheetRowIndex, updates) {
+    async function writeToSheetRow(sheetRowIndex, updates) {
       try {
         const token = await getAccessToken();
         const sid = extractSheetId(DEFAULT_SHEET_URL);
         if (!sid) return;
-
-        let rowNumber = sheetRowIndex + 2; // 1-based index (row 1 is header) - fallback only
-        const expected = (orderNumber || '').toString().trim().toUpperCase();
-        if (expected) {
-          const rowMap = await fetchLiveOrderRowMap(sid, token);
-          if (rowMap) {
-            const liveRow = rowMap.get(expected);
-            if (!liveRow) {
-              console.error(`writeToSheetRow: order ${orderNumber} not found in live sheet - aborting write to avoid corrupting the wrong row.`);
-              return;
-            }
-            rowNumber = liveRow;
-          }
-          // If the map fetch itself failed (network hiccup), fall back to the cached index
-          // rather than blocking the write entirely - degraded but not silently corrupting.
-        }
+        const rowNumber = sheetRowIndex + 2; // 1-based index (row 1 is header)
         const valueRanges = [];
 
         if (updates.assignedAgent !== undefined) {
@@ -454,8 +394,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       const isRefunded = disp.toLowerCase().includes('refund') || attempt.toLowerCase().includes('refund');
       const isDisposed = !!(conn || attempt || disp || remarks || newOrderId || newAddress);
-      const prep=pay.includes('PREPAID')||pay.includes('ONLINE')||pay.includes('PAYTM')||pay.includes('UPI')||(!pay.includes('COD')&&!pay.includes('CASH'));
-      const hp=prep&&HIGH_PRIORITY_RTO_REASONS.some(x=>rto.toLowerCase().includes(x));
 
       return{id:`T-${ord}-${i}`,orderNumber:ord,customerName:g('Customer Name','Name','Customer','Full Name')||'Customer',
         email:g('Email ID','Email','Customer Email')||'',phone:g('Contact Number','Phone','Mobile','Contact')||'',
@@ -698,6 +636,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       }, []);
 
       // Supabase DB Integration Engine
+      // WARNING: Default anon key is embedded client-side. Restrict RLS policies in Supabase
+      // to limit exposure if this HTML is ever served publicly.
       const DEFAULT_SUPABASE_URL = 'https://yzvqkboikvbkriccrhjk.supabase.co';
       const DEFAULT_SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl6dnFrYm9pa3Zia3JpY2NyaGprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ1NDgxNjEsImV4cCI6MjEwMDEyNDE2MX0.qF0rNhAt6NRBmE3PQp8BpI5hUb5RbMda98oEXtAjy_Q';
 
@@ -718,62 +658,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
             console.error('Supabase init error:', e);
           }
         }
-      }, [supabaseUrl, supabaseKey]);
-
-      // Live status for every OTHER agent only ever reaches this browser through Supabase -
-      // BroadcastChannel/localStorage sync below is same-device-only, so without this poll the
-      // roster has no signal at all for teammates and silently shows everyone as the seeded
-      // default ('Online') forever.
-      const [liveAgentStatuses, setLiveAgentStatuses] = useState({});
-      const [isRefreshingRoster, setIsRefreshingRoster] = useState(false);
-
-      const fetchLiveAgentStatuses = async () => {
-        const url = supabaseUrl || DEFAULT_SUPABASE_URL;
-        const key = supabaseKey || DEFAULT_SUPABASE_KEY;
-        if (!url || !key) return null;
-        try {
-          // Ordered oldest-first so that if the table has no unique constraint on email (i.e.
-          // every status change inserts a new row instead of upserting), the last write wins
-          // when rows are folded into a per-email map below, instead of an arbitrary one.
-          const res = await fetch(`${url}/rest/v1/agent_status?select=email,status,updated_at&order=updated_at.asc`, {
-            headers: { apikey: key, Authorization: `Bearer ${key}` }
-          });
-          if (!res.ok) return null;
-          return await res.json();
-        } catch (e) {
-          console.error('Fetch agent_status error:', e);
-          return null;
-        }
-      };
-
-      // Shared by the 20s background poll and the roster's manual Refresh button - kept as one
-      // function so a manual click always reflects the exact same fetch/merge logic.
-      const refreshLiveAgentStatuses = useCallback(async (withFeedback = false) => {
-        if (withFeedback) setIsRefreshingRoster(true);
-        const rows = await fetchLiveAgentStatuses();
-        if (Array.isArray(rows)) {
-          const map = {};
-          rows.forEach(r => { if (r.email) map[r.email.toLowerCase()] = { status: r.status, updatedAt: r.updated_at }; });
-          setLiveAgentStatuses(map);
-          if (withFeedback) showToast('🔄 Agent statuses refreshed');
-        } else if (withFeedback) {
-          showToast('Could not refresh agent statuses — check Supabase connection');
-        }
-        if (withFeedback) setIsRefreshingRoster(false);
-      }, [supabaseUrl, supabaseKey]);
-
-      useEffect(() => {
-        let cancelled = false;
-        const load = async () => {
-          const rows = await fetchLiveAgentStatuses();
-          if (cancelled || !Array.isArray(rows)) return;
-          const map = {};
-          rows.forEach(r => { if (r.email) map[r.email.toLowerCase()] = { status: r.status, updatedAt: r.updated_at }; });
-          setLiveAgentStatuses(map);
-        };
-        load();
-        const t = setInterval(load, 20000);
-        return () => { cancelled = true; clearInterval(t); };
       }, [supabaseUrl, supabaseKey]);
 
       const saveSupabaseConfig = (url, key) => {
@@ -872,21 +756,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         } catch {}
       };
 
-      // 10-Minute User Inactivity Auto-Offline Engine + Presence Heartbeat
+      // 10-Minute User Inactivity Auto-Offline Engine
       const lastActivityRef = useRef(Date.now());
-      const lastHeartbeatRef = useRef(0);
-
-      // syncStatusToSupabase only ever fired on an explicit status-dropdown change or the
-      // inactivity auto-offline below - an agent who opens the app and just starts working
-      // without ever touching that dropdown never tells Supabase they're online at all, so
-      // every OTHER viewer's roster (which trusts Supabase over a guess) shows them Offline
-      // forever. Push an immediate heartbeat the moment the agent signs in.
-      useEffect(() => {
-        if (googleUser?.email) {
-          syncStatusToSupabase(agentStatus, null);
-          lastHeartbeatRef.current = Date.now();
-        }
-      }, [googleUser]);
 
       useEffect(() => {
         const updateActivity = () => {
@@ -905,15 +776,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               console.log('10 minutes of inactivity detected — marking agent Offline');
               handleSetStatus('Offline');
               showToast('⚠️ Marked Offline due to 10 minutes of inactivity');
-              return;
-            }
-
-            // Silent presence heartbeat, well inside the 10-minute staleness window other
-            // browsers use to decide whether to trust this agent's last known status.
-            const twoMinutesMs = 2 * 60 * 1000;
-            if (Date.now() - lastHeartbeatRef.current >= twoMinutesMs) {
-              syncStatusToSupabase(agentStatus, null);
-              lastHeartbeatRef.current = Date.now();
             }
           }
         }, 15000); // Check every 15 seconds
@@ -961,6 +823,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       // Explicit Claim & Assign Function for Lead (Column Q Sync)
       const claimLeadForAgent = (tkt) => {
         const agentAssignedTag = `${googleUser.email}`;
+        const rowNumber = tkt.rawIndex + 2;
         setOverrides(p => {
           const u = {
             ...p,
@@ -974,9 +837,40 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return u;
         });
 
-        // Write directly to Google Sheet Column Q
-        writeToSheetRow(tkt.orderNumber, tkt.rawIndex, { assignedAgent: agentAssignedTag });
-        showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email} & updated Column Q!`);
+        const sid = extractSheetId(DEFAULT_SHEET_URL);
+        if (!sid) {
+          writeToSheetRow(tkt.rawIndex, { assignedAgent: agentAssignedTag });
+          showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email}`);
+          return;
+        }
+
+        const finishClaim = (token) => {
+          fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/Data!Q${rowNumber}`, {
+            headers: { Authorization: `Bearer ${token}` }
+          }).then(r => r.ok ? r.json() : Promise.reject(new Error(`Verify failed (${r.status})`))).then(d => {
+            const current = (d.values && d.values[0] && d.values[0][0] || '').toLowerCase();
+            if (!current || current === 'unassigned') {
+              writeToSheetRow(tkt.rawIndex, { assignedAgent: agentAssignedTag });
+              showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email} & updated Column Q!`);
+            } else {
+              const existingAgent = d.values[0][0] || 'another agent';
+              showToast(`⚠️ Lead ${tkt.orderNumber} was just claimed by ${existingAgent}. Refresh to sync view.`);
+              setOverrides(p => {
+                const u = { ...p, [tkt.id]: { ...(p[tkt.id] || {}), assignedAgent: existingAgent, assignedEmail: existingAgent } };
+                localStorage.setItem('rto_ticket_overrides', JSON.stringify(u));
+                return u;
+              });
+            }
+          }).catch(() => {
+            writeToSheetRow(tkt.rawIndex, { assignedAgent: agentAssignedTag });
+            showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email} & updated Column Q!`);
+          });
+        };
+
+        getAccessToken().then(finishClaim).catch(() => {
+          writeToSheetRow(tkt.rawIndex, { assignedAgent: agentAssignedTag });
+          showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email} & updated Column Q!`);
+        });
       };
 
       const openDisp = (t)=>{
@@ -1064,7 +958,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         setOverrides(p=>{const u={...p,[dispTkt.id]:ov};localStorage.setItem('rto_ticket_overrides',JSON.stringify(u));return u;});
         
         // Live Google Sheet Write-Back to Column Q, R, S, T, U, V, X!
-        writeToSheetRow(dispTkt.orderNumber, dispTkt.rawIndex, {
+        writeToSheetRow(dispTkt.rawIndex, {
           assignedAgent: agentAssignedTag,
           connectedStatus: dispConn==='YES'?'Yes':'No',
           attemptType: resolvedAttempt,
@@ -1150,14 +1044,21 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return;
         }
 
-        const newAssignedTag = isUnassign ? '' : targetAgentEmail;
         const newOverrides = {};
+        const valueRanges = [];
+        const newAssignedTag = isUnassign ? '' : targetAgentEmail;
+
         targetTickets.forEach(t => {
           newOverrides[t.id] = {
             ...(overrides[t.id] || {}),
             assignedAgent: isUnassign ? 'Unassigned' : newAssignedTag,
             assignedEmail: isUnassign ? '' : targetAgentEmail
           };
+          const rowNumber = t.rawIndex + 2;
+          valueRanges.push({
+            range: `Data!Q${rowNumber}`,
+            values: [[newAssignedTag]]
+          });
         });
 
         // Update UI overrides state instantly
@@ -1168,40 +1069,27 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         });
 
         // Batch update live Google Sheet Column Q
-        try {
-          const token = await getAccessToken();
-          const sid = extractSheetId(DEFAULT_SHEET_URL);
-          if (!sid) return;
-
-          // Resolve each ticket's CURRENT row by order number rather than trusting the cached
-          // rawIndex, which can drift if the sheet's row order shifted since the last sync.
-          const rowMap = await fetchLiveOrderRowMap(sid, token);
-          const valueRanges = [];
-          let skipped = 0;
-          targetTickets.forEach(t => {
-            const key = (t.orderNumber || '').toString().trim().toUpperCase();
-            const rowNumber = rowMap ? rowMap.get(key) : (t.rawIndex + 2);
-            if (!rowNumber) { skipped++; return; }
-            valueRanges.push({ range: `Data!Q${rowNumber}`, values: [[newAssignedTag]] });
-          });
-          if (skipped > 0) console.warn(`Bulk reassign: skipped ${skipped} lead(s) not found in live sheet.`);
-
-          if (valueRanges.length > 0) {
-            const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
-              method: 'POST',
-              headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
-            });
-            if (res.ok) {
-              if (isUnassign) {
-                showToast(`🧹 Unassigned all ${valueRanges.length} leads from ${sourceAgentEmail} & cleared Column Q!`);
-              } else {
-                showToast(`🔄 Reassigned ${valueRanges.length} leads to ${targetAgentEmail} & updated Google Sheet!`);
+        if (valueRanges.length > 0) {
+          try {
+            const token = await getAccessToken();
+            const sid = extractSheetId(DEFAULT_SHEET_URL);
+            if (sid) {
+              const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
+              });
+              if (res.ok) {
+                if (isUnassign) {
+                  showToast(`🧹 Unassigned all ${valueRanges.length} leads from ${sourceAgentEmail} & cleared Column Q!`);
+                } else {
+                  showToast(`🔄 Reassigned ${valueRanges.length} leads to ${targetAgentEmail} & updated Google Sheet!`);
+                }
               }
             }
+          } catch (err) {
+            console.error('Bulk reassign error:', err);
           }
-        } catch (err) {
-          console.error('Bulk reassign error:', err);
         }
       };
 
@@ -1225,12 +1113,19 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
 
         const newOverrides = {};
+        const valueRanges = [];
+
         staleTickets.forEach(t => {
           newOverrides[t.id] = {
             ...(overrides[t.id] || {}),
             assignedAgent: 'Unassigned',
             assignedEmail: ''
           };
+          const rowNumber = t.rawIndex + 2;
+          valueRanges.push({
+            range: `Data!Q${rowNumber}`,
+            values: [['']]
+          });
         });
 
         setOverrides(p => {
@@ -1239,45 +1134,32 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return u;
         });
 
-        try {
-          const token = await getAccessToken();
-          const sid = extractSheetId(DEFAULT_SHEET_URL);
-          if (!sid) return;
-
-          // Resolve each ticket's CURRENT row by order number rather than trusting the cached
-          // rawIndex, which can drift if the sheet's row order shifted since the last sync.
-          const rowMap = await fetchLiveOrderRowMap(sid, token);
-          const valueRanges = [];
-          let skipped = 0;
-          staleTickets.forEach(t => {
-            const key = (t.orderNumber || '').toString().trim().toUpperCase();
-            const rowNumber = rowMap ? rowMap.get(key) : (t.rawIndex + 2);
-            if (!rowNumber) { skipped++; return; }
-            valueRanges.push({ range: `Data!Q${rowNumber}`, values: [['']] });
-          });
-          if (skipped > 0) console.warn(`Reset stale leads: skipped ${skipped} lead(s) not found in live sheet.`);
-
-          if (valueRanges.length > 0) {
-            const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
-              method: 'POST',
-              headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
-            });
-            if (res.ok) {
-              showToast(`🧹 Reset ${valueRanges.length} stale undisposed leads from previous days & cleared Google Sheet Column Q!`);
+        if (valueRanges.length > 0) {
+          try {
+            const token = await getAccessToken();
+            const sid = extractSheetId(DEFAULT_SHEET_URL);
+            if (sid) {
+              const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
+              });
+              if (res.ok) {
+                showToast(`🧹 Reset ${valueRanges.length} stale undisposed leads from previous days & cleared Google Sheet Column Q!`);
+              }
             }
+          } catch (err) {
+            console.error('Reset stale error:', err);
           }
-        } catch (err) {
-          console.error('Reset stale error:', err);
         }
       };
 
       // Sync
       const sync = useCallback(async(silent=false)=>{
         const sid=extractSheetId(DEFAULT_SHEET_URL);if(!sid)return;setIsSyncing(true);
-        try{const raw=await fetchSheet(sid,DEFAULT_SHEET_RANGE);const mapped=await parseRows(raw);setTickets(mapped);try{localStorage.setItem('rto_cache_v4',JSON.stringify(mapped.slice(0,10000)));}catch{}setLastSync(new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));if(!silent)showToast(`${mapped.length.toLocaleString('en-IN')} leads synced`);}
+        try{const raw=await fetchSheet(sid,DEFAULT_SHEET_RANGE);const mapped=await parseRows(raw,googleUser,userRole);setTickets(mapped);try{localStorage.setItem('rto_cache_v4',JSON.stringify(mapped.slice(0,10000)));}catch{}setLastSync(new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));if(!silent)showToast(`${mapped.length.toLocaleString('en-IN')} leads synced`);}
         catch(e){if(!silent)showToast(e.message);}finally{setIsSyncing(false);}
-      },[showToast]);
+      },[googleUser,userRole,showToast]);
 
       useEffect(()=>{sync(true);},[]);
       useEffect(()=>{const t=setInterval(()=>sync(true),60000);return()=>clearInterval(t);},[sync]);
@@ -1328,26 +1210,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           }
         });
 
-        // Overwrite the seeded/placeholder status with what's actually known: the signed-in
-        // user's own status is authoritative locally (no round-trip lag); every other agent's
-        // status comes from their last Supabase heartbeat, and anyone with no heartbeat or a
-        // stale one (>10 min, matching the self inactivity-to-offline threshold) reads Offline
-        // rather than a guessed 'Online'.
-        const STALE_MS = 10 * 60 * 1000;
-        const now = Date.now();
-        const myEmail = googleUser?.email ? googleUser.email.toLowerCase() : null;
-        rosterMap.forEach((agent, email) => {
-          if (myEmail && email === myEmail) {
-            agent.status = agentStatus;
-            return;
-          }
-          const live = liveAgentStatuses[email];
-          const isFresh = live?.updatedAt && (now - new Date(live.updatedAt).getTime()) <= STALE_MS;
-          agent.status = isFresh ? (live.status || 'Offline') : 'Offline';
-        });
-
         return Array.from(rosterMap.values());
-      }, [agentRoster, tickets, overrides, googleUser, agentStatus, liveAgentStatuses]);
+      }, [agentRoster, tickets, overrides, googleUser]);
 
       // ONLY Agent-role users participate in round-robin. Admins/Team Leads are excluded from the interleave index.
       const sortedAgentEmails = useMemo(() => {
@@ -1374,11 +1238,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
             newAddress: o.newAddress || t.newAddress,
             disposedAt: o.disposedAt || t.disposedAt,
             disposedBy: o.disposedBy || t.disposedBy,
-            // The sheet's own Column Q is authoritative once it shows a real agent - a stale
-            // local override (e.g. this browser's own optimistic self-claim that got beaten by
-            // another agent's write in a race) must never permanently mask what the sheet says
-            // after a fresh sync. The override only fills the gap while Column Q is still blank.
-            assignedAgent: (t.assignedAgent && t.assignedAgent !== 'Unassigned') ? t.assignedAgent : (o.assignedAgent || t.assignedAgent),
+            assignedAgent: o.assignedAgent || t.assignedAgent,
             attemptType: o.attemptType || t.attemptType
           } : t;
         });
@@ -1508,64 +1368,81 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
         if (unassignedInBox.length === 0) return;
 
-        let cancelled = false;
+        const newOverrides = {};
+        const valueRanges = [];
+        const rowNumbers = [];
         const agentTag = `${googleUser.email}`;
 
-        (async () => {
-          const token = await getAccessToken().catch(() => null);
+        unassignedInBox.forEach(t => {
+          newOverrides[t.id] = {
+            ...(overrides[t.id] || {}),
+            assignedAgent: agentTag,
+            assignedEmail: googleUser.email
+          };
+          const rowNumber = t.rawIndex + 2;
+          rowNumbers.push(rowNumber);
+          valueRanges.push({
+            range: `Data!Q${rowNumber}`,
+            values: [[agentTag]]
+          });
+        });
+
+        // Update local overrides immediately
+        setOverrides(p => {
+          const u = { ...p, ...newOverrides };
+          try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
+          return u;
+        });
+
+        // Write to live Google Sheet Column Q via batchUpdate with PRIOR VERIFICATION to prevent race-condition overwrites
+        if (valueRanges.length > 0) {
           const sid = extractSheetId(DEFAULT_SHEET_URL);
-          if (!token || !sid || cancelled) return;
+          if (sid) {
+            getAccessToken().then(token => {
+              const minRow = Math.min(...rowNumbers);
+              const maxRow = Math.max(...rowNumbers);
+              const verifyRange = `Data!Q${minRow}:Q${maxRow}`;
 
-          // unassignedInBox was computed from this browser's own possibly-stale snapshot, so
-          // (a) the row it thinks is at t.rawIndex may have shifted to a different order by now,
-          // and (b) another agent may have genuinely claimed the same lead in the meantime.
-          // Re-check the live sheet immediately before writing and only claim what is still
-          // actually blank, at its actual current row.
-          const liveMap = await fetchLiveOrderAndAgentMap(sid, token);
-          if (cancelled) return;
+              fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${verifyRange}`, {
+                headers: { Authorization: `Bearer ${token}` }
+              }).then(r => r.ok ? r.json() : Promise.reject(new Error(`Verify failed (${r.status})`))).then(d => {
+                const currentValues = d.values || [];
+                const safeRanges = [];
+                const reassignedCount = { value: 0 };
 
-          const newOverrides = {};
-          const valueRanges = [];
-          let alreadyTaken = 0;
+                valueRanges.forEach((vr, idx) => {
+                  const rowOffset = rowNumbers[idx] - minRow;
+                  const currentVal = (currentValues[rowOffset] && currentValues[rowOffset][0] || '').toLowerCase();
+                  if (!currentVal || currentVal === 'unassigned') {
+                    safeRanges.push(vr);
+                  } else {
+                    reassignedCount.value++;
+                  }
+                });
 
-          unassignedInBox.forEach(t => {
-            const key = (t.orderNumber || '').toString().trim().toUpperCase();
-            const live = liveMap ? liveMap.get(key) : null;
-            if (liveMap && !live) return; // order not found live - skip rather than guess
-            if (live && live.agent && live.agent.toLowerCase() !== 'unassigned') { alreadyTaken++; return; }
-            const rowNumber = live ? live.row : (t.rawIndex + 2);
-            newOverrides[t.id] = {
-              ...(overrides[t.id] || {}),
-              assignedAgent: agentTag,
-              assignedEmail: googleUser.email
-            };
-            valueRanges.push({ range: `Data!Q${rowNumber}`, values: [[agentTag]] });
-          });
+                if (safeRanges.length === 0) {
+                  if (reassignedCount.value > 0) {
+                    showToast(`Skipped ${reassignedCount.value} leads — already claimed by another agent. Refresh to sync.`);
+                  }
+                  return;
+                }
 
-          if (alreadyTaken > 0) console.log(`Batch auto-assign: ${alreadyTaken} lead(s) already claimed by another agent since last sync - left alone.`);
-          if (valueRanges.length === 0) return;
-
-          // Update local overrides immediately
-          setOverrides(p => {
-            const u = { ...p, ...newOverrides };
-            try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
-            return u;
-          });
-
-          // Write to live Google Sheet Column Q via batchUpdate
-          fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
-          }).then(r => {
-            if (r.ok) {
-              console.log(`Successfully written ${valueRanges.length} Column Q agent tags to Google Sheet.`);
-              showToast(`Synced ${valueRanges.length} assigned leads to Google Sheet Column Q!`);
-            }
-          }).catch(console.error);
-        })();
-
-        return () => { cancelled = true; };
+                return fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
+                  method: 'POST',
+                  headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: safeRanges })
+                });
+              }).then(r => {
+                if (r && r.ok) {
+                  console.log(`Successfully written ${valueRanges.length} Column Q agent tags to Google Sheet.`);
+                  showToast(`Synced ${valueRanges.length} assigned leads to Google Sheet Column Q!`);
+                }
+              }).catch(err => {
+                console.error('Batch sync error:', err);
+              });
+            }).catch(console.error);
+          }
+        }
       }, [allTickets, tickets, googleUser, userRole]);
 
       // Fresh Unassigned Leads Count in Sheet
@@ -1711,9 +1588,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         };
       }, [allTickets, agentFilter, googleUser, userRole, dateScope, customDateFrom, customDateTo, overrides]);
 
-      const filtered = useMemo(()=>{
+      useEffect(() => {
         setPage(1);
+      }, [tab, search, payFilter, agentFilter, dateScope, customDateFrom, customDateTo]);
 
+      const filtered = useMemo(()=>{
         // Fresh Leads Tab: Shows leads ASSIGNED to the current agent/filter that have NOT been disposed yet!
         if (tab === 'fresh') {
           return allTickets.filter(t => {
@@ -2213,25 +2092,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                           <h2 className="text-lg font-bold text-zinc-100">Team Roster & Bulk Lead Reassignment Control</h2>
                           <p className="text-[13px] text-zinc-500 mt-0.5">Manage agent roles, lead capacity limits, reassign active agent boxes, or wipe Column Q in Google Sheet.</p>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => refreshLiveAgentStatuses(true)}
-                            disabled={isRefreshingRoster}
-                            className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2 disabled:opacity-50"
-                            title="Fetch each agent's latest status from Supabase right now"
-                          >
-                            {isRefreshingRoster ? '⏳ Refreshing…' : '🔄 Refresh Status'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={resetStalePendingLeads}
-                            className="px-3 py-1.5 rounded-xl bg-amber-950/70 hover:bg-amber-900 text-amber-200 border border-amber-800/80 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
-                            title="Unassign undisposed leads from previous days and clear Column Q in Google Sheet"
-                          >
-                            🧹 Reset Stale Pending Leads (&lt; Today)
-                          </button>
-                        </div>
+                        <button
+                          type="button"
+                          onClick={resetStalePendingLeads}
+                          className="px-3 py-1.5 rounded-xl bg-amber-950/70 hover:bg-amber-900 text-amber-200 border border-amber-800/80 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
+                          title="Unassign undisposed leads from previous days and clear Column Q in Google Sheet"
+                        >
+                          🧹 Reset Stale Pending Leads (&lt; Today)
+                        </button>
                       </div>
 
                       {/* Agent Roster & Reassignment Table */}
@@ -2504,7 +2372,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                             </div>
                           );
                         })()}
-                      </div>
 
                       {/* Supabase DB Settings Card */}
                       <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
