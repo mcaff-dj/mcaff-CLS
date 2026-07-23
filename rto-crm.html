@@ -725,6 +725,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       // roster has no signal at all for teammates and silently shows everyone as the seeded
       // default ('Online') forever.
       const [liveAgentStatuses, setLiveAgentStatuses] = useState({});
+      const [isRefreshingRoster, setIsRefreshingRoster] = useState(false);
 
       const fetchLiveAgentStatuses = async () => {
         const url = supabaseUrl || DEFAULT_SUPABASE_URL;
@@ -744,6 +745,22 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return null;
         }
       };
+
+      // Shared by the 20s background poll and the roster's manual Refresh button - kept as one
+      // function so a manual click always reflects the exact same fetch/merge logic.
+      const refreshLiveAgentStatuses = useCallback(async (withFeedback = false) => {
+        if (withFeedback) setIsRefreshingRoster(true);
+        const rows = await fetchLiveAgentStatuses();
+        if (Array.isArray(rows)) {
+          const map = {};
+          rows.forEach(r => { if (r.email) map[r.email.toLowerCase()] = { status: r.status, updatedAt: r.updated_at }; });
+          setLiveAgentStatuses(map);
+          if (withFeedback) showToast('🔄 Agent statuses refreshed');
+        } else if (withFeedback) {
+          showToast('Could not refresh agent statuses — check Supabase connection');
+        }
+        if (withFeedback) setIsRefreshingRoster(false);
+      }, [supabaseUrl, supabaseKey]);
 
       useEffect(() => {
         let cancelled = false;
@@ -2196,14 +2213,25 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                           <h2 className="text-lg font-bold text-zinc-100">Team Roster & Bulk Lead Reassignment Control</h2>
                           <p className="text-[13px] text-zinc-500 mt-0.5">Manage agent roles, lead capacity limits, reassign active agent boxes, or wipe Column Q in Google Sheet.</p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={resetStalePendingLeads}
-                          className="px-3 py-1.5 rounded-xl bg-amber-950/70 hover:bg-amber-900 text-amber-200 border border-amber-800/80 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
-                          title="Unassign undisposed leads from previous days and clear Column Q in Google Sheet"
-                        >
-                          🧹 Reset Stale Pending Leads (&lt; Today)
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => refreshLiveAgentStatuses(true)}
+                            disabled={isRefreshingRoster}
+                            className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2 disabled:opacity-50"
+                            title="Fetch each agent's latest status from Supabase right now"
+                          >
+                            {isRefreshingRoster ? '⏳ Refreshing…' : '🔄 Refresh Status'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={resetStalePendingLeads}
+                            className="px-3 py-1.5 rounded-xl bg-amber-950/70 hover:bg-amber-900 text-amber-200 border border-amber-800/80 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
+                            title="Unassign undisposed leads from previous days and clear Column Q in Google Sheet"
+                          >
+                            🧹 Reset Stale Pending Leads (&lt; Today)
+                          </button>
+                        </div>
                       </div>
 
                       {/* Agent Roster & Reassignment Table */}
