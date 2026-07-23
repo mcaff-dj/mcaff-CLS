@@ -19,13 +19,14 @@ roster/quota source yet (that only ever lived in each browser's localStorage),
 so every online agent gets the same DEFAULT_QUOTA; already-assigned pending
 leads held by an agent who isn't currently online are left alone.
 
-Only this script enforces the quota - a manual single-lead claim in the CRM
-and an Admin's bulk-reassign both write Column Q directly with no cap check,
-by design (see the "Enforce cap everywhere" decision this script's commit
-message references). So an online agent can still end up over DEFAULT_QUOTA
-before this runs. Each run trims anyone over quota back down to it first -
-unassigning their oldest excess leads (so it's a *different* agent's turn to
-get them, not the same one immediately) - before assigning anything new.
+A lead with ANY value already in Column Q - whether written by this script, a
+manual claim, an admin reassign, or typed directly into the sheet - is never
+touched again. It still counts toward that agent's load (so they don't get
+handed more than quota), but it is never unassigned or reassigned by this
+script, regardless of quota, regardless of whether that agent is online. An
+earlier version trimmed over-quota agents' oldest excess back to unassigned;
+that silently cleared a manually-assigned lead and was removed for exactly
+that reason - only touch what is genuinely blank.
 """
 import os
 import sys
@@ -187,12 +188,11 @@ def main():
     rows = values[1:]  # skip header
     print(f"  {len(rows)} data rows")
 
-    # current_load: how many pending (undisposed) leads each online agent already holds.
-    # agent_holdings additionally keeps *which* leads, so an agent sitting over quota
-    # (pre-existing backlog, a manual claim, or an admin bulk-reassign - none of those
-    # paths enforce the cap) can have the oldest excess trimmed back to unassigned below.
+    # current_load: how many pending (undisposed) leads each online agent already holds -
+    # still needed so an agent already at or over quota doesn't get handed more, but a lead
+    # counted here is NEVER unassigned or reassigned by this script, no matter how high the
+    # count goes. Only genuinely blank/Unassigned Column Q values are ever written to.
     current_load = {email: 0 for email in online_agents}
-    agent_holdings = {email: [] for email in online_agents}
     unassigned_pending = []  # (row_index, calling_date, order_id, tier)
     tier_counts = {0: 0, 1: 0, 2: 0}
 
@@ -218,38 +218,10 @@ def main():
             tier_counts[tier] += 1
         elif agent_raw in current_load:
             current_load[agent_raw] += 1
-            agent_holdings[agent_raw].append((i, calling_date, order_id, tier))
-        # else: pending lead already held by an agent who isn't currently online -
-        # left alone, per the CRM's existing behavior of not reassigning someone's
-        # active queue just because they stepped away. Only online agents' holdings
-        # are ever trimmed, for the same reason.
+        # else: pending lead already held by someone (online or not) - left alone either
+        # way. Column Q having any value at all is enough to exempt a lead permanently.
 
     print(f"  unassigned pool by priority: Prepaid={tier_counts[0]}, COD+high-priority reason={tier_counts[1]}, other COD={tier_counts[2]}")
-
-    # Trim step: this script only ever added leads up to quota, so an agent could still
-    # end up over 10 via a manual claim or an admin bulk-reassign (neither enforces the
-    # cap) - or simply from backlog that predates this script. Unassign the oldest excess
-    # back to the pool so it's redistributed below instead of sitting stuck indefinitely.
-    # Trimming itself stays purely oldest-first regardless of tier - it's about freeing
-    # capacity, not re-ranking; the freed lead's tier still applies once it's back in the
-    # pool and re-sorted below.
-    trim_ranges = []
-    for email in online_agents:
-        had = current_load[email]
-        excess = had - DEFAULT_QUOTA
-        if excess <= 0:
-            continue
-        oldest_first = sorted(agent_holdings[email], key=lambda t: t[1] or datetime.min)
-        to_trim = oldest_first[:excess]
-        for row_index, calling_date, order_id, tier in to_trim:
-            trim_ranges.append({"range": f"'{SHEET_TAB}'!Q{row_index + 2}", "values": [[""]]})
-            unassigned_pending.append((row_index, calling_date, order_id, tier))
-        current_load[email] = had - len(to_trim)
-        print(f"  trimming {len(to_trim)} excess lead(s) from {email} (had {had}, over quota by {excess})")
-
-    if trim_ranges:
-        print(f"Unassigning {len(trim_ranges)} over-quota lead(s) back to the pool...")
-        lib.set_sheet_values_batch(SPREADSHEET_ID, trim_ranges)
 
     if not unassigned_pending:
         print("No unassigned pending leads found - nothing to assign.")

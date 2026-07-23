@@ -1630,9 +1630,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       },[tickets,overrides]);
 
       // Admin-only read-only preview of what scripts/assign_leads.py's next scheduled run
-      // would do: same eligibility (currently-online agents), same quota/trim, same
-      // priority-tier + newest-date-first ordering. Nothing here writes anything - it's a
-      // forecast, not a trigger.
+      // would do: same eligibility (currently-online agents), same quota, same priority-tier
+      // + newest-date-first ordering. Nothing here writes anything - it's a forecast, not a
+      // trigger. A lead with any value in Column Q already (assigned to anyone, online or
+      // not) is permanently exempt - it counts toward that agent's load but is never
+      // reassigned, matching the script exactly.
       const predictedAssignments = useMemo(() => {
         const onlineAgents = effectiveAgentRoster
           .filter(a => a.status === 'Online')
@@ -1644,8 +1646,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
 
         const currentLoad = {};
-        const agentHoldings = {};
-        onlineAgents.forEach(e => { currentLoad[e] = 0; agentHoldings[e] = []; });
+        onlineAgents.forEach(e => { currentLoad[e] = 0; });
 
         const pool = []; // { ticket, tier }
 
@@ -1662,28 +1663,9 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
             pool.push({ ticket: t, tier });
           } else if (Object.prototype.hasOwnProperty.call(currentLoad, agt)) {
             currentLoad[agt] += 1;
-            agentHoldings[agt].push({ ticket: t, tier });
           }
-          // else: held by an agent who isn't currently online - left alone, same as the script.
+          // else: held by someone (online or not) - left alone either way.
         });
-
-        // Trim: an online agent already over quota (manual claim / admin bulk-reassign don't
-        // enforce the cap) has their oldest excess freed back into the pool first.
-        const freed = [];
-        onlineAgents.forEach(email => {
-          const had = currentLoad[email];
-          const excess = had - ASSIGNMENT_QUOTA;
-          if (excess <= 0) return;
-          const oldestFirst = [...agentHoldings[email]].sort((a, b) => {
-            const ad = a.ticket.rowDate ? a.ticket.rowDate.getTime() : 0;
-            const bd = b.ticket.rowDate ? b.ticket.rowDate.getTime() : 0;
-            return ad - bd;
-          });
-          const toTrim = oldestFirst.slice(0, excess);
-          freed.push(...toTrim);
-          currentLoad[email] = had - toTrim.length;
-        });
-        pool.push(...freed);
 
         // Tier ascending, then newest calling date first within each tier.
         pool.sort((a, b) => {
@@ -2754,7 +2736,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                 {predictedAssignments.onlineAgents.length === 0 ? (
                   <EmptyState title="No agents currently online" sub="The next run would find nobody eligible and assign nothing — same as the script itself would report."/>
                 ) : predictedAssignments.rows.length === 0 ? (
-                  <EmptyState title="Nothing waiting to be assigned" sub="No unassigned pending leads right now, and no online agent is over quota to trim from."/>
+                  <EmptyState title="Nothing waiting to be assigned" sub="No unassigned pending leads right now."/>
                 ) : (
                   <>
                     <div className="flex flex-wrap items-center gap-2">
