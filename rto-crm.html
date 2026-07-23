@@ -170,6 +170,28 @@
       'refused to accept (with cancellation code)','rto pending - otp validated cancellation'
     ];
 
+    // Assignment priority - mirrors scripts/assign_leads.py's priority_tier() exactly, for the
+    // Admin "Next to Assign" preview below. Kept in sync manually, not shared code: this is a
+    // read-only JS prediction of what that server-side script would do, not the actual writer.
+    //   0 = Prepaid (wins outright, regardless of RTO reason)
+    //   1 = COD whose RTO reason matches one of these (case-insensitive substring)
+    //   2 = every other COD lead
+    const HIGH_PRIORITY_COD_RTO_REASONS = [
+      'consignee opened the package and refused to accept','consignee refused to accept','customer refused to accept',
+      'customer refused to accept:verified','elasticrun_otp_verified','entry refused',
+      'kyc|customer refused to share kyc/ ndc/ scd','otp validation successful','otp verified cancellation',
+      'prf|receiver refused delivery(cir)','refused to accept','refused to accept (no cancellation code)',
+      'refused to accept (with cancellation code)','rto pending - otp validated cancellation'
+    ];
+    const ASSIGNMENT_QUOTA = 10; // must match scripts/assign_leads.py's DEFAULT_QUOTA
+
+    function getPriorityTier(t) {
+      if (t.paymentMethod === 'Prepaid') return 0;
+      const reason = (t.rtoReason || '').toLowerCase();
+      if (HIGH_PRIORITY_COD_RTO_REASONS.some(r => reason.includes(r))) return 1;
+      return 2;
+    }
+
     /* ── Security Note ──────────────────────────────────
      * This service-account key is embedded in client-side code so the
      * browser can call Google Sheets directly. Anyone who opens DevTools
@@ -1607,6 +1629,94 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         return base;
       },[tickets,overrides]);
 
+      // Admin-only read-only preview of what scripts/assign_leads.py's next scheduled run
+      // would do: same eligibility (currently-online agents), same quota/trim, same
+      // priority-tier + newest-date-first ordering. Nothing here writes anything - it's a
+      // forecast, not a trigger.
+      const predictedAssignments = useMemo(() => {
+        const onlineAgents = effectiveAgentRoster
+          .filter(a => a.status === 'Online')
+          .map(a => a.email.toLowerCase())
+          .sort();
+
+        if (onlineAgents.length === 0) {
+          return { onlineAgents, rows: [], leftover: 0 };
+        }
+
+        const currentLoad = {};
+        const agentHoldings = {};
+        onlineAgents.forEach(e => { currentLoad[e] = 0; agentHoldings[e] = []; });
+
+        const pool = []; // { ticket, tier }
+
+        allTickets.forEach(t => {
+          if (!t.orderNumber) return;
+          const isDisposed = !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
+          if (isDisposed) return;
+
+          const agt = (t.assignedAgent || '').trim().toLowerCase();
+          const isUnassigned = !agt || agt === 'unassigned';
+          const tier = getPriorityTier(t);
+
+          if (isUnassigned) {
+            pool.push({ ticket: t, tier });
+          } else if (Object.prototype.hasOwnProperty.call(currentLoad, agt)) {
+            currentLoad[agt] += 1;
+            agentHoldings[agt].push({ ticket: t, tier });
+          }
+          // else: held by an agent who isn't currently online - left alone, same as the script.
+        });
+
+        // Trim: an online agent already over quota (manual claim / admin bulk-reassign don't
+        // enforce the cap) has their oldest excess freed back into the pool first.
+        const freed = [];
+        onlineAgents.forEach(email => {
+          const had = currentLoad[email];
+          const excess = had - ASSIGNMENT_QUOTA;
+          if (excess <= 0) return;
+          const oldestFirst = [...agentHoldings[email]].sort((a, b) => {
+            const ad = a.ticket.rowDate ? a.ticket.rowDate.getTime() : 0;
+            const bd = b.ticket.rowDate ? b.ticket.rowDate.getTime() : 0;
+            return ad - bd;
+          });
+          const toTrim = oldestFirst.slice(0, excess);
+          freed.push(...toTrim);
+          currentLoad[email] = had - toTrim.length;
+        });
+        pool.push(...freed);
+
+        // Tier ascending, then newest calling date first within each tier.
+        pool.sort((a, b) => {
+          if (a.tier !== b.tier) return a.tier - b.tier;
+          const ad = a.ticket.rowDate ? a.ticket.rowDate.getTime() : 0;
+          const bd = b.ticket.rowDate ? b.ticket.rowDate.getTime() : 0;
+          return bd - ad;
+        });
+
+        const needed = {};
+        onlineAgents.forEach(e => { needed[e] = Math.max(0, ASSIGNMENT_QUOTA - currentLoad[e]); });
+
+        const rows = [];
+        let queuePos = 0;
+        let agentCycle = onlineAgents.filter(e => needed[e] > 0);
+        while (queuePos < pool.length && agentCycle.length > 0) {
+          let progressed = false;
+          for (const email of [...agentCycle]) {
+            if (queuePos >= pool.length) break;
+            if (needed[email] <= 0) { agentCycle = agentCycle.filter(e => e !== email); continue; }
+            const item = pool[queuePos];
+            rows.push({ ticket: item.ticket, tier: item.tier, predictedAgent: email, rank: rows.length + 1 });
+            needed[email] -= 1;
+            queuePos += 1;
+            progressed = true;
+            if (needed[email] <= 0) { agentCycle = agentCycle.filter(e => e !== email); }
+          }
+          if (!progressed) break;
+        }
+
+        return { onlineAgents, rows, leftover: pool.length - rows.length };
+      }, [allTickets, effectiveAgentRoster]);
+
       // Fresh Unassigned Leads Count in Sheet
       const freshUnassignedCount = useMemo(() => {
         return tickets.filter(t => {
@@ -1816,10 +1926,13 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       if (userRole === 'Admin' || userRole === 'Team Lead') {
         tabs.push({ key: 'admin', label: 'Admin Panel & Roster', count: effectiveAgentRoster.length });
       }
+      if (userRole === 'Admin') {
+        tabs.push({ key: 'predicted', label: '🔮 Next to Assign', count: predictedAssignments.rows.length });
+      }
 
-      // Automatically redirect away from admin tab if role switched to Agent
+      // Automatically redirect away from Admin-only tabs if role switched to Agent
       useEffect(() => {
-        if (userRole === 'Agent' && tab === 'admin') {
+        if (userRole === 'Agent' && (tab === 'admin' || tab === 'predicted')) {
           setTab('all');
         }
       }, [userRole, tab]);
@@ -2623,6 +2736,79 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     </>
                   );
                 })()}
+              </div>
+            ):tab==='predicted'&&userRole==='Admin'?(
+              /* ══════════════════════════════════════════════════════════════════════
+                 🔮 NEXT TO ASSIGN: read-only preview of scripts/assign_leads.py's next run
+                 ══════════════════════════════════════════════════════════════════════ */
+              <div className="space-y-5 animate-fadeIn">
+                <div>
+                  <h2 className="text-lg font-bold text-zinc-100">Next to Assign</h2>
+                  <p className="text-[13px] text-zinc-500 mt-0.5">
+                    A live preview of what the next scheduled run of <code className="font-mono text-indigo-300">assign_leads.py</code> would
+                    do right now — Prepaid first, then COD with a high-priority reason, then other COD, newest calling date first within
+                    each. Nothing on this tab writes anything; it only forecasts.
+                  </p>
+                </div>
+
+                {predictedAssignments.onlineAgents.length === 0 ? (
+                  <EmptyState title="No agents currently online" sub="The next run would find nobody eligible and assign nothing — same as the script itself would report."/>
+                ) : predictedAssignments.rows.length === 0 ? (
+                  <EmptyState title="Nothing waiting to be assigned" sub="No unassigned pending leads right now, and no online agent is over quota to trim from."/>
+                ) : (
+                  <>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="px-3 py-1.5 rounded-xl bg-zinc-900/70 border border-zinc-800/80 text-[12px] text-zinc-400">
+                        <span className="font-bold text-zinc-200">{predictedAssignments.onlineAgents.length}</span> agent{predictedAssignments.onlineAgents.length===1?'':'s'} online
+                      </div>
+                      <div className="px-3 py-1.5 rounded-xl bg-emerald-950/40 border border-emerald-800/60 text-[12px] text-emerald-300">
+                        <span className="font-bold">{predictedAssignments.rows.length}</span> would be assigned this run
+                      </div>
+                      {predictedAssignments.leftover > 0 && (
+                        <div className="px-3 py-1.5 rounded-xl bg-amber-950/40 border border-amber-800/60 text-[12px] text-amber-300">
+                          <span className="font-bold">{predictedAssignments.leftover}</span> left over — everyone online is at quota
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="bg-zinc-900/50 rounded-xl border border-zinc-800/80 overflow-hidden shadow-xs">
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-[13px]">
+                          <thead><tr className="border-b border-zinc-800/80 text-zinc-500 text-[12px]">
+                            <th className="py-3 px-4 text-left font-medium">#</th>
+                            <th className="py-3 px-4 text-left font-medium">Order</th>
+                            <th className="py-3 px-4 text-left font-medium">Customer</th>
+                            <th className="py-3 px-4 text-left font-medium">Priority</th>
+                            <th className="py-3 px-4 text-left font-medium">Payment</th>
+                            <th className="py-3 px-4 text-left font-medium">RTO Reason</th>
+                            <th className="py-3 px-4 text-left font-medium">Calling Date</th>
+                            <th className="py-3 px-4 text-right font-medium">Amount</th>
+                            <th className="py-3 px-4 text-left font-medium">Predicted Agent</th>
+                          </tr></thead>
+                          <tbody className="divide-y divide-zinc-800/40">
+                            {predictedAssignments.rows.map(row => (
+                              <tr key={row.ticket.id} className="hover:bg-zinc-800/25 transition-colors">
+                                <td className="py-3 px-4 text-zinc-500 font-mono tabular-nums">{row.rank}</td>
+                                <td className="py-3 px-4"><span className="font-mono font-semibold text-zinc-200">{row.ticket.orderNumber}</span></td>
+                                <td className="py-3 px-4"><span className="text-zinc-200 font-medium">{row.ticket.customerName}</span></td>
+                                <td className="py-3 px-4">
+                                  <Badge color={row.tier===0?'blue':row.tier===1?'amber':'zinc'}>
+                                    {row.tier===0?'Prepaid':row.tier===1?'COD · Priority':'COD'}
+                                  </Badge>
+                                </td>
+                                <td className="py-3 px-4"><Badge color={row.ticket.paymentMethod==='COD'?'amber':'blue'}>{row.ticket.paymentMethod}</Badge></td>
+                                <td className="py-3 px-4 max-w-[220px]"><span className="truncate block text-zinc-300">{row.ticket.rtoReason}</span></td>
+                                <td className="py-3 px-4 text-zinc-200 font-semibold font-mono tabular-nums">{row.ticket.callingDate}</td>
+                                <td className="py-3 px-4 text-right font-semibold text-zinc-200 tabular-nums">₹{row.ticket.orderAmount.toLocaleString('en-IN')}</td>
+                                <td className="py-3 px-4"><span className="font-mono text-indigo-300">{row.predictedAgent}</span></td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             ):(
               <>
