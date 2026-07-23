@@ -34,22 +34,22 @@ agent_coverage_html = (
     f"{DIP_MARK_NOTE}"
 )
 
-# Shared by the Agent wise analysis tab (JS mirrors these as AGENT_MIN_N / CELL_DIP_MIN_N / CELL_DIP_THRESHOLD).
-AGENT_MIN_N = 30
+# Shared by the CSAT tab's month-over-month dip banner (JS mirrors these as CELL_DIP_MIN_N / CELL_DIP_THRESHOLD).
 CELL_DIP_MIN_N = 15
 CELL_DIP_THRESHOLD = 0.3
-
-agent_leaderboard_footnote = (
-    f"'Top agent' / 'Needs attention' require at least {AGENT_MIN_N} responses under the current filter, "
-    f"so a low-volume agent can't win or lose on noise. Trend flags a &#9660;/&#9650; when this agent's current-month avg "
-    f"is &ge;{CELL_DIP_THRESHOLD} off a prior month's avg (both months need n&ge;{CELL_DIP_MIN_N}) &mdash; hover the badge for which month(s)."
-)
 
 GRANULAR_JSON = json.dumps(D["granular"], ensure_ascii=False, separators=(",", ":"))
 GRANULAR_AGENT_JSON = json.dumps(D["granular_agent"], ensure_ascii=False, separators=(",", ":"))
 GRANULAR_AGENT_CLASS_JSON = json.dumps(D["granular_agent_class"], ensure_ascii=False, separators=(",", ":"))
 WORDS_JSON = json.dumps(D["words_by_filter"], ensure_ascii=False, separators=(",", ":"))
 MONTH_ORDER_JSON = json.dumps(D["month_order"], ensure_ascii=False)
+
+# Agent wise analysis tab: daily agent-status export (login/logout, busy/break/offline
+# minutes per agent per day), a separate dataset from the CSAT tables above.
+SHIFT_DATA_PATH = r"mcaff-CLS/data/agent_shift_status.json"
+with open(SHIFT_DATA_PATH, "r", encoding="utf-8") as f:
+    SHIFT_DATA = json.load(f)
+AGENT_SHIFT_JSON = json.dumps(SHIFT_DATA, ensure_ascii=False, separators=(",", ":"))
 
 brands = k["brands"]
 hyphen = brands.get("Hyphen", {})
@@ -231,15 +231,20 @@ html = f"""<title>Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</tit
   .tab-panel {{ display: none; }}
   .tab-panel.active {{ display: block; }}
 
-  table.data-table tr.agent-cls-row td:first-child {{ cursor: pointer; }}
-  table.data-table tr.agent-sub-row td {{ background: color-mix(in srgb, var(--text-primary) 3%, transparent); }}
-  table.data-table th[data-sort] {{ cursor: pointer; user-select: none; }}
-  table.data-table th[data-sort]:hover {{ color: var(--text-primary); }}
-  table.data-table th .sort-arrow {{ font-size: 9px; opacity: 0.55; margin-left: 3px; }}
-  .trend-badge {{ display: inline-flex; align-items: center; gap: 3px; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 20px; white-space: nowrap; }}
-  .trend-badge.down {{ color: var(--warn-text); background: var(--warn-bg); }}
-  .trend-badge.up {{ color: var(--good-text); background: var(--good-bg); }}
-  .trend-badge.flat {{ color: var(--text-muted); background: transparent; }}
+  /* Agent wise analysis tab: brand sub-tabs + Daily/Weekly toggle + shift-status table */
+  #ash-brandTabs .tab-btn::before {{ content: ""; width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 1px; }}
+  #ash-brandTabs .tab-btn[data-brand="Hyphen"]::before {{ background: var(--brand-hyphen); }}
+  #ash-brandTabs .tab-btn[data-brand="mCaffeine"]::before {{ background: var(--brand-mcaff); }}
+  #ash-brandTabs .tab-btn {{ display: flex; align-items: center; gap: 7px; }}
+  .gran-toggle {{ display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }}
+  .gran-btn {{ appearance: none; border: none; background: var(--page-plane); color: var(--text-secondary); font: inherit; font-size: 13px; font-weight: 600; padding: 6px 14px; cursor: pointer; }}
+  .gran-btn.active {{ background: var(--brand-hyphen); color: #fff; }}
+  #panel-agent table.data-table th {{ cursor: pointer; user-select: none; }}
+  #panel-agent table.data-table th:hover {{ color: var(--text-primary); }}
+  #panel-agent table.data-table th .arrow {{ font-size: 9px; margin-left: 3px; opacity: 0.6; }}
+  #panel-agent table.data-table td.name {{ font-weight: 600; color: var(--text-primary); }}
+  #panel-agent table.data-table tr.absent td {{ color: var(--text-muted); font-style: italic; }}
+  #panel-agent table.data-table td.muted {{ color: var(--text-muted); font-size: 11.5px; }}
 
   @media (max-width: 760px) {{
     .kpi-row {{ grid-template-columns: repeat(2, 1fr); }}
@@ -358,53 +363,59 @@ html = f"""<title>Deep Dive — Hyphen &amp; mCaffeine (Mar&ndash;Jul 2026)</tit
     </div>
 
     <div class="tab-panel" id="panel-agent">
+      <p class="card-sub" style="margin:0 0 16px;">From the daily agent-status export (Hyphen &amp; mCaffeine).</p>
+
+      <nav class="tab-nav" id="ash-brandTabs"></nav>
+
       <div class="filterbar">
         <div class="filter-group">
-          <label for="fa-brand">Brand</label>
-          <select id="fa-brand">
-            <option value="All">All</option>
-            <option value="Hyphen">Hyphen</option>
-            <option value="mCaffeine">mCaffeine</option>
-          </select>
+          <div class="gran-toggle" id="ash-granToggle">
+            <button type="button" class="gran-btn active" data-gran="daily">Daily</button>
+            <button type="button" class="gran-btn" data-gran="weekly">Weekly</button>
+          </div>
         </div>
         <div class="filter-group">
-          <label for="fa-channel">Channel</label>
-          <select id="fa-channel">
-            <option value="All">All</option>
-            <option value="whatsapp">WhatsApp</option>
-            <option value="email">Email</option>
-            <option value="liveChat">Live Chat</option>
-          </select>
+          <label for="ash-f-period" id="ash-periodLabel">Date</label>
+          <select id="ash-f-period"></select>
         </div>
-        <div class="filter-group" style="color:var(--text-muted); font-size:12px;">Applies to the KPIs and table below &middot; AI-resolved tickets are excluded here &mdash; see CSAT Deep Dive for AI vs Human.</div>
+        <div class="filter-group" style="color:var(--text-muted); font-size:12px;" id="ash-filterNote"></div>
       </div>
 
-      <div class="kpi-row" style="grid-template-columns: repeat(4, 1fr);">
-        <div class="kpi"><div class="kpi-label">Human agents</div><div class="kpi-value" id="akpi-count">&ndash;</div><div class="kpi-sub" id="akpi-count-sub">with completed CSAT</div></div>
-        <div class="kpi"><div class="kpi-label">Avg rating (human)</div><div class="kpi-value" id="akpi-avg">&ndash;</div><div class="kpi-sub" id="akpi-avg-sub">out of 5</div></div>
-        <div class="kpi"><div class="kpi-label">Top agent</div><div class="kpi-value" id="akpi-top" style="font-size:16px;">&ndash;</div><div class="kpi-sub" id="akpi-top-sub">&ndash;</div></div>
-        <div class="kpi"><div class="kpi-label">Needs attention</div><div class="kpi-value" id="akpi-bottom" style="font-size:16px;">&ndash;</div><div class="kpi-sub" id="akpi-bottom-sub">&ndash;</div></div>
+      <div class="kpi-row" id="ash-kpiRow"></div>
+
+      <div class="card">
+        <h2 id="ash-tableTitle">Shift summary by agent</h2>
+        <p class="card-sub" id="ash-cardSub"></p>
+        <div class="heatmap-scroll">
+          <table class="data-table" id="ash-dataTable">
+            <thead><tr id="ash-tableHead"></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="footnote" id="ash-tableFootnote"></p>
       </div>
 
       <div class="card">
-        <h2>Agent leaderboard</h2>
-        <p class="card-sub">Sorted by total responses by default &mdash; click a column header to re-sort. Click an agent row to expand its Query Class breakdown (top 6 by volume).</p>
+        <h2>By day &mdash; heatmap</h2>
+        <p class="card-sub" id="ash-heatmapSub"></p>
+        <div class="card-controls">
+          <div class="filter-group">
+            <label for="ash-f-metric">Metric</label>
+            <select id="ash-f-metric">
+              <option value="busy">Total busy</option>
+              <option value="break">Total break</option>
+              <option value="offline">Total offline</option>
+            </select>
+          </div>
+          <div class="legend" id="ash-heatmapLegend" style="margin:0;"></div>
+        </div>
         <div class="heatmap-scroll">
-          <table class="data-table" id="agent-leaderboard-table">
-            <thead>
-              <tr>
-                <th data-sort="agent">Agent<span class="sort-arrow"></span></th>
-                <th data-sort="n" class="num">Responses<span class="sort-arrow"></span></th>
-                <th data-sort="avg" class="num">Avg rating<span class="sort-arrow"></span></th>
-                <th data-sort="promotersPct" class="num">Promoters %<span class="sort-arrow"></span></th>
-                <th data-sort="detractorsPct" class="num">Detractors %<span class="sort-arrow"></span></th>
-                <th>Trend</th>
-              </tr>
-            </thead>
-            <tbody id="agent-leaderboard-body"></tbody>
+          <table class="heatmap" id="ash-heatmapTable">
+            <thead><tr id="ash-heatmapHead"></tr></thead>
+            <tbody id="ash-heatmapBody"></tbody>
           </table>
         </div>
-        <p class="footnote">{agent_leaderboard_footnote}</p>
+        <p class="footnote">Blank cells = no shift logged that day/week. Weekly cells are per-agent averages over the days worked that week.</p>
       </div>
     </div>
   </div>
@@ -484,8 +495,6 @@ function relLuminance(rgb) {{
 const CELL_DIP_MIN_N = {CELL_DIP_MIN_N};
 const CELL_DIP_THRESHOLD = {CELL_DIP_THRESHOLD};
 const CURRENT_MONTH = MONTH_ORDER[MONTH_ORDER.length - 1];
-// Min responses for an agent to be eligible as "Top agent" / "Needs attention" in the Agent wise analysis tab.
-const AGENT_MIN_N = {AGENT_MIN_N};
 
 function rowDips(row) {{
   const curr = row.cell[CURRENT_MONTH];
@@ -602,184 +611,313 @@ function renderAgentHeatmap(brand, resolver, channel) {{
     agentName => computeSubHeatmapByAgent(agentName, brand, resolver, channel));
 }}
 
-// ---------------- Agent wise analysis tab ----------------
-// Per-agent totals + month cells (n/sum), built straight from GRANULAR_AGENT so
-// rowDips()/riseInfo() (month-over-month) work unchanged - same {{cell: {{month: {{n,sum}}}}}} shape
-// the CSAT tab's heatmap rows already use.
-function computeAgentStats(brand, channel) {{
-  const stats = {{}};
-  GRANULAR_AGENT.forEach(rec => {{
-    if (!passesFilter(rec, brand, "All", channel)) return;
-    const agent = rec.c;
-    if (!stats[agent]) stats[agent] = {{ n: 0, sum: 0, promN: 0, detN: 0, cell: {{}} }};
-    const s = stats[agent];
-    const rt = Number(rec.rt);
-    s.n += rec.n;
-    s.sum += rec.n * rt;
-    if (rt >= 4) s.promN += rec.n;
-    if (rt <= 2) s.detN += rec.n;
-    if (!s.cell[rec.m]) s.cell[rec.m] = {{ n: 0, sum: 0 }};
-    s.cell[rec.m].n += rec.n;
-    s.cell[rec.m].sum += rec.n * rt;
-  }});
-  return Object.keys(stats).map(agent => {{
-    const s = stats[agent];
+// ---------------- Agent wise analysis tab (shift-status export) ----------------
+const AGENT_SHIFT_DATA = {AGENT_SHIFT_JSON};
+(function() {{
+const tooltip = document.getElementById('tooltip');
+
+function hToLabel(min) {{
+  if (min == null) return '–';
+  const h = Math.floor(min / 60), m = Math.round(min - h * 60);
+  if (h && m) return h + 'h ' + m + 'm';
+  if (h) return h + 'h';
+  return m + 'm';
+}}
+function minToClock(min) {{
+  if (min == null) return '–';
+  let h = Math.floor(min / 60), m = Math.round(min - h * 60);
+  if (m === 60) {{ h += 1; m = 0; }}
+  h = h % 24;
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  let h12 = h % 12; if (h12 === 0) h12 = 12;
+  return h12 + ':' + String(m).padStart(2, '0') + ' ' + ampm;
+}}
+function hexToRgb(hex) {{
+  hex = hex.replace('#', '');
+  const num = parseInt(hex, 16);
+  return {{ r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 }};
+}}
+function mixRgb(a, b, t) {{
+  return {{ r: Math.round(a.r + (b.r - a.r) * t), g: Math.round(a.g + (b.g - a.g) * t), b: Math.round(a.b + (b.b - a.b) * t) }};
+}}
+function relLuminance(rgb) {{
+  const lin = c => {{ c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }};
+  return 0.2126 * lin(rgb.r) + 0.7152 * lin(rgb.g) + 0.0722 * lin(rgb.b);
+}}
+
+const METRIC_RAMPS = {{
+  busy:    {{ light: '#e3f6e3', dark: '#0a7d0a', label: 'Total busy' }},
+  break:   {{ light: '#fdf1d6', dark: '#c98500', label: 'Total break' }},
+  offline: {{ light: '#fbdede', dark: '#b52f2f', label: 'Total offline' }},
+}};
+
+let currentBrand = Object.keys(AGENT_SHIFT_DATA)[0];
+let currentGran = 'daily';
+let currentPeriod = null;
+let sortKey = 'busy_min';
+let sortDir = -1;
+
+function allDatesForBrand(brand) {{
+  const set = new Set();
+  AGENT_SHIFT_DATA[brand].forEach(a => a.days.forEach(d => set.add(d.date_sort)));
+  return Array.from(set).sort();
+}}
+function allWeeksForBrand(brand) {{
+  const set = new Set();
+  AGENT_SHIFT_DATA[brand].forEach(a => a.days.forEach(d => set.add(d.week_start)));
+  return Array.from(set).sort();
+}}
+function mostCommonLatestDate(brand) {{
+  const counts = {{}};
+  AGENT_SHIFT_DATA[brand].forEach(a => {{ if (a.days.length) counts[a.days[0].date_sort] = (counts[a.days[0].date_sort] || 0) + 1; }});
+  let best = null, bestN = -1;
+  Object.keys(counts).forEach(k => {{ if (counts[k] > bestN) {{ best = k; bestN = counts[k]; }} }});
+  return best;
+}}
+function formatDateLabel(iso) {{
+  const d = new Date(iso + 'T00:00:00');
+  return d.toLocaleDateString('en-IN', {{ day: 'numeric', month: 'short', year: 'numeric', weekday: 'short' }});
+}}
+function formatWeekLabel(iso) {{
+  const start = new Date(iso + 'T00:00:00');
+  const end = new Date(start); end.setDate(end.getDate() + 6);
+  const opts = {{ day: 'numeric', month: 'short' }};
+  return start.toLocaleDateString('en-IN', opts) + ' – ' + end.toLocaleDateString('en-IN', opts) + ', ' + start.getFullYear();
+}}
+
+// Builds one uniform row per agent for the selected period: a single day's
+// figures in Daily mode, or the mean across that week's worked days in Weekly.
+function rowFor(agent, period) {{
+  if (currentGran === 'daily') {{
+    const d = agent.days.find(x => x.date_sort === period);
+    if (!d) return {{ agent, present: false }};
     return {{
-      agent, n: s.n, avg: s.n ? s.sum / s.n : 0,
-      promotersPct: s.n ? 100 * s.promN / s.n : 0,
-      detractorsPct: s.n ? 100 * s.detN / s.n : 0,
-      cell: s.cell,
+      agent, present: true, days_worked: 1,
+      login: d.login, logout: d.logout,
+      busy_min: d.busy_min, break_min: d.break_min, offline_min: d.offline_min,
     }};
-  }});
-}}
-
-// Query Class breakdown for one agent (used by the leaderboard's row expand).
-function computeAgentClassBreakdown(agentName, brand, channel) {{
-  const filtered = GRANULAR_AGENT_CLASS.filter(rec => passesFilter(rec, brand, "All", channel) && rec.ag === agentName);
-  const byClass = {{}};
-  filtered.forEach(rec => {{
-    if (!byClass[rec.c]) byClass[rec.c] = {{ n: 0, sum: 0 }};
-    byClass[rec.c].n += rec.n;
-    byClass[rec.c].sum += rec.n * Number(rec.rt);
-  }});
-  return Object.keys(byClass)
-    .map(c => ({{ cls: c, n: byClass[c].n, avg: byClass[c].sum / byClass[c].n }}))
-    .sort((a, b) => b.n - a.n);
-}}
-
-// Mirror of rowDips() (same row shape, same thresholds) but for an improvement instead of a drop.
-function riseInfo(row) {{
-  const curr = row.cell[CURRENT_MONTH];
-  if (!curr || curr.n < CELL_DIP_MIN_N) return null;
-  const currAvg = curr.sum / curr.n;
-  const rises = [];
-  MONTH_ORDER.forEach(m => {{
-    if (m === CURRENT_MONTH) return;
-    const b = row.cell[m];
-    if (!b || b.n < CELL_DIP_MIN_N) return;
-    const avg = b.sum / b.n;
-    if (currAvg - avg >= CELL_DIP_THRESHOLD) rises.push({{ month: m, avg, rise: currAvg - avg }});
-  }});
-  return rises.length ? rises.sort((a, b) => b.rise - a.rise) : null;
-}}
-
-function trendBadgeHtml(row) {{
-  const dips = rowDips(row);
-  if (dips) {{
-    const detail = dips.map(d => `${{d.month}} (${{d.avg.toFixed(2)}})`).join(', ');
-    return `<span class="trend-badge down" title="Down vs ${{detail}}">&#9660; vs prior</span>`;
   }}
-  const rises = riseInfo(row);
-  if (rises) {{
-    const detail = rises.map(d => `${{d.month}} (${{d.avg.toFixed(2)}})`).join(', ');
-    return `<span class="trend-badge up" title="Up vs ${{detail}}">&#9650; vs prior</span>`;
-  }}
-  const curr = row.cell[CURRENT_MONTH];
-  if (!curr || curr.n < CELL_DIP_MIN_N) return `<span class="trend-badge flat" title="Not enough current-month volume (n<${{CELL_DIP_MIN_N}}) to compare">&ndash;</span>`;
-  return `<span class="trend-badge flat" title="Within &plusmn;${{CELL_DIP_THRESHOLD}} of every comparable prior month">flat</span>`;
+  const days = agent.days.filter(x => x.week_start === period);
+  if (!days.length) return {{ agent, present: false }};
+  const avg = key => days.reduce((s, x) => s + x[key], 0) / days.length;
+  return {{
+    agent, present: true, days_worked: days.length,
+    login: minToClock(avg('login_min')), logout: minToClock(avg('logout_min')),
+    busy_min: avg('busy_min'), break_min: avg('break_min'), offline_min: avg('offline_min'),
+  }};
 }}
 
-const agentSort = {{ key: 'n', dir: 'desc' }};
-
-function sortAgentRows(rows) {{
-  const {{ key, dir }} = agentSort;
-  const mul = dir === 'asc' ? 1 : -1;
-  return [...rows].sort((a, b) => key === 'agent' ? mul * a.agent.localeCompare(b.agent) : mul * (a[key] - b[key]));
-}}
-
-function renderAgentKPIs(rows) {{
-  const totalN = rows.reduce((s, r) => s + r.n, 0);
-  const totalSum = rows.reduce((s, r) => s + r.avg * r.n, 0);
-  const eligible = rows.filter(r => r.n >= AGENT_MIN_N);
-  const top = eligible.length ? eligible.reduce((a, b) => (b.avg > a.avg ? b : a)) : null;
-  const bottom = eligible.length ? eligible.reduce((a, b) => (b.avg < a.avg ? b : a)) : null;
-
-  document.getElementById('akpi-count').textContent = fmtInt(rows.length);
-  document.getElementById('akpi-avg').textContent = totalN ? fmtAvg(totalSum / totalN) : '&ndash;';
-  document.getElementById('akpi-avg-sub').textContent = 'n=' + fmtInt(totalN);
-
-  if (top) {{
-    document.getElementById('akpi-top').textContent = top.agent;
-    document.getElementById('akpi-top-sub').textContent = fmtAvg(top.avg) + ' avg · n=' + fmtInt(top.n);
-  }} else {{
-    document.getElementById('akpi-top').textContent = '&ndash;';
-    document.getElementById('akpi-top-sub').textContent = 'needs n≥' + AGENT_MIN_N;
-  }}
-  if (bottom) {{
-    document.getElementById('akpi-bottom').textContent = bottom.agent;
-    document.getElementById('akpi-bottom-sub').textContent = fmtAvg(bottom.avg) + ' avg · n=' + fmtInt(bottom.n);
-  }} else {{
-    document.getElementById('akpi-bottom').textContent = '&ndash;';
-    document.getElementById('akpi-bottom-sub').textContent = 'needs n≥' + AGENT_MIN_N;
-  }}
-}}
-
-function renderAgentLeaderboard(brand, channel) {{
-  const allRows = computeAgentStats(brand, channel);
-  const rows = allRows.filter(r => r.agent !== 'AI');
-  renderAgentKPIs(rows);
-
-  const sorted = sortAgentRows(rows);
-  const tbody = document.getElementById('agent-leaderboard-body');
-
-  if (sorted.length === 0) {{
-    tbody.innerHTML = '<tr><td colspan="6">No completed CSAT responses match this filter combination.</td></tr>';
-    return;
-  }}
-
-  tbody.innerHTML = sorted.map((row, i) => {{
-    const classBreak = computeAgentClassBreakdown(row.agent, brand, channel).slice(0, 6);
-    const subHtml = classBreak.length
-      ? `<tr class="agent-sub-row" data-parent-idx="${{i}}" style="display:none;"><td colspan="6" style="padding:10px 10px 14px 30px;">` +
-        classBreak.map(c => `<span style="display:inline-block; margin:2px 14px 2px 0; font-size:12px; color:var(--text-secondary);"><b style="color:var(--text-primary)">${{c.cls}}</b> &mdash; n=${{c.n}}, avg ${{c.avg.toFixed(2)}}</span>`).join('') +
-        `</td></tr>`
-      : '';
-    const toggle = classBreak.length
-      ? `<span class="row-toggle" data-toggle-idx="${{i}}">&#9656;</span>`
-      : '<span class="row-toggle-spacer"></span>';
-    return `<tr class="agent-cls-row" data-toggle-idx="${{i}}">` +
-      `<td>${{toggle}}${{row.agent}}</td>` +
-      `<td class="num">${{fmtInt(row.n)}}</td>` +
-      `<td class="num">${{fmtAvg(row.avg)}}</td>` +
-      `<td class="num">${{fmtPct(row.promotersPct)}}</td>` +
-      `<td class="num">${{fmtPct(row.detractorsPct)}}</td>` +
-      `<td>${{trendBadgeHtml(row)}}</td>` +
-      `</tr>${{subHtml}}`;
-  }}).join('');
-
-  tbody.querySelectorAll('tr.agent-cls-row').forEach(tr => {{
-    tr.querySelector('td:first-child').addEventListener('click', () => {{
-      const idx = tr.dataset.toggleIdx;
-      const toggleEl = tr.querySelector('.row-toggle');
-      if (!toggleEl) return;
-      const expanded = toggleEl.classList.toggle('expanded');
-      tbody.querySelectorAll(`tr.agent-sub-row[data-parent-idx="${{idx}}"]`).forEach(sub => {{
-        sub.style.display = expanded ? '' : 'none';
-      }});
+function buildTabs() {{
+  const nav = document.getElementById('ash-brandTabs');
+  nav.innerHTML = Object.keys(AGENT_SHIFT_DATA).map(b =>
+    `<button class="tab-btn${{b === currentBrand ? ' active' : ''}}" data-brand="${{b}}">${{b}}</button>`
+  ).join('');
+  nav.querySelectorAll('.tab-btn').forEach(btn => {{
+    btn.addEventListener('click', () => {{
+      currentBrand = btn.dataset.brand;
+      nav.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      resetPeriod();
+      buildPeriodSelect();
+      render();
     }});
   }});
 }}
 
-function refreshAgentTab() {{
-  const brand = document.getElementById('fa-brand').value;
-  const channel = document.getElementById('fa-channel').value;
-  renderAgentLeaderboard(brand, channel);
+function resetPeriod() {{
+  if (currentGran === 'daily') {{
+    currentPeriod = mostCommonLatestDate(currentBrand);
+  }} else {{
+    const weeks = allWeeksForBrand(currentBrand);
+    currentPeriod = weeks[weeks.length - 1];
+  }}
 }}
 
-document.querySelectorAll('#agent-leaderboard-table th[data-sort]').forEach(th => {{
-  th.addEventListener('click', () => {{
-    const key = th.dataset.sort;
-    if (agentSort.key === key) {{
-      agentSort.dir = agentSort.dir === 'asc' ? 'desc' : 'asc';
-    }} else {{
-      agentSort.key = key;
-      agentSort.dir = key === 'agent' ? 'asc' : 'desc';
-    }}
-    document.querySelectorAll('#agent-leaderboard-table th[data-sort] .sort-arrow').forEach(a => a.textContent = '');
-    th.querySelector('.sort-arrow').textContent = agentSort.dir === 'asc' ? '▲' : '▼';
-    refreshAgentTab();
+function buildPeriodSelect() {{
+  const sel = document.getElementById('ash-f-period');
+  document.getElementById('ash-periodLabel').textContent = currentGran === 'daily' ? 'Date' : 'Week';
+  if (currentGran === 'daily') {{
+    const dates = allDatesForBrand(currentBrand).slice().reverse();
+    sel.innerHTML = dates.map(d => `<option value="${{d}}"${{d === currentPeriod ? ' selected' : ''}}>${{formatDateLabel(d)}}</option>`).join('');
+  }} else {{
+    const weeks = allWeeksForBrand(currentBrand).slice().reverse();
+    sel.innerHTML = weeks.map(w => `<option value="${{w}}"${{w === currentPeriod ? ' selected' : ''}}>${{formatWeekLabel(w)}}</option>`).join('');
+  }}
+}}
+
+document.getElementById('ash-granToggle').querySelectorAll('.gran-btn').forEach(btn => {{
+  btn.addEventListener('click', () => {{
+    currentGran = btn.dataset.gran;
+    document.querySelectorAll('#ash-granToggle .gran-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    resetPeriod();
+    buildPeriodSelect();
+    render();
   }});
 }});
+
+function sortRows(rows) {{
+  rows.sort((r1, r2) => {{
+    if (!r1.present && !r2.present) return r1.agent.name.localeCompare(r2.agent.name);
+    if (!r1.present) return 1;
+    if (!r2.present) return -1;
+    if (sortKey === 'name') return sortDir * r1.agent.name.localeCompare(r2.agent.name);
+    if (sortKey === 'login') return sortDir * r1.login.localeCompare(r2.login);
+    return sortDir * ((r1[sortKey] ?? 0) - (r2[sortKey] ?? 0));
+  }});
+}}
+
+const COLUMNS = [
+  {{ key: 'name', label: 'Agent name' }},
+  {{ key: 'login', label: 'Login time' }},
+  {{ key: 'logout', label: 'Logout time' }},
+  {{ key: 'break_min', label: 'Total break', num: true }},
+  {{ key: 'offline_min', label: 'Total offline', num: true }},
+  {{ key: 'busy_min', label: 'Total busy', num: true }},
+];
+
+function buildTableHead() {{
+  const head = document.getElementById('ash-tableHead');
+  const cols = COLUMNS.concat(currentGran === 'weekly' ? [{{ key: 'days_worked', label: 'Days', num: true }}] : []);
+  head.innerHTML = cols.map(c => {{
+    const arrow = sortKey === c.key ? `<span class="arrow">${{sortDir === 1 ? '▲' : '▼'}}</span>` : '';
+    return `<th class="${{c.num ? 'num' : ''}}" data-key="${{c.key}}">${{c.label}}${{arrow}}</th>`;
+  }}).join('');
+  head.querySelectorAll('th').forEach(th => {{
+    th.addEventListener('click', () => {{
+      const key = th.dataset.key;
+      if (sortKey === key) sortDir *= -1; else {{ sortKey = key; sortDir = key === 'name' || key === 'login' ? 1 : -1; }}
+      render();
+    }});
+  }});
+}}
+
+function render() {{
+  const agents = AGENT_SHIFT_DATA[currentBrand];
+  const rows = agents.map(a => rowFor(a, currentPeriod));
+  sortRows(rows);
+
+  const present = rows.filter(r => r.present);
+  const periodLabel = currentGran === 'daily' ? formatDateLabel(currentPeriod) : formatWeekLabel(currentPeriod);
+
+  document.getElementById('ash-tableTitle').textContent = currentGran === 'daily' ? 'Shift summary by agent' : 'Weekly average by agent';
+  document.getElementById('ash-cardSub').textContent = `${{periodLabel}} — ${{present.length}} of ${{rows.length}} agents ${{currentGran === 'daily' ? 'logged in' : 'with at least one shift'}}`;
+  document.getElementById('ash-filterNote').textContent = currentGran === 'weekly' ? 'Numbers below are per-agent averages over days worked that week' : 'Applies to the summary and heatmap below';
+  document.getElementById('ash-tableFootnote').textContent =
+    'Login = first non-offline status of the day. Logout = last non-offline status end time. "Total busy" = time in the raw "Busy" status only (not Available). "Total offline" is every Offline segment logged that day, including time after logout until the next login.' +
+    (currentGran === 'weekly' ? ' "Days" = how many days that week the agent had a logged shift, out of 7.' : '');
+
+  const totalBusy = present.reduce((s, r) => s + r.busy_min, 0);
+  const totalBreak = present.reduce((s, r) => s + r.break_min, 0);
+  const totalOffline = present.reduce((s, r) => s + r.offline_min, 0);
+  const sortedLogins = present.map(r => r.login).slice().sort();
+
+  const kpis = [
+    {{ label: currentGran === 'daily' ? 'Agents logged in' : 'Agents active this week', value: `${{present.length}}/${{rows.length}}`, sub: periodLabel }},
+    {{ label: 'Median login time', value: sortedLogins.length ? sortedLogins[Math.floor(sortedLogins.length / 2)] : '–', sub: 'across active agents' }},
+    {{ label: 'Avg busy time', value: present.length ? hToLabel(totalBusy / present.length) : '–', sub: currentGran === 'daily' ? `total ${{hToLabel(totalBusy)}}` : 'per agent, per active day' }},
+    {{ label: 'Avg break time', value: present.length ? hToLabel(totalBreak / present.length) : '–', sub: currentGran === 'daily' ? `total ${{hToLabel(totalBreak)}}` : 'per agent, per active day' }},
+    {{ label: 'Avg offline time', value: present.length ? hToLabel(totalOffline / present.length) : '–', sub: 'includes after-logout time' }},
+  ];
+  document.getElementById('ash-kpiRow').innerHTML = kpis.map(k =>
+    `<div class="kpi"><div class="kpi-label">${{k.label}}</div><div class="kpi-value">${{k.value}}</div><div class="kpi-sub">${{k.sub}}</div></div>`
+  ).join('');
+
+  buildTableHead();
+  const tbody = document.querySelector('#ash-dataTable tbody');
+  tbody.innerHTML = '';
+  rows.forEach(r => {{
+    const tr = document.createElement('tr');
+    if (!r.present) tr.className = 'absent';
+    const nameTd = document.createElement('td');
+    nameTd.className = 'name';
+    nameTd.textContent = r.agent.name;
+    tr.appendChild(nameTd);
+
+    const cells = r.present
+      ? [r.login, r.logout, hToLabel(r.break_min), hToLabel(r.offline_min), hToLabel(r.busy_min)]
+      : ['–', '–', '–', '–', currentGran === 'daily' ? 'No shift logged' : 'No shift this week'];
+    cells.forEach((c, i) => {{
+      const td = document.createElement('td');
+      if (i >= 2) td.className = 'num';
+      if (!r.present && i === 4) {{ td.className = 'muted'; td.colSpan = 1; }}
+      td.textContent = c;
+      tr.appendChild(td);
+    }});
+    if (currentGran === 'weekly') {{
+      const td = document.createElement('td');
+      td.className = 'num';
+      td.textContent = r.present ? (r.days_worked + '/7') : '0/7';
+      tr.appendChild(td);
+    }}
+    tbody.appendChild(tr);
+  }});
+
+  renderHeatmap();
+}}
+
+function renderHeatmap() {{
+  const metric = document.getElementById('ash-f-metric').value;
+  const ramp = METRIC_RAMPS[metric];
+  const metricKey = metric === 'busy' ? 'busy_min' : (metric === 'break' ? 'break_min' : 'offline_min');
+  const agents = AGENT_SHIFT_DATA[currentBrand].slice().sort((a, b) => a.name.localeCompare(b.name));
+  const periods = currentGran === 'daily' ? allDatesForBrand(currentBrand) : allWeeksForBrand(currentBrand);
+  const labelFn = currentGran === 'daily'
+    ? d => new Date(d + 'T00:00:00').toLocaleDateString('en-IN', {{ day: 'numeric', month: 'short' }})
+    : w => 'Wk ' + new Date(w + 'T00:00:00').toLocaleDateString('en-IN', {{ day: 'numeric', month: 'short' }});
+
+  document.getElementById('ash-heatmapSub').textContent = `${{ramp.label}} per ${{currentGran === 'daily' ? 'day' : 'week'}}, by agent (${{currentBrand}})`;
+  document.getElementById('ash-heatmapLegend').innerHTML =
+    `<div class="legend-item"><span class="legend-swatch" style="background:${{ramp.light}};border:1px solid var(--border);"></span>Low</div>` +
+    `<div class="legend-item"><span class="legend-swatch" style="background:${{ramp.dark}};"></span>High</div>`;
+
+  // Precompute each agent's row values for all periods, and the max across
+  // the grid, so the sequential ramp is scaled consistently across cells.
+  const grid = agents.map(a => {{
+    const cells = periods.map(p => {{
+      const r = rowFor(a, p);
+      return r.present ? r[metricKey] : null;
+    }});
+    return {{ name: a.name, cells }};
+  }});
+  const maxVal = Math.max(1, ...grid.flatMap(g => g.cells.filter(v => v != null)));
+
+  const head = document.getElementById('ash-heatmapHead');
+  head.innerHTML = `<th class="corner">Agent</th>` + periods.map(p => `<th>${{labelFn(p)}}</th>`).join('');
+
+  const lightRgb = hexToRgb(ramp.light), darkRgb = hexToRgb(ramp.dark);
+  const body = document.getElementById('ash-heatmapBody');
+  body.innerHTML = grid.map(g => {{
+    const cellsHtml = g.cells.map((v, i) => {{
+      if (v == null) return '<td class="cell empty">&ndash;</td>';
+      const t = Math.min(1, v / maxVal);
+      const rgb = mixRgb(lightRgb, darkRgb, t);
+      const lum = relLuminance(rgb);
+      const textColor = lum > 0.45 ? '#0b0b0b' : '#ffffff';
+      const periodLabel = currentGran === 'daily' ? formatDateLabel(periods[i]) : formatWeekLabel(periods[i]);
+      return `<td class="cell" data-agent="${{g.name}}" data-period="${{periodLabel}}" data-val="${{hToLabel(v)}}" style="background:rgb(${{rgb.r}},${{rgb.g}},${{rgb.b}}); color:${{textColor}}">${{hToLabel(v)}}</td>`;
+    }}).join('');
+    return `<tr><td class="rowlabel" title="${{g.name}}">${{g.name}}</td>${{cellsHtml}}</tr>`;
+  }}).join('');
+
+  body.querySelectorAll('td.cell:not(.empty)').forEach(td => {{
+    td.addEventListener('mousemove', (e) => {{
+      tooltip.innerHTML = `<b>${{td.dataset.val}}</b> &middot; ${{td.dataset.agent}}, ${{td.dataset.period}}`;
+      tooltip.style.left = e.clientX + 'px';
+      tooltip.style.top = (e.clientY - 10) + 'px';
+      tooltip.classList.add('show');
+    }});
+    td.addEventListener('mouseleave', () => tooltip.classList.remove('show'));
+  }});
+}}
+
+resetPeriod();
+buildTabs();
+buildPeriodSelect();
+render();
+document.getElementById('ash-f-period').addEventListener('change', (e) => {{ currentPeriod = e.target.value; render(); }});
+document.getElementById('ash-f-metric').addEventListener('change', renderHeatmap);
+}})();
 
 function renderWordsTable(words) {{
   const tbody = document.querySelector('#words-table tbody');
@@ -980,15 +1118,12 @@ MONTH_ORDER.forEach(m => {{
 
 refreshWords();
 refreshAll();
-refreshAgentTab();
 
 document.getElementById('f-brand').addEventListener('change', refreshAll);
 document.getElementById('f-resolver').addEventListener('change', refreshAll);
 document.getElementById('f-channel').addEventListener('change', refreshAll);
 document.getElementById('f-word-brand').addEventListener('change', refreshWords);
 document.getElementById('f-word-month').addEventListener('change', refreshWords);
-document.getElementById('fa-brand').addEventListener('change', refreshAgentTab);
-document.getElementById('fa-channel').addEventListener('change', refreshAgentTab);
 window.addEventListener('resize', () => {{ refreshWords(); refreshAll(); }});
 
 document.querySelectorAll('.tab-btn').forEach(function(b) {{
