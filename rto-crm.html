@@ -858,6 +858,41 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
       };
 
+      // Admin-only: force every known agent's status to Offline right now, rather than
+      // waiting for each of their own 10-minute inactivity timeouts. Not a permanent lock -
+      // anyone still genuinely active will show Online again within ~2 minutes via their own
+      // next heartbeat (rto-crm.html's presence heartbeat effect).
+      const markAllAgentsOffline = async () => {
+        const emails = Array.from(new Set(effectiveAgentRoster.map(a => (a.email || '').toLowerCase()).filter(Boolean)));
+        if (emails.length === 0) return;
+
+        // My own status is authoritative locally - no Supabase round trip needed for me.
+        if (googleUser?.email) {
+          setAgentStatus('Offline');
+          try { localStorage.setItem('rto_agent_status', 'Offline'); } catch {}
+        }
+
+        const nowIso = new Date().toISOString();
+        let failed = 0;
+        await Promise.all(emails.map(async (email) => {
+          const res = await supabaseFetch('agent_status', 'POST', { email, status: 'Offline', updated_at: nowIso }, true);
+          if (!res || !res.ok) failed++;
+        }));
+
+        // Reflect immediately instead of waiting for the next 20s poll.
+        setLiveAgentStatuses(prev => {
+          const next = { ...prev };
+          emails.forEach(email => { next[email] = { status: 'Offline', updatedAt: nowIso }; });
+          return next;
+        });
+
+        if (failed > 0) {
+          showToast(`🌙 Marked offline. ${failed}/${emails.length} Supabase write(s) failed — check console.`);
+        } else {
+          showToast(`🌙 Marked all ${emails.length} agent(s) offline.`);
+        }
+      };
+
       const syncDispositionToSupabase = async (tkt, ov) => {
         if (!googleUser?.email) return;
         await supabaseFetch('ticket_disposition_logs', 'POST', {
@@ -2383,6 +2418,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                             title="Fetch each agent's latest status from Supabase right now"
                           >
                             {isRefreshingRoster ? '⏳ Refreshing…' : '🔄 Refresh Status'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={markAllAgentsOffline}
+                            className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
+                            title="Force every agent's status to Offline right now. Not permanent - anyone still active shows Online again within ~2 minutes via their own heartbeat."
+                          >
+                            🌙 Mark All Offline
                           </button>
                           <button
                             type="button"
