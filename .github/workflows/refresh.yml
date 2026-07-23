@@ -77,7 +77,31 @@ jobs:
           if ($changed) {
             $stamp = (Get-Date).ToUniversalTime().AddHours(5.5).ToString('yyyy-MM-dd HH:mm')
             git commit -m "Auto-refresh reports ($stamp IST)"
-            git push
+
+            # This repo gets pushed to frequently from elsewhere while this job is
+            # busy regenerating reports (a few minutes), so a bare `git push` here
+            # regularly loses the race with a non-fast-forward rejection even though
+            # generation succeeded. Rebase onto the latest main and retry instead of
+            # failing the whole run - the files this job touches are data/report
+            # outputs that don't overlap with unrelated code changes, so a rebase
+            # conflict here would be exceptional, not expected.
+            $pushed = $false
+            for ($i = 1; $i -le 5 -and -not $pushed; $i++) {
+              git push
+              if ($LASTEXITCODE -eq 0) {
+                $pushed = $true
+              } else {
+                Write-Host "Push rejected (attempt $i/5) - fetching and rebasing onto latest main..."
+                git fetch origin main
+                git rebase origin/main
+                if ($LASTEXITCODE -ne 0) {
+                  throw "Rebase onto origin/main failed after a push rejection - needs manual resolution."
+                }
+              }
+            }
+            if (-not $pushed) {
+              throw "Failed to push after 5 attempts - main is moving too fast to catch up."
+            }
             Write-Host "Pushed refreshed reports."
           } else {
             Write-Host "No data changes; nothing to commit."

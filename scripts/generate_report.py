@@ -38,8 +38,17 @@ def get_sales_m_by_month(ctx, rows_subset):
         tmp[mo][sm] = tmp[mo].get(sm, 0) + 1
     res = {}
     for mo, counts in tmp.items():
-        best = max(counts.items(), key=lambda kv: kv[1])
-        res[mo] = float(str(best[0]).replace(",", ""))
+        # Sheet formula errors (#REF!, #N/A, #DIV/0!, etc.) sometimes leak into this
+        # column when an upstream reference breaks - skip those candidates rather
+        # than crash the whole run; if literally every candidate for a month is
+        # unparseable, that month is just left out of res (callers already default
+        # missing months to 0 via ctx.sales_m.get(mo, 0)).
+        for val, _ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
+            try:
+                res[mo] = float(str(val).replace(",", ""))
+                break
+            except ValueError:
+                continue
     return res
 
 
