@@ -371,7 +371,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         if (!hasAnyData) continue;
 
         const o={};hdr.forEach((h,x)=>{const c=(h||'').trim();if(c)o[c]=(r[x]||'').trim();o[`c${x}`]=(r[x]||'').trim();});
-        res.push(mapTkt(o,i));
+
+        // A single malformed/unexpected row must never abort the entire sync - that's exactly
+        // what silently froze the ticket cache on a stale snapshot before (one row's mapTkt
+        // throwing killed parseRows for every row behind it). Skip just the bad row and keep going.
+        try {
+          res.push(mapTkt(o,i));
+        } catch (e) {
+          console.error(`parseRows: skipping row ${i} (order ${orderIdRaw}) - mapTkt threw:`, e);
+        }
         if(i%5000===4999)await new Promise(r=>setTimeout(r,0));
       }
       return res;
@@ -794,6 +802,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [stats, setStats] = useState(()=>{try{return JSON.parse(localStorage.getItem('rto_agent_stats')||'{}');}catch{return{};}});
       const [isSyncing, setIsSyncing] = useState(false);
       const [lastSync, setLastSync] = useState('—');
+      const [syncError, setSyncError] = useState(null);
       const [search, setSearch] = useState('');
       const [adminLogSearch, setAdminLogSearch] = useState('');
       const [adminLogAgent, setAdminLogAgent] = useState('ALL');
@@ -1159,8 +1168,28 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       // Sync
       const sync = useCallback(async(silent=false)=>{
         const sid=extractSheetId(DEFAULT_SHEET_URL);if(!sid)return;setIsSyncing(true);
-        try{const raw=await fetchSheet(sid,DEFAULT_SHEET_RANGE);const mapped=await parseRows(raw,googleUser,userRole);setTickets(mapped);try{localStorage.setItem('rto_cache_v4',JSON.stringify(mapped.slice(0,10000)));}catch{}setLastSync(new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));if(!silent)showToast(`${mapped.length.toLocaleString('en-IN')} leads synced`);}
-        catch(e){if(!silent)showToast(e.message);}finally{setIsSyncing(false);}
+        try{
+          const raw=await fetchSheet(sid,DEFAULT_SHEET_RANGE);
+          const mapped=await parseRows(raw,googleUser,userRole);
+          setTickets(mapped);
+          try{localStorage.setItem('rto_cache_v4',JSON.stringify(mapped.slice(0,10000)));}catch{}
+          setLastSync(new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));
+          setSyncError(null);
+          if(!silent)showToast(`${mapped.length.toLocaleString('en-IN')} leads synced`);
+        } catch(e) {
+          // A background sync failure used to fail completely silently (silent=true suppressed
+          // the toast, and nothing else surfaced it) - the UI just kept showing whatever stale
+          // cached tickets it already had, indefinitely, with zero visible indication anything
+          // was wrong. Always log it and keep a persistent on-screen indicator regardless of
+          // silent, and retry sooner than the normal 60s cadence instead of leaving the agent
+          // on broken data for up to a minute.
+          console.error('Sync failed:', e);
+          setSyncError(e.message || 'Sync failed');
+          if(!silent)showToast(e.message);
+          setTimeout(()=>sync(true), 15000);
+        } finally {
+          setIsSyncing(false);
+        }
       },[googleUser,userRole,showToast]);
 
       useEffect(()=>{sync(true);},[]);
@@ -1663,7 +1692,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     RTO Support Command Center
                     <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
                   </h1>
-                  <p className="text-[11px] text-zinc-500 font-mono">Last sync: {lastSync}</p>
+                  <p className="text-[11px] text-zinc-500 font-mono flex items-center gap-1.5">
+                    Last sync: {lastSync}
+                    {syncError && (
+                      <span className="text-rose-400 font-sans font-semibold" title={syncError}>
+                        ⚠ Sync failed — showing cached data, retrying…
+                      </span>
+                    )}
+                  </p>
                 </div>
               </div>
 
