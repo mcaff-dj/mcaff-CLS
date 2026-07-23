@@ -1487,11 +1487,19 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
 
 
-      const pend=allTickets.filter(t=>t.status==='Pending'&&!t.disposition&&!t.agentRemarks).length;
-      const dispCount=allTickets.filter(t=>t.disposition||t.agentRemarks||t.status!=='Pending').length;
+      // Same restriction as `filtered` above: an Agent's tab-count badges must only ever
+      // reflect their own leads, never every agent's, regardless of agentFilter's value.
+      const myScopeEmail = userRole === 'Agent' ? (googleUser?.email || '').toLowerCase() : '';
+      const inMyScope = (t) => {
+        if (!myScopeEmail) return true;
+        const a = (t.assignedAgent || '').toLowerCase();
+        return a.includes(myScopeEmail) || myScopeEmail.includes(a);
+      };
+      const pend=allTickets.filter(t=>inMyScope(t)&&t.status==='Pending'&&!t.disposition&&!t.agentRemarks).length;
+      const dispCount=allTickets.filter(t=>inMyScope(t)&&(t.disposition||t.agentRemarks||t.status!=='Pending')).length;
       const freshAssignedCount=allTickets.filter(t=>{
         const agt=(t.assignedAgent||'').trim().toLowerCase();
-        return agt&&agt!=='unassigned'&&t.status==='Pending'&&!t.disposition&&!t.agentRemarks;
+        return agt&&agt!=='unassigned'&&inMyScope(t)&&t.status==='Pending'&&!t.disposition&&!t.agentRemarks;
       }).length;
 
       const agents = useMemo(()=>{
@@ -1624,6 +1632,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       }, [tab, search, payFilter, agentFilter, dateScope, customDateFrom, customDateTo]);
 
       const filtered = useMemo(()=>{
+        // An Agent must never see another agent's leads regardless of agentFilter's value -
+        // agentFilter is an Admin-only "view as this agent" control. It only gets synced to
+        // the signed-in agent's own email inside handleSwitchRole's manual toggle, so a plain
+        // Agent login that never touches that dropdown left it at its 'ALL' default, and
+        // everyone's leads showed up. Force the restriction here instead of trusting that.
+        const restrictToEmail = userRole === 'Agent'
+          ? (googleUser?.email || '').toLowerCase()
+          : (agentFilter !== 'ALL' ? agentFilter.toLowerCase() : '');
+
         // Fresh Leads Tab: Shows leads ASSIGNED to the current agent/filter that have NOT been disposed yet!
         if (tab === 'fresh') {
           return allTickets.filter(t => {
@@ -1631,7 +1648,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
             const isAssigned = agt && agt.toLowerCase() !== 'unassigned';
             if (!isAssigned) return false;
             if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
-            if (agentFilter !== 'ALL') { const a = agt.toLowerCase(), s = agentFilter.toLowerCase(); if (!a.includes(s) && !s.includes(a)) return false; }
+            if (restrictToEmail) { const a = agt.toLowerCase(); if (!a.includes(restrictToEmail) && !restrictToEmail.includes(a)) return false; }
             if (payFilter !== 'ALL' && t.paymentMethod !== payFilter) return false;
             if (search.trim()) {
               const q = search.toLowerCase();
@@ -1648,13 +1665,13 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
         // All Leads Tab: Shows every lead that has ALREADY been disposed (disposition, remarks, or non-Pending status)
         return allTickets.filter(t=>{
-          if(agentFilter!=='ALL'){const a=t.assignedAgent.toLowerCase(),s=agentFilter.toLowerCase();if(!a.includes(s)&&!s.includes(a))return false;}
+          if(restrictToEmail){const a=(t.assignedAgent||'').toLowerCase();if(!a.includes(restrictToEmail)&&!restrictToEmail.includes(a))return false;}
           if(!t.disposition&&!t.agentRemarks&&t.status==='Pending')return false;
           if(payFilter!=='ALL'&&t.paymentMethod!==payFilter)return false;
           if(search.trim()){const q=search.toLowerCase();if(![t.orderNumber,t.customerName,t.email,t.phone,t.rtoReason,t.callingDate,t.assignedAgent,t.agentRemarks,t.disposition].some(f=>(f||'').toLowerCase().includes(q)))return false;}
           return true;
         });
-      },[allTickets,tickets,overrides,agentFilter,tab,payFilter,search]);
+      },[allTickets,tickets,overrides,agentFilter,tab,payFilter,search,userRole,googleUser]);
 
       const pages=Math.ceil(filtered.length/perPage)||1;
       const visible=filtered.slice((page-1)*perPage,page*perPage);
