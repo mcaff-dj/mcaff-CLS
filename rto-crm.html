@@ -621,7 +621,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         return [
           {email:'vighnesh.patil@mcaffeine.com',name:'Vighnesh Patil',role:'Admin',maxQuota:10,status:'Online',aht:'2.5m',breakTime:'15m'},
           {email:'vikash.pathak@mcaffeine.com',name:'Vikash Pathak',role:'Admin',maxQuota:10,status:'Online',aht:'3.1m',breakTime:'20m'},
-          {email:'aditi.sarkar@mcaffeine.com',name:'Aditi Sarkar',role:'Agent',maxQuota:10,status:'Online',aht:'2.5m',breakTime:'15m'},
           {email:'bhavesh.solanki@mcaffeine.com',name:'Bhavesh Solanki',role:'Agent',maxQuota:10,status:'Online',aht:'2.8m',breakTime:'45m'},
           {email:'badshasab.pathan@mcaffeine.com',name:'Badshasab Pathan',role:'Agent',maxQuota:10,status:'Online',aht:'3.4m',breakTime:'30m'}
         ];
@@ -1329,6 +1328,38 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         if(tgt){setReceiptTkt({...tgt,refundDetails:rec});try{window.confetti?.({particleCount:60,spread:55,origin:{y:.7}});}catch{}showToast(`₹${rec.amount.toLocaleString('en-IN')} refunded successfully`);}
       };
 
+      // Admin-only: remove an agent's row from the roster entirely (not just clear their
+      // leads - the existing "Unassign" button already does that). Blocked while they still
+      // hold pending leads, since removing them from agentRoster wouldn't unassign anything.
+      // Note: this only removes their entry from the manually-managed agentRoster list - if
+      // they still have ANY ticket history (pending or disposed) referencing their email,
+      // effectiveAgentRoster's dynamic discovery will re-add them with generic defaults
+      // (role: Agent, quota: 10), since the roster is partly derived from the sheet itself,
+      // not just this list. An agent with zero ticket history disappears entirely.
+      const removeAgentFromRoster = (email, name) => {
+        const lower = (email || '').toLowerCase();
+        if (!lower) return;
+        const prefix = lower.split('@')[0];
+
+        const activeCount = allTickets.filter(t => {
+          if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
+          const currAgt = (t.assignedAgent || '').toLowerCase();
+          return currAgt.includes(lower) || currAgt.includes(prefix);
+        }).length;
+
+        if (activeCount > 0) {
+          showToast(`Can't remove ${name} — they still have ${activeCount} pending lead(s). Reassign or unassign those first.`);
+          return;
+        }
+
+        setAgentRoster(p => {
+          const u = p.filter(a => (a.email || '').toLowerCase() !== lower);
+          try { localStorage.setItem('rto_agent_roster', JSON.stringify(u)); } catch {}
+          return u;
+        });
+        showToast(`Removed ${name} from the roster.`);
+      };
+
       // Admin Bulk Reassign / Unassign Controls
       const adminBulkAction = async (sourceAgentEmail, targetAgentEmail) => {
         const isUnassign = targetAgentEmail === 'UNASSIGN';
@@ -1563,12 +1594,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         (agentRoster || []).forEach(a => {
           if (a && a.email) rosterMap.set(a.email.toLowerCase(), { ...a });
         });
-
-        if (!rosterMap.has('aditi.sarkar@mcaffeine.com')) {
-          rosterMap.set('aditi.sarkar@mcaffeine.com', {
-            email: 'aditi.sarkar@mcaffeine.com', name: 'Aditi Sarkar', role: 'Agent', maxQuota: 10, status: 'Online', aht: '2.5m', breakTime: '15m'
-          });
-        }
 
         if (googleUser && googleUser.email && !rosterMap.has(googleUser.email.toLowerCase())) {
           const email = googleUser.email.toLowerCase();
@@ -2555,6 +2580,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                                       title="Wipe assigned agent and clear Column Q in Google Sheet"
                                     >
                                       🧹 Unassign
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => removeAgentFromRoster(a.email, a.name)}
+                                      className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-red-950/60 text-zinc-400 hover:text-red-300 border border-zinc-700 hover:border-red-800/80 text-[11px] font-bold transition-all shadow-xs"
+                                      title="Remove this agent's row from the roster entirely. Blocked while they hold pending leads."
+                                    >
+                                      🗑️ Remove
                                     </button>
                                   </div>
                                 </td>
