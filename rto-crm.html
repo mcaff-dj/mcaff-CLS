@@ -15,6 +15,7 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.2/dist/confetti.browser.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
   <script>
     tailwind.config = {
@@ -574,6 +575,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               const defaultRole = (d.isAdmin||d.email.toLowerCase().includes('vighnesh')||d.email.toLowerCase().includes('vikash')||d.email.toLowerCase().includes('aditi')) ? 'Admin' : 'Agent';
               setUserRole(defaultRole);
             }
+
+            // Log agent login to Supabase DB
+            const loginUrl = localStorage.getItem('rto_supabase_url') || 'https://yzvqkboikvbkriccrhjk.supabase.co';
+            const loginKey = localStorage.getItem('rto_supabase_key') || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl6dnFrYm9pa3Zia3JpY2NyaGprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ1NDgxNjEsImV4cCI6MjEwMDEyNDE2MX0.qF0rNhAt6NRBmE3PQp8BpI5hUb5RbMda98oEXtAjy_Q';
+            if (loginUrl && loginKey) {
+              const loginHeaders = { 'apikey': loginKey, 'Authorization': `Bearer ${loginKey}`, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=representation' };
+              fetch(`${loginUrl}/rest/v1/agent_status`, { method: 'POST', headers: loginHeaders, body: JSON.stringify({ email: d.email.toLowerCase(), status: 'Online', updated_at: new Date().toISOString() }) }).catch(() => {});
+              fetch(`${loginUrl}/rest/v1/agent_activity_logs`, { method: 'POST', headers: { ...loginHeaders, 'Prefer': 'return=representation' }, body: JSON.stringify({ email: d.email.toLowerCase(), agent_name: d.name || d.email.split('@')[0], action: 'Agent Logged In — Session Started', type: 'online', created_at: new Date().toISOString() }) }).catch(() => {});
+            }
           }
         }).catch(()=>{});
       },[]);
@@ -618,6 +628,90 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         };
       }, []);
 
+      // Supabase DB Integration Engine
+      const DEFAULT_SUPABASE_URL = 'https://yzvqkboikvbkriccrhjk.supabase.co';
+      const DEFAULT_SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl6dnFrYm9pa3Zia3JpY2NyaGprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ1NDgxNjEsImV4cCI6MjEwMDEyNDE2MX0.qF0rNhAt6NRBmE3PQp8BpI5hUb5RbMda98oEXtAjy_Q';
+
+      const [supabaseUrl, setSupabaseUrl] = useState(() => {
+        try { return localStorage.getItem('rto_supabase_url') || DEFAULT_SUPABASE_URL; } catch { return DEFAULT_SUPABASE_URL; }
+      });
+      const [supabaseKey, setSupabaseKey] = useState(() => {
+        try { return localStorage.getItem('rto_supabase_key') || DEFAULT_SUPABASE_KEY; } catch { return DEFAULT_SUPABASE_KEY; }
+      });
+      const supabaseRef = useRef(null);
+
+      useEffect(() => {
+        if (window.supabase && supabaseUrl && supabaseKey) {
+          try {
+            supabaseRef.current = window.supabase.createClient(supabaseUrl, supabaseKey);
+            console.log('Supabase DB Client initialized successfully!');
+          } catch (e) {
+            console.error('Supabase init error:', e);
+          }
+        }
+      }, [supabaseUrl, supabaseKey]);
+
+      const saveSupabaseConfig = (url, key) => {
+        setSupabaseUrl(url);
+        setSupabaseKey(key);
+        try {
+          localStorage.setItem('rto_supabase_url', url);
+          localStorage.setItem('rto_supabase_key', key);
+          showToast('⚡ Supabase DB Credentials Saved & Connected!');
+        } catch {}
+      };
+
+      const supabaseFetch = async (table, method, body, upsert = false) => {
+        const url = supabaseUrl || DEFAULT_SUPABASE_URL;
+        const key = supabaseKey || DEFAULT_SUPABASE_KEY;
+        if (!url || !key) return;
+        const headers = {
+          'apikey': key,
+          'Authorization': `Bearer ${key}`,
+          'Content-Type': 'application/json',
+          'Prefer': upsert ? 'resolution=merge-duplicates,return=representation' : 'return=representation'
+        };
+        try {
+          const res = await fetch(`${url}/rest/v1/${table}`, { method, headers, body: JSON.stringify(body) });
+          if (!res.ok) console.warn(`Supabase ${table} ${method} failed:`, res.status, await res.text());
+          else console.log(`Supabase ${table} ${method} OK`);
+          return res;
+        } catch (err) { console.error(`Supabase ${table} error:`, err); }
+      };
+
+      const syncStatusToSupabase = async (status, logEntry) => {
+        if (!googleUser?.email) return;
+        await supabaseFetch('agent_status', 'POST', {
+          email: googleUser.email.toLowerCase(),
+          status: status,
+          updated_at: new Date().toISOString()
+        }, true);
+        if (logEntry) {
+          await supabaseFetch('agent_activity_logs', 'POST', {
+            email: googleUser.email.toLowerCase(),
+            agent_name: googleUser.name || googleUser.email.split('@')[0],
+            action: logEntry.action,
+            type: logEntry.type,
+            created_at: new Date().toISOString()
+          });
+        }
+      };
+
+      const syncDispositionToSupabase = async (tkt, ov) => {
+        if (!googleUser?.email) return;
+        await supabaseFetch('ticket_disposition_logs', 'POST', {
+          order_number: tkt.orderNumber,
+          agent_email: googleUser.email.toLowerCase(),
+          connected_status: ov.connectedStatus,
+          attempt_type: ov.attemptType,
+          disposition: ov.agentDisposition,
+          remarks: ov.agentRemarks,
+          new_order_id: ov.newOrderId,
+          new_address: ov.newAddress,
+          disposed_at: new Date().toISOString()
+        });
+      };
+
       const handleSetStatus = (s)=>{
         setAgentStatus(s);
         try { localStorage.setItem('rto_agent_status', s); } catch {}
@@ -641,6 +735,9 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           try { localStorage.setItem('rto_agent_roster', JSON.stringify(u)); } catch {}
           return u;
         });
+
+        // Sync to Supabase DB
+        syncStatusToSupabase(s, newLog);
 
         try {
           const channel = new BroadcastChannel('rto_crm_sync_channel');
@@ -829,6 +926,9 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           newOrderId: newOrder==='YES'?newOrderId:'',
           newAddress: addrChange==='YES'?newAddr:''
         });
+
+        // Sync disposition log to Supabase DB
+        syncDispositionToSupabase(dispTkt, ov);
 
         const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
         
@@ -1072,9 +1172,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         return Array.from(rosterMap.values());
       }, [agentRoster, tickets, overrides, googleUser]);
 
+      // ONLY Agent-role users participate in round-robin. Admins/Team Leads are excluded from the interleave index.
       const sortedAgentEmails = useMemo(() => {
         const s = new Set();
-        effectiveAgentRoster.forEach(a => { if (a && a.email) s.add(a.email.toLowerCase()); });
+        effectiveAgentRoster.forEach(a => {
+          if (a && a.email && a.role === 'Agent') s.add(a.email.toLowerCase());
+        });
         return Array.from(s).sort();
       }, [effectiveAgentRoster]);
 
@@ -1135,13 +1238,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           const myAgentIdx = Math.max(0, sortedAgentEmails.indexOf(e));
           const numAgents = Math.max(1, sortedAgentEmails.length);
 
-          // All pending leads assigned to me OR unassigned
+          // All pending leads assigned to me OR truly unassigned (NOT assigned to any other agent)
           const allPendingLeads = base.filter(t => {
             if (!t.orderNumber) return false;
             if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
             const agt = (t.assignedAgent || '').trim();
             const isUnassigned = !agt || agt === 'Unassigned' || agt.toLowerCase() === 'unassigned';
-            return isMine(agt) || isUnassigned;
+            // CRITICAL: If assigned to ANOTHER agent, SKIP this lead entirely!
+            if (!isUnassigned && !isMine(agt)) return false;
+            return true;
           });
 
           // Disposed or refunded leads assigned to me (kept for history view)
@@ -1195,19 +1300,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               }
             }
 
-            // Fallback: If quota still needed for this date, pick remaining available unassigned leads
-            if (myPendingQueue.length < maxLeads && unassignedForDate.length > 0) {
-              for (const t of unassignedForDate) {
-                if (myPendingQueue.length >= maxLeads) break;
-                if (!claimedOrderNumbers.has(t.orderNumber)) {
-                  claimedOrderNumbers.add(t.orderNumber);
-                  myPendingQueue.push({
-                    ...t,
-                    assignedAgent: googleUser.email
-                  });
-                }
-              }
-            }
+            // No fallback loop — strict round-robin only to prevent cross-agent duplicates
           }
 
           // Return PENDING leads (up to maxLeads) + ALL DISPOSED leads
@@ -2202,6 +2295,54 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                             </div>
                           );
                         })()}
+
+                      {/* Supabase DB Settings Card */}
+                      <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
+                              ⚡ Supabase Database Connection & Real-Time Log Persistence
+                            </h3>
+                            <p className="text-[12px] text-zinc-500 mt-0.5">Connect your Supabase DB to record agent status updates, break activity logs, and ticket dispositions to PostgreSQL.</p>
+                          </div>
+                          <span className={`text-[12px] px-2.5 py-1 rounded-lg font-mono font-bold ${supabaseUrl && supabaseKey ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/40' : 'bg-zinc-800 text-zinc-400'}`}>
+                            {supabaseUrl && supabaseKey ? '⚡ Connected to Supabase DB' : '⚪ Not Connected'}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-[11px] font-bold text-zinc-400 uppercase tracking-wider mb-1">Supabase Project URL</label>
+                            <input
+                              type="text"
+                              value={supabaseUrl}
+                              onChange={e => setSupabaseUrl(e.target.value)}
+                              placeholder="https://your-project.supabase.co"
+                              className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2.5 text-[13px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-bold text-zinc-400 uppercase tracking-wider mb-1">Supabase Anon Key</label>
+                            <input
+                              type="password"
+                              value={supabaseKey}
+                              onChange={e => setSupabaseKey(e.target.value)}
+                              placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                              className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2.5 text-[13px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between pt-2 border-t border-zinc-800/60">
+                          <p className="text-[11px] text-zinc-500 font-mono">Tables: <code>agent_status</code>, <code>agent_activity_logs</code>, <code>ticket_disposition_logs</code></p>
+                          <button
+                            type="button"
+                            onClick={() => saveSupabaseConfig(supabaseUrl, supabaseKey)}
+                            className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[12px] transition-all shadow-md shadow-indigo-950/50"
+                          >
+                            💾 Save Supabase Credentials
+                          </button>
+                        </div>
                       </div>
                     </>
                   );
