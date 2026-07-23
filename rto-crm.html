@@ -377,8 +377,16 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const agt=g('Agent Name','Agent','Assigned Agent','AgentName','Assigned To','c16')||'Unassigned';
       const rto=g('RTO Reason','c3','Reason','RTOReason')||'Return To Origin';
       const cd=g('Calling Date','CallingDate','c24')||'';
-      const prep=pay.includes('PREPAID')||pay.includes('ONLINE')||pay.includes('PAYTM')||pay.includes('UPI')||(!pay.includes('COD')&&!pay.includes('CASH'));
-      const hp=prep&&HIGH_PRIORITY_RTO_REASONS.some(x=>rto.toLowerCase().includes(x));
+      const conn = r['c17'] || '';
+      const attempt = r['c18'] || '';
+      const disp = r['c19'] || '';
+      const remarks = r['c20'] || r['c25'] || r['c29'] || '';
+      const newOrderId = r['c21'] || '';
+      const newAddress = r['c23'] || '';
+
+      const isRefunded = disp.toLowerCase().includes('refund') || attempt.toLowerCase().includes('refund');
+      const isDisposed = !!(conn || attempt || disp || remarks || newOrderId || newAddress);
+
       return{id:`T-${ord}-${i}`,orderNumber:ord,customerName:g('Customer Name','Name','Customer','Full Name')||'Customer',
         email:g('Email ID','Email','Customer Email')||'',phone:g('Contact Number','Phone','Mobile','Contact')||'',
         address:g('Address','Street Address','Shipping Address')||'',city:g('City','District','Town')||'',
@@ -387,8 +395,9 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         orderAmount:parseFloat(amt.replace(/[^0-9.]/g,''))||0,rtoReason:rto,
         assignedAgent:agt,callingDate:cd||'—',isHighPriority:hp,
         rowDate:parseDate(cd)||parseDate(g('Date','Order Date','c0')),rawIndex:i,
-        attemptType:r['c18']||'',
-        status:'Pending',connected:r['c17']||'',disposition:r['c19']||'',agentRemarks:''};
+        attemptType:attempt,connected:conn,disposition:disp,agentRemarks:remarks,
+        newOrderId:newOrderId,newAddress:newAddress,
+        status:isRefunded?'Refunded':isDisposed?'Disposed':'Pending'};
     }
 
     /* ── SVG Icons ───────────────────────────────────── */
@@ -569,20 +578,76 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }).catch(()=>{});
       },[]);
 
+      // Cross-Tab & Multi-Client Real-Time Status & Activity Broadcast Sync
+      useEffect(() => {
+        let channel = null;
+        try {
+          channel = new BroadcastChannel('rto_crm_sync_channel');
+          channel.onmessage = (event) => {
+            const data = event.data;
+            if (data?.type === 'STATUS_UPDATE' && data.email && data.status) {
+              setAgentRoster(p => {
+                const u = p.map(a => a.email.toLowerCase() === data.email.toLowerCase() ? { ...a, status: data.status } : a);
+                try { localStorage.setItem('rto_agent_roster', JSON.stringify(u)); } catch {}
+                return u;
+              });
+            }
+            if (data?.type === 'ACTIVITY_LOG' && data.log) {
+              setActivityLogs(p => {
+                const u = [data.log, ...p.slice(0, 99)];
+                try { localStorage.setItem('rto_central_activity_logs_v3', JSON.stringify(u)); } catch {}
+                return u;
+              });
+            }
+          };
+        } catch {}
+
+        const handleStorageEvent = (e) => {
+          if (e.key === 'rto_agent_roster' && e.newValue) {
+            try { setAgentRoster(JSON.parse(e.newValue)); } catch {}
+          }
+          if (e.key === 'rto_central_activity_logs_v3' && e.newValue) {
+            try { setActivityLogs(JSON.parse(e.newValue)); } catch {}
+          }
+        };
+
+        window.addEventListener('storage', handleStorageEvent);
+        return () => {
+          window.removeEventListener('storage', handleStorageEvent);
+          if (channel) channel.close();
+        };
+      }, []);
+
       const handleSetStatus = (s)=>{
-        setAgentStatus(s);localStorage.setItem('rto_agent_status',s);
-        const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-        const newLog = {time:t,agent:googleUser.email,action:`Status → ${s}`,type:s==='Online'?'online':s==='Busy'?'break':'offline'};
-        setActivityLogs(p=>{
-          const u=[newLog, ...p.slice(0,99)];
-          localStorage.setItem('rto_central_activity_logs_v3',JSON.stringify(u));
+        setAgentStatus(s);
+        try { localStorage.setItem('rto_agent_status', s); } catch {}
+        const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const newLog = {
+          time: t,
+          agent: googleUser.email,
+          agentName: googleUser.name || googleUser.email.split('@')[0],
+          action: `Status → ${s}`,
+          type: s === 'Online' ? 'online' : s === 'Busy' ? 'break' : 'offline'
+        };
+
+        setActivityLogs(p => {
+          const u = [newLog, ...p.slice(0, 99)];
+          try { localStorage.setItem('rto_central_activity_logs_v3', JSON.stringify(u)); } catch {}
           return u;
         });
-        setAgentRoster(p=>{
-          const u=p.map(a=>a.email.toLowerCase()===googleUser.email.toLowerCase()?{...a,status:s}:a);
-          localStorage.setItem('rto_agent_roster',JSON.stringify(u));
+
+        setAgentRoster(p => {
+          const u = p.map(a => a.email.toLowerCase() === googleUser.email.toLowerCase() ? { ...a, status: s } : a);
+          try { localStorage.setItem('rto_agent_roster', JSON.stringify(u)); } catch {}
           return u;
         });
+
+        try {
+          const channel = new BroadcastChannel('rto_crm_sync_channel');
+          channel.postMessage({ type: 'STATUS_UPDATE', email: googleUser.email, status: s });
+          channel.postMessage({ type: 'ACTIVITY_LOG', log: newLog });
+          channel.close();
+        } catch {}
       };
 
       // Data
