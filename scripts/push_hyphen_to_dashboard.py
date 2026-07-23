@@ -71,6 +71,9 @@ FORMULA_COLUMNS = [
 # module docstring for why - copyPaste "drag down" doesn't work on this
 # dashboard). "{r}" is replaced with the actual 1-based row number. Captured
 # verbatim from the live dashboard sheet's own formulas.
+#
+# EXCEPTION: templates containing ARRAYFORMULA are never dragged row-by-row -
+# see the ARRAYFORMULA branch below main() for why.
 FORMULA_TEMPLATES = {
     "SKU": '=iferror(VLOOKUP(G{r},SKU!A:B,2,0))',
     "Month": '=IF(Q{r}="2026",TEXT(B{r},"M")&"_"&TEXT(B{r},"MMM\'YY"),TEXT(B{r},"MM")&"_"&TEXT(B{r},"MMM\'YY"))',
@@ -195,8 +198,24 @@ def main():
         if not template:
             continue
         col_index = dash_headers.index(col_name)
-        formulas = [[template.replace("{r}", str(start_row + i))] for i in range(len(new_rows))]
         col_letter = lib.get_column_letter(col_index)
+        if "ARRAYFORMULA" in template.upper():
+            # An ARRAYFORMULA cell already governs the whole column from its
+            # anchor row downward (an open range like M2:M auto-expands to
+            # cover every row below it) - writing another copy into each new
+            # row overlaps that same range and Sheets rejects it with #REF!
+            # ("Array result was not expanded because it would overwrite
+            # data in ..."), which is what broke the "Refresh reports" run
+            # on 2026-07-23. Only seed it once, and only on a brand-new tab
+            # that has no existing anchor row to rely on.
+            if dash_last_row < 2:
+                formula = template.replace("{r}", str(start_row))
+                lib.set_sheet_values_batch(DASHBOARD_SHEET_ID, [{
+                    "range": f"'{DASHBOARD_TAB}'!{col_letter}{start_row}",
+                    "values": [[formula]],
+                }])
+            continue
+        formulas = [[template.replace("{r}", str(start_row + i))] for i in range(len(new_rows))]
         lib.set_sheet_values_batch(DASHBOARD_SHEET_ID, [{
             "range": f"'{DASHBOARD_TAB}'!{col_letter}{start_row}:{col_letter}{dest_row_end}",
             "values": formulas,
