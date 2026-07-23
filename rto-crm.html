@@ -928,7 +928,62 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       useEffect(()=>{sync(true);},[]);
       useEffect(()=>{const t=setInterval(()=>sync(true),60000);return()=>clearInterval(t);},[sync]);
 
-      // Derived data & STRICT Calling Date (Latest First) Sorting & Duplicate Lead Protection
+      // Dynamic Roster that automatically includes EVERY unique agent found in Google Sheet tickets or overrides
+      const effectiveAgentRoster = useMemo(() => {
+        const rosterMap = new Map();
+        
+        (agentRoster || []).forEach(a => {
+          if (a && a.email) rosterMap.set(a.email.toLowerCase(), { ...a });
+        });
+
+        if (!rosterMap.has('aditi.sarkar@mcaffeine.com')) {
+          rosterMap.set('aditi.sarkar@mcaffeine.com', {
+            email: 'aditi.sarkar@mcaffeine.com', name: 'Aditi Sarkar', role: 'Admin', maxQuota: 10, status: 'Online', aht: '2.5m', breakTime: '15m'
+          });
+        }
+
+        if (googleUser && googleUser.email && !rosterMap.has(googleUser.email.toLowerCase())) {
+          const email = googleUser.email.toLowerCase();
+          const name = googleUser.name || email.split('@')[0].split('.').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+          const isAdmin = email.includes('vighnesh') || email.includes('vikash') || email.includes('aditi');
+          rosterMap.set(email, {
+            email, name, role: isAdmin ? 'Admin' : 'Agent', maxQuota: 10, status: 'Online', aht: '2.5m', breakTime: '15m'
+          });
+        }
+
+        (tickets || []).forEach(t => {
+          const agt = (overrides[t.id]?.assignedAgent || t.assignedAgent || '').trim();
+          if (agt && agt !== 'Unassigned') {
+            let email = agt.toLowerCase();
+            let name = agt;
+            if (agt.includes('(')) {
+              const match = agt.match(/\(([^)]+)\)/);
+              if (match) email = match[1].toLowerCase().trim();
+              name = agt.split('(')[0].trim();
+            } else if (agt.includes('@')) {
+              email = agt.toLowerCase().trim();
+              const parts = email.split('@')[0].split('.');
+              name = parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+            } else {
+              email = `${agt.toLowerCase().replace(/\s+/g, '.')}@mcaffeine.com`;
+              name = agt;
+            }
+            if (!rosterMap.has(email)) {
+              rosterMap.set(email, { email, name, role: 'Agent', maxQuota: 10, status: 'Online', aht: '2.8m', breakTime: '15m' });
+            }
+          }
+        });
+
+        return Array.from(rosterMap.values());
+      }, [agentRoster, tickets, overrides, googleUser]);
+
+      const sortedAgentEmails = useMemo(() => {
+        const s = new Set();
+        effectiveAgentRoster.forEach(a => { if (a && a.email) s.add(a.email.toLowerCase()); });
+        return Array.from(s).sort();
+      }, [effectiveAgentRoster]);
+
+      // Derived data & STRICT Calling Date (Latest First) Sorting & Conflict-Free Round-Robin Lead Protection
       const allTickets = useMemo(()=>{
         // 1. Merge overrides with base tickets
         let base = tickets.map(t => {
@@ -976,11 +1031,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return b.rawIndex - a.rawIndex;
         });
 
-        // 4. REPLENISHMENT ENGINE WITH STRICT DATE WATERFALL & EXCLUSIVE LEAD LOCKING
+        // 4. REPLENISHMENT ENGINE WITH CONFLICT-FREE ROUND-ROBIN INTERLEAVED DISJOINT ALLOCATION
         if(userRole==='Agent' && googleUser?.email){
           const e = googleUser.email.toLowerCase();
           const p = e.split('@')[0];
           const isMine = (agt) => agt && agt !== 'Unassigned' && (agt.toLowerCase().includes(e) || agt.toLowerCase().includes(p));
+
+          const myAgentIdx = Math.max(0, sortedAgentEmails.indexOf(e));
+          const numAgents = Math.max(1, sortedAgentEmails.length);
 
           // All pending leads assigned to me OR unassigned
           const allPendingLeads = base.filter(t => {
@@ -1023,20 +1081,36 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               }
             }
 
-            // 2. Take unassigned leads for this date to fill remaining quota for this date
+            // 2. Take unassigned leads for this date using CONFLICT-FREE ROUND-ROBIN INTERLEAVED OFFSET!
             const unassignedForDate = leadsForDate.filter(t => {
               const agt = (t.assignedAgent || '').trim();
               return !agt || agt === 'Unassigned' || agt.toLowerCase() === 'unassigned';
             });
 
-            for (const t of unassignedForDate) {
+            // Interleaved loop: start at myAgentIdx, step by numAgents!
+            for (let idx = myAgentIdx; idx < unassignedForDate.length; idx += numAgents) {
               if (myPendingQueue.length >= maxLeads) break;
+              const t = unassignedForDate[idx];
               if (!claimedOrderNumbers.has(t.orderNumber)) {
                 claimedOrderNumbers.add(t.orderNumber);
                 myPendingQueue.push({
                   ...t,
                   assignedAgent: googleUser.email
                 });
+              }
+            }
+
+            // Fallback: If quota still needed for this date, pick remaining available unassigned leads
+            if (myPendingQueue.length < maxLeads && unassignedForDate.length > 0) {
+              for (const t of unassignedForDate) {
+                if (myPendingQueue.length >= maxLeads) break;
+                if (!claimedOrderNumbers.has(t.orderNumber)) {
+                  claimedOrderNumbers.add(t.orderNumber);
+                  myPendingQueue.push({
+                    ...t,
+                    assignedAgent: googleUser.email
+                  });
+                }
               }
             }
           }
@@ -1046,7 +1120,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
 
         return base;
-      },[tickets,overrides,userRole,maxLeads,googleUser]);
+      },[tickets,overrides,userRole,maxLeads,googleUser,sortedAgentEmails]);
 
       // Batch Auto-Assignment Effect: Syncs Column Q to Google Sheet for all active leads in agent's box that are unassigned in Google Sheet
       useEffect(() => {
@@ -1117,83 +1191,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }).length;
       }, [tickets, overrides]);
 
-      // Dynamic Roster that automatically includes EVERY unique agent found in Google Sheet tickets or overrides
-      const effectiveAgentRoster = useMemo(() => {
-        const rosterMap = new Map();
-        
-        // 1. Initial saved roster agents
-        (agentRoster || []).forEach(a => {
-          if (a && a.email) {
-            rosterMap.set(a.email.toLowerCase(), { ...a });
-          }
-        });
 
-        // 2. Guarantee Aditi Sarkar is always present as Admin
-        if (!rosterMap.has('aditi.sarkar@mcaffeine.com')) {
-          rosterMap.set('aditi.sarkar@mcaffeine.com', {
-            email: 'aditi.sarkar@mcaffeine.com',
-            name: 'Aditi Sarkar',
-            role: 'Admin',
-            maxQuota: 10,
-            status: 'Online',
-            aht: '2.5m',
-            breakTime: '15m'
-          });
-        }
-
-        // 3. Guarantee currently signed-in user is present in roster
-        if (googleUser && googleUser.email && !rosterMap.has(googleUser.email.toLowerCase())) {
-          const email = googleUser.email.toLowerCase();
-          const name = googleUser.name || email.split('@')[0].split('.').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
-          const isAdmin = email.includes('vighnesh') || email.includes('vikash') || email.includes('aditi');
-          rosterMap.set(email, {
-            email,
-            name,
-            role: isAdmin ? 'Admin' : 'Agent',
-            maxQuota: 10,
-            status: 'Online',
-            aht: '2.5m',
-            breakTime: '15m'
-          });
-        }
-
-        // 2. Scan all tickets for any assigned agent names/emails
-        const allScanned = [...(tickets || []), ...(allTickets || [])];
-        allScanned.forEach(t => {
-          const agt = (overrides[t.id]?.assignedAgent || t.assignedAgent || '').trim();
-          if (agt && agt !== 'Unassigned') {
-            let email = agt.toLowerCase();
-            let name = agt;
-
-            if (agt.includes('(')) {
-              const match = agt.match(/\(([^)]+)\)/);
-              if (match) email = match[1].toLowerCase().trim();
-              name = agt.split('(')[0].trim();
-            } else if (agt.includes('@')) {
-              email = agt.toLowerCase().trim();
-              const parts = email.split('@')[0].split('.');
-              name = parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
-            } else {
-              email = `${agt.toLowerCase().replace(/\s+/g, '.')}@mcaffeine.com`;
-              name = agt;
-            }
-
-            if (!rosterMap.has(email)) {
-              rosterMap.set(email, {
-                email,
-                name,
-                role: 'Agent',
-                maxQuota: 10,
-                status: 'Online',
-                aht: '2.8m',
-                breakTime: '15m'
-              });
-            }
-          }
-        });
-
-        return Array.from(rosterMap.values());
-      }, [agentRoster, tickets, allTickets, overrides]);
 
       const pend=allTickets.filter(t=>t.status==='Pending'&&!t.disposition&&!t.agentRemarks).length;
       const dispCount=allTickets.filter(t=>t.disposition||t.agentRemarks||t.status!=='Pending').length;
