@@ -646,6 +646,22 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [agentFilter, setAgentFilter] = useState('ALL');
       const [agentStatus, setAgentStatus] = useState(()=>localStorage.getItem('rto_agent_status')||'Online');
 
+      // Real presence from Postgres (agent_presence table), keyed by lowercase email -
+      // {}'d out for non-admin sessions (the GET is admin-only), in which case the
+      // roster table just falls back to each agent's local/mock status as before.
+      const [serverPresence, setServerPresence] = useState({});
+      const fetchServerPresence = useCallback(() => {
+        fetch('/api/auth/presence')
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { if (d && d.agents) setServerPresence(d.agents); })
+          .catch(() => {});
+      }, []);
+      useEffect(() => {
+        fetchServerPresence();
+        const t = setInterval(fetchServerPresence, 30000);
+        return () => clearInterval(t);
+      }, [fetchServerPresence]);
+
       const [toast, setToast] = useState(null);
       const showToast = useCallback(m=>{setToast(m);setTimeout(()=>setToast(null),3000);},[]);
 
@@ -741,6 +757,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         } else {
           const target = effectiveAgentRoster.find(a => (a.email || '').toLowerCase() === lower);
           syncPresenceToServer(newStatus, { email: lower, name: target?.name });
+          // Optimistic - effectiveAgentRoster prefers serverPresence for non-self rows,
+          // so without this the row would flicker back to the old status until the next
+          // 30s poll catches up with what we just wrote.
+          setServerPresence(p => ({ ...p, [lower]: { status: newStatus, updatedAt: null } }));
         }
 
         setAgentRoster(p => {
@@ -1298,12 +1318,30 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         const todayStart = startOfDay(new Date());
         if (!todayStart) return;
 
+        // Freshly-assigned leads carry an old Calling Date by definition (the backlog
+        // assign_leads.py works through is old), so without this check every fresh
+        // assignment looks exactly as "stale" as one genuinely ignored for days. Cross-check
+        // against Postgres's lead_assignments table (stamped by assign_leads.py on every
+        // assignment - see api/_lib/db.js) and exclude anything assigned within the last 24h
+        // grace period, regardless of its Calling Date.
+        let recentlyAssigned = new Set();
+        try {
+          const resp = await fetch('/api/auth/recentAssignments?hours=24');
+          if (resp.ok) {
+            const data = await resp.json();
+            recentlyAssigned = new Set(Object.keys(data.assignments || {}).map(k => k.trim().toUpperCase()));
+          }
+        } catch (err) {
+          console.error('Fetch recent assignments error:', err);
+        }
+
         const staleTickets = tickets.filter(t => {
           if (!t.orderNumber) return false;
           if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
           const currAgt = (overrides[t.id]?.assignedAgent || t.assignedAgent || '').trim();
           const isAssigned = currAgt && currAgt !== 'Unassigned' && currAgt.toLowerCase() !== 'unassigned';
           if (!isAssigned) return false;
+          if (recentlyAssigned.has(t.orderNumber.toString().trim().toUpperCase())) return false;
           const rd = t.rowDate ? t.rowDate.getTime() : 0;
           return rd > 0 && rd < todayStart.getTime();
         });
@@ -1490,15 +1528,20 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         });
 
         // The signed-in user's own status is authoritative locally (no round-trip lag).
-        // Everyone else's status is just whatever's stored in the roster (manually set, or
-        // its seeded default) - there's no shared live-status source to verify it against.
+        // Everyone else's status comes from serverPresence (Neon Postgres agent_presence,
+        // fetched by fetchServerPresence above) when available, so the roster table shows
+        // each agent's real reported status instead of a stale local/seeded default.
         const myEmail = googleUser?.email ? googleUser.email.toLowerCase() : null;
-        if (myEmail && rosterMap.has(myEmail)) {
-          rosterMap.get(myEmail).status = agentStatus;
-        }
+        rosterMap.forEach((a, email) => {
+          if (email === myEmail) {
+            a.status = agentStatus;
+          } else if (serverPresence[email]?.status) {
+            a.status = serverPresence[email].status;
+          }
+        });
 
         return Array.from(rosterMap.values());
-      }, [agentRoster, tickets, overrides, googleUser, agentStatus]);
+      }, [agentRoster, tickets, overrides, googleUser, agentStatus, serverPresence]);
 
       // Derived data & STRICT Calling Date (Latest First) Sorting
       const allTickets = useMemo(()=>{
@@ -1895,13 +1938,21 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   <span className="hidden md:inline">{isSyncing?'Syncing…':'Refresh'}</span>
                 </button>
 
-                {/* UI Role Switcher */}
-                <CustomSelect
-                  value={userRole}
-                  onChange={handleSwitchRole}
-                  options={roleOptions}
-                  icon={ShieldIcon}
-                />
+                {/* UI Role Switcher - hidden for genuine Agents, who have no legitimate
+                    reason to switch into Admin/Team Lead view (handleSwitchRole is a plain
+                    client-side setUserRole with no server-side check, so this is the only
+                    gate). Gated on the underlying account (same vighnesh/vikash check used
+                    for the initial default role elsewhere), NOT on the current userRole -
+                    otherwise a real admin who switches into "Agent" view to preview it would
+                    lose the only control that switches them back. */}
+                {(googleUser?.email || '').toLowerCase().match(/vighnesh|vikash/) && (
+                  <CustomSelect
+                    value={userRole}
+                    onChange={handleSwitchRole}
+                    options={roleOptions}
+                    icon={ShieldIcon}
+                  />
+                )}
 
                 {/* Theme Selector (Dark / Light / Purple) */}
                 <CustomSelect

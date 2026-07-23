@@ -86,6 +86,21 @@ async function ensureSchema() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `;
+  // Records when scripts/assign_leads.py actually assigned each lead (by the sheet's
+  // own Order ID). rto-crm.html's "Reset Stale Pending Leads" only had the lead's own
+  // Calling Date to judge staleness by, which unassigned leads the moment they were
+  // handed out - the backlog assign_leads.py distributes is old by definition, so
+  // every fresh assignment looked exactly as "stale" as a genuinely-ignored one. This
+  // table lets the reset button tell the two apart. Written by assign_leads.py
+  // directly (its own psycopg connection), read by rto-crm.html via a new
+  // /api/auth/[action].js?action=recentAssignments endpoint.
+  await sql`
+    CREATE TABLE IF NOT EXISTS lead_assignments (
+      order_id TEXT PRIMARY KEY,
+      email TEXT NOT NULL,
+      assigned_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
   schemaReady = true;
 }
 
@@ -190,8 +205,34 @@ async function upsertAgentPresence(email, name, status) {
   `;
 }
 
+// Returns every agent's last-reported status, keyed by lowercase email - lets the
+// roster table (rto-crm.html) show each agent's real Postgres-backed presence
+// instead of the mock/local status it falls back to before anyone's ever reported in.
+async function getAllAgentPresence() {
+  await ensureSchema();
+  const { rows } = await sql`SELECT email, name, status, updated_at FROM agent_presence`;
+  const out = {};
+  for (const r of rows) out[r.email.toLowerCase()] = { status: r.status, updatedAt: r.updated_at };
+  return out;
+}
+
+// Returns { orderId: assignedAtIso } for assignments newer than sinceHours - the
+// reset button only needs "was this assigned recently", so callers keep the payload
+// small by asking for a window just past their own grace period, not the whole table.
+async function getRecentLeadAssignments(sinceHours) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT order_id, assigned_at FROM lead_assignments
+    WHERE assigned_at >= now() - make_interval(hours => ${sinceHours})
+  `;
+  const out = {};
+  for (const r of rows) out[r.order_id] = r.assigned_at;
+  return out;
+}
+
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserPermissions, getUserTabPermissions, setTabPermissions,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
+  getAllAgentPresence, getRecentLeadAssignments,
 };

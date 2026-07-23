@@ -1,7 +1,7 @@
 // Consolidated auth routes (login/logout/callback/me/presence) into one dynamic-route
 // file to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells
 // us which logical route was hit; URLs are unchanged.
-const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence } = require('../_lib/db');
+const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getRecentLeadAssignments } = require('../_lib/db');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
 
 const PRESENCE_STATUSES = new Set(['Online', 'Busy', 'Offline']);
@@ -198,13 +198,25 @@ async function handleCallback(req, res) {
 // assignment pass - assign_leads.py itself remains the sole authority on who actually
 // gets which lead.
 async function handlePresence(req, res) {
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed' });
-    return;
-  }
   const session = getSession(req);
   if (!session || !session.email) {
     res.status(401).json({ error: 'Not signed in' });
+    return;
+  }
+  // GET: the roster table's live Status column reads straight from Postgres here,
+  // instead of trusting each browser's own localStorage mock state - admin-only since
+  // it's the only caller (see the Team Roster panel in rto-crm.html).
+  if (req.method === 'GET') {
+    if (!session.isAdmin) {
+      res.status(403).json({ error: 'Admin only' });
+      return;
+    }
+    const agents = await getAllAgentPresence();
+    res.status(200).json({ agents });
+    return;
+  }
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
     return;
   }
   let body = req.body;
@@ -229,7 +241,27 @@ async function handlePresence(req, res) {
   res.status(200).json({ ok: true });
 }
 
-const HANDLERS = { login: handleLogin, logout: handleLogout, me: handleMe, callback: handleCallback, presence: handlePresence };
+// Lets rto-crm.html's resetStalePendingLeads() tell a lead assign_leads.py just handed
+// out apart from one that's genuinely been sitting unworked - see the lead_assignments
+// table comment in api/_lib/db.js. Authenticated (any signed-in agent, not admin-only):
+// every agent runs this reset against their own queue, not just admins.
+async function handleRecentAssignments(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+  const session = getSession(req);
+  if (!session || !session.email) {
+    res.status(401).json({ error: 'Not signed in' });
+    return;
+  }
+  const hoursRaw = req.query && req.query.hours;
+  const hours = Math.min(Math.max(parseInt(hoursRaw, 10) || 48, 1), 24 * 30);
+  const assignments = await getRecentLeadAssignments(hours);
+  res.status(200).json({ assignments });
+}
+
+const HANDLERS = { login: handleLogin, logout: handleLogout, me: handleMe, callback: handleCallback, presence: handlePresence, recentAssignments: handleRecentAssignments };
 
 module.exports = async (req, res) => {
   const action = req.query && req.query.action;

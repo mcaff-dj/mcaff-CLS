@@ -70,6 +70,34 @@ def fetch_online_agents():
             return [row[0].lower() for row in cur.fetchall()]
 
 
+def record_lead_assignments(assignments, unassigned_pending):
+    """Stamps assigned_at=now() for every lead just assigned, keyed by the sheet's
+    own Order ID, so rto-crm.html's resetStalePendingLeads() can tell a
+    fresh assignment apart from a genuinely stale one (the lead's own Calling
+    Date can't do this - the backlog this script distributes is old by
+    definition). Best-effort: if POSTGRES_URL isn't configured, silently
+    skips (fetch_online_agents() would already have returned [] in that case,
+    so in practice this only runs when the DB is reachable anyway)."""
+    conn_str = os.environ.get("POSTGRES_URL")
+    if not conn_str or not assignments:
+        return
+    order_id_by_row = {row_index: order_id for row_index, _calling_date, order_id, _tier in unassigned_pending}
+    rows = [(order_id_by_row[row_index], email) for row_index, email in assignments.items() if row_index in order_id_by_row]
+    if not rows:
+        return
+    with psycopg.connect(conn_str) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO lead_assignments (order_id, email, assigned_at)
+                VALUES (%s, %s, now())
+                ON CONFLICT (order_id) DO UPDATE SET email = EXCLUDED.email, assigned_at = now()
+                """,
+                rows,
+            )
+        conn.commit()
+
+
 def main():
     print("Fetching online agents from Postgres...")
     online_agents = fetch_online_agents()
@@ -137,6 +165,7 @@ def main():
     ]
     print(f"Writing {len(value_ranges)} Column Q assignment(s)...")
     lib.set_sheet_values_batch(SPREADSHEET_ID, value_ranges)
+    record_lead_assignments(assignments, unassigned_pending)
 
     per_agent = {}
     for email in assignments.values():
