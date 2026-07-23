@@ -762,6 +762,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       // signal at all for teammates and silently shows everyone as the seeded default forever.
       const [liveAgentStatuses, setLiveAgentStatuses] = useState({});
       const [isRefreshingRoster, setIsRefreshingRoster] = useState(false);
+      const [newAgentEmail, setNewAgentEmail] = useState('');
+      const [newAgentRole, setNewAgentRole] = useState('Agent');
 
       const fetchLiveAgentStatuses = async () => {
         const url = supabaseUrl || DEFAULT_SUPABASE_URL;
@@ -1358,6 +1360,30 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return u;
         });
         showToast(`Removed ${name} from the roster.`);
+      };
+
+      // Admin-only: pre-add a brand-new team member before they've ever logged in or been
+      // assigned a lead - effectiveAgentRoster would otherwise only pick them up once one of
+      // those happens (see the dynamic-discovery block above), which is too late if you want
+      // their role/quota set up in advance.
+      const addAgentToRoster = (email, role) => {
+        const lower = (email || '').trim().toLowerCase();
+        if (!lower || !lower.includes('@')) {
+          showToast('Enter a valid email address.');
+          return;
+        }
+        if (effectiveAgentRoster.some(a => (a.email || '').toLowerCase() === lower)) {
+          showToast(`${lower} is already on the roster.`);
+          return;
+        }
+        const name = lower.split('@')[0].split('.').map(p => p ? p.charAt(0).toUpperCase() + p.slice(1) : p).join(' ');
+        const newAgent = { email: lower, name, role: role || 'Agent', maxQuota: 10, status: 'Offline', aht: '2.8m', breakTime: '15m' };
+        setAgentRoster(p => {
+          const u = [...p, newAgent];
+          try { localStorage.setItem('rto_agent_roster', JSON.stringify(u)); } catch {}
+          return u;
+        });
+        showToast(`Added ${name} (${lower}) as ${role || 'Agent'}.`);
       };
 
       // Admin Bulk Reassign / Unassign Controls
@@ -2486,6 +2512,40 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                             🧹 Reset Stale Pending Leads (&lt; Today)
                           </button>
                         </div>
+                      </div>
+
+                      {/* Add a new agent to the roster before they've ever logged in or been
+                          assigned a lead - see addAgentToRoster's comment for why this exists. */}
+                      <div className="flex items-center gap-2 bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-3">
+                        <input
+                          type="email"
+                          value={newAgentEmail}
+                          onChange={(e) => setNewAgentEmail(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              addAgentToRoster(newAgentEmail, newAgentRole);
+                              setNewAgentEmail('');
+                            }
+                          }}
+                          placeholder="new.agent@mcaffeine.com"
+                          className="flex-1 min-w-0 px-3 py-1.5 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-100 text-[12px] placeholder-zinc-500 focus:outline-none focus:border-indigo-600"
+                        />
+                        <CustomSelect
+                          value={newAgentRole}
+                          onChange={setNewAgentRole}
+                          options={[
+                            { value: 'Agent', label: 'Agent' },
+                            { value: 'Team Lead', label: 'Team Lead' },
+                            { value: 'Admin', label: 'Admin' }
+                          ]}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => { addAgentToRoster(newAgentEmail, newAgentRole); setNewAgentEmail(''); }}
+                          className="px-3 py-1.5 rounded-xl bg-indigo-700 hover:bg-indigo-600 text-white text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
+                        >
+                          ➕ Add Agent
+                        </button>
                       </div>
 
                       {/* Agent Roster & Reassignment Table */}
