@@ -15,7 +15,6 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.2/dist/confetti.browser.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
   <script>
     tailwind.config = {
@@ -679,15 +678,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               const defaultRole = (d.isAdmin||d.email.toLowerCase().includes('vighnesh')||d.email.toLowerCase().includes('vikash')) ? 'Admin' : 'Agent';
               setUserRole(defaultRole);
             }
-
-            // Log agent login to Supabase DB
-            const loginUrl = localStorage.getItem('rto_supabase_url') || 'https://yzvqkboikvbkriccrhjk.supabase.co';
-            const loginKey = localStorage.getItem('rto_supabase_key') || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl6dnFrYm9pa3Zia3JpY2NyaGprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ1NDgxNjEsImV4cCI6MjEwMDEyNDE2MX0.qF0rNhAt6NRBmE3PQp8BpI5hUb5RbMda98oEXtAjy_Q';
-            if (loginUrl && loginKey) {
-              const loginHeaders = { 'apikey': loginKey, 'Authorization': `Bearer ${loginKey}`, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=representation' };
-              fetch(`${loginUrl}/rest/v1/agent_status`, { method: 'POST', headers: loginHeaders, body: JSON.stringify({ email: d.email.toLowerCase(), status: 'Online', updated_at: new Date().toISOString() }) }).catch(() => {});
-              fetch(`${loginUrl}/rest/v1/agent_activity_logs`, { method: 'POST', headers: { ...loginHeaders, 'Prefer': 'return=representation' }, body: JSON.stringify({ email: d.email.toLowerCase(), agent_name: d.name || d.email.split('@')[0], action: 'Agent Logged In — Session Started', type: 'online', created_at: new Date().toISOString() }) }).catch(() => {});
-            }
           }
         }).catch(()=>{});
       },[]);
@@ -732,173 +722,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         };
       }, []);
 
-      // Supabase DB Integration Engine
-      // WARNING: Default anon key is embedded client-side. Restrict RLS policies in Supabase
-      // to limit exposure if this HTML is ever served publicly.
-      const DEFAULT_SUPABASE_URL = 'https://yzvqkboikvbkriccrhjk.supabase.co';
-      const DEFAULT_SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl6dnFrYm9pa3Zia3JpY2NyaGprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ1NDgxNjEsImV4cCI6MjEwMDEyNDE2MX0.qF0rNhAt6NRBmE3PQp8BpI5hUb5RbMda98oEXtAjy_Q';
-
-      const [supabaseUrl, setSupabaseUrl] = useState(() => {
-        try { return localStorage.getItem('rto_supabase_url') || DEFAULT_SUPABASE_URL; } catch { return DEFAULT_SUPABASE_URL; }
-      });
-      const [supabaseKey, setSupabaseKey] = useState(() => {
-        try { return localStorage.getItem('rto_supabase_key') || DEFAULT_SUPABASE_KEY; } catch { return DEFAULT_SUPABASE_KEY; }
-      });
-      const supabaseRef = useRef(null);
-
-      useEffect(() => {
-        if (window.supabase && supabaseUrl && supabaseKey) {
-          try {
-            supabaseRef.current = window.supabase.createClient(supabaseUrl, supabaseKey);
-            console.log('Supabase DB Client initialized successfully!');
-          } catch (e) {
-            console.error('Supabase init error:', e);
-          }
-        }
-      }, [supabaseUrl, supabaseKey]);
-
-      // Live status for every OTHER agent only ever reaches this browser through Supabase -
-      // cross-tab sync mechanisms are same-device-only, so without this poll the roster has no
-      // signal at all for teammates and silently shows everyone as the seeded default forever.
-      const [liveAgentStatuses, setLiveAgentStatuses] = useState({});
-      const [isRefreshingRoster, setIsRefreshingRoster] = useState(false);
       const [newAgentEmail, setNewAgentEmail] = useState('');
       const [newAgentRole, setNewAgentRole] = useState('Agent');
 
-      const fetchLiveAgentStatuses = async () => {
-        const url = supabaseUrl || DEFAULT_SUPABASE_URL;
-        const key = supabaseKey || DEFAULT_SUPABASE_KEY;
-        if (!url || !key) return null;
-        try {
-          // Ordered oldest-first so that if the table has no unique constraint on email (i.e.
-          // every status change inserts a new row instead of upserting), the last write wins
-          // when rows are folded into a per-email map below, instead of an arbitrary one.
-          const res = await fetch(`${url}/rest/v1/agent_status?select=email,status,updated_at&order=updated_at.asc`, {
-            headers: { apikey: key, Authorization: `Bearer ${key}` }
-          });
-          if (!res.ok) return null;
-          return await res.json();
-        } catch (e) {
-          console.error('Fetch agent_status error:', e);
-          return null;
-        }
-      };
-
-      // Shared by the 20s background poll and the roster's manual Refresh button.
-      const refreshLiveAgentStatuses = useCallback(async (withFeedback = false) => {
-        if (withFeedback) setIsRefreshingRoster(true);
-        const rows = await fetchLiveAgentStatuses();
-        if (Array.isArray(rows)) {
-          const map = {};
-          rows.forEach(r => { if (r.email) map[r.email.toLowerCase()] = { status: r.status, updatedAt: r.updated_at }; });
-          setLiveAgentStatuses(map);
-          if (withFeedback) showToast('🔄 Agent statuses refreshed');
-        } else if (withFeedback) {
-          showToast('Could not refresh agent statuses — check Supabase connection');
-        }
-        if (withFeedback) setIsRefreshingRoster(false);
-      }, [supabaseUrl, supabaseKey]);
-
-      useEffect(() => {
-        let cancelled = false;
-        const load = async () => {
-          const rows = await fetchLiveAgentStatuses();
-          if (cancelled || !Array.isArray(rows)) return;
-          const map = {};
-          rows.forEach(r => { if (r.email) map[r.email.toLowerCase()] = { status: r.status, updatedAt: r.updated_at }; });
-          setLiveAgentStatuses(map);
-        };
-        load();
-        const t = setInterval(load, 20000);
-        return () => { cancelled = true; clearInterval(t); };
-      }, [supabaseUrl, supabaseKey]);
-
-      const saveSupabaseConfig = (url, key) => {
-        setSupabaseUrl(url);
-        setSupabaseKey(key);
-        try {
-          localStorage.setItem('rto_supabase_url', url);
-          localStorage.setItem('rto_supabase_key', key);
-          showToast('⚡ Supabase DB Credentials Saved & Connected!');
-        } catch {}
-      };
-
-      const supabaseFetch = async (table, method, body, upsert = false) => {
-        const url = supabaseUrl || DEFAULT_SUPABASE_URL;
-        const key = supabaseKey || DEFAULT_SUPABASE_KEY;
-        if (!url || !key) return;
-        const headers = {
-          'apikey': key,
-          'Authorization': `Bearer ${key}`,
-          'Content-Type': 'application/json',
-          'Prefer': upsert ? 'resolution=merge-duplicates,return=representation' : 'return=representation'
-        };
-        try {
-          const res = await fetch(`${url}/rest/v1/${table}`, { method, headers, body: JSON.stringify(body) });
-          if (!res.ok) console.warn(`Supabase ${table} ${method} failed:`, res.status, await res.text());
-          else console.log(`Supabase ${table} ${method} OK`);
-          return res;
-        } catch (err) { console.error(`Supabase ${table} error:`, err); }
-      };
-
-      const syncStatusToSupabase = async (status, logEntry) => {
-        if (!googleUser?.email) return;
-        await supabaseFetch('agent_status', 'POST', {
-          email: googleUser.email.toLowerCase(),
-          status: status,
-          updated_at: new Date().toISOString()
-        }, true);
-        if (logEntry) {
-          await supabaseFetch('agent_activity_logs', 'POST', {
-            email: googleUser.email.toLowerCase(),
-            agent_name: googleUser.name || googleUser.email.split('@')[0],
-            action: logEntry.action,
-            type: logEntry.type,
-            created_at: new Date().toISOString()
-          });
-        }
-      };
-
-      // Admin-only: force every known agent's status to Offline right now, rather than
-      // waiting for each of their own 10-minute inactivity timeouts. Not a permanent lock -
-      // anyone still genuinely active will show Online again within ~2 minutes via their own
-      // next heartbeat (rto-crm.html's presence heartbeat effect).
-      const markAllAgentsOffline = async () => {
-        const emails = Array.from(new Set(effectiveAgentRoster.map(a => (a.email || '').toLowerCase()).filter(Boolean)));
-        if (emails.length === 0) return;
-
-        // My own status is authoritative locally - no Supabase round trip needed for me.
-        if (googleUser?.email) {
-          setAgentStatus('Offline');
-          try { localStorage.setItem('rto_agent_status', 'Offline'); } catch {}
-        }
-
-        const nowIso = new Date().toISOString();
-        let failed = 0;
-        await Promise.all(emails.map(async (email) => {
-          const res = await supabaseFetch('agent_status', 'POST', { email, status: 'Offline', updated_at: nowIso }, true);
-          if (!res || !res.ok) failed++;
-        }));
-
-        // Reflect immediately instead of waiting for the next 20s poll.
-        setLiveAgentStatuses(prev => {
-          const next = { ...prev };
-          emails.forEach(email => { next[email] = { status: 'Offline', updatedAt: nowIso }; });
-          return next;
-        });
-
-        if (failed > 0) {
-          showToast(`🌙 Marked offline. ${failed}/${emails.length} Supabase write(s) failed — check console.`);
-        } else {
-          showToast(`🌙 Marked all ${emails.length} agent(s) offline.`);
-        }
-      };
-
-      // Admin-only: manually set any single agent's status (Online / On Break / Offline)
-      // from the roster table, same underlying write as the heartbeat itself uses - so it
-      // sticks exactly as long as a real heartbeat would, and gets overwritten by that
-      // agent's own next heartbeat like any other status change.
-      const setAgentStatusManually = async (email, newStatus) => {
+      // Manually set any single agent's status (Online / On Break / Offline) from the roster
+      // table. Local-only (agentRoster/localStorage) since there's no shared backend this
+      // syncs to anymore - other viewers won't see this change until a durable shared status
+      // source is wired up.
+      const setAgentStatusManually = (email, newStatus) => {
         const lower = (email || '').toLowerCase();
         if (!lower) return;
 
@@ -907,31 +738,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           try { localStorage.setItem('rto_agent_status', newStatus); } catch {}
         }
 
-        const nowIso = new Date().toISOString();
-        const res = await supabaseFetch('agent_status', 'POST', { email: lower, status: newStatus, updated_at: nowIso }, true);
-
-        setLiveAgentStatuses(prev => ({ ...prev, [lower]: { status: newStatus, updatedAt: nowIso } }));
-
-        if (!res || !res.ok) {
-          showToast(`⚠️ Set locally, but the Supabase write failed for ${email} — check console.`);
-        } else {
-          showToast(`Status set to ${newStatus} for ${email}`);
-        }
-      };
-
-      const syncDispositionToSupabase = async (tkt, ov) => {
-        if (!googleUser?.email) return;
-        await supabaseFetch('ticket_disposition_logs', 'POST', {
-          order_number: tkt.orderNumber,
-          agent_email: googleUser.email.toLowerCase(),
-          connected_status: ov.connectedStatus,
-          attempt_type: ov.attemptType,
-          disposition: ov.agentDisposition,
-          remarks: ov.agentRemarks,
-          new_order_id: ov.newOrderId,
-          new_address: ov.newAddress,
-          disposed_at: new Date().toISOString()
+        setAgentRoster(p => {
+          const u = p.map(a => (a.email || '').toLowerCase() === lower ? { ...a, status: newStatus } : a);
+          try { localStorage.setItem('rto_agent_roster', JSON.stringify(u)); } catch {}
+          return u;
         });
+        showToast(`Status set to ${newStatus} for ${email}`);
       };
 
       const unassignMyPendingLeads = async () => {
@@ -1017,9 +829,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return u;
         });
 
-        // Sync to Supabase DB
-        syncStatusToSupabase(s, newLog);
-
         if (s === 'Offline') {
           unassignMyPendingLeads();
         }
@@ -1032,21 +841,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         } catch {}
       };
 
-      // 10-Minute User Inactivity Auto-Offline Engine + Presence Heartbeat
+      // 10-Minute User Inactivity Auto-Offline Engine
       const lastActivityRef = useRef(Date.now());
-      const lastHeartbeatRef = useRef(0);
-
-      // syncStatusToSupabase only ever fires on an explicit status-dropdown change or the
-      // inactivity auto-offline below - an agent who opens the app and just starts working
-      // without ever touching that dropdown never tells Supabase they're online at all, so
-      // every OTHER viewer's roster (which trusts Supabase over a guess) shows them Offline
-      // forever. Push an immediate heartbeat the moment the agent signs in.
-      useEffect(() => {
-        if (googleUser?.email) {
-          syncStatusToSupabase(agentStatus, null);
-          lastHeartbeatRef.current = Date.now();
-        }
-      }, [googleUser]);
 
       useEffect(() => {
         const updateActivity = () => {
@@ -1066,14 +862,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               handleSetStatus('Offline');
               showToast('⚠️ Marked Offline due to 10 minutes of inactivity');
               return;
-            }
-
-            // Silent presence heartbeat, well inside the 10-minute staleness window other
-            // browsers use to decide whether to trust this agent's last known status.
-            const twoMinutesMs = 2 * 60 * 1000;
-            if (Date.now() - lastHeartbeatRef.current >= twoMinutesMs) {
-              syncStatusToSupabase(agentStatus, null);
-              lastHeartbeatRef.current = Date.now();
             }
           }
         }, 15000); // Check every 15 seconds
@@ -1270,9 +1058,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           newOrderId: newOrder==='YES'?newOrderId:'',
           newAddress: addrChange==='YES'?newAddr:''
         });
-
-        // Sync disposition log to Supabase DB
-        syncDispositionToSupabase(dispTkt, ov);
 
         const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
         
@@ -1653,26 +1438,16 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           }
         });
 
-        // Overwrite the seeded/placeholder status with what's actually known: the signed-in
-        // user's own status is authoritative locally (no round-trip lag); every other agent's
-        // status comes from their last Supabase heartbeat, and anyone with no heartbeat or a
-        // stale one (>10 min, matching the self inactivity-to-offline threshold) reads Offline
-        // rather than a guessed 'Online'.
-        const STALE_MS = 10 * 60 * 1000;
-        const now = Date.now();
+        // The signed-in user's own status is authoritative locally (no round-trip lag).
+        // Everyone else's status is just whatever's stored in the roster (manually set, or
+        // its seeded default) - there's no shared live-status source to verify it against.
         const myEmail = googleUser?.email ? googleUser.email.toLowerCase() : null;
-        rosterMap.forEach((agent, email) => {
-          if (myEmail && email === myEmail) {
-            agent.status = agentStatus;
-            return;
-          }
-          const live = liveAgentStatuses[email];
-          const isFresh = live?.updatedAt && (now - new Date(live.updatedAt).getTime()) <= STALE_MS;
-          agent.status = isFresh ? (live.status || 'Offline') : 'Offline';
-        });
+        if (myEmail && rosterMap.has(myEmail)) {
+          rosterMap.get(myEmail).status = agentStatus;
+        }
 
         return Array.from(rosterMap.values());
-      }, [agentRoster, tickets, overrides, googleUser, agentStatus, liveAgentStatuses]);
+      }, [agentRoster, tickets, overrides, googleUser, agentStatus]);
 
       // Derived data & STRICT Calling Date (Latest First) Sorting
       const allTickets = useMemo(()=>{
@@ -2488,23 +2263,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
-                            onClick={() => refreshLiveAgentStatuses(true)}
-                            disabled={isRefreshingRoster}
-                            className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2 disabled:opacity-50"
-                            title="Fetch each agent's latest status from Supabase right now"
-                          >
-                            {isRefreshingRoster ? '⏳ Refreshing…' : '🔄 Refresh Status'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={markAllAgentsOffline}
-                            className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
-                            title="Force every agent's status to Offline right now. Not permanent - anyone still active shows Online again within ~2 minutes via their own heartbeat."
-                          >
-                            🌙 Mark All Offline
-                          </button>
-                          <button
-                            type="button"
                             onClick={resetStalePendingLeads}
                             className="px-3 py-1.5 rounded-xl bg-amber-950/70 hover:bg-amber-900 text-amber-200 border border-amber-800/80 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
                             title="Unassign undisposed leads from previous days and clear Column Q in Google Sheet"
@@ -2829,54 +2587,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                         })()}
                       </div>
 
-                      {/* Supabase DB Settings Card */}
-                      <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                              ⚡ Supabase Database Connection & Real-Time Log Persistence
-                            </h3>
-                            <p className="text-[12px] text-zinc-500 mt-0.5">Connect your Supabase DB to record agent status updates, break activity logs, and ticket dispositions to PostgreSQL.</p>
-                          </div>
-                          <span className={`text-[12px] px-2.5 py-1 rounded-lg font-mono font-bold ${supabaseUrl && supabaseKey ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/40' : 'bg-zinc-800 text-zinc-400'}`}>
-                            {supabaseUrl && supabaseKey ? '⚡ Connected to Supabase DB' : '⚪ Not Connected'}
-                          </span>
-                        </div>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                          <div>
-                            <label className="block text-[11px] font-bold text-zinc-400 uppercase tracking-wider mb-1">Supabase Project URL</label>
-                            <input
-                              type="text"
-                              value={supabaseUrl}
-                              onChange={e => setSupabaseUrl(e.target.value)}
-                              placeholder="https://your-project.supabase.co"
-                              className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2.5 text-[13px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[11px] font-bold text-zinc-400 uppercase tracking-wider mb-1">Supabase Anon Key</label>
-                            <input
-                              type="password"
-                              value={supabaseKey}
-                              onChange={e => setSupabaseKey(e.target.value)}
-                              placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                              className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2.5 text-[13px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
-                            />
-                          </div>
-                        </div>
-
-                        <div className="flex items-center justify-between pt-2 border-t border-zinc-800/60">
-                          <p className="text-[11px] text-zinc-500 font-mono">Tables: <code>agent_status</code>, <code>agent_activity_logs</code>, <code>ticket_disposition_logs</code></p>
-                          <button
-                            type="button"
-                            onClick={() => saveSupabaseConfig(supabaseUrl, supabaseKey)}
-                            className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[12px] transition-all shadow-md shadow-indigo-950/50"
-                          >
-                            💾 Save Supabase Credentials
-                          </button>
-                        </div>
-                      </div>
                     </>
                   );
                 })()}
