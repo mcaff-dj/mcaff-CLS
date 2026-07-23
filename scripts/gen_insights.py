@@ -169,12 +169,22 @@ def get_score_insight(rows, label, score_good, score_watch):
     if not rows or len(rows) < 2:
         return None
     last = rows[-1]
-    last_score = float(last[2])
+    # A sheet formula error (#REF!, #N/A, etc.) in the latest row leaves nothing
+    # sensible to show - skip this insight rather than crash the whole run.
+    try:
+        last_score = float(last[2])
+    except (ValueError, TypeError):
+        return None
     last_month = pretty_month(last[0])
     chg = None
     if len(rows) >= 3:
         prev = rows[-2]
-        chg = round1(last_score - float(prev[2]))
+        # Same error, but in the prior row only - still show the insight, just
+        # without a month-on-month trend comparison.
+        try:
+            chg = round1(last_score - float(prev[2]))
+        except (ValueError, TypeError):
+            chg = None
     tag = "good" if last_score >= score_good else ("watch" if last_score >= score_watch else "crit")
     trend = ""
     if chg is not None:

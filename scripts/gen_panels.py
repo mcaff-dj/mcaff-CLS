@@ -487,10 +487,19 @@ def build_combo2(rows, title, score_label, score_max):
     for i in range(1, len(rows)):
         r = rows[i]
         raw = r[0]
+        # Sheet formula errors (#REF!, #N/A, #DIV/0!, etc.) sometimes leak into these
+        # columns when an upstream reference breaks - skip the whole row rather than
+        # crash the run (there's no sensible fallback value for a single data point,
+        # unlike the mode-of-many-rows lookups elsewhere).
+        try:
+            v = float(str(r[1]).replace(",", ""))
+            s = float(r[2])
+        except (ValueError, TypeError):
+            continue
         mos.append(pretty_month(raw))
         yrs_raw.append(year_of(raw))
-        vals.append(float(str(r[1]).replace(",", "")))
-        sc.append(float(r[2]))
+        vals.append(v)
+        sc.append(s)
         m = 0
         import re as _re
         mm = _re.match(r"^(\d+)_", raw)
@@ -637,8 +646,16 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
 
     PROSALES = [[0.0] * n for _ in range(len(SKUS))]
     for (si, pidx), counts in prosales_counts.items():
-        best = max(counts.items(), key=lambda kv: kv[1])
-        PROSALES[si][pidx] = float(str(best[0]).replace(",", ""))
+        # Sheet formula errors (#REF!, #N/A, #DIV/0!, etc.) sometimes leak into this
+        # column when an upstream reference breaks - skip those candidates rather
+        # than crash the whole run; if literally every candidate is unparseable,
+        # PROSALES[si][pidx] just keeps its 0.0 initializer above.
+        for val, _ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
+            try:
+                PROSALES[si][pidx] = float(str(val).replace(",", ""))
+                break
+            except ValueError:
+                continue
 
     def lmk(arr, sku_idx):
         c = arr[LP]

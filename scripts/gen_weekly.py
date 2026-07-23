@@ -54,8 +54,17 @@ def _get_sales_w_by_week(ctx):
         tmp[wk_key][sw] = tmp[wk_key].get(sw, 0) + 1
     res = {}
     for wk_key, counts in tmp.items():
-        best = max(counts.items(), key=lambda kv: kv[1])
-        res[wk_key] = float(str(best[0]).replace(",", ""))
+        # Sheet formula errors (#REF!, #N/A, #DIV/0!, etc.) sometimes leak into this
+        # column when an upstream reference breaks - skip those candidates rather
+        # than crash the whole run; if literally every candidate for a week is
+        # unparseable, it's just left out of res (the caller already defaults
+        # missing weeks to 0.0 via sales_w_lookup.get(wk_key, 0.0)).
+        for val, _ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
+            try:
+                res[wk_key] = float(str(val).replace(",", ""))
+                break
+            except ValueError:
+                continue
     return res
 
 
