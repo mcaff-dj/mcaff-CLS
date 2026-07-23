@@ -726,9 +726,10 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [newAgentRole, setNewAgentRole] = useState('Agent');
 
       // Manually set any single agent's status (Online / On Break / Offline) from the roster
-      // table. Local-only (agentRoster/localStorage) since there's no shared backend this
-      // syncs to anymore - other viewers won't see this change until a durable shared status
-      // source is wired up.
+      // table. Only syncs to the server (agent_presence, see syncPresenceToServer) when
+      // it's your OWN row - there's no admin-override-someone-else's-presence endpoint,
+      // so setting another agent's status here only updates this browser's local roster
+      // view, not what assign_leads.py sees for them.
       const setAgentStatusManually = (email, newStatus) => {
         const lower = (email || '').toLowerCase();
         if (!lower) return;
@@ -736,6 +737,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         if (googleUser?.email && googleUser.email.toLowerCase() === lower) {
           setAgentStatus(newStatus);
           try { localStorage.setItem('rto_agent_status', newStatus); } catch {}
+          syncPresenceToServer(newStatus);
         }
 
         setAgentRoster(p => {
@@ -805,9 +807,23 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
       };
 
+      // Reports this browser's own status to the server (Postgres-backed
+      // agent_presence, keyed by session - see api/auth/[action].js's presence
+      // handler) - this is what scripts/assign_leads.py reads to decide who's
+      // eligible for new leads. Best-effort: a failed sync just means this agent
+      // won't show as eligible for the next assignment pass, not a UI error.
+      const syncPresenceToServer = (status) => {
+        fetch('/api/auth/presence', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status }),
+        }).catch(() => {});
+      };
+
       const handleSetStatus = (s)=>{
         setAgentStatus(s);
         try { localStorage.setItem('rto_agent_status', s); } catch {}
+        syncPresenceToServer(s);
         const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const newLog = {
           time: t,
@@ -841,8 +857,18 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         } catch {}
       };
 
+      // Presence heartbeat: push status to the server immediately on sign-in, then
+      // every 2 minutes while active, well inside assign_leads.py's 10-minute
+      // staleness window - an agent who opens the app and just starts working
+      // without ever touching the status dropdown still needs the server to know
+      // they're Online.
+      useEffect(() => {
+        if (googleUser?.email) syncPresenceToServer(agentStatus);
+      }, [googleUser]);
+
       // 10-Minute User Inactivity Auto-Offline Engine
       const lastActivityRef = useRef(Date.now());
+      const lastHeartbeatRef = useRef(0);
 
       useEffect(() => {
         const updateActivity = () => {
@@ -862,6 +888,12 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               handleSetStatus('Offline');
               showToast('⚠️ Marked Offline due to 10 minutes of inactivity');
               return;
+            }
+
+            const twoMinutesMs = 2 * 60 * 1000;
+            if (Date.now() - lastHeartbeatRef.current >= twoMinutesMs) {
+              syncPresenceToServer(agentStatus);
+              lastHeartbeatRef.current = Date.now();
             }
           }
         }, 15000); // Check every 15 seconds

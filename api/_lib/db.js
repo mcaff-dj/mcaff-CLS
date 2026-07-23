@@ -74,6 +74,18 @@ async function ensureSchema() {
   await sql`UPDATE permissions SET card_key = 'deepdive' WHERE card_key = 'npsdeepdive'`;
   await sql`UPDATE report_tab_permissions SET card_key = 'deepdive' WHERE card_key = 'npsdeepdive'`;
   await sql`UPDATE audit_log SET card_key = 'deepdive' WHERE card_key = 'npsdeepdive'`;
+  // RTO CRM agent online/offline state (replaces the removed Supabase agent_status
+  // table) - one row per agent, upserted on every explicit status change and
+  // periodic heartbeat. scripts/assign_leads.py reads this directly (via its own
+  // Postgres connection) to decide who's eligible for new leads.
+  await sql`
+    CREATE TABLE IF NOT EXISTS agent_presence (
+      email TEXT PRIMARY KEY,
+      name TEXT,
+      status TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
   schemaReady = true;
 }
 
@@ -165,8 +177,21 @@ async function logAccess(userId, email, cardKey, ip) {
   return logEvent(userId, email, cardKey, 'view', null, ip);
 }
 
+// status: 'Online' | 'Busy' | 'Offline'. email/name always come from the caller's own
+// session, never from client-supplied data, so an agent can only ever set their own
+// presence - not spoof anyone else's (the gap that made the old Supabase anon-key
+// design insecure).
+async function upsertAgentPresence(email, name, status) {
+  await ensureSchema();
+  await sql`
+    INSERT INTO agent_presence (email, name, status, updated_at)
+    VALUES (${email}, ${name}, ${status}, now())
+    ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, status = EXCLUDED.status, updated_at = now()
+  `;
+}
+
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserPermissions, getUserTabPermissions, setTabPermissions,
-  bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser,
+  bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
 };

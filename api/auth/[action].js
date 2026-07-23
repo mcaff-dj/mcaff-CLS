@@ -1,8 +1,10 @@
-// Consolidated auth routes (login/logout/callback/me) into one dynamic-route file
-// to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells us
-// which of the 4 original routes was hit; URLs are unchanged.
-const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent } = require('../_lib/db');
+// Consolidated auth routes (login/logout/callback/me/presence) into one dynamic-route
+// file to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells
+// us which logical route was hit; URLs are unchanged.
+const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence } = require('../_lib/db');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
+
+const PRESENCE_STATUSES = new Set(['Online', 'Busy', 'Offline']);
 
 async function handleLogin(req, res) {
   const clientId = process.env.GOOGLE_CLIENT_ID;
@@ -149,7 +151,33 @@ async function handleCallback(req, res) {
   }
 }
 
-const HANDLERS = { login: handleLogin, logout: handleLogout, me: handleMe, callback: handleCallback };
+// RTO CRM agent presence (replaces the removed Supabase agent_status writes). Always
+// keyed by the caller's own session email/name - never client-supplied - so an agent
+// can only ever report their own status, not spoof anyone else's.
+async function handlePresence(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+  const session = getSession(req);
+  if (!session || !session.email) {
+    res.status(401).json({ error: 'Not signed in' });
+    return;
+  }
+  let body = req.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch { body = {}; }
+  }
+  body = body || {};
+  if (!PRESENCE_STATUSES.has(body.status)) {
+    res.status(400).json({ error: 'status must be one of Online, Busy, Offline' });
+    return;
+  }
+  await upsertAgentPresence(session.email, session.name || session.email, body.status);
+  res.status(200).json({ ok: true });
+}
+
+const HANDLERS = { login: handleLogin, logout: handleLogout, me: handleMe, callback: handleCallback, presence: handlePresence };
 
 module.exports = async (req, res) => {
   const action = req.query && req.query.action;

@@ -30,4 +30,5 @@ jobs:
       - name: Assign unassigned leads
         env:
           GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
         run: python scripts/assign_leads.py
