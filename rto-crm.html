@@ -1048,11 +1048,21 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         return base;
       },[tickets,overrides,userRole,maxLeads,googleUser]);
 
-      // Batch Auto-Assignment Effect: Syncs Column Q to Google Sheet in 1 single batch call for all active leads in box
+      // Batch Auto-Assignment Effect: Syncs Column Q to Google Sheet for all active leads in agent's box that are unassigned in Google Sheet
       useEffect(() => {
         if (allTickets.length === 0 || !googleUser?.email || userRole !== 'Agent') return;
 
-        const unassignedInBox = allTickets.filter(t => t.orderNumber && (!t.disposition && !t.agentRemarks && t.status === 'Pending') && (!overrides[t.id]?.assignedAgent || overrides[t.id]?.assignedAgent === 'Unassigned'));
+        // Find tickets in active queue that have NOT yet been tagged in raw Google Sheet data
+        const unassignedInBox = allTickets.filter(t => {
+          if (!t.orderNumber) return false;
+          if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
+          // Check raw ticket from sheet
+          const rawTicket = tickets.find(x => x.id === t.id);
+          const rawAgent = (rawTicket?.assignedAgent || '').trim().toLowerCase();
+          const sheetIsUnassigned = !rawAgent || rawAgent === 'unassigned';
+          return sheetIsUnassigned;
+        });
+
         if (unassignedInBox.length === 0) return;
 
         const newOverrides = {};
@@ -1072,14 +1082,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           });
         });
 
-        // Update UI state immediately so all 10 rows show Agent Name & Email
+        // Update local overrides immediately
         setOverrides(p => {
           const u = { ...p, ...newOverrides };
           try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
           return u;
         });
 
-        // Batch update live Google Sheet Column Q in 1 single API call
+        // Write to live Google Sheet Column Q via batchUpdate
         if (valueRanges.length > 0) {
           getAccessToken().then(token => {
             const sid = extractSheetId(DEFAULT_SHEET_URL);
@@ -1089,11 +1099,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
               body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
             }).then(r => {
-              if (r.ok) showToast(`Synced Column Q in Google Sheet for fresh box leads!`);
+              if (r.ok) {
+                console.log(`Successfully written ${valueRanges.length} Column Q agent tags to Google Sheet.`);
+                showToast(`Synced ${valueRanges.length} assigned leads to Google Sheet Column Q!`);
+              }
             }).catch(console.error);
           }).catch(console.error);
         }
-      }, [allTickets, googleUser, userRole]);
+      }, [allTickets, tickets, googleUser, userRole]);
 
       // Fresh Unassigned Leads Count in Sheet
       const freshUnassignedCount = useMemo(() => {
