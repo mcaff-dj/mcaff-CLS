@@ -621,7 +621,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         return [
           {email:'vighnesh.patil@mcaffeine.com',name:'Vighnesh Patil',role:'Admin',maxQuota:10,status:'Online',aht:'2.5m',breakTime:'15m'},
           {email:'vikash.pathak@mcaffeine.com',name:'Vikash Pathak',role:'Admin',maxQuota:10,status:'Online',aht:'3.1m',breakTime:'20m'},
-          {email:'aditi.sarkar@mcaffeine.com',name:'Aditi Sarkar',role:'Admin',maxQuota:10,status:'Online',aht:'2.5m',breakTime:'15m'},
+          {email:'aditi.sarkar@mcaffeine.com',name:'Aditi Sarkar',role:'Agent',maxQuota:10,status:'Online',aht:'2.5m',breakTime:'15m'},
           {email:'bhavesh.solanki@mcaffeine.com',name:'Bhavesh Solanki',role:'Agent',maxQuota:10,status:'Online',aht:'2.8m',breakTime:'45m'},
           {email:'badshasab.pathan@mcaffeine.com',name:'Badshasab Pathan',role:'Agent',maxQuota:10,status:'Online',aht:'3.4m',breakTime:'30m'}
         ];
@@ -677,7 +677,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
             localStorage.setItem('rto_google_user',JSON.stringify(u));
             const savedRole = localStorage.getItem('rto_active_role');
             if(!savedRole){
-              const defaultRole = (d.isAdmin||d.email.toLowerCase().includes('vighnesh')||d.email.toLowerCase().includes('vikash')||d.email.toLowerCase().includes('aditi')) ? 'Admin' : 'Agent';
+              const defaultRole = (d.isAdmin||d.email.toLowerCase().includes('vighnesh')||d.email.toLowerCase().includes('vikash')) ? 'Admin' : 'Agent';
               setUserRole(defaultRole);
             }
 
@@ -1566,14 +1566,14 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
         if (!rosterMap.has('aditi.sarkar@mcaffeine.com')) {
           rosterMap.set('aditi.sarkar@mcaffeine.com', {
-            email: 'aditi.sarkar@mcaffeine.com', name: 'Aditi Sarkar', role: 'Admin', maxQuota: 10, status: 'Online', aht: '2.5m', breakTime: '15m'
+            email: 'aditi.sarkar@mcaffeine.com', name: 'Aditi Sarkar', role: 'Agent', maxQuota: 10, status: 'Online', aht: '2.5m', breakTime: '15m'
           });
         }
 
         if (googleUser && googleUser.email && !rosterMap.has(googleUser.email.toLowerCase())) {
           const email = googleUser.email.toLowerCase();
           const name = googleUser.name || email.split('@')[0].split('.').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
-          const isAdmin = email.includes('vighnesh') || email.includes('vikash') || email.includes('aditi');
+          const isAdmin = email.includes('vighnesh') || email.includes('vikash');
           rosterMap.set(email, {
             email, name, role: isAdmin ? 'Admin' : 'Agent', maxQuota: 10, status: 'Online', aht: '2.5m', breakTime: '15m'
           });
