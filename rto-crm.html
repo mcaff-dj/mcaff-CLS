@@ -875,9 +875,13 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       // every 2 minutes while active, well inside assign_leads.py's 10-minute
       // staleness window - an agent who opens the app and just starts working
       // without ever touching the status dropdown still needs the server to know
-      // they're Online.
+      // they're Online. Also passes pendingBox so returning to the app already
+      // Online with an empty queue (e.g. a page refresh) still gets the instant-
+      // assignment trigger, not just an explicit dropdown change - a stale/low
+      // pend reading here (tickets not fully synced yet) only risks one harmless
+      // extra assignment pass, same tradeoff as the admin-override path.
       useEffect(() => {
-        if (googleUser?.email) syncPresenceToServer(agentStatus);
+        if (googleUser?.email) syncPresenceToServer(agentStatus, { pendingBox: agentStatus === 'Online' ? pend : undefined });
       }, [googleUser]);
 
       // 10-Minute User Inactivity Auto-Offline Engine
