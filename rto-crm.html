@@ -1256,7 +1256,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
             newAddress: o.newAddress || t.newAddress,
             disposedAt: o.disposedAt || t.disposedAt,
             disposedBy: o.disposedBy || t.disposedBy,
-            assignedAgent: o.assignedAgent || t.assignedAgent,
+            // The sheet's own Column Q is authoritative once it shows a real agent - a stale
+            // local override (e.g. this browser's own optimistic self-claim that got beaten by
+            // another agent's write in a race) must never permanently mask what the sheet says
+            // after a fresh sync. The override only fills the gap while Column Q is still blank.
+            assignedAgent: (t.assignedAgent && t.assignedAgent !== 'Unassigned') ? t.assignedAgent : (o.assignedAgent || t.assignedAgent),
             attemptType: o.attemptType || t.attemptType
           } : t;
         });
