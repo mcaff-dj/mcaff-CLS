@@ -394,6 +394,8 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       const isRefunded = disp.toLowerCase().includes('refund') || attempt.toLowerCase().includes('refund');
       const isDisposed = !!(conn || attempt || disp || remarks || newOrderId || newAddress);
+      const prep=pay.includes('PREPAID')||pay.includes('ONLINE')||pay.includes('PAYTM')||pay.includes('UPI')||(!pay.includes('COD')&&!pay.includes('CASH'));
+      const hp=prep&&HIGH_PRIORITY_RTO_REASONS.some(x=>rto.toLowerCase().includes(x));
 
       return{id:`T-${ord}-${i}`,orderNumber:ord,customerName:g('Customer Name','Name','Customer','Full Name')||'Customer',
         email:g('Email ID','Email','Customer Email')||'',phone:g('Contact Number','Phone','Mobile','Contact')||'',
@@ -2372,6 +2374,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                             </div>
                           );
                         })()}
+                      </div>
 
                       {/* Supabase DB Settings Card */}
                       <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
