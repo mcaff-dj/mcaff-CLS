@@ -855,8 +855,21 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         } catch {}
       };
 
-      // 10-Minute User Inactivity Auto-Offline Engine
+      // 10-Minute User Inactivity Auto-Offline Engine + Presence Heartbeat
       const lastActivityRef = useRef(Date.now());
+      const lastHeartbeatRef = useRef(0);
+
+      // syncStatusToSupabase only ever fired on an explicit status-dropdown change or the
+      // inactivity auto-offline below - an agent who opens the app and just starts working
+      // without ever touching that dropdown never tells Supabase they're online at all, so
+      // every OTHER viewer's roster (which trusts Supabase over a guess) shows them Offline
+      // forever. Push an immediate heartbeat the moment the agent signs in.
+      useEffect(() => {
+        if (googleUser?.email) {
+          syncStatusToSupabase(agentStatus, null);
+          lastHeartbeatRef.current = Date.now();
+        }
+      }, [googleUser]);
 
       useEffect(() => {
         const updateActivity = () => {
@@ -875,6 +888,15 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               console.log('10 minutes of inactivity detected — marking agent Offline');
               handleSetStatus('Offline');
               showToast('⚠️ Marked Offline due to 10 minutes of inactivity');
+              return;
+            }
+
+            // Silent presence heartbeat, well inside the 10-minute staleness window other
+            // browsers use to decide whether to trust this agent's last known status.
+            const twoMinutesMs = 2 * 60 * 1000;
+            if (Date.now() - lastHeartbeatRef.current >= twoMinutesMs) {
+              syncStatusToSupabase(agentStatus, null);
+              lastHeartbeatRef.current = Date.now();
             }
           }
         }, 15000); // Check every 15 seconds
