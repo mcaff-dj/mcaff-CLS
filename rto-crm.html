@@ -650,6 +650,36 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         } catch {}
       };
 
+      // 10-Minute User Inactivity Auto-Offline Engine
+      const lastActivityRef = useRef(Date.now());
+
+      useEffect(() => {
+        const updateActivity = () => {
+          lastActivityRef.current = Date.now();
+        };
+
+        const activityEvents = ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'];
+        activityEvents.forEach(evt => window.addEventListener(evt, updateActivity, { passive: true }));
+
+        const checkInterval = setInterval(() => {
+          if (agentStatus !== 'Offline' && googleUser?.email) {
+            const inactiveDurationMs = Date.now() - lastActivityRef.current;
+            const tenMinutesMs = 10 * 60 * 1000; // 10 minutes = 600,000 ms
+
+            if (inactiveDurationMs >= tenMinutesMs) {
+              console.log('10 minutes of inactivity detected — marking agent Offline');
+              handleSetStatus('Offline');
+              showToast('⚠️ Marked Offline due to 10 minutes of inactivity');
+            }
+          }
+        }, 15000); // Check every 15 seconds
+
+        return () => {
+          activityEvents.forEach(evt => window.removeEventListener(evt, updateActivity));
+          clearInterval(checkInterval);
+        };
+      }, [agentStatus, googleUser]);
+
       // Data
       const [tickets, setTickets] = useState(()=>{try{const s=localStorage.getItem('rto_cache_v4');if(s){const p=JSON.parse(s);if(Array.isArray(p)&&p.length)return p.map(t=>({...t,rowDate:t.rowDate?new Date(t.rowDate):null}));}}catch{}return[];});
       const [overrides, setOverrides] = useState(()=>{try{return JSON.parse(localStorage.getItem('rto_ticket_overrides')||'{}');}catch{return{};}});
