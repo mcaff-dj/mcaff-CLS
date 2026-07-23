@@ -893,6 +893,31 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
       };
 
+      // Admin-only: manually set any single agent's status (Online / On Break / Offline)
+      // from the roster table, same underlying write as the heartbeat itself uses - so it
+      // sticks exactly as long as a real heartbeat would, and gets overwritten by that
+      // agent's own next heartbeat like any other status change.
+      const setAgentStatusManually = async (email, newStatus) => {
+        const lower = (email || '').toLowerCase();
+        if (!lower) return;
+
+        if (googleUser?.email && googleUser.email.toLowerCase() === lower) {
+          setAgentStatus(newStatus);
+          try { localStorage.setItem('rto_agent_status', newStatus); } catch {}
+        }
+
+        const nowIso = new Date().toISOString();
+        const res = await supabaseFetch('agent_status', 'POST', { email: lower, status: newStatus, updated_at: nowIso }, true);
+
+        setLiveAgentStatuses(prev => ({ ...prev, [lower]: { status: newStatus, updatedAt: nowIso } }));
+
+        if (!res || !res.ok) {
+          showToast(`⚠️ Set locally, but the Supabase write failed for ${email} — check console.`);
+        } else {
+          showToast(`Status set to ${newStatus} for ${email}`);
+        }
+      };
+
       const syncDispositionToSupabase = async (tkt, ov) => {
         if (!googleUser?.email) return;
         await supabaseFetch('ticket_disposition_logs', 'POST', {
@@ -2483,10 +2508,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                                   />
                                 </td>
                                 <td className="py-3 px-4">
-                                  <span className={`inline-flex items-center gap-1.5 text-[12px] font-semibold ${a.status === 'Online' ? 'text-emerald-400' : a.status === 'Busy' ? 'text-amber-400' : 'text-zinc-500'}`}>
-                                    <span className={`h-1.5 w-1.5 rounded-full ${a.status === 'Online' ? 'bg-emerald-500' : a.status === 'Busy' ? 'bg-amber-400' : 'bg-zinc-500'}`} />
-                                    {a.status}
-                                  </span>
+                                  <CustomSelect
+                                    value={a.status}
+                                    onChange={(newStatus) => setAgentStatusManually(a.email, newStatus)}
+                                    options={statusOptions}
+                                  />
                                 </td>
                                 <td className="py-3 px-4 text-center font-bold text-zinc-100 tabular-nums">{a.assigned}</td>
                                 <td className="py-3 px-4 text-center font-bold text-indigo-400 tabular-nums">{a.disposed}</td>
