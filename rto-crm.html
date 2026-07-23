@@ -857,6 +857,67 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
       };
 
+      const resetStalePendingLeads = async () => {
+        const todayStart = startOfDay(new Date());
+        if (!todayStart) return;
+
+        const staleTickets = tickets.filter(t => {
+          if (!t.orderNumber) return false;
+          if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
+          const currAgt = (overrides[t.id]?.assignedAgent || t.assignedAgent || '').trim();
+          const isAssigned = currAgt && currAgt !== 'Unassigned' && currAgt.toLowerCase() !== 'unassigned';
+          if (!isAssigned) return false;
+          const rd = t.rowDate ? t.rowDate.getTime() : 0;
+          return rd > 0 && rd < todayStart.getTime();
+        });
+
+        if (staleTickets.length === 0) {
+          showToast('No stale undisposed leads found from previous days.');
+          return;
+        }
+
+        const newOverrides = {};
+        const valueRanges = [];
+
+        staleTickets.forEach(t => {
+          newOverrides[t.id] = {
+            ...(overrides[t.id] || {}),
+            assignedAgent: 'Unassigned',
+            assignedEmail: ''
+          };
+          const rowNumber = t.rawIndex + 2;
+          valueRanges.push({
+            range: `Data!Q${rowNumber}`,
+            values: [['']]
+          });
+        });
+
+        setOverrides(p => {
+          const u = { ...p, ...newOverrides };
+          try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
+          return u;
+        });
+
+        if (valueRanges.length > 0) {
+          try {
+            const token = await getAccessToken();
+            const sid = extractSheetId(DEFAULT_SHEET_URL);
+            if (sid) {
+              const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
+              });
+              if (res.ok) {
+                showToast(`🧹 Reset ${valueRanges.length} stale undisposed leads from previous days & cleared Google Sheet Column Q!`);
+              }
+            }
+          } catch (err) {
+            console.error('Reset stale error:', err);
+          }
+        }
+      };
+
       // Sync
       const sync = useCallback(async(silent=false)=>{
         const sid=extractSheetId(DEFAULT_SHEET_URL);if(!sid)return;setIsSyncing(true);
@@ -921,71 +982,67 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           const p = e.split('@')[0];
           const isMine = (agt) => agt && agt !== 'Unassigned' && (agt.toLowerCase().includes(e) || agt.toLowerCase().includes(p));
 
-          // Pending unresolved leads currently assigned to me
-          let myPending = base.filter(t => t.status === 'Pending' && !t.disposition && !t.agentRemarks && isMine(t.assignedAgent));
-          
-          // Deduplicate myPending by orderNumber
-          const myPendingMap = new Map();
-          myPending.forEach(t => { if (!myPendingMap.has(t.orderNumber)) myPendingMap.set(t.orderNumber, t); });
-          myPending = Array.from(myPendingMap.values());
-
-          myPending.sort((a,b)=>{
-            if(a.rowDate && b.rowDate && a.rowDate.getTime() !== b.rowDate.getTime()) {
-              return b.rowDate.getTime() - a.rowDate.getTime();
-            }
-            return b.rawIndex - a.rawIndex;
-          });
-          
-          // Disposed or refunded leads assigned to me (kept for history view)
-          const myDisposed = base.filter(t => (t.status !== 'Pending' || t.disposition || t.agentRemarks) && isMine(t.assignedAgent));
-
-          // Unassigned pending leads available in the sheet (STRICTLY verifying NO OTHER agent is assigned)
-          let unassignedLeads = base.filter(t => {
+          // All pending leads assigned to me OR unassigned
+          const allPendingLeads = base.filter(t => {
             if (!t.orderNumber) return false;
             if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
             const agt = (t.assignedAgent || '').trim();
-            return !agt || agt === 'Unassigned' || agt.toLowerCase() === 'unassigned';
+            const isUnassigned = !agt || agt === 'Unassigned' || agt.toLowerCase() === 'unassigned';
+            return isMine(agt) || isUnassigned;
           });
 
-          const needed = Math.max(0, maxLeads - myPending.length);
-          if (needed > 0 && unassignedLeads.length > 0) {
-            // WATERFALL DATE REPLENISHMENT: Group unassigned leads by date (newest date first)
-            const dateMap = new Map();
-            unassignedLeads.forEach(t => {
-              const ts = t.rowDate ? t.rowDate.getTime() : 0;
-              if (!dateMap.has(ts)) dateMap.set(ts, []);
-              dateMap.get(ts).push(t);
-            });
+          // Disposed or refunded leads assigned to me (kept for history view)
+          const myDisposed = base.filter(t => (t.status !== 'Pending' || t.disposition || t.agentRemarks) && isMine(t.assignedAgent));
 
-            // Sort unique date timestamps in descending order (Today -> Yesterday -> 20th -> 19th...)
-            const sortedTimestamps = Array.from(dateMap.keys()).sort((a, b) => b - a);
+          // Group all available pending leads by date timestamp (newest date first)
+          const dateMap = new Map();
+          allPendingLeads.forEach(t => {
+            const ts = t.rowDate ? t.rowDate.getTime() : 0;
+            if (!dateMap.has(ts)) dateMap.set(ts, []);
+            dateMap.get(ts).push(t);
+          });
 
-            // Waterfall: Fill from newest date available. Only move to previous date if current date is exhausted!
-            const claimed = [];
-            const claimedOrderNumbers = new Set(myPending.map(t => t.orderNumber));
+          // Sort unique date timestamps in descending order (Today -> Yesterday -> 20th -> 19th...)
+          const sortedTimestamps = Array.from(dateMap.keys()).sort((a, b) => b - a);
 
-            for (const ts of sortedTimestamps) {
-              if (claimed.length >= needed) break;
-              const leadsForDate = dateMap.get(ts);
-              for (const t of leadsForDate) {
-                if (claimed.length >= needed) break;
-                if (!claimedOrderNumbers.has(t.orderNumber)) {
-                  claimedOrderNumbers.add(t.orderNumber);
-                  claimed.push(t);
-                }
+          // Fill quota (maxLeads) starting from NEWEST date timestamp first (Today -> Yesterday -> older)
+          const myPendingQueue = [];
+          const claimedOrderNumbers = new Set();
+
+          for (const ts of sortedTimestamps) {
+            if (myPendingQueue.length >= maxLeads) break;
+            const leadsForDate = dateMap.get(ts);
+
+            // 1. Take leads for this date already assigned to me
+            const myLeadsForDate = leadsForDate.filter(t => isMine(t.assignedAgent));
+            for (const t of myLeadsForDate) {
+              if (myPendingQueue.length >= maxLeads) break;
+              if (!claimedOrderNumbers.has(t.orderNumber)) {
+                claimedOrderNumbers.add(t.orderNumber);
+                myPendingQueue.push(t);
               }
             }
 
-            const claimedTagged = claimed.map(t => ({
-              ...t,
-              assignedAgent: googleUser.email
-            }));
+            // 2. Take unassigned leads for this date to fill remaining quota for this date
+            const unassignedForDate = leadsForDate.filter(t => {
+              const agt = (t.assignedAgent || '').trim();
+              return !agt || agt === 'Unassigned' || agt.toLowerCase() === 'unassigned';
+            });
 
-            myPending = [...myPending, ...claimedTagged];
+            for (const t of unassignedForDate) {
+              if (myPendingQueue.length >= maxLeads) break;
+              if (!claimedOrderNumbers.has(t.orderNumber)) {
+                claimedOrderNumbers.add(t.orderNumber);
+                myPendingQueue.push({
+                  ...t,
+                  assignedAgent: googleUser.email
+                });
+              }
+            }
           }
 
           // Return PENDING leads (up to maxLeads) + ALL DISPOSED leads
-          return [...myPending.slice(0, maxLeads), ...myDisposed];
+          return [...myPendingQueue, ...myDisposed];
         }
 
         return base;
@@ -1754,9 +1811,19 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
                   return (
                     <>
-                      <div>
-                        <h2 className="text-lg font-bold text-zinc-100">Team Roster & Bulk Lead Reassignment Control</h2>
-                        <p className="text-[13px] text-zinc-500 mt-0.5">Manage agent roles, lead capacity limits, reassign active agent boxes, or wipe Column Q in Google Sheet.</p>
+                      <div className="flex items-center justify-between flex-wrap gap-3">
+                        <div>
+                          <h2 className="text-lg font-bold text-zinc-100">Team Roster & Bulk Lead Reassignment Control</h2>
+                          <p className="text-[13px] text-zinc-500 mt-0.5">Manage agent roles, lead capacity limits, reassign active agent boxes, or wipe Column Q in Google Sheet.</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={resetStalePendingLeads}
+                          className="px-3 py-1.5 rounded-xl bg-amber-950/70 hover:bg-amber-900 text-amber-200 border border-amber-800/80 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
+                          title="Unassign undisposed leads from previous days and clear Column Q in Google Sheet"
+                        >
+                          🧹 Reset Stale Pending Leads (&lt; Today)
+                        </button>
                       </div>
 
                       {/* Agent Roster & Reassignment Table */}
