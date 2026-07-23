@@ -625,7 +625,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       const [agentFilter, setAgentFilter] = useState('ALL');
       const [agentStatus, setAgentStatus] = useState(()=>localStorage.getItem('rto_agent_status')||'Online');
-      const maxLeads = useMemo(()=>{const m=agentRoster.find(a=>a.email.toLowerCase()===googleUser.email.toLowerCase());return m?m.maxQuota:10;},[agentRoster,googleUser]);
 
       const [toast, setToast] = useState(null);
       const showToast = useCallback(m=>{setToast(m);setTimeout(()=>setToast(null),3000);},[]);
@@ -1411,16 +1410,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         return Array.from(rosterMap.values());
       }, [agentRoster, tickets, overrides, googleUser, agentStatus, liveAgentStatuses]);
 
-      // ONLY Agent-role users participate in round-robin. Admins/Team Leads are excluded from the interleave index.
-      const sortedAgentEmails = useMemo(() => {
-        const s = new Set();
-        effectiveAgentRoster.forEach(a => {
-          if (a && a.email && a.role === 'Agent') s.add(a.email.toLowerCase());
-        });
-        return Array.from(s).sort();
-      }, [effectiveAgentRoster]);
-
-      // Derived data & STRICT Calling Date (Latest First) Sorting & Conflict-Free Round-Robin Lead Protection
+      // Derived data & STRICT Calling Date (Latest First) Sorting
       const allTickets = useMemo(()=>{
         // 1. Merge overrides with base tickets
         let base = tickets.map(t => {
@@ -1472,163 +1462,19 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return b.rawIndex - a.rawIndex;
         });
 
-        // 4. REPLENISHMENT ENGINE WITH CONFLICT-FREE ROUND-ROBIN INTERLEAVED DISJOINT ALLOCATION
-        if(userRole==='Agent' && googleUser?.email){
-          const e = googleUser.email.toLowerCase();
-          const p = e.split('@')[0];
-          const isMine = (agt) => agt && agt !== 'Unassigned' && (agt.toLowerCase().includes(e) || agt.toLowerCase().includes(p));
-
-          const myAgentIdx = Math.max(0, sortedAgentEmails.indexOf(e));
-          const numAgents = Math.max(1, sortedAgentEmails.length);
-
-          // All pending leads assigned to me OR truly unassigned (NOT assigned to any other agent)
-          const allPendingLeads = base.filter(t => {
-            if (!t.orderNumber) return false;
-            if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
-            const agt = (t.assignedAgent || '').trim();
-            const isUnassigned = !agt || agt === 'Unassigned' || agt.toLowerCase() === 'unassigned';
-            // CRITICAL: If assigned to ANOTHER agent, SKIP this lead entirely!
-            if (!isUnassigned && !isMine(agt)) return false;
-            return true;
-          });
-
-          // Disposed or refunded leads assigned to me (kept for history view)
-          const myDisposed = base.filter(t => (t.status !== 'Pending' || t.disposition || t.agentRemarks) && isMine(t.assignedAgent));
-
-          // Group all available pending leads by date timestamp (newest date first)
-          const dateMap = new Map();
-          allPendingLeads.forEach(t => {
-            const ts = t.rowDate ? t.rowDate.getTime() : 0;
-            if (!dateMap.has(ts)) dateMap.set(ts, []);
-            dateMap.get(ts).push(t);
-          });
-
-          // Sort unique date timestamps in descending order (Today -> Yesterday -> 20th -> 19th...)
-          const sortedTimestamps = Array.from(dateMap.keys()).sort((a, b) => b - a);
-
-          // Fill quota (maxLeads) starting from NEWEST date timestamp first (Today -> Yesterday -> older)
-          const myPendingQueue = [];
-          const claimedOrderNumbers = new Set();
-
-          for (const ts of sortedTimestamps) {
-            if (myPendingQueue.length >= maxLeads) break;
-            const leadsForDate = dateMap.get(ts);
-
-            // 1. Take leads for this date already assigned to me
-            const myLeadsForDate = leadsForDate.filter(t => isMine(t.assignedAgent));
-            for (const t of myLeadsForDate) {
-              if (myPendingQueue.length >= maxLeads) break;
-              if (!claimedOrderNumbers.has(t.orderNumber)) {
-                claimedOrderNumbers.add(t.orderNumber);
-                myPendingQueue.push(t);
-              }
-            }
-
-            // 2. Take unassigned leads for this date using CONFLICT-FREE ROUND-ROBIN INTERLEAVED OFFSET!
-            const unassignedForDate = leadsForDate.filter(t => {
-              const agt = (t.assignedAgent || '').trim();
-              return !agt || agt === 'Unassigned' || agt.toLowerCase() === 'unassigned';
-            });
-
-            // Interleaved loop: start at myAgentIdx, step by numAgents!
-            for (let idx = myAgentIdx; idx < unassignedForDate.length; idx += numAgents) {
-              if (myPendingQueue.length >= maxLeads) break;
-              const t = unassignedForDate[idx];
-              if (!claimedOrderNumbers.has(t.orderNumber)) {
-                claimedOrderNumbers.add(t.orderNumber);
-                myPendingQueue.push({
-                  ...t,
-                  assignedAgent: googleUser.email
-                });
-              }
-            }
-
-            // No fallback loop — strict round-robin only to prevent cross-agent duplicates
-          }
-
-          // Return PENDING leads (up to maxLeads) + ALL DISPOSED leads
-          return [...myPendingQueue, ...myDisposed];
-        }
-
+        // Lead assignment (deciding which unassigned lead goes to which online agent, and
+        // writing it to Column Q) now runs server-side only - see scripts/assign_leads.py,
+        // scheduled via .github/workflows/assign-leads.yml. This used to also run here,
+        // independently, in every agent's browser: each browser's own possibly-stale
+        // ticket/roster snapshot could disagree about who "should" get an unassigned lead,
+        // and whichever browser's write reached Column Q last silently won, overwriting
+        // another agent's legitimate claim. The CRM now just displays whatever Column Q
+        // already says (see the 'fresh' tab filter below) - manual single-lead claiming
+        // (claimLeadForAgent, triggered by an agent explicitly opening a still-unassigned
+        // ticket) is unaffected and still writes directly, since that's a deliberate,
+        // one-at-a-time human action rather than a background mass-assignment race.
         return base;
-      },[tickets,overrides,userRole,maxLeads,googleUser,sortedAgentEmails]);
-
-      // Batch Auto-Assignment Effect: Syncs Column Q to Google Sheet for all active leads in agent's box that are unassigned in Google Sheet
-      useEffect(() => {
-        if (allTickets.length === 0 || !googleUser?.email || userRole !== 'Agent') return;
-
-        // Find tickets in active queue that have NOT yet been tagged in raw Google Sheet data
-        const unassignedInBox = allTickets.filter(t => {
-          if (!t.orderNumber) return false;
-          if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
-          // Check raw ticket from sheet
-          const rawTicket = tickets.find(x => x.id === t.id);
-          const rawAgent = (rawTicket?.assignedAgent || '').trim().toLowerCase();
-          const sheetIsUnassigned = !rawAgent || rawAgent === 'unassigned';
-          return sheetIsUnassigned;
-        });
-
-        if (unassignedInBox.length === 0) return;
-
-        let cancelled = false;
-        const agentTag = `${googleUser.email}`;
-
-        (async () => {
-          const token = await getAccessToken().catch(() => null);
-          const sid = extractSheetId(DEFAULT_SHEET_URL);
-          if (!token || !sid || cancelled) return;
-
-          // unassignedInBox was computed from this browser's own possibly-stale snapshot, so
-          // (a) the row it thinks is at t.rawIndex may have shifted to a different order by now,
-          // and (b) another agent may have genuinely claimed the same lead in the meantime.
-          // Re-check the live sheet immediately before writing and only claim what is still
-          // actually blank, at its actual current row.
-          const liveMap = await fetchLiveOrderAndAgentMap(sid, token);
-          if (cancelled) return;
-
-          const newOverrides = {};
-          const valueRanges = [];
-          let alreadyTaken = 0;
-
-          unassignedInBox.forEach(t => {
-            const key = (t.orderNumber || '').toString().trim().toUpperCase();
-            const live = liveMap ? liveMap.get(key) : null;
-            if (liveMap && !live) return; // order not found live - skip rather than guess
-            if (live && live.agent && live.agent.toLowerCase() !== 'unassigned') { alreadyTaken++; return; }
-            const rowNumber = live ? live.row : (t.rawIndex + 2);
-            newOverrides[t.id] = {
-              ...(overrides[t.id] || {}),
-              assignedAgent: agentTag,
-              assignedEmail: googleUser.email
-            };
-            valueRanges.push({ range: `Data!Q${rowNumber}`, values: [[agentTag]] });
-          });
-
-          if (alreadyTaken > 0) showToast(`Skipped ${alreadyTaken} lead(s) — already claimed by another agent. Refresh to sync.`);
-          if (valueRanges.length === 0) return;
-
-          // Update local overrides immediately
-          setOverrides(p => {
-            const u = { ...p, ...newOverrides };
-            try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
-            return u;
-          });
-
-          // Write to live Google Sheet Column Q via batchUpdate
-          fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
-          }).then(r => {
-            if (r.ok) {
-              console.log(`Successfully written ${valueRanges.length} Column Q agent tags to Google Sheet.`);
-              showToast(`Synced ${valueRanges.length} assigned leads to Google Sheet Column Q!`);
-            }
-          }).catch(err => console.error('Batch sync error:', err));
-        })();
-
-        return () => { cancelled = true; };
-      }, [allTickets, tickets, googleUser, userRole]);
+      },[tickets,overrides]);
 
       // Fresh Unassigned Leads Count in Sheet
       const freshUnassignedCount = useMemo(() => {
