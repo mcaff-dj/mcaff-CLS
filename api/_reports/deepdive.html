@@ -177,7 +177,13 @@
   .tab-panel { display: none; }
   .tab-panel.active { display: block; }
 
-  /* Agent wise analysis tab: brand sub-tabs + Daily/Weekly toggle + shift-status table */
+  /* Agent wise analysis tab: brand sub-tabs + Daily/Weekly toggle + shift-status table.
+     Deliberately NOT class="tab-nav" - the dashboard shell's onIframeLoaded() scrapes
+     every .tab-nav .tab-btn in this document (unscoped) to build its own sidebar nav;
+     giving this sub-nav that class made "Hyphen"/"mCaffeine" show up there as if they
+     were top-level report tabs. Buttons keep class="tab-btn" for shared styling below -
+     only the wrapping <nav> needs a different class so the dashboard's selector misses it. */
+  .brand-subnav { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 18px; border-bottom: 1px solid var(--gridline); overflow-x: auto; }
   #ash-brandTabs .tab-btn::before { content: ""; width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 1px; }
   #ash-brandTabs .tab-btn[data-brand="Hyphen"]::before { background: var(--brand-hyphen); }
   #ash-brandTabs .tab-btn[data-brand="mCaffeine"]::before { background: var(--brand-mcaff); }
@@ -311,7 +317,7 @@
     <div class="tab-panel" id="panel-agent">
       <p class="card-sub" style="margin:0 0 16px;">From the daily agent-status export (Hyphen &amp; mCaffeine).</p>
 
-      <nav class="tab-nav" id="ash-brandTabs"></nav>
+      <nav class="brand-subnav" id="ash-brandTabs"></nav>
 
       <div class="filterbar">
         <div class="filter-group">
