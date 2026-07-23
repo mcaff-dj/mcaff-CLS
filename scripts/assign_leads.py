@@ -17,8 +17,15 @@ STALE_MINUTES (the CRM pushes a heartbeat on login and every 2 minutes while
 active - see rto-crm.html's presence heartbeat effect). There's no durable
 roster/quota source yet (that only ever lived in each browser's localStorage),
 so every online agent gets the same DEFAULT_QUOTA; already-assigned pending
-leads are left with their current agent regardless of that agent's online
-status right now.
+leads held by an agent who isn't currently online are left alone.
+
+Only this script enforces the quota - a manual single-lead claim in the CRM
+and an Admin's bulk-reassign both write Column Q directly with no cap check,
+by design (see the "Enforce cap everywhere" decision this script's commit
+message references). So an online agent can still end up over DEFAULT_QUOTA
+before this runs. Each run trims anyone over quota back down to it first -
+unassigning their oldest excess leads (so it's a *different* agent's turn to
+get them, not the same one immediately) - before assigning anything new.
 """
 import os
 import sys
@@ -44,17 +51,66 @@ DEFAULT_QUOTA = 10
 STALE_MINUTES = 10  # must match the CRM's own inactivity-to-offline threshold
 
 # 0-based column indices, matching rto-crm.html's mapTkt/writeToSheetRow exactly.
-COL_ORDER_ID = 4     # E
-COL_AGENT = 16       # Q
-COL_CONNECTED = 17   # R
-COL_ATTEMPT = 18     # S
-COL_DISPOSITION = 19  # T
-COL_REMARKS = 20     # U
-COL_CALLING_DATE = 24  # Y
+COL_RTO_REASON = 3        # D - the ORIGINAL system/courier RTO reason (not the agent's own
+                          # disposition in COL_DISPOSITION below)
+COL_ORDER_ID = 4          # E
+COL_PAYMENT_METHOD = 14   # O
+COL_AGENT = 16            # Q
+COL_CONNECTED = 17        # R
+COL_ATTEMPT = 18          # S
+COL_DISPOSITION = 19      # T - agent's own "RTO Reason - Agent" disposition entry
+COL_REMARKS = 20          # U
+COL_CALLING_DATE = 24     # Y
 
 MONTHS = {m: i + 1 for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 )}
+
+# Assignment priority, highest first:
+#   0. Prepaid orders - payment method wins outright, regardless of RTO reason.
+#   1. COD orders whose original RTO reason matches one of these (case-insensitive
+#      substring) - the consignee has already refused/OTP-verified the cancellation, so
+#      the outcome is effectively known and worth acting on quickly.
+#   2. Every other COD order.
+# Within each tier, newest calling date first. Same reason list as rto-crm.html's
+# HIGH_PRIORITY_RTO_REASONS constant.
+HIGH_PRIORITY_COD_RTO_REASONS = [
+    "consignee opened the package and refused to accept",
+    "consignee refused to accept",
+    "customer refused to accept",
+    "customer refused to accept:verified",
+    "elasticrun_otp_verified",
+    "entry refused",
+    "kyc|customer refused to share kyc/ ndc/ scd",
+    "otp validation successful",
+    "otp verified cancellation",
+    "prf|receiver refused delivery(cir)",
+    "refused to accept",
+    "refused to accept (no cancellation code)",
+    "refused to accept (with cancellation code)",
+    "rto pending - otp validated cancellation",
+]
+
+
+def is_prepaid(payment_raw):
+    """Same rule as rto-crm.html's mapTkt: explicit prepaid-like keywords, OR - since payment
+    method text varies a lot across sources - anything that isn't explicitly COD/Cash defaults
+    to Prepaid."""
+    p = (payment_raw or "").upper()
+    if "COD" in p or "CASH" in p:
+        return False
+    return True
+
+
+def priority_tier(payment_raw, rto_reason_raw):
+    """0 = Prepaid (always highest, irrespective of reason), 1 = COD matching one of the
+    high-priority reasons, 2 = every other COD lead. Lower sorts first."""
+    if is_prepaid(payment_raw):
+        return 0
+    reason = (rto_reason_raw or "").lower()
+    if any(r in reason for r in HIGH_PRIORITY_COD_RTO_REASONS):
+        return 1
+    return 2
 
 
 def parse_calling_date(s):
@@ -131,9 +187,14 @@ def main():
     rows = values[1:]  # skip header
     print(f"  {len(rows)} data rows")
 
-    # current_load: how many pending (undisposed) leads each online agent already holds
+    # current_load: how many pending (undisposed) leads each online agent already holds.
+    # agent_holdings additionally keeps *which* leads, so an agent sitting over quota
+    # (pre-existing backlog, a manual claim, or an admin bulk-reassign - none of those
+    # paths enforce the cap) can have the oldest excess trimmed back to unassigned below.
     current_load = {email: 0 for email in online_agents}
-    unassigned_pending = []  # (row_index, calling_date, order_id)
+    agent_holdings = {email: [] for email in online_agents}
+    unassigned_pending = []  # (row_index, calling_date, order_id, tier)
+    tier_counts = {0: 0, 1: 0, 2: 0}
 
     for i, row in enumerate(rows):
         order_id = cell(row, COL_ORDER_ID)
@@ -149,22 +210,56 @@ def main():
 
         agent_raw = cell(row, COL_AGENT).lower()
         is_unassigned = (not agent_raw) or agent_raw == "unassigned"
+        calling_date = parse_calling_date(cell(row, COL_CALLING_DATE))
+        tier = priority_tier(cell(row, COL_PAYMENT_METHOD), cell(row, COL_RTO_REASON))
 
         if is_unassigned:
-            calling_date = parse_calling_date(cell(row, COL_CALLING_DATE))
-            unassigned_pending.append((i, calling_date, order_id))
+            unassigned_pending.append((i, calling_date, order_id, tier))
+            tier_counts[tier] += 1
         elif agent_raw in current_load:
             current_load[agent_raw] += 1
+            agent_holdings[agent_raw].append((i, calling_date, order_id, tier))
         # else: pending lead already held by an agent who isn't currently online -
         # left alone, per the CRM's existing behavior of not reassigning someone's
-        # active queue just because they stepped away.
+        # active queue just because they stepped away. Only online agents' holdings
+        # are ever trimmed, for the same reason.
+
+    print(f"  unassigned pool by priority: Prepaid={tier_counts[0]}, COD+high-priority reason={tier_counts[1]}, other COD={tier_counts[2]}")
+
+    # Trim step: this script only ever added leads up to quota, so an agent could still
+    # end up over 10 via a manual claim or an admin bulk-reassign (neither enforces the
+    # cap) - or simply from backlog that predates this script. Unassign the oldest excess
+    # back to the pool so it's redistributed below instead of sitting stuck indefinitely.
+    # Trimming itself stays purely oldest-first regardless of tier - it's about freeing
+    # capacity, not re-ranking; the freed lead's tier still applies once it's back in the
+    # pool and re-sorted below.
+    trim_ranges = []
+    for email in online_agents:
+        had = current_load[email]
+        excess = had - DEFAULT_QUOTA
+        if excess <= 0:
+            continue
+        oldest_first = sorted(agent_holdings[email], key=lambda t: t[1] or datetime.min)
+        to_trim = oldest_first[:excess]
+        for row_index, calling_date, order_id, tier in to_trim:
+            trim_ranges.append({"range": f"'{SHEET_TAB}'!Q{row_index + 2}", "values": [[""]]})
+            unassigned_pending.append((row_index, calling_date, order_id, tier))
+        current_load[email] = had - len(to_trim)
+        print(f"  trimming {len(to_trim)} excess lead(s) from {email} (had {had}, over quota by {excess})")
+
+    if trim_ranges:
+        print(f"Unassigning {len(trim_ranges)} over-quota lead(s) back to the pool...")
+        lib.set_sheet_values_batch(SPREADSHEET_ID, trim_ranges)
 
     if not unassigned_pending:
         print("No unassigned pending leads found - nothing to assign.")
         return
 
-    # Newest calling date first; undated leads (calling_date=None -> datetime.min) sort last.
-    unassigned_pending.sort(key=lambda t: t[1] or datetime.min, reverse=True)
+    # Tier 0 (Prepaid) before tier 1 (COD + high-priority reason) before tier 2 (other COD),
+    # regardless of date. Within each tier, newest calling date first; undated leads sort
+    # last in their tier. toordinal() (not timestamp()) avoids a pre-1970 overflow for any
+    # genuinely ancient/unparseable-year date.
+    unassigned_pending.sort(key=lambda t: (t[3], -(t[1] or datetime.min).toordinal()))
 
     needed = {email: max(0, DEFAULT_QUOTA - current_load.get(email, 0)) for email in online_agents}
     print(f"  current load / quota: {[(e, current_load[e], DEFAULT_QUOTA) for e in online_agents]}")
@@ -180,7 +275,7 @@ def main():
             if needed[email] <= 0:
                 agent_cycle.remove(email)
                 continue
-            row_index, _, order_id = unassigned_pending[queue_pos]
+            row_index, _, order_id, _ = unassigned_pending[queue_pos]
             assignments[row_index] = email
             needed[email] -= 1
             queue_pos += 1
