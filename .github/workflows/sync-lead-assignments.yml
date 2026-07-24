@@ -1,0 +1,38 @@
+name: Sync lead assignments to MySQL
+
+on:
+  schedule:
+    - cron: '30 3 * * *'   # 9:00am IST daily (3:30 UTC)
+  workflow_dispatch: {}      # manual "Run workflow" button
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-lead-assignments
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Sync yesterday's disposed leads
+        env:
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+        run: python scripts/sync_lead_assignments_to_mysql.py
