@@ -1,0 +1,69 @@
+name: Refresh Deep Dive report
+
+on:
+  workflow_dispatch: {}      # dispatched by the "Refresh data" button inside deepdive.html
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-deepdive
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Rebuild CSAT data, Agent wise analysis data, and the report itself
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+        run: |
+          python scripts/build_csat_dashboard_data.py
+          python scripts/build_agent_shift_status.py
+          python scripts/build_csat_artifact.py
+
+      - name: Commit & push if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/csat_dashboard_data.json data/agent_shift_status.json api/_reports/deepdive.html
+          if git diff --cached --quiet; then
+            echo "No data changes; nothing to commit."
+            exit 0
+          fi
+          stamp=$(TZ='Asia/Kolkata' date '+%Y-%m-%d %H:%M')
+          git commit -m "Auto-refresh Deep Dive report ($stamp IST)"
+
+          # Same rebase-and-retry as refresh.yml - this repo gets pushed to from
+          # elsewhere while this job runs, so a bare push regularly loses the race.
+          pushed=false
+          for i in 1 2 3 4 5; do
+            if git push; then
+              pushed=true
+              break
+            fi
+            echo "Push rejected (attempt $i/5) - fetching and rebasing onto latest main..."
+            git fetch origin main
+            git rebase origin/main || { echo "Rebase onto origin/main failed - needs manual resolution."; exit 1; }
+          done
+          if [ "$pushed" != "true" ]; then
+            echo "Failed to push after 5 attempts - main is moving too fast to catch up."
+            exit 1
+          fi
+          echo "Pushed refreshed Deep Dive report."

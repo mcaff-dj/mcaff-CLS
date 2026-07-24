@@ -196,6 +196,25 @@
   @media (max-width: 760px) {
     .kpi-row { grid-template-columns: repeat(2, 1fr); }
   }
+
+  /* Report-level refresh control - reruns build_csat_dashboard_data.py,
+     build_agent_shift_status.py and build_csat_artifact.py (see
+     .github/workflows/refresh-deepdive.yml), so it sits above the tab-nav
+     rather than inside either tab panel - it refreshes both. */
+  .dd-refresh-row { display: flex; align-items: center; gap: 10px; margin: 4px 0 14px; flex-wrap: wrap; }
+  .dd-refresh-btn {
+    appearance: none; display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary);
+    font: inherit; font-size: 12.5px; font-weight: 600; padding: 6px 12px; border-radius: 7px;
+    cursor: pointer; transition: border-color .15s ease, color .15s ease;
+  }
+  .dd-refresh-btn:hover:not(:disabled) { border-color: var(--brand-hyphen); color: var(--brand-hyphen); }
+  .dd-refresh-btn:disabled { opacity: .6; cursor: default; }
+  .dd-refresh-btn .spin { display: inline-block; }
+  .dd-refresh-btn.spinning .spin { animation: dd-spin 1s linear infinite; }
+  @keyframes dd-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .dd-refresh-status { font-size: 11.5px; color: var(--text-muted); }
+  .dd-refresh-status.error { color: var(--rating-1); }
 </style>
 
 <div class="viz-root">
@@ -208,6 +227,14 @@
       AI-resolved avg 3.79 (n=34,616) &nbsp;vs&nbsp; Human-resolved avg 4.19 (n=28,684) &nbsp;&middot;&nbsp;
       WhatsApp avg 4.04 (n=52,424) &nbsp;&middot;&nbsp; Email avg 3.50 (n=5,320) &nbsp;&middot;&nbsp; Live Chat avg 3.78 (n=5,554)
     </p>
+
+    <div class="dd-refresh-row">
+      <button type="button" class="dd-refresh-btn" id="dd-refresh-btn" onclick="ddTriggerRefresh()">
+        <span class="spin">&#8635;</span> Refresh data
+      </button>
+      <span class="dd-refresh-status" id="dd-refresh-status"></span>
+      <span class="dd-refresh-status" id="dd-last-refreshed"></span>
+    </div>
 
     <nav class="tab-nav" id="main-tab-nav">
       <button class="tab-btn active" data-tab="csat">CSAT Deep Dive</button>
@@ -1090,6 +1117,86 @@ if (window.top !== window.self) {
   var tn = document.querySelector('.tab-nav');
   if (tn) tn.style.display = 'none';
 }
+
+// "Refresh data" button - dispatches .github/workflows/refresh-deepdive.yml (reruns
+// build_csat_dashboard_data.py + build_agent_shift_status.py + build_csat_artifact.py,
+// so BOTH tabs' data goes current, not just Agent wise analysis) via /api/refresh-deepdive,
+// then polls /api/refresh-deepdive-status until it completes and reloads this page.
+// Mirrors index.html's own "Refresh Data" button/polling pattern (that one only covers
+// the mcaffeine/hyphen reports, not this one - see refresh.yml vs refresh-deepdive.yml).
+var ddRefreshPollTimer = null;
+
+function ddSetStatus(text, isError) {
+  var el = document.getElementById('dd-refresh-status');
+  el.textContent = text || '';
+  el.classList.toggle('error', !!isError);
+}
+
+function ddSetBusy(busy) {
+  var btn = document.getElementById('dd-refresh-btn');
+  btn.disabled = busy;
+  btn.classList.toggle('spinning', busy);
+}
+
+function ddFormatRefreshedAt(isoString) {
+  var d = new Date(isoString);
+  return d.toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true });
+}
+
+function ddShowLastRefreshed(statusResp) {
+  var el = document.getElementById('dd-last-refreshed');
+  if (!statusResp || !statusResp.updated_at) { el.textContent = ''; return; }
+  var label = statusResp.status === 'completed' && statusResp.conclusion !== 'success' ? ' (with issues)' : '';
+  el.textContent = 'Last refreshed: ' + ddFormatRefreshedAt(statusResp.updated_at) + label;
+}
+
+function ddPollRefreshStatus() {
+  fetch('/api/refresh-deepdive-status').then(function(r) { return r.json(); }).then(function(d) {
+    if (d.status === 'completed') {
+      clearInterval(ddRefreshPollTimer);
+      ddRefreshPollTimer = null;
+      ddSetBusy(false);
+      ddShowLastRefreshed(d);
+      if (d.conclusion === 'success') {
+        ddSetStatus('Refresh complete - reloading...');
+        setTimeout(function() { location.reload(); }, 1200);
+      } else {
+        ddSetStatus('Refresh finished with issues - see the workflow run for details.', true);
+      }
+    }
+  }).catch(function() { /* transient poll failure - next tick retries */ });
+}
+
+function ddTriggerRefresh() {
+  ddSetBusy(true);
+  ddSetStatus('Starting refresh...');
+  fetch('/api/refresh-deepdive', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.status === 'started' || d.status === 'already_running') {
+        ddSetStatus(d.message);
+        if (!ddRefreshPollTimer) ddRefreshPollTimer = setInterval(ddPollRefreshStatus, 10000);
+      } else {
+        ddSetBusy(false);
+        ddSetStatus(d.message || 'Could not start refresh.', true);
+      }
+    })
+    .catch(function() {
+      ddSetBusy(false);
+      ddSetStatus('Could not reach the refresh service.', true);
+    });
+}
+
+(function ddInitRefreshStatus() {
+  fetch('/api/refresh-deepdive-status').then(function(r) { return r.json(); }).then(function(d) {
+    ddShowLastRefreshed(d);
+    if (d.status === 'in_progress' || d.status === 'queued') {
+      ddSetBusy(true);
+      ddSetStatus('Refreshing data... (' + d.status.replace('_', ' ') + ')');
+      if (!ddRefreshPollTimer) ddRefreshPollTimer = setInterval(ddPollRefreshStatus, 10000);
+    }
+  }).catch(function() { /* no last-refreshed info available - leave it blank */ });
+})();
 </script>
 
 </body>
