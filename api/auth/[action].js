@@ -241,10 +241,8 @@ async function handlePresence(req, res) {
   res.status(200).json({ ok: true });
 }
 
-// Lets rto-crm.html's resetStalePendingLeads() tell a lead assign_leads.py just handed
-// out apart from one that's genuinely been sitting unworked - see the lead_assignments
-// table comment in api/_lib/db.js. Authenticated (any signed-in agent, not admin-only):
-// every agent runs this reset against their own queue, not just admins.
+// Exposes assign_leads.py's assigned_at stamps (see the lead_assignments table comment
+// in api/_lib/db.js). Authenticated, not admin-only.
 async function handleRecentAssignments(req, res) {
   if (req.method !== 'GET') {
     res.status(405).json({ error: 'Method not allowed' });
@@ -286,13 +284,23 @@ async function handleRecordDisposition(req, res) {
     res.status(400).json({ error: 'orderId is required' });
     return;
   }
-  await recordLeadDisposition(orderId, session.email, {
-    disposition: body.disposition,
-    agentRemarks: body.agentRemarks,
-    connected: body.connected,
-    attempt: body.attempt,
-    refundAmount: typeof body.refundAmount === 'number' ? body.refundAmount : null,
-  });
+  try {
+    await recordLeadDisposition(orderId, session.email, {
+      disposition: body.disposition,
+      agentRemarks: body.agentRemarks,
+      connected: body.connected,
+      attempt: body.attempt,
+      refundAmount: typeof body.refundAmount === 'number' ? body.refundAmount : null,
+    });
+  } catch (e) {
+    // A failed disposition write here has no other trace anywhere - the Sheet write
+    // already succeeded independently, and the client's postJsonWithRetry only sees a
+    // non-2xx status, not why. Log the real cause (e.g. a Neon cold-start timeout) so
+    // it's actually findable via `vercel logs` instead of silently vanishing.
+    console.error('recordDisposition failed for order', orderId, e);
+    res.status(500).json({ error: 'Failed to record disposition' });
+    return;
+  }
   res.status(200).json({ ok: true });
 }
 
@@ -305,5 +313,14 @@ module.exports = async (req, res) => {
     res.status(404).send('Not found.');
     return;
   }
-  await handler(req, res);
+  try {
+    await handler(req, res);
+  } catch (e) {
+    // Without this, an unhandled DB error (e.g. a Neon cold-start timeout) crashes the
+    // function with a generic platform error and no application-level log line - the
+    // exact failure mode that let disposed-lead writes vanish silently. Every handler
+    // above that does its own DB work still gets a real error logged here as a backstop.
+    console.error(`Unhandled error in auth/${action}:`, e);
+    if (!res.headersSent) res.status(500).json({ error: 'Internal server error' });
+  }
 };
