@@ -454,7 +454,7 @@
     <div>
       <span class="badge">Customer Experience</span>
       <span class="badge">Hyphen</span>
-      <span class="badge">Updated 24 Jul 2026, 14:18 IST</span>
+      <span class="badge">Updated 24 Jul 2026, 15:25 IST</span>
     </div>
     <h1>Customer Query Segment Report &mdash; Hyphen</h1>
     <p>Source: "Hyphen" tab &middot; 1,10,774 raw ticket rows, deduplicated to 77,942 unique tickets</p>
@@ -616,14 +616,14 @@
   <div class="tab-panel active" id="panel-csat"><section><h2>Customer Satisfaction (CSAT)</h2><p class="desc">Monthly survey responses (bars, right axis) against CSAT out of 5 (line, left axis).</p><div class='card'><div class='pivot-title' style='margin-bottom:18px;'>Agent CSAT</div><div class='legend-row' style='justify-content:center;'><div class='legend-item'><span class='swatch' style='background:var(--s1);border-radius:50%;'></span><span class='lname'>CSAT</span></div><div class='legend-item'><span class='swatch' style='background:var(--s2);'></span><span class='lname'>Total Responses</span></div></div><svg id='chart-2' viewBox='0 0 1120 420' width='100%' height='420' role='img'></svg></div><script>
 (function(){
   var svg = document.getElementById('chart-2');
-  var opts = { vals:[2534.0,1918.0,2926.0,2348.0,3614.0,3194.0,2426.0,1571.0], sc:[4.57,4.64,4.48,4.43,4.17,3.84,4.24,4.2], labels:["Dec","Jan '26","Feb '26","Mar '26","Apr '26","May '26","Jun '26","Jul '26"], years:["2025","2026","2026","2026","2026","2026","2026","2026"], scoreMax:5,
+  var opts = { vals:[2534.0,1918.0,2926.0,2348.0,3614.0,3194.0,2426.0,1579.0], sc:[4.57,4.64,4.48,4.43,4.17,3.84,4.24,4.2], labels:["Dec","Jan '26","Feb '26","Mar '26","Apr '26","May '26","Jun '26","Jul '26"], years:["2025","2026","2026","2026","2026","2026","2026","2026"], scoreMax:5,
     W:1120, H:420, padL:55, padR:55, padT:40, padB:55};
   window.registerYearChart(function(){ window.renderScoreChart(svg, opts); });
 })();
 </script></section><section><div class='card'><div class='pivot-title' style='margin-bottom:18px;'>AI CSAT</div><div class='legend-row' style='justify-content:center;'><div class='legend-item'><span class='swatch' style='background:var(--s1);border-radius:50%;'></span><span class='lname'>CSAT</span></div><div class='legend-item'><span class='swatch' style='background:var(--s2);'></span><span class='lname'>Total Responses</span></div></div><svg id='chart-3' viewBox='0 0 1120 420' width='100%' height='420' role='img'></svg></div><script>
 (function(){
   var svg = document.getElementById('chart-3');
-  var opts = { vals:[2654.0,2590.0,4815.0,1747.0,2502.0,3377.0,2779.0,2434.0], sc:[3.59,3.81,3.5,3.56,3.63,3.71,3.69,3.37], labels:["Dec","Jan 26","Feb '26","Mar '26","Apr '26","May '26","Jun '26","Jul '26"], years:["2025","2026","2026","2026","2026","2026","2026","2026"], scoreMax:5,
+  var opts = { vals:[2654.0,2590.0,4815.0,1747.0,2502.0,3377.0,2779.0,2443.0], sc:[3.59,3.81,3.5,3.56,3.63,3.71,3.69,3.37], labels:["Dec","Jan 26","Feb '26","Mar '26","Apr '26","May '26","Jun '26","Jul '26"], years:["2025","2026","2026","2026","2026","2026","2026","2026"], scoreMax:5,
     W:1120, H:420, padL:55, padR:55, padT:40, padB:55};
   window.registerYearChart(function(){ window.renderScoreChart(svg, opts); });
 })();
@@ -2031,7 +2031,7 @@ document.addEventListener('click', function(ev){
 })();
 </script>
 
-  <footer><p><strong>Methodology:</strong> Aggregated from the raw "Hyphen" tab. Rows flagged "Duplicate" are excluded from per-class drill-downs (Overview shows both). Percentages use the sheet's own "Total Sales M" / "Partner Allocation" figures.</p><p>Auto-refreshed daily at 2 PM IST. Last updated 24 Jul 2026, 14:18 IST. No customer PII (name, phone, email, etc.) is ever stored or exposed &mdash; the tables/charts above are aggregated segment counts, and the optional "Download Raw Data" export on each tab is limited to non-PII ticket fields (dates, category, product/SKU/batch, partner, month/week, sales figure, unique flag).</p></footer>
+  <footer><p><strong>Methodology:</strong> Aggregated from the raw "Hyphen" tab. Rows flagged "Duplicate" are excluded from per-class drill-downs (Overview shows both). Percentages use the sheet's own "Total Sales M" / "Partner Allocation" figures.</p><p>Auto-refreshed daily at 2 PM IST. Last updated 24 Jul 2026, 15:25 IST. No customer PII (name, phone, email, etc.) is ever stored or exposed &mdash; the tables/charts above are aggregated segment counts, and the optional "Download Raw Data" export on each tab is limited to non-PII ticket fields (dates, category, product/SKU/batch, partner, month/week, sales figure, unique flag).</p></footer>
 </div>
 <script>document.querySelectorAll('.tab-btn').forEach(function(b){b.addEventListener('click',function(){document.querySelectorAll('.tab-btn').forEach(function(x){x.classList.remove('active');});document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.remove('active');});b.classList.add('active');document.getElementById('panel-'+b.dataset.tab).classList.add('active');var t=document.getElementById('active-tab-title'); if(t)t.textContent=b.textContent;});});if(window.top!==window.self){var tn=document.querySelector('.tab-nav'); if(tn)tn.style.display='none';}</script>
 <script>
