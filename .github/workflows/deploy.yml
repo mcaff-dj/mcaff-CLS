@@ -1,0 +1,74 @@
+name: Deploy
+
+# Fires on every push to main that touches anything actually deployed - the app
+# code, its dependencies, or the static pages. Deliberately does NOT fire on
+# changes to data/*.json (refresh.yml's own cache bookkeeping) or the generated
+# report HTML (those go straight to S3 from refresh.yml, not through this
+# workflow) - so the daily automated data refresh doesn't cause a pointless
+# same-code redeploy every day, while any real code change - from anyone -
+# deploys within about a minute of landing on main, with no manual step.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'index.html'
+      - 'admin.html'
+      - 'login.html'
+      - 'dashboard.html'
+      - 'rto-crm.html'
+      - '.github/workflows/deploy.yml'
+
+permissions:
+  id-token: write   # lets this workflow request an OIDC token to assume the AWS role below - no stored AWS keys anywhere
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install production dependencies
+        run: npm ci --omit=dev
+
+      - name: Package the Lambda function
+        run: |
+          mkdir -p build/api
+          cp -r api/. build/api/
+          rm -rf build/api/_reports
+          cp -r node_modules build/node_modules
+          cp package.json build/package.json
+          cd build && zip -r ../lambda.zip . -x "*.git*" && cd ..
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::157320387454:role/github-actions-mcaff-cls-deploy
+          aws-region: ap-south-1
+
+      - name: Update Lambda function code
+        run: aws lambda update-function-code --function-name mcaff-cls-api --zip-file fileb://lambda.zip
+
+      - name: Sync static pages to S3
+        run: |
+          aws s3 cp index.html s3://mcaff-cls-static/index.html --content-type "text/html; charset=utf-8"
+          aws s3 cp admin.html s3://mcaff-cls-static/admin.html --content-type "text/html; charset=utf-8"
+          aws s3 cp login.html s3://mcaff-cls-static/login.html --content-type "text/html; charset=utf-8"
+          aws s3 cp dashboard.html s3://mcaff-cls-static/dashboard.html --content-type "text/html; charset=utf-8"
+          aws s3 cp rto-crm.html s3://mcaff-cls-static/rto-crm.html --content-type "text/html; charset=utf-8"
+
+      - name: Invalidate CloudFront cache
+        run: aws cloudfront create-invalidation --distribution-id EITNFFB9X4HAZ --paths "/*"
