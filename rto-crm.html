@@ -1411,6 +1411,36 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       useEffect(()=>{sync(true);},[]);
       useEffect(()=>{const t=setInterval(()=>sync(true),60000);return()=>clearInterval(t);},[sync]);
 
+      // Detects when a newer deployment of this page has shipped while this tab has been
+      // sitting open. rto-crm.html is a static file with no build step / hot-reload - once
+      // loaded, a long-lived tab keeps running that exact JS forever with zero indication a
+      // new version exists, which is exactly how some agents' browsers kept running old JS
+      // that predated a feature (e.g. Postgres disposition syncing) while others, who'd
+      // reloaded more recently, silently got it. Polls the file's own ETag/Last-Modified via
+      // a no-store HEAD request rather than requiring a manually-bumped version constant, so
+      // this stays accurate with zero upkeep on every future edit to this file.
+      const [updateAvailable, setUpdateAvailable] = useState(false);
+      const deployedVersionRef = useRef(null);
+      useEffect(() => {
+        const checkVersion = async () => {
+          try {
+            const res = await fetch(window.location.pathname, { method: 'HEAD', cache: 'no-store' });
+            const v = res.headers.get('etag') || res.headers.get('last-modified');
+            if (!v) return;
+            if (deployedVersionRef.current === null) {
+              deployedVersionRef.current = v;
+            } else if (v !== deployedVersionRef.current) {
+              setUpdateAvailable(true);
+            }
+          } catch (e) {
+            // Network hiccup - just skip this round, next interval tries again.
+          }
+        };
+        checkVersion();
+        const t = setInterval(checkVersion, 3 * 60 * 1000);
+        return () => clearInterval(t);
+      }, []);
+
       // Dynamic Roster that automatically includes EVERY unique agent found in Google Sheet tickets or overrides
       const effectiveAgentRoster = useMemo(() => {
         const rosterMap = new Map();
@@ -1896,6 +1926,25 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
           {/* ═══ TOAST ═══ */}
           {toast&&<div className="fixed top-16 right-5 z-50 animate-slideUp"><div className="px-4 py-2.5 rounded-xl bg-zinc-800/90 text-zinc-100 border border-zinc-700 text-[13px] shadow-2xl flex items-center gap-2.5 backdrop-blur-md"><CheckIcon className="text-emerald-400 shrink-0"/>{toast}</div></div>}
+
+          {/* ═══ NEW VERSION BANNER — this tab is running stale JS, a newer deploy exists ═══ */}
+          {updateAvailable && (
+            <div className="sticky top-13 z-40 bg-amber-950/95 backdrop-blur-xl border-b border-amber-800/60">
+              <div className="max-w-[1440px] mx-auto px-5 py-2 flex items-center justify-between gap-3">
+                <span className="text-[13px] text-amber-200 font-medium flex items-center gap-2">
+                  <RefreshIcon className="text-amber-400 shrink-0" />
+                  A newer version of this app is available. Refresh to make sure your leads sync correctly.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  className="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-amber-950 text-[12px] font-bold transition-colors shadow-xs shrink-0"
+                >
+                  Refresh Now
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* ═══ MAIN WORKSPACE ═══ */}
           <main className="flex-1 max-w-[1440px] w-full mx-auto px-5 py-5 space-y-5">
