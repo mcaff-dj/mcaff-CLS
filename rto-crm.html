@@ -901,7 +901,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       }, [agentStatus, googleUser]);
 
       // Data
-      const [tickets, setTickets] = useState(()=>{try{const s=localStorage.getItem('rto_cache_v4');if(s){const p=JSON.parse(s);if(Array.isArray(p)&&p.length)return p.map(t=>({...t,rowDate:t.rowDate?new Date(t.rowDate):null}));}}catch{}return[];});
+      const [tickets, setTickets] = useState(()=>{try{const s=localStorage.getItem('rto_cache_v4');if(s){const p=JSON.parse(s);if(Array.isArray(p)&&p.length)return p.map(t=>({...t,rowDate:t.rowDate?new Date(t.rowDate):null,rtoInitiatedDate:t.rtoInitiatedDate?new Date(t.rtoInitiatedDate):null}));}}catch{}return[];});
       const [overrides, setOverrides] = useState(()=>{try{return JSON.parse(localStorage.getItem('rto_ticket_overrides')||'{}');}catch{return{};}});
       const [stats, setStats] = useState(()=>{try{return JSON.parse(localStorage.getItem('rto_agent_stats')||'{}');}catch{return{};}});
       const [isSyncing, setIsSyncing] = useState(false);
