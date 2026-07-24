@@ -37,9 +37,9 @@ import psycopg
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib
 from lead_priority import (
-    COL_AGENT, COL_ATTEMPT, COL_CALLING_DATE, COL_CONNECTED, COL_DISPOSITION,
-    COL_ORDER_ID, COL_PAYMENT_METHOD, COL_REMARKS, COL_RTO_REASON,
-    DEFAULT_QUOTA, build_assignment_queue, cell, parse_calling_date, priority_tier,
+    COL_AGENT, COL_ATTEMPT, COL_AWB_CODE, COL_CONNECTED, COL_DISPOSITION,
+    COL_ORDER_ID, COL_PAYMENT_METHOD, COL_REMARKS, COL_RTO_INITIATED_DATE, COL_RTO_REASON,
+    DEFAULT_QUOTA, build_assignment_queue, cell, parse_rto_initiated_date, priority_tier,
 )
 
 SPREADSHEET_ID = "1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI"
@@ -70,28 +70,41 @@ def fetch_online_agents():
             return [row[0].lower() for row in cur.fetchall()]
 
 
-def record_lead_assignments(assignments, unassigned_pending):
+def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row):
     """Stamps assigned_at=now() for every lead just assigned, keyed by the sheet's
     own Order ID, so rto-crm.html's resetStalePendingLeads() can tell a
     fresh assignment apart from a genuinely stale one (the lead's own Calling
     Date can't do this - the backlog this script distributes is old by
     definition). Best-effort: if POSTGRES_URL isn't configured, silently
     skips (fetch_online_agents() would already have returned [] in that case,
-    so in practice this only runs when the DB is reachable anyway)."""
+    so in practice this only runs when the DB is reachable anyway).
+
+    Also stamps awb_code (unique per lead_assignments row - see the UNIQUE
+    index in api/_lib/db.js's ensureSchema) so downstream reporting
+    (scripts/sync_lead_assignments_to_mysql.py) can key on it. Uses COALESCE
+    on conflict rather than blindly overwriting, so a re-run never clobbers an
+    awb_code already recorded by the disposal write path (api/_lib/db.js's
+    recordLeadDisposition) with a blank value."""
     conn_str = os.environ.get("POSTGRES_URL")
     if not conn_str or not assignments:
         return
-    order_id_by_row = {row_index: order_id for row_index, _calling_date, order_id, _tier in unassigned_pending}
-    rows = [(order_id_by_row[row_index], email) for row_index, email in assignments.items() if row_index in order_id_by_row]
+    order_id_by_row = {row_index: order_id for row_index, _rto_initiated_date, order_id, _tier in unassigned_pending}
+    rows = [
+        (order_id_by_row[row_index], email, awb_code_by_row.get(row_index) or None)
+        for row_index, email in assignments.items() if row_index in order_id_by_row
+    ]
     if not rows:
         return
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
             cur.executemany(
                 """
-                INSERT INTO lead_assignments (order_id, email, assigned_at)
-                VALUES (%s, %s, now())
-                ON CONFLICT (order_id) DO UPDATE SET email = EXCLUDED.email, assigned_at = now()
+                INSERT INTO lead_assignments (order_id, email, assigned_at, awb_code)
+                VALUES (%s, %s, now(), %s)
+                ON CONFLICT (order_id) DO UPDATE SET
+                    email = EXCLUDED.email,
+                    assigned_at = now(),
+                    awb_code = COALESCE(EXCLUDED.awb_code, lead_assignments.awb_code)
                 """,
                 rows,
             )
@@ -119,7 +132,8 @@ def main():
     # counted here is NEVER unassigned or reassigned by this script, no matter how high the
     # count goes. Only genuinely blank/Unassigned Column Q values are ever written to.
     current_load = {email: 0 for email in online_agents}
-    unassigned_pending = []  # (row_index, calling_date, order_id, tier)
+    unassigned_pending = []  # (row_index, rto_initiated_date, order_id, tier)
+    awb_code_by_row = {}
     tier_counts = {0: 0, 1: 0, 2: 0, 3: 0}
 
     for i, row in enumerate(rows):
@@ -136,11 +150,12 @@ def main():
 
         agent_raw = cell(row, COL_AGENT).lower()
         is_unassigned = (not agent_raw) or agent_raw == "unassigned"
-        calling_date = parse_calling_date(cell(row, COL_CALLING_DATE))
+        rto_initiated_date = parse_rto_initiated_date(cell(row, COL_RTO_INITIATED_DATE))
         tier = priority_tier(cell(row, COL_PAYMENT_METHOD), cell(row, COL_RTO_REASON))
 
         if is_unassigned:
-            unassigned_pending.append((i, calling_date, order_id, tier))
+            unassigned_pending.append((i, rto_initiated_date, order_id, tier))
+            awb_code_by_row[i] = cell(row, COL_AWB_CODE)
             tier_counts[tier] += 1
         elif agent_raw in current_load:
             current_load[agent_raw] += 1
@@ -165,7 +180,7 @@ def main():
     ]
     print(f"Writing {len(value_ranges)} Column Q assignment(s)...")
     lib.set_sheet_values_batch(SPREADSHEET_ID, value_ranges)
-    record_lead_assignments(assignments, unassigned_pending)
+    record_lead_assignments(assignments, unassigned_pending, awb_code_by_row)
 
     per_agent = {}
     for email in assignments.values():

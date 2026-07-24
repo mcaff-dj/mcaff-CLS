@@ -285,7 +285,8 @@ async function handleRecordDisposition(req, res) {
     return;
   }
   try {
-    await recordLeadDisposition(orderId, session.email, {
+    const awbCode = (body.awbCode || '').toString().trim() || null;
+    await recordLeadDisposition(orderId, session.email, awbCode, {
       disposition: body.disposition,
       agentRemarks: body.agentRemarks,
       connected: body.connected,

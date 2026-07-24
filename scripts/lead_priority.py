@@ -10,9 +10,13 @@ list, column indices) were duplicated by hand between assign_leads.py
 
 # 0-based column indices in the 'Data' tab, matching rto-crm.html's
 # mapTkt/writeToSheetRow exactly.
+COL_RTO_INITIATED_DATE = 1  # B - "DD-MM-YYYY HH:MM", e.g. "19-07-2026 07:40" - the
+                          # assignment-queue sort key (NOT Calling Date - see
+                          # parse_rto_initiated_date)
 COL_RTO_REASON = 3        # D - the ORIGINAL system/courier RTO reason (not the agent's own
                           # disposition in COL_DISPOSITION below)
 COL_ORDER_ID = 4          # E
+COL_AWB_CODE = 6          # G
 COL_PAYMENT_METHOD = 14   # O
 COL_AGENT = 16            # Q
 COL_CONNECTED = 17        # R
@@ -56,6 +60,22 @@ def parse_calling_date(s):
         return None
 
 
+def parse_rto_initiated_date(s):
+    """Parse the sheet's "RTO Initiated Date" column (format "DD-MM-YYYY HH:MM",
+    e.g. "19-07-2026 07:40"; a bare "DD-MM-YYYY" is also accepted) into a sortable
+    value. Returns None if unparseable/blank - those tickets sort last (oldest) so
+    a bad date never jumps the queue."""
+    if not s:
+        return None
+    from datetime import datetime
+    for fmt in ("%d-%m-%Y %H:%M", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(s.strip(), fmt)
+        except ValueError:
+            continue
+    return None
+
+
 # Assignment priority, highest first:
 #   0. Prepaid orders - payment method wins outright, regardless of RTO reason.
 #   1. COD orders whose original RTO reason matches one of these (case-insensitive
@@ -64,7 +84,8 @@ def parse_calling_date(s):
 #   2. Every other COD order.
 #   3. COD orders matching LOW_PRIORITY_COD_RTO_REASONS - pushed to the back of the
 #      queue on purpose (see that list's docstring).
-# Within each tier, newest calling date first.
+# Within each tier, newest RTO Initiated Date first (see parse_rto_initiated_date -
+# NOT Calling Date, which is when the agent called, not when the RTO itself started).
 HIGH_PRIORITY_COD_RTO_REASONS = [
     "consignee opened the package and refused to accept",
     "consignee refused to accept",
@@ -121,8 +142,8 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     just display it (rto_crm_app's Next to Assign preview); both call this same
     function so the preview can never drift from what the real writer would do.
 
-    unassigned_pending: list of (row_index, calling_date, order_id, tier) tuples,
-    NOT yet sorted - this function sorts them (tier asc, calling_date desc;
+    unassigned_pending: list of (row_index, rto_initiated_date, order_id, tier) tuples,
+    NOT yet sorted - this function sorts them (tier asc, rto_initiated_date desc;
     undated leads sort last within their tier).
     online_agents: list of agent emails eligible to receive leads this round.
     current_load: {email: int} - pending leads that agent already holds; only
@@ -132,7 +153,16 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     """
     from datetime import datetime
 
-    sorted_pool = sorted(unassigned_pending, key=lambda t: (t[3], -(t[1] or datetime.min).toordinal()))
+    # Seconds since epoch via timedelta subtraction (not .timestamp() - that calls into
+    # the platform's C time functions and raises on Windows for extreme/pre-epoch values,
+    # which datetime.min triggers). RTO Initiated Date carries a time-of-day component
+    # (unlike the old day-only Calling Date), so this needs to preserve it, not just the day.
+    EPOCH = datetime(1970, 1, 1)
+
+    def _date_seconds(dt):
+        return (dt - EPOCH).total_seconds() if dt else 0.0
+
+    sorted_pool = sorted(unassigned_pending, key=lambda t: (t[3], -_date_seconds(t[1])))
 
     needed = {email: max(0, quota - current_load.get(email, 0)) for email in online_agents}
     assignments = {}

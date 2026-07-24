@@ -528,6 +528,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const remarks = r['c20'] || r['c25'] || r['c29'] || '';
       const newOrderId = r['c21'] || '';
       const newAddress = r['c23'] || '';
+      const awbCode = r['c6'] || ''; // AWB Code (col G) - see scripts/lead_priority.py's COL_AWB_CODE
 
       const isRefunded = disp.toLowerCase().includes('refund') || attempt.toLowerCase().includes('refund');
       const isDisposed = !!(conn || attempt || disp || remarks || newOrderId || newAddress);
@@ -544,7 +545,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         rowDate:parseDate(cd)||parseDate(g('Date','Order Date','c0')),
         rtoInitiatedDate:parseRtoInitiatedDate(rid),rawIndex:i,
         attemptType:attempt,connected:conn,disposition:disp,agentRemarks:remarks,
-        newOrderId:newOrderId,newAddress:newAddress,
+        newOrderId:newOrderId,newAddress:newAddress,awbCode:awbCode,
         status:isRefunded?'Refunded':isDisposed?'Disposed':'Pending'};
     }
 
@@ -813,65 +814,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         showToast(`Status set to ${newStatus} for ${email}`);
       };
 
-      const unassignMyPendingLeads = async () => {
-        if (!googleUser?.email) return;
-        const myEmail = googleUser.email.toLowerCase();
-
-        // Find all pending undisposed tickets currently assigned to this agent
-        const pendingToRelease = (allTickets || []).filter(t => {
-          if (!t.orderNumber) return false;
-          if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
-          const currAgt = (overrides[t.id]?.assignedAgent || t.assignedAgent || '').trim().toLowerCase();
-          return currAgt.includes(myEmail) || myEmail.includes(currAgt);
-        });
-
-        if (pendingToRelease.length === 0) return;
-
-        const newOverrides = {};
-        pendingToRelease.forEach(t => {
-          newOverrides[t.id] = {
-            ...(overrides[t.id] || {}),
-            assignedAgent: 'Unassigned',
-            assignedEmail: ''
-          };
-        });
-
-        setOverrides(prev => {
-          const updated = { ...prev, ...newOverrides };
-          try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(updated)); } catch {}
-          return updated;
-        });
-
-        try {
-          const token = await getAccessToken();
-          const sid = extractSheetId(DEFAULT_SHEET_URL);
-          if (!sid) return;
-
-          const rowMap = await fetchLiveOrderRowMap(sid, token);
-          const valueRanges = [];
-          pendingToRelease.forEach(t => {
-            const key = (t.orderNumber || '').toString().trim().toUpperCase();
-            const rowNumber = rowMap ? rowMap.get(key) : (t.rawIndex + 2);
-            if (rowNumber) {
-              valueRanges.push({ range: `Data!Q${rowNumber}`, values: [['']] });
-            }
-          });
-
-          if (valueRanges.length > 0) {
-            const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
-              method: 'POST',
-              headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
-            });
-            if (res.ok) {
-              showToast(`🧹 Released ${valueRanges.length} pending lead(s) back to pool (Status: Offline)`);
-            }
-          }
-        } catch (err) {
-          console.error('Error clearing Column Q on going Offline:', err);
-        }
-      };
-
       // Reports an agent's status to the server (Postgres-backed agent_presence -
       // see api/auth/[action].js's presence handler) - this is what
       // scripts/assign_leads.py reads to decide who's eligible for new leads.
@@ -916,10 +858,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           try { localStorage.setItem('rto_agent_roster', JSON.stringify(u)); } catch {}
           return u;
         });
-
-        if (s === 'Offline') {
-          unassignMyPendingLeads();
-        }
 
         try {
           const channel = new BroadcastChannel('rto_crm_sync_channel');
@@ -1187,6 +1125,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         // regardless, so a DB-side failure here is surfaced, not blocking.
         const dbSynced = await postJsonWithRetry('/api/auth/recordDisposition', {
           orderId: dispTkt.orderNumber,
+          awbCode: dispTkt.awbCode,
           disposition: dispReason,
           agentRemarks: (isAlreadyRef ? '[Already Refunded] ' : '') + agentRemarks.trim(),
           connected: dispConn==='YES'?'Yes':'No',

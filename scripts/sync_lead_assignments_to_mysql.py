@@ -31,18 +31,18 @@ RETENTION_DAYS = 30
 
 COLUMNS = [
     "order_id", "email", "assigned_at", "disposed_at",
-    "disposition", "agent_remarks", "connected", "attempt", "refund_amount",
+    "disposition", "agent_remarks", "connected", "attempt", "refund_amount", "awb_code",
 ]
 
 FETCH_YESTERDAY_SQL = """
-SELECT order_id, email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount
+SELECT order_id, email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount, awb_code
 FROM lead_assignments
 WHERE (disposed_at AT TIME ZONE 'Asia/Kolkata')::date
       = ((now() AT TIME ZONE 'Asia/Kolkata')::date - interval '1 day')
 """
 
 FETCH_AGED_SQL = f"""
-SELECT order_id, email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount
+SELECT order_id, email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount, awb_code
 FROM lead_assignments
 WHERE disposed_at IS NOT NULL
       AND disposed_at < now() - interval '{RETENTION_DAYS} days'
@@ -79,6 +79,15 @@ def upsert_rows(rows):
     )
     try:
         cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema = %s AND table_name = %s AND column_name = 'awb_code'",
+            (SCHEMA, TABLE),
+        )
+        if cur.fetchone()[0] == 0:
+            cur.execute(f"ALTER TABLE `{TABLE}` ADD COLUMN `awb_code` VARCHAR(255) NULL")
+            conn.commit()
+
         col_names = ", ".join(f"`{c}`" for c in COLUMNS)
         placeholders = ", ".join(["%s"] * len(COLUMNS))
         update_clause = ", ".join(f"`{c}` = VALUES(`{c}`)" for c in COLUMNS if c != "order_id")

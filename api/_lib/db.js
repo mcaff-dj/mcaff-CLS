@@ -111,6 +111,14 @@ async function ensureSchema() {
   await sql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS connected TEXT`;
   await sql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS attempt TEXT`;
   await sql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS refund_amount NUMERIC`;
+  // AWB Code (sheet column G) - unique per lead (see scripts/lead_priority.py's
+  // COL_AWB_CODE), written by both assign_leads.py's assignment INSERT and
+  // recordLeadDisposition below, so it's present regardless of which path first
+  // creates the row. A unique index (not a plain UNIQUE constraint, so this stays
+  // idempotent via IF NOT EXISTS) - Postgres already treats multiple NULLs as
+  // distinct, so leads created before this column existed don't block real ones.
+  await sql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS awb_code TEXT`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS lead_assignments_awb_code_key ON lead_assignments (awb_code)`;
   schemaReady = true;
 }
 
@@ -245,19 +253,24 @@ async function getRecentLeadAssignments(sinceHours) {
 // straight in the sheet), the INSERT branch creates the row now with the disposing
 // agent's own email as assigned_at's best-available attribution, rather than dropping
 // the disposal details on the floor.
-async function recordLeadDisposition(orderId, email, details) {
+//
+// awbCode uses COALESCE on conflict rather than overwriting, so a disposal call
+// without it (e.g. an older cached client) never clobbers the awb_code
+// assign_leads.py already stamped for this order_id.
+async function recordLeadDisposition(orderId, email, awbCode, details) {
   await ensureSchema();
   const { disposition, agentRemarks, connected, attempt, refundAmount } = details || {};
   await sql`
-    INSERT INTO lead_assignments (order_id, email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount)
-    VALUES (${orderId}, ${email}, now(), now(), ${disposition || null}, ${agentRemarks || null}, ${connected || null}, ${attempt || null}, ${refundAmount || null})
+    INSERT INTO lead_assignments (order_id, email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount, awb_code)
+    VALUES (${orderId}, ${email}, now(), now(), ${disposition || null}, ${agentRemarks || null}, ${connected || null}, ${attempt || null}, ${refundAmount || null}, ${awbCode || null})
     ON CONFLICT (order_id) DO UPDATE SET
       disposed_at = now(),
       disposition = EXCLUDED.disposition,
       agent_remarks = EXCLUDED.agent_remarks,
       connected = EXCLUDED.connected,
       attempt = EXCLUDED.attempt,
-      refund_amount = EXCLUDED.refund_amount
+      refund_amount = EXCLUDED.refund_amount,
+      awb_code = COALESCE(EXCLUDED.awb_code, lead_assignments.awb_code)
   `;
 }
 
