@@ -62,6 +62,8 @@ def parse_calling_date(s):
 #      substring) - the consignee has already refused/OTP-verified the cancellation, so
 #      the outcome is effectively known and worth acting on quickly.
 #   2. Every other COD order.
+#   3. COD orders matching LOW_PRIORITY_COD_RTO_REASONS - pushed to the back of the
+#      queue on purpose (see that list's docstring).
 # Within each tier, newest calling date first.
 HIGH_PRIORITY_COD_RTO_REASONS = [
     "consignee opened the package and refused to accept",
@@ -71,11 +73,16 @@ HIGH_PRIORITY_COD_RTO_REASONS = [
     "elasticrun_otp_verified",
     "entry refused",
     "kyc|customer refused to share kyc/ ndc/ scd",
-    "otp validation successful",
-    "otp verified cancellation",
     "prf|receiver refused delivery(cir)",
     "refused to accept",
     "refused to accept (no cancellation code)",
+]
+
+# Deliberately lowest priority (tier 3, behind even "every other COD order") -
+# these OTP outcomes are handled last in the assignment queue.
+LOW_PRIORITY_COD_RTO_REASONS = [
+    "otp validation successful",
+    "otp verified cancellation",
     "refused to accept (with cancellation code)",
     "rto pending - otp validated cancellation",
 ]
@@ -95,10 +102,13 @@ def is_prepaid(payment_raw):
 
 def priority_tier(payment_raw, rto_reason_raw):
     """0 = Prepaid (always highest, irrespective of reason), 1 = COD matching one of the
-    high-priority reasons, 2 = every other COD lead. Lower sorts first."""
+    high-priority reasons, 2 = every other COD lead, 3 = COD matching one of the
+    low-priority reasons (lowest). Lower sorts first."""
     if is_prepaid(payment_raw):
         return 0
     reason = (rto_reason_raw or "").lower()
+    if any(r in reason for r in LOW_PRIORITY_COD_RTO_REASONS):
+        return 3
     if any(r in reason for r in HIGH_PRIORITY_COD_RTO_REASONS):
         return 1
     return 2

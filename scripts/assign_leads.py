@@ -120,7 +120,7 @@ def main():
     # count goes. Only genuinely blank/Unassigned Column Q values are ever written to.
     current_load = {email: 0 for email in online_agents}
     unassigned_pending = []  # (row_index, calling_date, order_id, tier)
-    tier_counts = {0: 0, 1: 0, 2: 0}
+    tier_counts = {0: 0, 1: 0, 2: 0, 3: 0}
 
     for i, row in enumerate(rows):
         order_id = cell(row, COL_ORDER_ID)
@@ -147,7 +147,7 @@ def main():
         # else: pending lead already held by someone (eligible or not) - left alone either
         # way. Column Q having any value at all is enough to exempt a lead permanently.
 
-    print(f"  unassigned pool by priority: Prepaid={tier_counts[0]}, COD+high-priority reason={tier_counts[1]}, other COD={tier_counts[2]}")
+    print(f"  unassigned pool by priority: Prepaid={tier_counts[0]}, COD+high-priority reason={tier_counts[1]}, other COD={tier_counts[2]}, COD+low-priority reason={tier_counts[3]}")
 
     if not unassigned_pending:
         print("No unassigned pending leads found - nothing to assign.")

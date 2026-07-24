@@ -169,17 +169,21 @@
       'refused to accept (with cancellation code)','rto pending - otp validated cancellation'
     ];
 
-    // Assignment priority - mirrors scripts/assign_leads.py's priority_tier() exactly, for the
+    // Assignment priority - mirrors scripts/lead_priority.py's priority_tier() exactly, for the
     // Admin "Next to Assign" preview below. Kept in sync manually, not shared code: this is a
     // read-only JS prediction of what that server-side script would do, not the actual writer.
     //   0 = Prepaid (wins outright, regardless of RTO reason)
     //   1 = COD whose RTO reason matches one of these (case-insensitive substring)
     //   2 = every other COD lead
+    //   3 = COD matching LOW_PRIORITY_COD_RTO_REASONS - deliberately last
     const HIGH_PRIORITY_COD_RTO_REASONS = [
       'consignee opened the package and refused to accept','consignee refused to accept','customer refused to accept',
       'customer refused to accept:verified','elasticrun_otp_verified','entry refused',
-      'kyc|customer refused to share kyc/ ndc/ scd','otp validation successful','otp verified cancellation',
-      'prf|receiver refused delivery(cir)','refused to accept','refused to accept (no cancellation code)',
+      'kyc|customer refused to share kyc/ ndc/ scd','prf|receiver refused delivery(cir)',
+      'refused to accept','refused to accept (no cancellation code)'
+    ];
+    const LOW_PRIORITY_COD_RTO_REASONS = [
+      'otp validation successful','otp verified cancellation',
       'refused to accept (with cancellation code)','rto pending - otp validated cancellation'
     ];
     const ASSIGNMENT_QUOTA = 10; // must match scripts/assign_leads.py's DEFAULT_QUOTA
@@ -187,6 +191,7 @@
     function getPriorityTier(t) {
       if (t.paymentMethod === 'Prepaid') return 0;
       const reason = (t.rtoReason || '').toLowerCase();
+      if (LOW_PRIORITY_COD_RTO_REASONS.some(r => reason.includes(r))) return 3;
       if (HIGH_PRIORITY_COD_RTO_REASONS.some(r => reason.includes(r))) return 1;
       return 2;
     }
