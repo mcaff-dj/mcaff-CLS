@@ -1,79 +1,89 @@
-// Postgres access + schema bootstrap. @vercel/postgres's `sql` specifically reads
-// process.env.POSTGRES_URL - but Vercel storage integrations name their connection
-// string var all sorts of things (sometimes with a custom prefix, e.g. this project's
-// Neon integration uses "auth_POSTGRES_URL" etc.), so search broadly for it rather
-// than requiring an exact name.
-if (!process.env.POSTGRES_URL) {
-  const candidateNames = Object.keys(process.env).filter((k) =>
-    /(^|_)(POSTGRES_URL|DATABASE_URL)$/.test(k) && !/_UNPOOLING|NON_POOLING|UNPOOLED|NO_SSL|PRISMA/.test(k)
-  );
-  // Prefer an exact/prefixed POSTGRES_URL or DATABASE_URL match; fall back to
-  // anything else that looks like a connection string var if none found.
-  const preferred = candidateNames.find((k) => k.endsWith('POSTGRES_URL')) || candidateNames.find((k) => k.endsWith('DATABASE_URL'));
-  if (preferred) {
-    process.env.POSTGRES_URL = process.env[preferred];
-  }
+// MySQL access + schema bootstrap, against the app's own schema (PEP_CLS) on the
+// existing mcaff-dwh RDS instance - separate from the mcaff_dwh schema the report
+// scripts read (see scripts/mysql_lib.py). Connection details come from env vars
+// (DB_HOST/DB_USER/DB_PASSWORD/DB_NAME/DB_PORT), backed by AWS Secrets Manager in
+// production - named distinctly from the Python pipeline's MYSQL_* vars since
+// they're different credentials for a different schema.
+const mysql = require('mysql2/promise');
+
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME || 'PEP_CLS',
+  port: Number(process.env.DB_PORT) || 3306,
+  ssl: { rejectUnauthorized: false }, // RDS requires TLS; harden to the RDS CA bundle later if needed
+  connectionLimit: 5,
+  namedPlaceholders: false,
+});
+
+// Postgres's `sql` tagged-template call sites (admin/*.js) are kept working as-is by
+// giving MySQL the same calling convention: sql`... ${value} ...` -> a parameterized
+// query, resolved to { rows, insertId, affectedRows }. `rows` is only ever populated
+// for SELECTs - mysql2 returns a ResultSetHeader (not an array) for INSERT/UPDATE/DELETE,
+// which is where insertId/affectedRows come from instead of Postgres's RETURNING.
+async function sql(strings, ...values) {
+  let text = '';
+  strings.forEach((s, i) => {
+    text += s;
+    if (i < values.length) text += '?';
+  });
+  const [result] = await pool.execute(text, values);
+  const rows = Array.isArray(result) ? result : [];
+  return { rows, insertId: result.insertId, affectedRows: result.affectedRows };
 }
-const { sql } = require('@vercel/postgres');
 
 let schemaReady = false;
 
 // Idempotent - safe to call on every cold start. Only runs the DDL once per warm instance.
+// This is a fresh schema (PEP_CLS), so unlike the Postgres version, there's no historical
+// ALTER/rename migrations to carry forward - just the final desired shape.
 async function ensureSchema() {
   if (schemaReady) return;
   await sql`
     CREATE TABLE IF NOT EXISTS users (
-      id SERIAL PRIMARY KEY,
-      email TEXT UNIQUE NOT NULL,
-      name TEXT,
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      email VARCHAR(320) UNIQUE NOT NULL,
+      name VARCHAR(255),
       is_admin BOOLEAN NOT NULL DEFAULT FALSE,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `;
   await sql`
     CREATE TABLE IF NOT EXISTS permissions (
-      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      card_key TEXT NOT NULL,
-      granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      PRIMARY KEY (user_id, card_key)
+      user_id INT NOT NULL,
+      card_key VARCHAR(64) NOT NULL,
+      granted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, card_key),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `;
   await sql`
     CREATE TABLE IF NOT EXISTS audit_log (
-      id SERIAL PRIMARY KEY,
-      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-      email TEXT NOT NULL,
-      card_key TEXT NOT NULL,
-      accessed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      ip TEXT
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT,
+      email VARCHAR(320) NOT NULL,
+      card_key VARCHAR(64),
+      action VARCHAR(32) NOT NULL DEFAULT 'view',
+      detail TEXT,
+      accessed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      ip VARCHAR(64),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
     )
   `;
-  // card_key was NOT NULL - login events aren't tied to a report, so it needs to allow
-  // NULL. action/detail distinguish what actually happened (view / login / csv_export /
-  // raw_download) since previously every row was implicitly a "view". Both ALTERs are
-  // idempotent - safe to run on every cold start alongside the CREATE TABLE above.
-  await sql`ALTER TABLE audit_log ALTER COLUMN card_key DROP NOT NULL`;
-  await sql`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'view'`;
-  await sql`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS detail TEXT`;
   // Sub-permission within an already-granted card (e.g. "just the CSAT tab under
   // Hyphen"), UI-level only - see api/_lib/tabs.js. No rows for a (user, card) pair
-  // means "no restriction, full access to every tab", so existing grants are
-  // unaffected by this table's existence.
+  // means "no restriction, full access to every tab".
   await sql`
     CREATE TABLE IF NOT EXISTS report_tab_permissions (
-      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      card_key TEXT NOT NULL,
-      tab_key TEXT NOT NULL,
-      granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      PRIMARY KEY (user_id, card_key, tab_key)
+      user_id INT NOT NULL,
+      card_key VARCHAR(64) NOT NULL,
+      tab_key VARCHAR(64) NOT NULL,
+      granted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, card_key, tab_key),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `;
-  // The npsdeepdive card was renamed to deepdive (gained a CSAT/Agent tab split) -
-  // carry forward any rows granted under the old key so no one silently loses
-  // access. Safe to run on every cold start: a no-op once the old key is gone.
-  await sql`UPDATE permissions SET card_key = 'deepdive' WHERE card_key = 'npsdeepdive'`;
-  await sql`UPDATE report_tab_permissions SET card_key = 'deepdive' WHERE card_key = 'npsdeepdive'`;
-  await sql`UPDATE audit_log SET card_key = 'deepdive' WHERE card_key = 'npsdeepdive'`;
   schemaReady = true;
 }
 
@@ -94,8 +104,10 @@ async function getUserByEmail(email) {
 // (user_id set to NULL via ON DELETE SET NULL) so past access history survives.
 async function deleteUser(userId) {
   await ensureSchema();
-  const { rows } = await sql`DELETE FROM users WHERE id = ${userId} RETURNING email`;
-  return rows[0] || null;
+  const { rows } = await sql`SELECT email FROM users WHERE id = ${userId}`;
+  if (!rows[0]) return null;
+  await sql`DELETE FROM users WHERE id = ${userId}`;
+  return rows[0];
 }
 
 async function getUserPermissions(userId) {
@@ -122,7 +134,7 @@ async function setTabPermissions(userId, cardKey, tabKeys) {
   await ensureSchema();
   await sql`DELETE FROM report_tab_permissions WHERE user_id = ${userId} AND card_key = ${cardKey}`;
   for (const tabKey of tabKeys) {
-    await sql`INSERT INTO report_tab_permissions (user_id, card_key, tab_key) VALUES (${userId}, ${cardKey}, ${tabKey}) ON CONFLICT DO NOTHING`;
+    await sql`INSERT IGNORE INTO report_tab_permissions (user_id, card_key, tab_key) VALUES (${userId}, ${cardKey}, ${tabKey})`;
   }
 }
 
@@ -142,14 +154,14 @@ async function bootstrapAdminIfNeeded(email, name) {
       await sql`UPDATE users SET is_admin = TRUE WHERE id = ${existing.id}`;
     }
     for (const key of CARD_KEYS) {
-      await sql`INSERT INTO permissions (user_id, card_key) VALUES (${existing.id}, ${key}) ON CONFLICT DO NOTHING`;
+      await sql`INSERT IGNORE INTO permissions (user_id, card_key) VALUES (${existing.id}, ${key})`;
     }
     return { ...existing, is_admin: true };
   }
-  const { rows } = await sql`INSERT INTO users (email, name, is_admin) VALUES (${email}, ${name}, TRUE) RETURNING id, email, name, is_admin`;
-  const user = rows[0];
+  const { insertId } = await sql`INSERT INTO users (email, name, is_admin) VALUES (${email}, ${name}, TRUE)`;
+  const user = { id: insertId, email, name, is_admin: true };
   for (const key of CARD_KEYS) {
-    await sql`INSERT INTO permissions (user_id, card_key) VALUES (${user.id}, ${key}) ON CONFLICT DO NOTHING`;
+    await sql`INSERT IGNORE INTO permissions (user_id, card_key) VALUES (${user.id}, ${key})`;
   }
   return user;
 }

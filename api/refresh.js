@@ -9,7 +9,7 @@
 //   A GitHub fine-grained personal access token, scoped ONLY to this repo, with
 //   "Actions: Read and write" permission (no other scopes needed).
 
-const OWNER = 'Vikash-P';
+const OWNER = 'mcaff-dj';
 const REPO = 'mcaff-CLS';
 const WORKFLOW_FILE = 'refresh.yml';
 const COOLDOWN_MS = 5 * 60 * 1000; // don't allow re-dispatch within 5 min of the last manual trigger

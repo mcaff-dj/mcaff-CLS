@@ -23,7 +23,7 @@ This is a zero-build static site, so no framework or build step is needed.
 
 **Option A — Vercel dashboard (recommended)**
 1. Go to [vercel.com/new](https://vercel.com/new) and import the
-   `Vikash-P/mcaff-CLS` GitHub repo.
+   `mcaff-dj/mcaff-CLS` GitHub repo.
 2. Framework Preset: **Other**. Build Command: *(leave empty)*.
    Output Directory: *(leave as root / empty)*.
 3. Click **Deploy**. The landing page is served at `/`, and the reports at
