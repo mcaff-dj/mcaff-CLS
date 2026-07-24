@@ -1,7 +1,7 @@
 // Consolidated auth routes (login/logout/callback/me/presence) into one dynamic-route
 // file to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells
 // us which logical route was hit; URLs are unchanged.
-const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getRecentLeadAssignments } = require('../_lib/db');
+const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getRecentLeadAssignments, recordLeadDisposition } = require('../_lib/db');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
 
 const PRESENCE_STATUSES = new Set(['Online', 'Busy', 'Offline']);
@@ -261,7 +261,42 @@ async function handleRecentAssignments(req, res) {
   res.status(200).json({ assignments });
 }
 
-const HANDLERS = { login: handleLogin, logout: handleLogout, me: handleMe, callback: handleCallback, presence: handlePresence, recentAssignments: handleRecentAssignments };
+// Records the disposal side of a lead's lifecycle in Postgres (assigned_at is
+// assign_leads.py's side of the same row - see the lead_assignments comment in
+// api/_lib/db.js), called from rto-crm.html's submitDisp() alongside its existing
+// direct-to-Sheet write. Any signed-in agent may call this for their own disposition -
+// not admin-only, since every agent disposes their own leads routinely.
+async function handleRecordDisposition(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+  const session = getSession(req);
+  if (!session || !session.email) {
+    res.status(401).json({ error: 'Not signed in' });
+    return;
+  }
+  let body = req.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch { body = {}; }
+  }
+  body = body || {};
+  const orderId = (body.orderId || '').toString().trim();
+  if (!orderId) {
+    res.status(400).json({ error: 'orderId is required' });
+    return;
+  }
+  await recordLeadDisposition(orderId, session.email, {
+    disposition: body.disposition,
+    agentRemarks: body.agentRemarks,
+    connected: body.connected,
+    attempt: body.attempt,
+    refundAmount: typeof body.refundAmount === 'number' ? body.refundAmount : null,
+  });
+  res.status(200).json({ ok: true });
+}
+
+const HANDLERS = { login: handleLogin, logout: handleLogout, me: handleMe, callback: handleCallback, presence: handlePresence, recentAssignments: handleRecentAssignments, recordDisposition: handleRecordDisposition };
 
 module.exports = async (req, res) => {
   const action = req.query && req.query.action;

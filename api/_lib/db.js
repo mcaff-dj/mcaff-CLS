@@ -101,6 +101,16 @@ async function ensureSchema() {
       assigned_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `;
+  // Disposal side of the same lead lifecycle - written by rto-crm.html's submitDisp()
+  // in real time (via a new recordDisposition auth action) alongside its existing
+  // direct-to-Sheet write, so this history survives independent of the Google Sheet
+  // (e.g. for reporting) and doesn't require re-scanning the sheet to reconstruct.
+  await sql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS disposed_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS disposition TEXT`;
+  await sql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS agent_remarks TEXT`;
+  await sql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS connected TEXT`;
+  await sql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS attempt TEXT`;
+  await sql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS refund_amount NUMERIC`;
   schemaReady = true;
 }
 
@@ -230,9 +240,30 @@ async function getRecentLeadAssignments(sinceHours) {
   return out;
 }
 
+// Upserts the disposal side of a lead's lifecycle. If assign_leads.py never recorded
+// this order_id (assigned before lead_assignments existed, or assigned manually
+// straight in the sheet), the INSERT branch creates the row now with the disposing
+// agent's own email as assigned_at's best-available attribution, rather than dropping
+// the disposal details on the floor.
+async function recordLeadDisposition(orderId, email, details) {
+  await ensureSchema();
+  const { disposition, agentRemarks, connected, attempt, refundAmount } = details || {};
+  await sql`
+    INSERT INTO lead_assignments (order_id, email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount)
+    VALUES (${orderId}, ${email}, now(), now(), ${disposition || null}, ${agentRemarks || null}, ${connected || null}, ${attempt || null}, ${refundAmount || null})
+    ON CONFLICT (order_id) DO UPDATE SET
+      disposed_at = now(),
+      disposition = EXCLUDED.disposition,
+      agent_remarks = EXCLUDED.agent_remarks,
+      connected = EXCLUDED.connected,
+      attempt = EXCLUDED.attempt,
+      refund_amount = EXCLUDED.refund_amount
+  `;
+}
+
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserPermissions, getUserTabPermissions, setTabPermissions,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
-  getAllAgentPresence, getRecentLeadAssignments,
+  getAllAgentPresence, getRecentLeadAssignments, recordLeadDisposition,
 };

@@ -1129,6 +1129,23 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           newAddress: addrChange==='YES'?newAddr:''
         });
 
+        // Mirror the disposal into Postgres's lead_assignments table (assigned_at's
+        // counterpart - see api/_lib/db.js) so disposal history survives independent of
+        // the Google Sheet. Fire-and-forget, same as syncPresenceToServer - a failed
+        // write here never blocks the agent's actual disposal, which already landed above.
+        fetch('/api/auth/recordDisposition', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            orderId: dispTkt.orderNumber,
+            disposition: dispReason,
+            agentRemarks: (isAlreadyRef ? '[Already Refunded] ' : '') + agentRemarks.trim(),
+            connected: dispConn==='YES'?'Yes':'No',
+            attempt: resolvedAttempt,
+            refundAmount: (isRef || isAlreadyRef) ? dispTkt.orderAmount : null,
+          }),
+        }).catch(() => {});
+
         const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
         
         const newLog = {
