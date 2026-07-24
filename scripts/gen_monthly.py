@@ -360,10 +360,13 @@ def build_batch_recurring_section(ctx):
     in the LATEST of those 3 months specifically (not the 3-month combined total - a
     product could accumulate 5+ across 3 quiet months without anything currently active),
     writes a narrative comparing the first vs. last month's volume (rising/falling/stable,
-    via the same change_verb used elsewhere) and identifies whether one batch is driving
-    most of any increase (a batch-specific defect) or the rise is spread across batches
-    (more likely a product-wide issue) - prose, not a raw per-batch table, matching every
-    other Monthly Analysis section's style."""
+    via the same change_verb used elsewhere) and identifies whether one query category
+    (reason) is driving most of any increase, or the rise is spread across categories (more
+    likely a broad product issue) - prose, not a raw per-category table, matching every
+    other Monthly Analysis section's style. A category is only ever named as "the driver"
+    once it has itself reached 5 complaints in the latest month, mirroring the product-level
+    qualifying threshold above - a category limping in at 1-2 tickets doesn't get credited
+    with driving a double-digit product rise just because it happened to grow fastest."""
     months_window = ctx.months[-3:]
     if len(months_window) < 2:
         return ""
@@ -401,58 +404,49 @@ def build_batch_recurring_section(ctx):
         verb = change_verb(first_c, last_c)
         line = f"<b>{h_enc(prod)}</b>: complaints {verb} ({trend_str})."
 
-        batch_cache = {}
-        batch_month = {}
-        batch_cat_tot = {}
-        cat_caches = {}
+        cat_cache = {}
+        cat_month = {}
         for r in rows:
-            batch = ctx.cell(r, ctx.col["batch"])
-            if not str(batch).strip():
-                batch = "(blank)"
-            batch = ci_key(batch, batch_cache)
-            batch_month.setdefault(batch, {mo2: 0 for mo2 in months_window})
-            batch_month[batch][ctx.cell(r, ctx.col["month"])] += 1
             cat = ctx.cell(r, ctx.col["cat"])
             if not str(cat).strip():
                 cat = "(blank)"
-            cat = ci_key(cat, cat_caches.setdefault(batch, {}))
-            batch_cat_tot.setdefault(batch, {})
-            batch_cat_tot[batch][cat] = batch_cat_tot[batch].get(cat, 0) + 1
+            cat = ci_key(cat, cat_cache)
+            cat_month.setdefault(cat, {mo2: 0 for mo2 in months_window})
+            cat_month[cat][ctx.cell(r, ctx.col["month"])] += 1
 
         overall_delta = last_c - first_c
-        # Only attempt to name a "driving batch" once the rise itself is non-trivial
+        # Only attempt to name a "driving category" once the rise itself is non-trivial
         # (>=3) - otherwise a product edging up by 1-2 tickets can spuriously credit a
-        # batch that itself only moved 0->1, which is noise, not a finding.
-        if overall_delta >= 3 and batch_month:
-            top_batch, top_first, top_last = max(
-                ((b, mc[first_mo], mc[last_mo]) for b, mc in batch_month.items()),
-                key=lambda x: x[2] - x[1],
-            )
-            top_delta = top_last - top_first
-            # Require the batch's OWN increase to be non-trivial too, not just its share
-            # of a small overall rise.
-            if top_delta >= 3:
-                share = round1(top_delta / overall_delta * 100)
-                top_cat_name = max(batch_cat_tot[top_batch].items(), key=lambda kv: kv[1])[0]
+        # category that itself only moved 0->1, which is noise, not a finding.
+        if overall_delta >= 3 and cat_month:
+            # Eligible to be named "the driver" only once the category itself has reached
+            # 5 complaints in the latest month - mirrors the product-level qualifying rule,
+            # so a category sitting at 1-2 tickets doesn't get blamed for a bigger rise.
+            eligible = {c: mc for c, mc in cat_month.items() if mc[last_mo] >= 5}
+            if eligible:
+                top_cat, top_mc = max(eligible.items(), key=lambda kv: kv[1][last_mo] - kv[1][first_mo])
+                top_first, top_last = top_mc[first_mo], top_mc[last_mo]
+                top_delta = top_last - top_first
+                share = round1(top_delta / overall_delta * 100) if top_delta >= 3 else 0
                 if share > 100:
-                    # The top batch's own increase exceeds the product's net rise - only
-                    # possible if other batches improved enough to partly offset it. A
+                    # The top category's own increase exceeds the product's net rise - only
+                    # possible if other categories improved enough to partly offset it. A
                     # real, distinct finding worth naming rather than a bug to hide.
-                    line += (f" Batch <b>{h_enc(top_batch)}</b> alone rose from {n0(top_first)} to {n0(top_last)} &mdash; more than the "
-                             f"product's entire net increase, meaning other batches actually improved even as this one worsened "
-                             f"&mdash; mostly &quot;{h_enc(top_cat_name)}&quot;, pointing at a batch-specific defect rather than a product-wide one.")
+                    line += (f" Category &quot;{h_enc(top_cat)}&quot; alone rose from {n0(top_first)} to {n0(top_last)} &mdash; more than the "
+                             f"product's entire net increase, meaning other categories actually improved even as this one worsened.")
                 elif share >= 50:
-                    line += (f" Batch <b>{h_enc(top_batch)}</b> is driving most of this rise, up from {n0(top_first)} to {n0(top_last)} "
-                             f"({fnum(share)}% of the increase) &mdash; mostly &quot;{h_enc(top_cat_name)}&quot;, pointing at a batch-specific "
-                             f"defect rather than a product-wide one.")
+                    line += (f" Category &quot;{h_enc(top_cat)}&quot; is driving most of this rise, up from {n0(top_first)} to {n0(top_last)} "
+                             f"({fnum(share)}% of the increase).")
                 else:
-                    line += " No single batch accounts for most of the increase - complaints look spread across batches, more likely a product-wide issue than one bad batch."
+                    line += " No single category accounts for most of the increase - complaints look spread across reasons, more likely a broad product issue than one specific defect."
+            else:
+                line += " No category has reached 5 complaints in the latest month, so no single reason can be called out as the driver - complaints are spread thin across many reasons."
         bullets.append(f"<li>{line}</li>")
 
-    return (f"<div class='ma-class'><h4>Packaging &amp; Product Complaints &mdash; Batch Trend (last {len(months_window)} months)</h4>"
+    return (f"<div class='ma-class'><h4>Packaging &amp; Product Complaints &mdash; Reason Trend (last {len(months_window)} months)</h4>"
             f"<p class='ma-overall'>{n0(len(qualifying))} product(s) with at least 5 Packaging &amp; Operational or Product complaints in "
-            f"{h_enc(pretty_month(last_mo))} specifically, trended back to {h_enc(pretty_month(first_mo))} and calling out which batch (if any) "
-            f"is driving a rise.</p>"
+            f"{h_enc(pretty_month(last_mo))} specifically, trended back to {h_enc(pretty_month(first_mo))} and calling out which query category "
+            f"(if any) is driving a rise.</p>"
             f"<ul class='ma-list'>{''.join(bullets)}</ul></div>")
 
 
