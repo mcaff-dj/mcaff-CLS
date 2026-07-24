@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "description": "Static customer-query segment reports + access-gated report serving.",
   "dependencies": {
-    "mysql2": "^3.11.0"
+    "mysql2": "^3.11.0",
+    "@aws-sdk/client-secrets-manager": "^3.600.0"
   }
 }

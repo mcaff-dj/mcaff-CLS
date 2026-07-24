@@ -1,21 +1,34 @@
 // MySQL access + schema bootstrap, against the app's own schema (PEP_CLS) on the
 // existing mcaff-dwh RDS instance - separate from the mcaff_dwh schema the report
-// scripts read (see scripts/mysql_lib.py). Connection details come from env vars
-// (DB_HOST/DB_USER/DB_PASSWORD/DB_NAME/DB_PORT), backed by AWS Secrets Manager in
-// production - named distinctly from the Python pipeline's MYSQL_* vars since
-// they're different credentials for a different schema.
+// scripts read (see scripts/mysql_lib.py). Connection details come from AWS Secrets
+// Manager (secret name in DB_SECRET_NAME, default "mcaff-cls/db") - not from a plain
+// DB_PASSWORD env var, so the real password never sits in the Lambda's own
+// configuration (which anyone able to view the function, not just invoke it, can read).
 const mysql = require('mysql2/promise');
+const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME || 'PEP_CLS',
-  port: Number(process.env.DB_PORT) || 3306,
-  ssl: { rejectUnauthorized: false }, // RDS requires TLS; harden to the RDS CA bundle later if needed
-  connectionLimit: 5,
-  namedPlaceholders: false,
-});
+const secretsClient = new SecretsManagerClient({});
+let pool = null;
+
+// Fetched once per warm Lambda instance, then reused - same "do it once, cache it"
+// idea as ensureSchema()'s schemaReady flag below.
+async function getPool() {
+  if (pool) return pool;
+  const secretName = process.env.DB_SECRET_NAME || 'mcaff-cls/db';
+  const { SecretString } = await secretsClient.send(new GetSecretValueCommand({ SecretId: secretName }));
+  const creds = JSON.parse(SecretString);
+  pool = mysql.createPool({
+    host: creds.host,
+    user: creds.user,
+    password: creds.password,
+    database: creds.database || 'PEP_CLS',
+    port: Number(creds.port) || 3306,
+    ssl: { rejectUnauthorized: false }, // RDS requires TLS; harden to the RDS CA bundle later if needed
+    connectionLimit: 5,
+    namedPlaceholders: false,
+  });
+  return pool;
+}
 
 // Postgres's `sql` tagged-template call sites (admin/*.js) are kept working as-is by
 // giving MySQL the same calling convention: sql`... ${value} ...` -> a parameterized
@@ -28,7 +41,8 @@ async function sql(strings, ...values) {
     text += s;
     if (i < values.length) text += '?';
   });
-  const [result] = await pool.execute(text, values);
+  const p = await getPool();
+  const [result] = await p.execute(text, values);
   const rows = Array.isArray(result) ? result : [];
   return { rows, insertId: result.insertId, affectedRows: result.affectedRows };
 }
