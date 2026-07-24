@@ -48,7 +48,11 @@ def _sign_rs256(signing_input, private_key_pem):
     return private_key.sign(signing_input.encode("ascii"), padding.PKCS1v15(), hashes.SHA256())
 
 
-_token_cache = {"read": {"token": None, "expiry": 0}, "write": {"token": None, "expiry": 0}}
+_token_cache = {
+    "read": {"token": None, "expiry": 0},
+    "write": {"token": None, "expiry": 0},
+    "drive": {"token": None, "expiry": 0},
+}
 
 
 def _get_token(scope, cache_key):
@@ -87,6 +91,55 @@ def get_access_token():
 
 def get_write_access_token():
     return _get_token("https://www.googleapis.com/auth/spreadsheets", "write")
+
+
+def get_drive_access_token():
+    return _get_token("https://www.googleapis.com/auth/drive.readonly", "drive")
+
+
+def list_drive_folder(folder_id):
+    """Lists {id, name, mimeType, size, modifiedTime} for every file directly inside
+    a Drive folder (service account must already have at least Viewer access -
+    see the mcaff-CLS Drive CSV merge precedent). Paginates via nextPageToken."""
+    token = get_drive_access_token()
+    files = []
+    page_token = None
+    while True:
+        params = {
+            "q": f"'{folder_id}' in parents and trashed = false",
+            "fields": "nextPageToken, files(id, name, mimeType, size, modifiedTime)",
+            "pageSize": 1000,
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        resp = requests.get(
+            "https://www.googleapis.com/drive/v3/files",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params, timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        files.extend(data.get("files", []))
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+    return files
+
+
+def download_drive_file(file_id, dest_path, timeout_sec=300):
+    token = get_drive_access_token()
+    resp = requests.get(
+        f"https://www.googleapis.com/drive/v3/files/{file_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"alt": "media", "supportsAllDrives": "true"},
+        timeout=timeout_sec, stream=True,
+    )
+    resp.raise_for_status()
+    with open(dest_path, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=1024 * 1024):
+            f.write(chunk)
 
 
 def set_sheet_values_batch(spreadsheet_id, updates):
