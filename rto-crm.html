@@ -370,6 +370,30 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       }
     }
 
+    // Best-effort POST to our own API with one retry after a short delay - Neon's
+    // serverless Postgres can auto-suspend when idle and take a few seconds to wake on
+    // the next connection, which is long enough to fail a single fire-and-forget request
+    // outright (fetch() doesn't reject on a non-2xx status, so a plain `.catch(()=>{})`
+    // never even sees it - the write silently vanishes with zero trace). Never blocks the
+    // caller's UI; failures are only logged to the console for later debugging.
+    async function postJsonWithRetry(url, body, attempts = 2) {
+      for (let i = 0; i < attempts; i++) {
+        try {
+          const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (resp.ok) return true;
+          console.error(`${url} responded ${resp.status}:`, await resp.text().catch(() => ''));
+        } catch (e) {
+          console.error(`${url} network error:`, e);
+        }
+        if (i < attempts - 1) await new Promise(r => setTimeout(r, 2000));
+      }
+      return false;
+    }
+
     function extractSheetId(i){const m=i.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);return m?m[1]:/^[a-zA-Z0-9_-]{20,}$/.test(i.trim())?i.trim():null;}
 
     function startOfDay(d){
@@ -847,11 +871,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         const body = { status };
         if (typeof opts.pendingBox === 'number') body.pendingBox = opts.pendingBox;
         if (opts.email) { body.email = opts.email; body.name = opts.name; }
-        fetch('/api/auth/presence', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }).catch(() => {});
+        postJsonWithRetry('/api/auth/presence', body);
       };
 
       const handleSetStatus = (s)=>{
@@ -960,8 +980,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       const [payFilter, setPayFilter] = useState('ALL');
       const [page, setPage] = useState(1);
       const [perPage, setPerPage] = useState(50);
-      const [selectedIds, setSelectedIds] = useState(() => new Set());
-      const [isUnassigningSelected, setIsUnassigningSelected] = useState(false);
 
       // Modals & Disposition State
       const [detailTkt, setDetailTkt] = useState(null);
@@ -1031,7 +1049,7 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       };
 
       const openDisp = (t)=>{
-        if (agentStatus === 'Offline') {
+        if (agentStatus === 'Offline' && userRole !== 'Admin') {
           showToast('⚠️ Cannot process leads while Offline. Switch status to Online first.');
           return;
         }
@@ -1087,10 +1105,35 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
         }
 
         const st=isRef?'Refunded':dispConn==='YES'?`Connected — ${dispReason}`:`Unreachable — ${dispReason}`;
-        
+
         // Auto-assign Column Q to active agent's Email ID
         const agentAssignedTag = `${googleUser.email}`;
         const isAlreadyRef = alreadyRefunded === 'YES' || dispReason === 'Already Refunded';
+
+        // Once a lead has a real assigned agent, that assignment must never change - not to
+        // blank, not to a different agent - even if someone else (e.g. a Team Lead helping
+        // out) is the one submitting the disposition. Live-check Column Q's current value
+        // (same pattern as claimLeadForAgent) so a stale/cached local view can't silently
+        // steal someone else's lead; only a genuinely still-unassigned lead gets claimed here.
+        let finalAssignedAgent = agentAssignedTag;
+        let finalAssignedEmail = googleUser.email;
+        let claimBlocked = false;
+        try {
+          const sid = extractSheetId(DEFAULT_SHEET_URL);
+          if (sid) {
+            const token = await getAccessToken();
+            const liveMap = await fetchLiveOrderAndAgentMap(sid, token);
+            const key = (dispTkt.orderNumber || '').toString().trim().toUpperCase();
+            const live = liveMap ? liveMap.get(key) : null;
+            if (live && live.agent && live.agent.toLowerCase() !== 'unassigned' && !live.agent.toLowerCase().includes(googleUser.email.toLowerCase())) {
+              finalAssignedAgent = live.agent;
+              finalAssignedEmail = live.agent;
+              claimBlocked = true;
+            }
+          }
+        } catch (e) {
+          console.error('Live assignment check error:', e);
+        }
 
         // Resolve Column S (Attempt) value:
         // - If refund was initiated, auto-set to 'Already Refunded'
@@ -1112,39 +1155,43 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           newAddress: addrChange==='YES'?newAddr:'',
           disposedAt: new Date().toLocaleString([],{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}),
           disposedBy: agentAssignedTag,
-          assignedAgent: agentAssignedTag,
-          assignedEmail: googleUser.email
+          assignedAgent: finalAssignedAgent,
+          assignedEmail: finalAssignedEmail
         };
 
         setOverrides(p=>{const u={...p,[dispTkt.id]:ov};localStorage.setItem('rto_ticket_overrides',JSON.stringify(u));return u;});
-        
-        // Live Google Sheet Write-Back to Column Q, R, S, T, U, V, X!
-        writeToSheetRow(dispTkt.orderNumber, dispTkt.rawIndex, {
-          assignedAgent: agentAssignedTag,
+        if (claimBlocked) {
+          showToast(`ℹ️ This lead is assigned to ${finalAssignedAgent} — recorded your disposition without changing the assignment.`);
+        }
+
+        // Live Google Sheet Write-Back to Column Q, R, S, T, U, V, X! assignedAgent is only
+        // included when this agent already legitimately owns the lead (or it was genuinely
+        // unassigned and this claims it) - never to hand a different agent's lead over.
+        const sheetUpdates = {
           connectedStatus: dispConn==='YES'?'Yes':'No',
           attemptType: resolvedAttempt,
           disposition: dispReason,
           remarks: (isAlreadyRef ? '[Already Refunded] ' : '') + agentRemarks.trim(),
           newOrderId: newOrder==='YES'?newOrderId:'',
           newAddress: addrChange==='YES'?newAddr:''
-        });
+        };
+        if (!claimBlocked) {
+          sheetUpdates.assignedAgent = agentAssignedTag;
+        }
+        writeToSheetRow(dispTkt.orderNumber, dispTkt.rawIndex, sheetUpdates);
 
         // Mirror the disposal into Postgres's lead_assignments table (assigned_at's
         // counterpart - see api/_lib/db.js) so disposal history survives independent of
-        // the Google Sheet. Fire-and-forget, same as syncPresenceToServer - a failed
-        // write here never blocks the agent's actual disposal, which already landed above.
-        fetch('/api/auth/recordDisposition', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            orderId: dispTkt.orderNumber,
-            disposition: dispReason,
-            agentRemarks: (isAlreadyRef ? '[Already Refunded] ' : '') + agentRemarks.trim(),
-            connected: dispConn==='YES'?'Yes':'No',
-            attempt: resolvedAttempt,
-            refundAmount: (isRef || isAlreadyRef) ? dispTkt.orderAmount : null,
-          }),
-        }).catch(() => {});
+        // the Google Sheet. Retried once (see postJsonWithRetry) - never blocks the
+        // agent's actual disposal, which already landed above.
+        postJsonWithRetry('/api/auth/recordDisposition', {
+          orderId: dispTkt.orderNumber,
+          disposition: dispReason,
+          agentRemarks: (isAlreadyRef ? '[Already Refunded] ' : '') + agentRemarks.trim(),
+          connected: dispConn==='YES'?'Yes':'No',
+          attempt: resolvedAttempt,
+          refundAmount: (isRef || isAlreadyRef) ? dispTkt.orderAmount : null,
+        });
 
         const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
         
@@ -1260,8 +1307,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
       };
 
       // Admin Bulk Reassign / Unassign Controls
+      // Admin-only: moves every one of sourceAgentEmail's active leads to targetAgentEmail.
+      // A lead is never cleared to blank here - once assigned, it always stays assigned to
+      // someone; this only ever moves it between two named agents (e.g. offboarding an agent
+      // whose leads need a new home), it never unassigns.
       const adminBulkAction = async (sourceAgentEmail, targetAgentEmail) => {
-        const isUnassign = targetAgentEmail === 'UNASSIGN';
         const sourceEmail = sourceAgentEmail.toLowerCase();
         const sourcePrefix = sourceEmail.split('@')[0];
 
@@ -1276,13 +1326,13 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
           return;
         }
 
-        const newAssignedTag = isUnassign ? '' : targetAgentEmail;
+        const newAssignedTag = targetAgentEmail;
         const newOverrides = {};
         targetTickets.forEach(t => {
           newOverrides[t.id] = {
             ...(overrides[t.id] || {}),
-            assignedAgent: isUnassign ? 'Unassigned' : newAssignedTag,
-            assignedEmail: isUnassign ? '' : targetAgentEmail
+            assignedAgent: newAssignedTag,
+            assignedEmail: targetAgentEmail
           };
         });
 
@@ -1319,158 +1369,11 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
               body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
             });
             if (res.ok) {
-              if (isUnassign) {
-                showToast(`🧹 Unassigned all ${valueRanges.length} leads from ${sourceAgentEmail} & cleared Column Q!`);
-              } else {
-                showToast(`🔄 Reassigned ${valueRanges.length} leads to ${targetAgentEmail} & updated Google Sheet!`);
-              }
+              showToast(`🔄 Reassigned ${valueRanges.length} leads to ${targetAgentEmail} & updated Google Sheet!`);
             }
           }
         } catch (err) {
           console.error('Bulk reassign error:', err);
-        }
-      };
-
-      const resetStalePendingLeads = async () => {
-        const todayStart = startOfDay(new Date());
-        if (!todayStart) return;
-
-        // Freshly-assigned leads carry an old Calling Date by definition (the backlog
-        // assign_leads.py works through is old), so without this check every fresh
-        // assignment looks exactly as "stale" as one genuinely ignored for days. Cross-check
-        // against Postgres's lead_assignments table (stamped by assign_leads.py on every
-        // assignment - see api/_lib/db.js) and exclude anything assigned within the last 24h
-        // grace period, regardless of its Calling Date.
-        let recentlyAssigned = new Set();
-        try {
-          const resp = await fetch('/api/auth/recentAssignments?hours=24');
-          if (resp.ok) {
-            const data = await resp.json();
-            recentlyAssigned = new Set(Object.keys(data.assignments || {}).map(k => k.trim().toUpperCase()));
-          }
-        } catch (err) {
-          console.error('Fetch recent assignments error:', err);
-        }
-
-        const staleTickets = tickets.filter(t => {
-          if (!t.orderNumber) return false;
-          if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
-          const currAgt = (overrides[t.id]?.assignedAgent || t.assignedAgent || '').trim();
-          const isAssigned = currAgt && currAgt !== 'Unassigned' && currAgt.toLowerCase() !== 'unassigned';
-          if (!isAssigned) return false;
-          if (recentlyAssigned.has(t.orderNumber.toString().trim().toUpperCase())) return false;
-          const rd = t.rowDate ? t.rowDate.getTime() : 0;
-          return rd > 0 && rd < todayStart.getTime();
-        });
-
-        if (staleTickets.length === 0) {
-          showToast('No stale undisposed leads found from previous days.');
-          return;
-        }
-
-        const newOverrides = {};
-        staleTickets.forEach(t => {
-          newOverrides[t.id] = {
-            ...(overrides[t.id] || {}),
-            assignedAgent: 'Unassigned',
-            assignedEmail: ''
-          };
-        });
-
-        setOverrides(p => {
-          const u = { ...p, ...newOverrides };
-          try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
-          return u;
-        });
-
-        try {
-          const token = await getAccessToken();
-          const sid = extractSheetId(DEFAULT_SHEET_URL);
-          if (!sid) return;
-
-          // Resolve each ticket's CURRENT row by order number rather than trusting the cached
-          // rawIndex, which can drift if the sheet's row order shifted since the last sync.
-          const rowMap = await fetchLiveOrderRowMap(sid, token);
-          const valueRanges = [];
-          let skipped = 0;
-          staleTickets.forEach(t => {
-            const key = (t.orderNumber || '').toString().trim().toUpperCase();
-            const rowNumber = rowMap ? rowMap.get(key) : (t.rawIndex + 2);
-            if (!rowNumber) { skipped++; return; }
-            valueRanges.push({ range: `Data!Q${rowNumber}`, values: [['']] });
-          });
-          if (skipped > 0) console.warn(`Reset stale leads: skipped ${skipped} lead(s) not found in live sheet.`);
-
-          if (valueRanges.length > 0) {
-            const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
-              method: 'POST',
-              headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
-            });
-            if (res.ok) {
-              showToast(`🧹 Reset ${valueRanges.length} stale undisposed leads from previous days & cleared Google Sheet Column Q!`);
-            }
-          }
-        } catch (err) {
-          console.error('Reset stale error:', err);
-        }
-      };
-
-      // Admin-only: unassign specific leads hand-picked via the table's row checkboxes,
-      // rather than every lead belonging to one agent (adminBulkAction) or every stale one
-      // (resetStalePendingLeads). Same row-drift-safe write pattern as both of those.
-      const bulkUnassignSelectedLeads = async () => {
-        if (userRole !== 'Admin' || selectedIds.size === 0) return;
-        const targetTickets = allTickets.filter(t => selectedIds.has(t.id));
-        if (targetTickets.length === 0) return;
-
-        setIsUnassigningSelected(true);
-        try {
-          const newOverrides = {};
-          targetTickets.forEach(t => {
-            newOverrides[t.id] = {
-              ...(overrides[t.id] || {}),
-              assignedAgent: 'Unassigned',
-              assignedEmail: ''
-            };
-          });
-          setOverrides(p => {
-            const u = { ...p, ...newOverrides };
-            try { localStorage.setItem('rto_ticket_overrides', JSON.stringify(u)); } catch {}
-            return u;
-          });
-
-          const token = await getAccessToken();
-          const sid = extractSheetId(DEFAULT_SHEET_URL);
-          if (!sid) return;
-
-          const rowMap = await fetchLiveOrderRowMap(sid, token);
-          const valueRanges = [];
-          let skipped = 0;
-          targetTickets.forEach(t => {
-            const key = (t.orderNumber || '').toString().trim().toUpperCase();
-            const rowNumber = rowMap ? rowMap.get(key) : (t.rawIndex + 2);
-            if (!rowNumber) { skipped++; return; }
-            valueRanges.push({ range: `Data!Q${rowNumber}`, values: [['']] });
-          });
-          if (skipped > 0) console.warn(`Unassign selected: skipped ${skipped} lead(s) not found in live sheet.`);
-
-          if (valueRanges.length > 0) {
-            const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values:batchUpdate`, {
-              method: 'POST',
-              headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: valueRanges })
-            });
-            if (res.ok) {
-              showToast(`🧹 Unassigned ${valueRanges.length} selected lead(s) & cleared Column Q!`);
-            }
-          }
-          setSelectedIds(new Set());
-        } catch (err) {
-          console.error('Bulk unassign selected error:', err);
-          showToast('Failed to unassign selected leads — check console.');
-        } finally {
-          setIsUnassigningSelected(false);
         }
       };
 
@@ -1849,7 +1752,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
       useEffect(() => {
         setPage(1);
-        setSelectedIds(new Set());
       }, [tab, search, payFilter, agentFilter, dateScope, customDateFrom, customDateTo]);
 
       const filtered = useMemo(()=>{
@@ -2392,14 +2294,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                           >
                             ⚪ Mark All Offline
                           </button>
-                          <button
-                            type="button"
-                            onClick={resetStalePendingLeads}
-                            className="px-3 py-1.5 rounded-xl bg-amber-950/70 hover:bg-amber-900 text-amber-200 border border-amber-800/80 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
-                            title="Unassign undisposed leads from previous days and clear Column Q in Google Sheet"
-                          >
-                            🧹 Reset Stale Pending Leads (&lt; Today)
-                          </button>
                         </div>
                       </div>
 
@@ -2522,14 +2416,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                                         }))
                                       ]}
                                     />
-                                    <button
-                                      type="button"
-                                      onClick={() => adminBulkAction(a.email, 'UNASSIGN')}
-                                      className="px-2.5 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900 text-rose-200 border border-rose-800/80 text-[11px] font-bold transition-all shadow-xs"
-                                      title="Wipe assigned agent and clear Column Q in Google Sheet"
-                                    >
-                                      🧹 Unassign
-                                    </button>
                                     <button
                                       type="button"
                                       onClick={() => removeAgentFromRoster(a.email, a.name)}
@@ -2899,17 +2785,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                   </div>
 
                   <div className="flex items-center gap-3">
-                    {userRole === 'Admin' && selectedIds.size > 0 && (
-                      <button
-                        type="button"
-                        onClick={bulkUnassignSelectedLeads}
-                        disabled={isUnassigningSelected}
-                        className="px-3 py-1.5 rounded-xl bg-rose-950/70 hover:bg-rose-900 text-rose-200 border border-rose-800/80 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2 disabled:opacity-50"
-                        title="Clear Column Q for the selected leads"
-                      >
-                        {isUnassigningSelected ? '⏳ Unassigning…' : `🧹 Unassign Selected (${selectedIds.size})`}
-                      </button>
-                    )}
                     <CustomSelect
                       value={perPage}
                       onChange={(val) => setPerPage(Number(val))}
@@ -2927,25 +2802,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
                     <div className="overflow-x-auto">
                       <table className="w-full text-[13px]">
                         <thead><tr className="border-b border-zinc-800/80 text-zinc-500 text-[12px]">
-                          {userRole === 'Admin' && (
-                            <th className="py-3 pl-4 pr-2 text-left font-medium w-8">
-                              <input
-                                type="checkbox"
-                                className="accent-rose-500 cursor-pointer"
-                                checked={visible.length > 0 && visible.every(t => selectedIds.has(t.id))}
-                                ref={el => { if (el) el.indeterminate = visible.some(t => selectedIds.has(t.id)) && !visible.every(t => selectedIds.has(t.id)); }}
-                                onChange={() => {
-                                  setSelectedIds(prev => {
-                                    const allSelected = visible.every(t => prev.has(t.id));
-                                    const next = new Set(prev);
-                                    visible.forEach(t => { if (allSelected) next.delete(t.id); else next.add(t.id); });
-                                    return next;
-                                  });
-                                }}
-                                title="Select all on this page"
-                              />
-                            </th>
-                          )}
                           <th className="py-3 px-4 text-left font-medium">Order</th>
                           <th className="py-3 px-4 text-left font-medium">Customer</th>
                           <th className="py-3 px-4 text-left font-medium">Agent Name & Email (Col Q)</th>
@@ -2968,22 +2824,6 @@ LOHKU9EQqaJKXyAN7vYDylkIr1YVE2xjL7MVyMsCgYBUSgfUltNjcWhF/2aRGqYp
 
                             return(
                               <tr key={t.id} className="hover:bg-zinc-800/25 transition-colors">
-                                {userRole === 'Admin' && (
-                                  <td className="py-3 pl-4 pr-2">
-                                    <input
-                                      type="checkbox"
-                                      className="accent-rose-500 cursor-pointer"
-                                      checked={selectedIds.has(t.id)}
-                                      onChange={() => {
-                                        setSelectedIds(prev => {
-                                          const next = new Set(prev);
-                                          if (next.has(t.id)) next.delete(t.id); else next.add(t.id);
-                                          return next;
-                                        });
-                                      }}
-                                    />
-                                  </td>
-                                )}
                                 <td className="py-3 px-4"><span className="font-mono font-semibold text-zinc-200">{t.orderNumber}</span></td>
                                 <td className="py-3 px-4"><span className="text-zinc-200 font-medium">{t.customerName}</span><span className="block text-[12px] text-zinc-500 mt-0.5 truncate max-w-[160px]">{t.email||t.phone}</span></td>
                                 
