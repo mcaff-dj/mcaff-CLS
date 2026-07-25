@@ -7,8 +7,17 @@
 // Static assets (index.html, admin.html, generated reports, etc.) are NOT served from
 // here - those come from S3 via CloudFront directly. This app only ever handles /api/*.
 const express = require('express');
+const { ensureAppSecretsLoaded } = require('../_lib/secrets');
 
 const app = express();
+app.use(async (req, res, next) => {
+  try {
+    await ensureAppSecretsLoaded();
+    next();
+  } catch (e) {
+    res.status(500).json({ error: 'Server not configured: could not load app secrets - ' + (e.message || String(e)) });
+  }
+});
 app.use(express.json());
 
 function mount(method, path, handlerPath, paramName) {
