@@ -24,10 +24,13 @@ async function sendMail({ to, subject, html }) {
   return resp.json();
 }
 
+// See the matching comment in api/auth/[action].js - req.headers.host inside this
+// Lambda is always the raw API Gateway domain (CloudFront doesn't forward the
+// viewer's original Host), so PUBLIC_BASE_URL pins the one real public address.
 function siteBaseUrl(req) {
+  if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL;
   const proto = req.headers['x-forwarded-proto'] || 'https';
-  const host = req.headers.host;
-  return `${proto}://${host}`;
+  return `${proto}://${req.headers.host}`;
 }
 
 module.exports = { sendMail, siteBaseUrl };

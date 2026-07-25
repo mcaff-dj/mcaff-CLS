@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write   # lets this workflow request an OIDC token to assume the AWS role below - no stored AWS keys anywhere
 
 concurrency:
   group: refresh-reports
@@ -55,25 +56,47 @@ jobs:
           }
           python ./scripts/refresh.py @quickArgs
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::157320387454:role/github-actions-mcaff-cls-deploy
+          aws-region: ap-south-1
+
+      - name: Upload reports to S3
+        shell: pwsh
+        # The report HTML/raw CSVs used to be committed to git purely to trigger a
+        # Vercel redeploy - now that api/report/[card].js and api/report/raw.js read
+        # these straight from S3 (see api/_lib/s3.js), they go there directly instead.
+        # Uploaded on every run regardless of whether the data-cache JSONs below
+        # changed, since the reports themselves are always freshly regenerated.
+        run: |
+          if (Test-Path "api/_reports/mcaffeine.html") {
+            aws s3 cp api/_reports/mcaffeine.html s3://mcaff-cls-reports/reports/mcaffeine.html --content-type "text/html; charset=utf-8"
+          }
+          if (Test-Path "api/_reports/hyphen.html") {
+            aws s3 cp api/_reports/hyphen.html s3://mcaff-cls-reports/reports/hyphen.html --content-type "text/html; charset=utf-8"
+          }
+          Get-ChildItem -Path api/_reports -Filter "*_raw_*.csv.gz" -ErrorAction SilentlyContinue | ForEach-Object {
+            aws s3 cp $_.FullName "s3://mcaff-cls-reports/reports/$($_.Name)" --content-type "application/gzip"
+          }
+
       - name: Commit & push if changed
         shell: pwsh
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Just the data-cache JSONs now - the report HTML/raw CSVs above go to S3, not
+          # git, so this commit is purely the pipeline's own incremental-refresh state,
+          # not anything that needs to trigger a redeploy (see deploy.yml's path filter).
           $paths = @(
-            "api/_reports/mcaffeine.html", "api/_reports/hyphen.html",
             "data/mcaffeine_primary_cache.json", "data/hyphen_primary_cache.json",
             "data/mcaffeine_secondary_cache.json",
             "data/mcaffeine_smalltabs_cache.json", "data/hyphen_smalltabs_cache.json",
             "data/mcaffeine_awb_geo_cache.json", "data/hyphen_awb_geo_cache.json",
             "data/mcaffeine_geo_orders_cache.json", "data/hyphen_geo_orders_cache.json"
           ) | Where-Object { Test-Path $_ }
-          # raw.js serves these straight from disk (see api/report/raw.js) - without this,
-          # an auto-refresh updates the report HTML but leaves raw CSV downloads stale.
-          $rawPaths = Get-ChildItem -Path api/_reports -Filter "*_raw_*.csv.gz" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
           git add $paths
-          if ($rawPaths) { git add $rawPaths }
-          $changed = git status --porcelain ($paths + $rawPaths)
+          $changed = git status --porcelain $paths
           if ($changed) {
             $stamp = (Get-Date).ToUniversalTime().AddHours(5.5).ToString('yyyy-MM-dd HH:mm')
             git commit -m "Auto-refresh reports ($stamp IST)"

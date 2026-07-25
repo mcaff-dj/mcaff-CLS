@@ -1,11 +1,13 @@
 // Gated raw-data CSV server: GET /api/report/raw?card=mcaffeine&tab=delivery
-// The CSVs live under api/_reports/ (same non-public convention as the report HTML in
-// [card].js) so downloading one always goes through the same session + permission check
-// as viewing the report itself. Only mcaffeine/hyphen have raw exports (productkyc is a
-// separate standalone report with no ticket-level export built for it).
-const fs = require('fs');
-const path = require('path');
-const zlib = require('zlib');
+// The CSVs live in S3 now (same reasoning as [card].js - uploaded by the refresh job,
+// not bundled with this Lambda), so downloading one still goes through the same
+// session + permission check as viewing the report itself, then redirects to a
+// short-lived S3 link instead of streaming the file through Lambda. Only mcaffeine/
+// hyphen have raw exports (productkyc is a separate standalone report with no
+// ticket-level export built for it).
+const { HeadObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { s3Client, REPORTS_BUCKET } = require('../_lib/s3');
 const { getSession } = require('../_lib/session');
 const { CARD_KEYS, logEvent } = require('../_lib/db');
 
@@ -31,13 +33,25 @@ module.exports = async (req, res) => {
     return;
   }
 
+  const key = `reports/${card}_raw_${tab}.csv.gz`;
   try {
-    const filePath = path.join(__dirname, '..', '_reports', `${card}_raw_${tab}.csv.gz`);
-    const csv = zlib.gunzipSync(fs.readFileSync(filePath));
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${card}_${tab}_raw.csv"`);
-    res.setHeader('Cache-Control', 'no-store');
-    res.status(200).send(csv);
+    // Confirms the object actually exists first, so a not-yet-built tab returns the
+    // same "not available yet" message it always has, instead of a redirect to a link
+    // that 404s once the browser follows it.
+    await s3Client.send(new HeadObjectCommand({ Bucket: REPORTS_BUCKET, Key: key }));
+    const url = await getSignedUrl(
+      s3Client,
+      new GetObjectCommand({
+        Bucket: REPORTS_BUCKET,
+        Key: key,
+        ResponseContentType: 'text/csv; charset=utf-8',
+        ResponseContentDisposition: `attachment; filename="${card}_${tab}_raw.csv"`,
+        ResponseContentEncoding: 'gzip',
+      }),
+      { expiresIn: 60 }
+    );
+    res.writeHead(302, { Location: url, 'Cache-Control': 'no-store' });
+    res.end();
     const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
     logEvent(session.uid, session.email, card, 'raw_download', tab, ip).catch(() => {});
   } catch (e) {

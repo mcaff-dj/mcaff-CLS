@@ -1,8 +1,12 @@
 // Gated report server: GET /api/report/mcaffeine|hyphen|productkyc
-// The actual HTML lives under api/_reports/ (NOT publicly servable - only this function
-// reads it), so viewing a report always goes through a session + permission check.
-const fs = require('fs');
-const path = require('path');
+// The actual HTML lives in S3 (uploaded by the GitHub Actions refresh job, NOT bundled
+// with this Lambda's code - report files can be tens of MB, well over what Lambda/API
+// Gateway can return directly), so this function only ever makes the allow/deny
+// decision and hands back a short-lived signed link on OUR OWN domain (CloudFront's
+// /reports/* path, not S3's own domain - see reportUrls.js for why: the dashboard's
+// own JS reaches into the report iframe's document, which browsers only allow
+// same-origin).
+const { signedReportUrl } = require('../_lib/reportUrls');
 const { getSession } = require('../_lib/session');
 const { CARD_KEYS, logAccess } = require('../_lib/db');
 
@@ -25,11 +29,9 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const filePath = path.join(__dirname, '..', '_reports', `${card}.html`);
-    const html = fs.readFileSync(filePath, 'utf8');
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store');
-    res.status(200).send(html);
+    const url = await signedReportUrl(`reports/${card}.html`);
+    res.writeHead(302, { Location: url, 'Cache-Control': 'no-store' });
+    res.end();
     const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
     logAccess(session.uid, session.email, card, ip).catch(() => {});
   } catch (e) {

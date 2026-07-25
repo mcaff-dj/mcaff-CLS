@@ -27,7 +27,7 @@ module.exports = async (req, res) => {
   }
 
   if (req.method === 'POST') {
-    await sql`INSERT INTO permissions (user_id, card_key) VALUES (${userId}, ${cardKey}) ON CONFLICT DO NOTHING`;
+    await sql`INSERT IGNORE INTO permissions (user_id, card_key) VALUES (${userId}, ${cardKey})`;
     res.status(200).json({ ok: true });
     return;
   }

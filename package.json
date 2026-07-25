@@ -4,6 +4,13 @@
   "version": "1.0.0",
   "description": "Static customer-query segment reports + access-gated report serving.",
   "dependencies": {
-    "@vercel/postgres": "^0.10.0"
+    "mysql2": "^3.11.0",
+    "@vercel/postgres": "^0.10.0",
+    "@aws-sdk/client-secrets-manager": "^3.600.0",
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/s3-request-presigner": "^3.600.0",
+    "@aws-sdk/cloudfront-signer": "^3.600.0",
+    "express": "^4.19.2",
+    "serverless-http": "^3.2.0"
   }
 }

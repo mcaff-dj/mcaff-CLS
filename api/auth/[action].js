@@ -5,7 +5,7 @@ const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPe
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
 
 const PRESENCE_STATUSES = new Set(['Online', 'Busy', 'Offline']);
-const GH_REPO = 'Vikash-P/mcaff-CLS';
+const GH_REPO = 'mcaff-dj/mcaff-CLS';
 const GH_ASSIGN_WORKFLOW = 'assign-leads.yml';
 
 // Fires the same assign-leads workflow the 5-minute cron runs, on demand, so an agent
@@ -38,15 +38,27 @@ async function triggerImmediateAssignment() {
   }
 }
 
+// CloudFront deliberately does NOT forward the viewer's original Host header to the
+// API Gateway origin (see the origin request policy - forwarding it made API Gateway
+// reject every request, since it validates Host against its own execute-api domain).
+// That means req.headers.host inside this Lambda is always the raw API Gateway
+// domain, never the CloudFront domain the browser actually used - so building the
+// OAuth redirect_uri from it would send Google a URL we never authorized. With no
+// custom domain yet, PUBLIC_BASE_URL just pins the one real public address; falls
+// back to the header-derived guess only if that env var isn't set.
+function publicBaseUrl(req) {
+  if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL;
+  const proto = req.headers['x-forwarded-proto'] || 'https';
+  return `${proto}://${req.headers.host}`;
+}
+
 async function handleLogin(req, res) {
   const clientId = process.env.GOOGLE_CLIENT_ID;
   if (!clientId) {
     res.status(500).send('Server not configured: missing GOOGLE_CLIENT_ID.');
     return;
   }
-  const proto = req.headers['x-forwarded-proto'] || 'https';
-  const host = req.headers.host;
-  const redirectUri = `${proto}://${host}/api/auth/callback`;
+  const redirectUri = `${publicBaseUrl(req)}/api/auth/callback`;
   const next = (req.query && req.query.next) || '/';
   const state = Buffer.from(JSON.stringify({ next })).toString('base64url');
 
@@ -97,9 +109,7 @@ async function handleCallback(req, res) {
       res.status(500).send('Server not configured: missing Google OAuth credentials.');
       return;
     }
-    const proto = req.headers['x-forwarded-proto'] || 'https';
-    const host = req.headers.host;
-    const redirectUri = `${proto}://${host}/api/auth/callback`;
+    const redirectUri = `${publicBaseUrl(req)}/api/auth/callback`;
 
     const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',

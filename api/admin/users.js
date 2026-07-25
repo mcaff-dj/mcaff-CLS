@@ -14,14 +14,14 @@ async function upsertAndInvite(email, name, perms, tabPerms, req) {
   const existing = await sql`SELECT id FROM users WHERE email = ${email}`;
   const isNewUser = existing.rows.length === 0;
 
-  const { rows } = await sql`
+  await sql`
     INSERT INTO users (email, name) VALUES (${email}, ${name})
-    ON CONFLICT (email) DO UPDATE SET name = COALESCE(NULLIF(EXCLUDED.name, ''), users.name)
-    RETURNING id, email, name, is_admin
+    ON DUPLICATE KEY UPDATE name = COALESCE(NULLIF(VALUES(name), ''), name)
   `;
+  const { rows } = await sql`SELECT id, email, name, is_admin FROM users WHERE email = ${email}`;
   const user = rows[0];
   for (const key of perms) {
-    await sql`INSERT INTO permissions (user_id, card_key) VALUES (${user.id}, ${key}) ON CONFLICT DO NOTHING`;
+    await sql`INSERT IGNORE INTO permissions (user_id, card_key) VALUES (${user.id}, ${key})`;
   }
   for (const [cardKey, tabKeys] of Object.entries(tabPerms || {})) {
     if (!perms.includes(cardKey)) continue;
