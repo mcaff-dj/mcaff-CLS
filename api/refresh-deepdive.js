@@ -8,7 +8,7 @@
 // Required Vercel env var: GH_DISPATCH_TOKEN (same token as /api/refresh.js already
 // uses - it's scoped to the whole repo's Actions, not one workflow file).
 
-const OWNER = 'Vikash-P';
+const OWNER = 'mcaff-dj';
 const REPO = 'mcaff-CLS';
 const WORKFLOW_FILE = 'refresh-deepdive.yml';
 const COOLDOWN_MS = 5 * 60 * 1000; // don't allow re-dispatch within 5 min of the last manual trigger

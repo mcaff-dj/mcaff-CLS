@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write   # lets this workflow request an OIDC token to assume the AWS role below - no stored AWS keys anywhere
 
 concurrency:
   group: refresh-deepdive
@@ -37,6 +38,21 @@ jobs:
           python scripts/build_csat_dashboard_data.py
           python scripts/build_agent_shift_status.py
           python scripts/build_csat_artifact.py
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::157320387454:role/github-actions-mcaff-cls-deploy
+          aws-region: ap-south-1
+
+      - name: Upload report to S3
+        # api/report/[card].js reads deepdive.html from S3, not from this repo - the
+        # git commit below is no longer what makes a refresh visible on the live site,
+        # this step is (same reasoning as refresh.yml's "Upload reports to S3" step).
+        run: |
+          if [ -f "api/_reports/deepdive.html" ]; then
+            aws s3 cp api/_reports/deepdive.html s3://mcaff-cls-reports/reports/deepdive.html --content-type "text/html; charset=utf-8"
+          fi
 
       - name: Commit & push if changed
         run: |

@@ -2,7 +2,7 @@
 // Same pattern as /api/refresh-status.js, but reports on refresh-deepdive.yml runs
 // instead of refresh.yml - see /api/refresh-deepdive.js for why this is separate.
 
-const OWNER = 'Vikash-P';
+const OWNER = 'mcaff-dj';
 const REPO = 'mcaff-CLS';
 const WORKFLOW_FILE = 'refresh-deepdive.yml';
 

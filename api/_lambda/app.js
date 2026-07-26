@@ -49,6 +49,8 @@ mount('post', '/api/log-export', '../log-export.js');
 mount('post', '/api/onboarding/submit', '../onboarding/submit.js');
 mount('post', '/api/refresh', '../refresh.js');
 mount('get', '/api/refresh-status', '../refresh-status.js');
+mount('post', '/api/refresh-deepdive', '../refresh-deepdive.js');
+mount('get', '/api/refresh-deepdive-status', '../refresh-deepdive-status.js');
 mount('post', '/api/refund/gokwik-initiate', '../refund/gokwik-initiate.js');
 
 // Registered before the dynamic /api/report/:card route below - Express matches routes
