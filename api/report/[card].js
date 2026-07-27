@@ -17,7 +17,7 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const session = getSession(req);
+  const session = await getSession(req);
   if (!session) {
     res.writeHead(302, { Location: `/login.html?next=${encodeURIComponent('/api/report/' + card)}` });
     res.end();

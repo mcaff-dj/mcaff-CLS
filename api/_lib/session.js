@@ -1,6 +1,7 @@
 // Small HMAC-signed session token - not full JWT, same security property (tamper-proof,
 // server-verified, expiring) without adding a JWT dependency for a single internal tool.
 const crypto = require('crypto');
+const { getUserById, getUserPermissions, getUserTabPermissions, CARD_KEYS } = require('./db');
 
 const COOKIE_NAME = 'pkyc_session';
 const MAX_AGE_SECONDS = 7 * 24 * 60 * 60; // 7 days
@@ -55,9 +56,28 @@ function parseCookies(req) {
   return out;
 }
 
-function getSession(req) {
+// The signed cookie only proves who logged in and when - it can't reflect a user being
+// deleted or having permissions changed *after* it was issued (cookies last up to
+// MAX_AGE_SECONDS). So every call re-checks the user's current row and re-derives
+// perms/isAdmin/tabPerms from the database instead of trusting what was baked into the
+// cookie at login time; a user deleted (or de-admin'd) after logging in loses access
+// on their very next request rather than whenever their cookie happens to expire.
+async function getSession(req) {
   const cookies = parseCookies(req);
-  return verify(cookies[COOKIE_NAME]);
+  const payload = verify(cookies[COOKIE_NAME]);
+  if (!payload) return null;
+  const user = await getUserById(payload.uid);
+  if (!user) return null;
+  const perms = user.is_admin ? CARD_KEYS : await getUserPermissions(user.id);
+  const tabPerms = user.is_admin ? {} : await getUserTabPermissions(user.id);
+  return {
+    uid: user.id,
+    email: user.email,
+    name: user.name,
+    isAdmin: !!user.is_admin,
+    perms,
+    tabPerms,
+  };
 }
 
 function setSessionCookie(res, payload) {

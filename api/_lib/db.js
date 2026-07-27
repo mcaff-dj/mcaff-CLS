@@ -179,6 +179,21 @@ async function ensurePgSchema() {
   // distinct, so leads created before this column existed don't block real ones.
   await pgSql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS awb_code TEXT`;
   await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS lead_assignments_awb_code_key ON lead_assignments (awb_code)`;
+  await pgSql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS rto_reason TEXT`;
+  // Replacement order ID (sheet column V) - lets "reordered" be computed the same way
+  // the RTO-CRM UI itself already defines it (see reordersConverted in
+  // app/rto-crm/RtoCrmClient.js) directly from Postgres, without re-deriving it from
+  // disposition text alone. Only populated going forward; leads disposed before this
+  // column existed have it NULL even if they were genuinely reorders.
+  await pgSql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS new_order_id TEXT`;
+  // Delivery partner, derived from awb_code via the same AWB-prefix rule already used
+  // in scripts/lead_priority.py's prefix_rule_partner (SF->Shadowfax, MC->ElasticRun,
+  // etc. - see resolvePartnerFromAwb below for the JS mirror). Plain column, populated
+  // explicitly at write time (recordLeadDisposition below, and assign_leads.py's own
+  // Postgres write) the same way awb_code itself already is, rather than a generated
+  // column - both writers already know the AWB when they write, so there's no reason
+  // to make Postgres re-derive it on every read.
+  await pgSql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS delivery_partner TEXT`;
   pgSchemaReady = true;
 }
 
@@ -191,6 +206,17 @@ const CARD_LABELS = {
 async function getUserByEmail(email) {
   await ensureSchema();
   const { rows } = await sql`SELECT id, email, name, is_admin FROM users WHERE email = ${email}`;
+  return rows[0] || null;
+}
+
+// Used by session.js on every request to re-verify a session's user still exists (and
+// re-derive their current perms) - a signed cookie alone can't reflect a
+// deletion/permission change made after it was issued, so this closes that gap by
+// checking the current row on each call instead of trusting what was baked into the
+// cookie at login time.
+async function getUserById(userId) {
+  await ensureSchema();
+  const { rows } = await sql`SELECT id, email, name, is_admin FROM users WHERE id = ${userId}`;
   return rows[0] || null;
 }
 
@@ -310,21 +336,37 @@ async function getRecentLeadAssignments(sinceHours) {
   return out;
 }
 
+// JS mirror of scripts/lead_priority.py's prefix_rule_partner - keep both in sync by
+// hand if the rule ever changes (same tradeoff already accepted elsewhere in this repo,
+// e.g. rto-crm's own JS mirror of that same script's priority_tier()).
+const AWB_PREFIX_RULES = [
+  ['SF', 'Shadowfax'], ['MC', 'ElasticRun'], ['PD', 'Pidge'],
+  ['76', 'Bluedart'], ['77', 'Bluedart'], ['78', 'Bluedart'], ['80', 'Bluedart'], ['90', 'Bluedart'],
+  ['23', 'Delhivery'], ['15', 'Xpressbees'], ['18', 'Delhivery'],
+];
+function resolvePartnerFromAwb(awbCode) {
+  const awb = (awbCode || '').trim();
+  if (!awb) return null;
+  const match = AWB_PREFIX_RULES.find(([prefix]) => awb.startsWith(prefix));
+  return match ? match[1] : null;
+}
+
 // Upserts the disposal side of a lead's lifecycle. If assign_leads.py never recorded
 // this order_id (assigned before lead_assignments existed, or assigned manually
 // straight in the sheet), the INSERT branch creates the row now with the disposing
 // agent's own email as assigned_at's best-available attribution, rather than dropping
 // the disposal details on the floor.
 //
-// awbCode uses COALESCE on conflict rather than overwriting, so a disposal call
-// without it (e.g. an older cached client) never clobbers the awb_code
+// awbCode/delivery_partner use COALESCE on conflict rather than overwriting, so a
+// disposal call without an AWB (e.g. an older cached client) never clobbers what
 // assign_leads.py already stamped for this order_id.
 async function recordLeadDisposition(orderId, email, awbCode, details) {
   await ensurePgSchema();
-  const { disposition, agentRemarks, connected, attempt, refundAmount } = details || {};
+  const { disposition, agentRemarks, connected, attempt, refundAmount, newOrderId } = details || {};
+  const deliveryPartner = resolvePartnerFromAwb(awbCode);
   await pgSql`
-    INSERT INTO lead_assignments (order_id, email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount, awb_code)
-    VALUES (${orderId}, ${email}, now(), now(), ${disposition || null}, ${agentRemarks || null}, ${connected || null}, ${attempt || null}, ${refundAmount || null}, ${awbCode || null})
+    INSERT INTO lead_assignments (order_id, email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount, awb_code, new_order_id, delivery_partner)
+    VALUES (${orderId}, ${email}, now(), now(), ${disposition || null}, ${agentRemarks || null}, ${connected || null}, ${attempt || null}, ${refundAmount || null}, ${awbCode || null}, ${newOrderId || null}, ${deliveryPartner})
     ON CONFLICT (order_id) DO UPDATE SET
       disposed_at = now(),
       disposition = EXCLUDED.disposition,
@@ -332,13 +374,178 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
       connected = EXCLUDED.connected,
       attempt = EXCLUDED.attempt,
       refund_amount = EXCLUDED.refund_amount,
-      awb_code = COALESCE(EXCLUDED.awb_code, lead_assignments.awb_code)
+      awb_code = COALESCE(EXCLUDED.awb_code, lead_assignments.awb_code),
+      new_order_id = COALESCE(EXCLUDED.new_order_id, lead_assignments.new_order_id),
+      delivery_partner = COALESCE(EXCLUDED.delivery_partner, lead_assignments.delivery_partner)
   `;
+}
+
+// dateFrom/dateTo are inclusive "YYYY-MM-DD" strings (or null for unbounded), interpreted
+// as IST calendar days (+05:30, matching the hour-of-day bucketing above and the rest of
+// this app's IST convention) rather than UTC days - otherwise "Today"/"Yesterday" would be
+// off by up to 5.5 hours around the day boundary. Each metric below applies these bounds
+// to its OWN natural timestamp (assigned_at for assigned/pending, disposed_at for
+// everything disposal-related), not a single shared WHERE, since one calendar range means
+// something different depending on which side of a lead's lifecycle you're counting.
+function dateBounds(dateFrom, dateTo) {
+  return {
+    from: dateFrom ? new Date(`${dateFrom}T00:00:00.000+05:30`) : null,
+    to: dateTo ? new Date(`${dateTo}T23:59:59.999+05:30`) : null,
+  };
+}
+
+// Cross-agent lead/disposition KPIs for the Calling Team's "Overview" sub-tab
+// (app/calling-overview/) - aggregated straight from lead_assignments, the same table
+// rto-crm.html's own submitDisp() already writes to, so this needs no new data
+// pipeline. "Connect rate" mirrors rto-crm's own definition: disposed leads where
+// connected = 'Yes', over all disposed leads (blank/other values excluded from the
+// denominator the same way rto-crm's own KPI row treats them).
+async function getCallingOverviewStats(dateFrom, dateTo) {
+  await ensurePgSchema();
+  const { from, to } = dateBounds(dateFrom, dateTo);
+  const { rows } = await pgSql`
+    SELECT
+      count(*) FILTER (
+        WHERE (${from}::timestamptz IS NULL OR assigned_at >= ${from}) AND (${to}::timestamptz IS NULL OR assigned_at <= ${to})
+      )::int AS total_assigned,
+      count(*) FILTER (
+        WHERE disposed_at IS NOT NULL AND (${from}::timestamptz IS NULL OR disposed_at >= ${from}) AND (${to}::timestamptz IS NULL OR disposed_at <= ${to})
+      )::int AS total_disposed,
+      count(*) FILTER (
+        WHERE disposed_at IS NULL AND (${from}::timestamptz IS NULL OR assigned_at >= ${from}) AND (${to}::timestamptz IS NULL OR assigned_at <= ${to})
+      )::int AS total_pending,
+      count(*) FILTER (
+        WHERE connected = 'Yes' AND disposed_at IS NOT NULL AND (${from}::timestamptz IS NULL OR disposed_at >= ${from}) AND (${to}::timestamptz IS NULL OR disposed_at <= ${to})
+      )::int AS total_connected,
+      count(*) FILTER (
+        WHERE connected = 'No' AND disposed_at IS NOT NULL AND (${from}::timestamptz IS NULL OR disposed_at >= ${from}) AND (${to}::timestamptz IS NULL OR disposed_at <= ${to})
+      )::int AS total_unreachable,
+      count(*) FILTER (
+        WHERE (disposition = 'Refund Requested' OR refund_amount IS NOT NULL)
+          AND disposed_at IS NOT NULL AND (${from}::timestamptz IS NULL OR disposed_at >= ${from}) AND (${to}::timestamptz IS NULL OR disposed_at <= ${to})
+      )::int AS total_refunded,
+      coalesce(sum(refund_amount) FILTER (
+        WHERE disposed_at IS NOT NULL AND (${from}::timestamptz IS NULL OR disposed_at >= ${from}) AND (${to}::timestamptz IS NULL OR disposed_at <= ${to})
+      ), 0)::float AS total_refund_amount
+    FROM lead_assignments
+  `;
+  const r = rows[0] || {};
+  const totalDisposed = r.total_disposed || 0;
+  const totalConnectAttempts = (r.total_connected || 0) + (r.total_unreachable || 0);
+  return {
+    totalAssigned: r.total_assigned || 0,
+    totalDisposed,
+    totalPending: r.total_pending || 0,
+    connectRate: totalConnectAttempts > 0 ? Math.round((r.total_connected / totalConnectAttempts) * 100) : 0,
+    totalRefunded: r.total_refunded || 0,
+    totalRefundAmount: r.total_refund_amount || 0,
+  };
+}
+
+// Hour-of-day (IST) activity pattern for the Overview tab's chart - every lead bucketed
+// by the hour its own natural timestamp falls in (assigned_at for "assigned"; disposed_at
+// for the other four, since dialling/connecting/reordering/refunding all happen at
+// disposal time), summed across all history rather than a specific day. "Reordered"
+// mirrors RtoCrmClient.js's own reordersConverted definition exactly (disposition value
+// OR a replacement order ID), now that new_order_id is captured in Postgres too.
+async function getCallingHourlyStats(dateFrom, dateTo) {
+  await ensurePgSchema();
+  const { from, to } = dateBounds(dateFrom, dateTo);
+  const [assignedRows, disposedRows] = await Promise.all([
+    pgSql`
+      SELECT extract(hour FROM assigned_at AT TIME ZONE 'Asia/Kolkata')::int AS hour, count(*)::int AS n
+      FROM lead_assignments
+      WHERE (${from}::timestamptz IS NULL OR assigned_at >= ${from}) AND (${to}::timestamptz IS NULL OR assigned_at <= ${to})
+      GROUP BY 1
+    `,
+    pgSql`
+      SELECT
+        extract(hour FROM disposed_at AT TIME ZONE 'Asia/Kolkata')::int AS hour,
+        count(*)::int AS dialled,
+        count(*) FILTER (WHERE connected = 'Yes')::int AS connected,
+        count(*) FILTER (WHERE disposition IN ('Customer Agreed to Accept', 'Product Issue / Exchange') OR new_order_id IS NOT NULL)::int AS reordered,
+        count(*) FILTER (WHERE disposition = 'Refund Requested' OR refund_amount IS NOT NULL)::int AS refunded
+      FROM lead_assignments
+      WHERE disposed_at IS NOT NULL
+        AND (${from}::timestamptz IS NULL OR disposed_at >= ${from}) AND (${to}::timestamptz IS NULL OR disposed_at <= ${to})
+      GROUP BY 1
+    `,
+  ]);
+
+  const byHour = Array.from({ length: 24 }, (_, hour) => ({
+    hour, assigned: 0, dialled: 0, connected: 0, reordered: 0, refunded: 0,
+  }));
+  for (const r of assignedRows.rows) byHour[r.hour].assigned = r.n;
+  for (const r of disposedRows.rows) {
+    byHour[r.hour].dialled = r.dialled;
+    byHour[r.hour].connected = r.connected;
+    byHour[r.hour].reordered = r.reordered;
+    byHour[r.hour].refunded = r.refunded;
+  }
+  return byHour;
+}
+
+// Per-partner disposition breakdown (delivery_partner, derived from awb_code - see
+// ensurePgSchema). Surfaces "Customer Agreed to Accept" specifically alongside the total,
+// so it directly answers "which partner is most of our Customer Agreed to Accept coming
+// from" rather than just a generic disposed count - sorted by that count descending.
+async function getCallingPartnerBreakdown(dateFrom, dateTo) {
+  await ensurePgSchema();
+  const { from, to } = dateBounds(dateFrom, dateTo);
+  const { rows } = await pgSql`
+    SELECT
+      coalesce(delivery_partner, 'Unknown') AS partner,
+      count(*)::int AS total_disposed,
+      count(*) FILTER (WHERE disposition = 'Customer Agreed to Accept')::int AS customer_agreed_to_accept,
+      count(*) FILTER (WHERE connected = 'Yes')::int AS connected
+    FROM lead_assignments
+    WHERE disposed_at IS NOT NULL
+      AND (${from}::timestamptz IS NULL OR disposed_at >= ${from}) AND (${to}::timestamptz IS NULL OR disposed_at <= ${to})
+    GROUP BY 1
+    ORDER BY customer_agreed_to_accept DESC, total_disposed DESC
+  `;
+  return rows.map((r) => ({
+    partner: r.partner,
+    totalDisposed: r.total_disposed,
+    customerAgreedToAccept: r.customer_agreed_to_accept,
+    connected: r.connected,
+  }));
+}
+
+// Per-RTO-reason lead volume (rto_reason - the sheet's own RTO reason column, mirrored
+// into Postgres). Sorted by volume descending, same as the partner breakdown.
+async function getCallingRtoReasonBreakdown(dateFrom, dateTo) {
+  await ensurePgSchema();
+  const { from, to } = dateBounds(dateFrom, dateTo);
+  const { rows } = await pgSql`
+    SELECT
+      coalesce(rto_reason, 'Unknown') AS rto_reason,
+      count(*)::int AS total
+    FROM lead_assignments
+    WHERE (${from}::timestamptz IS NULL OR assigned_at >= ${from}) AND (${to}::timestamptz IS NULL OR assigned_at <= ${to})
+    GROUP BY 1
+    ORDER BY total DESC
+  `;
+  return rows.map((r) => ({ rtoReason: r.rto_reason, total: r.total }));
+}
+
+// Combines all queries above into the single payload api/report/data/[key].js's
+// "calling-overview" route serves - one round trip for the whole Overview tab.
+async function getCallingOverviewData(query) {
+  const { dateFrom, dateTo } = query || {};
+  const [stats, hourly, partnerBreakdown, rtoReasonBreakdown] = await Promise.all([
+    getCallingOverviewStats(dateFrom, dateTo),
+    getCallingHourlyStats(dateFrom, dateTo),
+    getCallingPartnerBreakdown(dateFrom, dateTo),
+    getCallingRtoReasonBreakdown(dateFrom, dateTo),
+  ]);
+  return { stats, hourly, partnerBreakdown, rtoReasonBreakdown };
 }
 
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
-  getUserByEmail, getUserPermissions, getUserTabPermissions, setTabPermissions,
+  getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
   getAllAgentPresence, getRecentLeadAssignments, recordLeadDisposition,
+  getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
 };

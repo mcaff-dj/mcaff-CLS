@@ -7,7 +7,7 @@ const { CARD_TABS } = require('../_lib/tabs');
 const { getSession } = require('../_lib/session');
 
 module.exports = async (req, res) => {
-  const session = getSession(req);
+  const session = await getSession(req);
   if (!session || !session.isAdmin) {
     res.status(403).json({ error: 'Forbidden' });
     return;

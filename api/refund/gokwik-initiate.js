@@ -28,7 +28,7 @@ module.exports = async (req, res) => {
     res.status(405).json({ error: 'Method not allowed' });
     return;
   }
-  const session = getSession(req);
+  const session = await getSession(req);
   if (!session) {
     res.status(401).json({ error: 'Not signed in' });
     return;

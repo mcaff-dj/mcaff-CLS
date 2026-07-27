@@ -81,7 +81,7 @@ async function handleLogout(req, res) {
 }
 
 async function handleMe(req, res) {
-  const session = getSession(req);
+  const session = await getSession(req);
   if (!session) {
     res.status(200).json({ authenticated: false });
     return;
@@ -208,7 +208,7 @@ async function handleCallback(req, res) {
 // assignment pass - assign_leads.py itself remains the sole authority on who actually
 // gets which lead.
 async function handlePresence(req, res) {
-  const session = getSession(req);
+  const session = await getSession(req);
   if (!session || !session.email) {
     res.status(401).json({ error: 'Not signed in' });
     return;
@@ -258,7 +258,7 @@ async function handleRecentAssignments(req, res) {
     res.status(405).json({ error: 'Method not allowed' });
     return;
   }
-  const session = getSession(req);
+  const session = await getSession(req);
   if (!session || !session.email) {
     res.status(401).json({ error: 'Not signed in' });
     return;
@@ -279,7 +279,7 @@ async function handleRecordDisposition(req, res) {
     res.status(405).json({ error: 'Method not allowed' });
     return;
   }
-  const session = getSession(req);
+  const session = await getSession(req);
   if (!session || !session.email) {
     res.status(401).json({ error: 'Not signed in' });
     return;
