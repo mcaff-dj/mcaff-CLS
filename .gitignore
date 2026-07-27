@@ -5,6 +5,7 @@ sheetdata-*.json
 sa_key*
 
 node_modules/
+.next/
 .env
 .env.*
 !.env.example

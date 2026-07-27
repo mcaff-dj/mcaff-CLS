@@ -1,12 +1,13 @@
 name: Deploy
 
-# Fires on every push to main that touches anything actually deployed - the app
-# code, its dependencies, or the static pages. Deliberately does NOT fire on
-# changes to data/*.json (refresh.yml's own cache bookkeeping) or the generated
-# report HTML (those go straight to S3 from refresh.yml, not through this
-# workflow) - so the daily automated data refresh doesn't cause a pointless
-# same-code redeploy every day, while any real code change - from anyone -
-# deploys within about a minute of landing on main, with no manual step.
+# Fires on every push to main that touches the API Lambda's own code or its
+# dependencies. Deliberately does NOT fire on changes to data/*.json (refresh.yml's
+# own cache bookkeeping) or the generated report HTML (those go straight to S3 from
+# refresh.yml, not through this workflow) - so the daily automated data refresh
+# doesn't cause a pointless same-code redeploy every day, while any real code
+# change - from anyone - deploys within about a minute of landing on main, with no
+# manual step. The app/ frontend is NOT deployed by this workflow at all - it's
+# hosted separately on AWS Amplify, which has its own GitHub-triggered build.
 on:
   push:
     branches: [main]
@@ -14,11 +15,6 @@ on:
       - 'api/**'
       - 'package.json'
       - 'package-lock.json'
-      - 'index.html'
-      - 'admin.html'
-      - 'login.html'
-      - 'dashboard.html'
-      - 'rto-crm.html'
       - '.github/workflows/deploy.yml'
 
 permissions:
@@ -45,11 +41,20 @@ jobs:
         run: npm ci --omit=dev
 
       - name: Package the Lambda function
+        # node_modules now also contains next/react/tailwindcss (the Next.js
+        # frontend's dependencies, listed in the same package.json for Amplify's own
+        # build to use) - the Lambda's own code never requires() any of these, so
+        # they're pruned before zipping rather than shipped as dead weight in every
+        # deploy (Next.js alone is a large chunk of a typical node_modules).
         run: |
           mkdir -p build/api
           cp -r api/. build/api/
           rm -rf build/api/_reports
           cp -r node_modules build/node_modules
+          rm -rf build/node_modules/next build/node_modules/@next build/node_modules/react build/node_modules/react-dom \
+                 build/node_modules/canvas-confetti build/node_modules/tailwindcss build/node_modules/postcss \
+                 build/node_modules/autoprefixer build/node_modules/styled-jsx build/node_modules/@swc \
+                 build/node_modules/caniuse-lite build/node_modules/bowser
           cp package.json build/package.json
           cd build && zip -r ../lambda.zip . -x "*.git*" && cd ..
 
@@ -61,14 +66,3 @@ jobs:
 
       - name: Update Lambda function code
         run: aws lambda update-function-code --function-name mcaff-cls-api --zip-file fileb://lambda.zip
-
-      - name: Sync static pages to S3
-        run: |
-          aws s3 cp index.html s3://mcaff-cls-static/index.html --content-type "text/html; charset=utf-8"
-          aws s3 cp admin.html s3://mcaff-cls-static/admin.html --content-type "text/html; charset=utf-8"
-          aws s3 cp login.html s3://mcaff-cls-static/login.html --content-type "text/html; charset=utf-8"
-          aws s3 cp dashboard.html s3://mcaff-cls-static/dashboard.html --content-type "text/html; charset=utf-8"
-          aws s3 cp rto-crm.html s3://mcaff-cls-static/rto-crm.html --content-type "text/html; charset=utf-8"
-
-      - name: Invalidate CloudFront cache
-        run: aws cloudfront create-invalidation --distribution-id EITNFFB9X4HAZ --paths "/*"
