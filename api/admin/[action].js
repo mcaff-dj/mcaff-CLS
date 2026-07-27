@@ -1,14 +1,26 @@
-// GET    /api/admin/users -> list all users + their permissions (admin only)
-// POST   /api/admin/users -> create/invite a user: { email, name, permissions: ['mcaffeine',...], tabPermissions: {hyphen:['csat']} }
-//                         -> or bulk-invite: { users: [{email,name},...], permissions: [...], tabPermissions: {...} }
-//          tabPermissions restricts a granted card to only the listed tabs (UI-level
-//          only - see report_tab_permissions in db.js); a card key absent from it, or
-//          given an empty array, gets full access to every tab as before.
-// DELETE /api/admin/users -> delete a user outright: { userId }
+// Consolidated admin routes (users/permissions/audit) into one dynamic-route file,
+// same technique already used by api/auth/[action].js. req.query.action tells us
+// which logical route was hit; URLs are unchanged:
+//   GET    /api/admin/users       -> list all users + their permissions (admin only)
+//   POST   /api/admin/users       -> create/invite a user: { email, name, permissions: ['mcaffeine',...], tabPermissions: {hyphen:['csat']} }
+//                                  -> or bulk-invite: { users: [{email,name},...], permissions: [...], tabPermissions: {...} }
+//   DELETE /api/admin/users       -> delete a user outright: { userId }
+//   POST   /api/admin/permissions -> grant whole card         { userId, cardKey }
+//   DELETE /api/admin/permissions -> revoke whole card        { userId, cardKey }
+//   PUT    /api/admin/permissions -> set tab restriction      { userId, cardKey, tabKeys }
+//   GET    /api/admin/audit       -> most recent 200 access events (admin only)
 const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser } = require('../_lib/db');
 const { CARD_TABS } = require('../_lib/tabs');
 const { getSession } = require('../_lib/session');
 const { sendMail, siteBaseUrl } = require('../_lib/mail');
+
+function parseBody(req) {
+  let body = req.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch { body = {}; }
+  }
+  return body || {};
+}
 
 async function upsertAndInvite(email, name, perms, tabPerms, req) {
   const existing = await sql`SELECT id FROM users WHERE email = ${email}`;
@@ -32,9 +44,9 @@ async function upsertAndInvite(email, name, perms, tabPerms, req) {
   const { rows: permRows } = await sql`SELECT card_key FROM permissions WHERE user_id = ${user.id}`;
   const cardLabels = permRows.map((r) => CARD_LABELS[r.card_key] || r.card_key);
 
-  // Best-effort notification - awaited before responding so Vercel doesn't freeze
-  // the function mid-send (which can happen if you write the response first), but
-  // failures here still never block the invite itself from succeeding.
+  // Best-effort notification - awaited before responding so a slow send never risks
+  // the function tearing down mid-send, but failures here still never block the
+  // invite itself from succeeding.
   try {
     const base = siteBaseUrl(req);
     const listHtml = cardLabels.length ? `<ul>${cardLabels.map((l) => `<li>${l}</li>`).join('')}</ul>` : '<p>(no reports yet)</p>';
@@ -55,14 +67,7 @@ async function upsertAndInvite(email, name, perms, tabPerms, req) {
   return user;
 }
 
-module.exports = async (req, res) => {
-  const session = await getSession(req);
-  if (!session || !session.isAdmin) {
-    res.status(403).json({ error: 'Forbidden' });
-    return;
-  }
-  await ensureSchema();
-
+async function handleUsers(req, res, session) {
   if (req.method === 'GET') {
     const { rows: users } = await sql`SELECT id, email, name, is_admin, created_at FROM users ORDER BY created_at ASC`;
     const { rows: perms } = await sql`SELECT user_id, card_key FROM permissions`;
@@ -82,11 +87,7 @@ module.exports = async (req, res) => {
   }
 
   if (req.method === 'POST') {
-    let body = req.body;
-    if (typeof body === 'string') {
-      try { body = JSON.parse(body); } catch { body = {}; }
-    }
-    body = body || {};
+    const body = parseBody(req);
     const perms = Array.isArray(body.permissions) ? body.permissions.filter((k) => CARD_KEYS.includes(k)) : [];
     const tabPerms = (body.tabPermissions && typeof body.tabPermissions === 'object') ? body.tabPermissions : {};
 
@@ -132,11 +133,7 @@ module.exports = async (req, res) => {
   }
 
   if (req.method === 'DELETE') {
-    let body = req.body;
-    if (typeof body === 'string') {
-      try { body = JSON.parse(body); } catch { body = {}; }
-    }
-    body = body || {};
+    const body = parseBody(req);
     const userId = parseInt(body.userId, 10);
     if (!userId) {
       res.status(400).json({ error: 'Invalid userId' });
@@ -156,4 +153,54 @@ module.exports = async (req, res) => {
   }
 
   res.status(405).json({ error: 'Method not allowed' });
+}
+
+async function handlePermissions(req, res) {
+  const body = parseBody(req);
+  const userId = parseInt(body.userId, 10);
+  const cardKey = body.cardKey;
+  if (!userId || !CARD_KEYS.includes(cardKey)) {
+    res.status(400).json({ error: 'Invalid userId or cardKey' });
+    return;
+  }
+
+  if (req.method === 'POST') {
+    await sql`INSERT IGNORE INTO permissions (user_id, card_key) VALUES (${userId}, ${cardKey})`;
+    res.status(200).json({ ok: true });
+    return;
+  }
+  if (req.method === 'DELETE') {
+    await sql`DELETE FROM permissions WHERE user_id = ${userId} AND card_key = ${cardKey}`;
+    res.status(200).json({ ok: true });
+    return;
+  }
+  if (req.method === 'PUT') {
+    const validKeys = new Set((CARD_TABS[cardKey] || []).map((t) => t.key));
+    const tabKeys = Array.isArray(body.tabKeys) ? body.tabKeys.filter((k) => validKeys.has(k)) : [];
+    await setTabPermissions(userId, cardKey, tabKeys);
+    res.status(200).json({ ok: true });
+    return;
+  }
+  res.status(405).json({ error: 'Method not allowed' });
+}
+
+async function handleAudit(req, res) {
+  const { rows } = await sql`SELECT email, card_key, action, detail, accessed_at, ip FROM audit_log ORDER BY accessed_at DESC LIMIT 200`;
+  res.status(200).json({ entries: rows.map((r) => ({ ...r, cardLabel: r.card_key ? (CARD_LABELS[r.card_key] || r.card_key) : '' })) });
+}
+
+module.exports = async (req, res) => {
+  const session = await getSession(req);
+  if (!session || !session.isAdmin) {
+    res.status(403).json({ error: 'Forbidden' });
+    return;
+  }
+  await ensureSchema();
+
+  const action = req.query && req.query.action;
+  if (action === 'users') return handleUsers(req, res, session);
+  if (action === 'permissions') return handlePermissions(req, res);
+  if (action === 'audit') return handleAudit(req, res);
+
+  res.status(404).json({ error: 'Unknown admin route' });
 };

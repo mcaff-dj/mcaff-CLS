@@ -35,15 +35,7 @@ function mount(method, path, handlerPath, paramName) {
 
 mount('all', '/api/auth/:action', '../auth/[action].js', 'action');
 
-mount('get', '/api/admin/users', '../admin/users.js');
-mount('post', '/api/admin/users', '../admin/users.js');
-mount('delete', '/api/admin/users', '../admin/users.js');
-
-mount('post', '/api/admin/permissions', '../admin/permissions.js');
-mount('delete', '/api/admin/permissions', '../admin/permissions.js');
-mount('put', '/api/admin/permissions', '../admin/permissions.js');
-
-mount('get', '/api/admin/audit', '../admin/audit.js');
+mount('all', '/api/admin/:action', '../admin/[action].js', 'action');
 
 mount('post', '/api/log-export', '../log-export.js');
 mount('post', '/api/onboarding/submit', '../onboarding/submit.js');
@@ -52,11 +44,13 @@ mount('get', '/api/refresh-status', '../refresh-status.js');
 mount('post', '/api/refresh-deepdive', '../refresh-deepdive.js');
 mount('get', '/api/refresh-deepdive-status', '../refresh-deepdive-status.js');
 mount('post', '/api/refund/gokwik-initiate', '../refund/gokwik-initiate.js');
+mount('all', '/api/rto/sheet', '../rto/sheet.js');
 
 // Registered before the dynamic /api/report/:card route below - Express matches routes
-// in registration order, so this literal path has to win the match before "raw" is ever
-// tried as a :card value.
+// in registration order, so these more specific paths have to win the match before
+// "raw"/"data" are ever tried as a :card value.
 mount('get', '/api/report/raw', '../report/raw.js');
+mount('get', '/api/report/data/:key', '../report/data/[key].js', 'key');
 mount('get', '/api/report/:card', '../report/[card].js', 'card');
 
 app.use((req, res) => {

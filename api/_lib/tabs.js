@@ -49,6 +49,7 @@ const CARD_TABS = {
   deepdive: [
     { key: 'csat', label: 'CSAT Deep Dive' },
     { key: 'agent', label: 'Agent wise analysis' },
+    { key: 'agentactivity', label: 'Agent Activity Analysis' },
   ],
 };
 
