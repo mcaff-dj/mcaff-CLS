@@ -5,10 +5,16 @@
 // report's data endpoint would otherwise be its own file, and this repo is already at
 // the Vercel Hobby plan's 12-serverless-function cap. req.query.key selects which
 // data source/permission-card this request is for.
-const fs = require('fs');
-const path = require('path');
+const { GetObjectCommand } = require('@aws-sdk/client-s3');
+const { s3Client, REPORTS_BUCKET } = require('../../_lib/s3');
 const { getSession } = require('../../_lib/session');
 const { logAccess, getCallingOverviewData } = require('../../_lib/db');
+
+async function streamToString(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 const DATA_ROUTES = {
   productkyc: { file: 'productkyc_data.json', card: 'productkyc', page: '/productkyc' },
@@ -49,14 +55,26 @@ module.exports = async (req, res) => {
     if (route.query) {
       payload = await route.query(req.query);
     } else {
-      const filePath = path.join(__dirname, '..', '..', '..', 'data', route.file);
-      if (!fs.existsSync(filePath)) {
-        res.status(404).json({ error: `Data for "${key}" has not been generated yet.` });
-        return;
+      // These small JSON files are refreshed by refresh-deepdive.yml/similar and
+      // uploaded to S3 (same reports/ prefix the big HTML reports already use) rather
+      // than bundled into the Lambda's own deployment package - deploy.yml only
+      // packages api/ + node_modules, and doesn't even trigger on data/** changes, so a
+      // file living only in the Lambda's local filesystem would never actually reach
+      // production regardless of how often it's regenerated.
+      let body;
+      try {
+        const obj = await s3Client.send(new GetObjectCommand({ Bucket: REPORTS_BUCKET, Key: `reports/${route.file}` }));
+        body = await streamToString(obj.Body);
+      } catch (e) {
+        if (e.name === 'NoSuchKey') {
+          res.status(404).json({ error: `Data for "${key}" has not been generated yet.` });
+          return;
+        }
+        throw e;
       }
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.setHeader('Cache-Control', 'no-store');
-      res.status(200).send(fs.readFileSync(filePath, 'utf8'));
+      res.status(200).send(body);
       const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
       logAccess(session.uid, session.email, route.card, ip).catch(() => {});
       return;

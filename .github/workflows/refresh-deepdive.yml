@@ -49,9 +49,20 @@ jobs:
         # api/report/[card].js reads deepdive.html from S3, not from this repo - the
         # git commit below is no longer what makes a refresh visible on the live site,
         # this step is (same reasoning as refresh.yml's "Upload reports to S3" step).
+        # csat_dashboard_data.json/agent_shift_status.json need the same treatment -
+        # api/report/data/[key].js reads these from S3 too now, not from the Lambda's
+        # own filesystem (deploy.yml never bundles data/ into the Lambda package, and
+        # doesn't even trigger on data/** changes, so committing these to git alone
+        # never actually reached production).
         run: |
           if [ -f "api/_reports/deepdive.html" ]; then
             aws s3 cp api/_reports/deepdive.html s3://mcaff-cls-reports/reports/deepdive.html --content-type "text/html; charset=utf-8"
+          fi
+          if [ -f "data/csat_dashboard_data.json" ]; then
+            aws s3 cp data/csat_dashboard_data.json s3://mcaff-cls-reports/reports/csat_dashboard_data.json --content-type "application/json; charset=utf-8"
+          fi
+          if [ -f "data/agent_shift_status.json" ]; then
+            aws s3 cp data/agent_shift_status.json s3://mcaff-cls-reports/reports/agent_shift_status.json --content-type "application/json; charset=utf-8"
           fi
 
       - name: Commit & push if changed
