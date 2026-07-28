@@ -15,6 +15,7 @@ import gen_monthly
 import gen_panels
 import gen_raw_export
 import gen_weekly
+import kyc_source
 import lib
 from brands import BRANDS
 from report_context import Ctx, ci_key, fnum, h_enc, n0, pretty_month, round1, year_of
@@ -146,16 +147,37 @@ def main():
         with open(report_cache_file, "r", encoding="utf-8-sig") as f:
             data_rows = json.load(f)
     else:
-        # Rows for months older than the target window are treated as settled and reused from
-        # the persisted primary-sheet cache instead of being re-fetched on every refresh - only
-        # the tail (plus anything newly appended) is pulled live each time. The "Refresh data
-        # now" button (workflow_dispatch) only needs the last ~30 days, so it refetches just the
-        # latest month live; the scheduled daily run (schedule event) still refetches 3 months.
+        # Settled months (everything but the still-moving target window) come from the
+        # CLS_KYC_mCaff/CLS_KYC_Hyphen MySQL tables - a column-for-column mirror of this same
+        # sheet (see kyc_source.py) - instead of a live Sheets pull; only the target window
+        # itself is fetched live. The "Refresh data now" button (workflow_dispatch) only needs
+        # the last ~30 days, so it refetches just the latest month live; the scheduled daily
+        # run (schedule event) still refetches 3 months. Falls back to the old sheet-only
+        # incremental cache if MySQL credentials aren't configured.
         target_months = [b["months"][-1]] if args.quick else b["months"][-3:]
-        print(f"[{b['brand']}] fetching main sheet (incremental: last {len(target_months)} month(s) live, rest from cache)...")
         primary_cache_path = REPO_ROOT / f"data/{b['brand']}_primary_cache.json"
-        data_rows = lib.get_sheet_rows_incremental(b["spreadsheet_id"], b["sheet_name"], b["last_col"],
-                                                    primary_cache_path, col["month"], target_months)
+        kyc_table = b.get("kyc_mysql_table")
+        settled_rows = kyc_source.fetch_settled_rows(kyc_table, b["kyc_mysql_columns"], target_months) if kyc_table else None
+        settled_from_mysql = settled_rows is not None
+        if settled_from_mysql:
+            print(f"[{b['brand']}] loaded {len(settled_rows)} settled rows from {kyc_table}; "
+                  f"fetching {len(target_months)} live month(s) from the sheet...")
+            # Reads a generous trailing window of the live sheet (by the sheet's own row
+            # count, not settled_rows' count - the MySQL mirror can fold in rows the primary
+            # tab alone doesn't carry, e.g. a merged secondary/legacy sheet, so its row count
+            # doesn't line up with the primary sheet's own row numbering) and keeps only the
+            # target month(s) from it.
+            fresh_rows = lib.get_sheet_tail_for_months(b["spreadsheet_id"], b["sheet_name"], b["last_col"],
+                                                        20000, col["month"], target_months)
+            data_rows = settled_rows + fresh_rows
+            primary_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(primary_cache_path, "w", encoding="utf-8") as f:
+                json.dump(data_rows, f, separators=(",", ":"))
+        else:
+            print(f"[{b['brand']}] MySQL unavailable - falling back to the sheet-only incremental cache "
+                  f"(last {len(target_months)} month(s) live, rest from cache)...")
+            data_rows = lib.get_sheet_rows_incremental(b["spreadsheet_id"], b["sheet_name"], b["last_col"],
+                                                        primary_cache_path, col["month"], target_months)
     data_rows = [list(r) if isinstance(r, list) else r for r in data_rows]
 
     # Older KYC raw-dump sheet covering months the primary sheet doesn't (see brands.py).
@@ -166,7 +188,12 @@ def main():
     # instead of the primary sheet's literal "Unique"/"Duplicate" strings, so every downstream
     # `== "Unique"` check (KPI cards, per-category tables) silently dropped these rows until
     # the value is normalized here (rank "1" -> "Unique", everything else -> "Duplicate").
-    if "secondary" in b:
+    #
+    # Skipped entirely when settled_rows came from MySQL above: CLS_KYC_mCaff's settled months
+    # already carry this sheet's contribution pre-merged and pre-normalized (verified against
+    # its per-month row counts and unique_flag values before wiring this in) - merging it again
+    # here would double-count every settled-month row it contributes.
+    if "secondary" in b and not settled_from_mysql:
         # The quick (button-triggered) refresh only needs the primary sheet's latest month, so
         # it reuses whatever secondary-sheet snapshot the last full refresh saved instead of
         # re-pulling all ~71k rows live.

@@ -411,6 +411,24 @@ def set_sheet_rows_at_row(spreadsheet_id, sheet_name, rows, start_row, chunk_siz
                 time.sleep(5 * attempt)
 
 
+def get_sheet_tail_for_months(spreadsheet_id, sheet_name, last_col, buffer_rows, month_col_idx, target_months):
+    """Fetches the last buffer_rows data rows of the sheet - using the sheet's own current
+    row count (a cheap column-A read), not a row count derived from some other source - and
+    keeps only rows whose Month is one of target_months. Used when the settled
+    (pre-target-month) rows come from a MySQL mirror instead of a local cache (see
+    kyc_source.py): that mirror's row count can NOT be assumed to line up with the live
+    sheet's own row numbering (e.g. it may also fold in a secondary/legacy sheet the primary
+    tab doesn't carry), so this reads a generous trailing window off the sheet itself rather
+    than guessing a start row from the mirror's count. buffer_rows must comfortably exceed
+    the current month's row count; the Month filter discards whatever extra older rows the
+    window happens to catch."""
+    last_row = get_last_data_row(spreadsheet_id, sheet_name)
+    start_row = max(2, last_row - buffer_rows + 1)
+    target_set = set(target_months)
+    fetched = get_sheet_rows_chunked(spreadsheet_id, sheet_name, last_col, start_row=start_row)
+    return [r for r in fetched if (r[month_col_idx] if month_col_idx < len(r) else None) in target_set]
+
+
 def get_sheet_rows_incremental(spreadsheet_id, sheet_name, last_col, cache_path, month_col_idx, target_months):
     cache_path = Path(cache_path)
     if not cache_path.exists():

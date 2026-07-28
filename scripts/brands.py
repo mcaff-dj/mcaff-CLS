@@ -45,6 +45,20 @@ BRANDS = [
         # AGENT/AI sheet tabs above (mcaff_dwh has no CSAT data before Mar'26) -
         # see scripts/csat_source.py.
         "csat_mysql": {"csat_table": "mcaff_tickets_csat", "tickets_table": "mcaff_tickets"},
+        # Settled-month ticket rows (everything but the current, still-moving month) come
+        # from this table instead of a live Sheets pull - see scripts/kyc_source.py. It's a
+        # column-for-column mirror (in this exact order) of the primary sheet's own columns
+        # A:Z, verified against the live "mCaffeine" tab header - the sheet has more trailing
+        # columns (State_zone/Outer_package/visible_damage/CPR/platform) this table doesn't
+        # carry, which is fine: ctx.cell() already returns "" past a row's actual length.
+        "kyc_mysql_table": "CLS_KYC_mCaff",
+        "kyc_mysql_columns": [
+            "created_date", "parent_order", "last_source_type", "ticket_no", "query_class", "query_category",
+            "product_name", "batch_number", "sku", "awb_number", "delivery_partner_name", "order_date",
+            "month", "week", "order_month", "order_week", "year", "unique_flag", "order_year",
+            "total_sales_m", "total_sales_w", "wh_name", "pro_sales", "partner_allocation", "wh_allocation",
+            "log_partner",
+        ],
     },
     {
         "brand": "hyphen",
@@ -71,5 +85,17 @@ BRANDS = [
         # this same spreadsheet's "Sales per month" tab (not the ticket-row sheet above).
         "rto_conv_range": "AS:AY",
         "csat_mysql": {"csat_table": "hyphen_tickets_csat", "tickets_table": "hyphen_tickets"},
+        # See the matching mcaffeine comment above - verified against the live "Hyphen" tab
+        # header (columns A:AO), same exact order.
+        "kyc_mysql_table": "CLS_KYC_Hyphen",
+        "kyc_mysql_columns": [
+            "ticket_no", "created_date", "parent_order", "last_source_type", "query_class", "query_category",
+            "product_name", "batch_number", "sku", "awb_number", "delivery_partner_name", "order_date",
+            "month", "week", "order_month", "order_week", "year", "unique_flag", "order_year",
+            "total_sales_m", "total_sales_w", "pro_sales", "wh_name", "partner_allocation", "wh_allocation",
+            "log_partner", "product_link", "edd", "age", "gender", "skin_type", "first_time_regular",
+            "outer_packaging", "visible_damage", "state_zone", "cpr", "reason_of_purchase", "am_pm",
+            "usage_times", "sequence_of_usage", "platform",
+        ],
     },
 ]
