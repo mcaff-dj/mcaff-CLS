@@ -31,6 +31,37 @@ MONTHS = {m: i + 1 for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 )}
 
+# Delivery partner from an AWB code's prefix - mirrored in api/_lib/db.js's
+# resolvePartnerFromAwb/AWB_PREFIX_RULES for leads recorded via the disposal path; keep
+# both in sync by hand if the rule ever changes. Business rule confirmed manually
+# against known AWB ranges, not derived from anything self-describing in the AWB
+# format itself.
+PREFIX_RULES = [
+    ("SF", "Shadowfax"),
+    ("MC", "ElasticRun"),
+    ("PD", "Pidge"),
+    ("PA", "Pikendle"),
+    ("76", "Bluedart"),
+    ("77", "Bluedart"),
+    ("78", "Bluedart"),
+    ("80", "Bluedart"),
+    ("90", "Bluedart"),
+    ("23", "Delhivery"),
+    ("15", "Xpressbees"),
+    ("18", "Delhivery"),
+    ("53", "Delhivery"),
+]
+
+
+def prefix_rule_partner(awb):
+    awb = (awb or "").strip()
+    if not awb:
+        return ""
+    for prefix, partner in PREFIX_RULES:
+        if awb.startswith(prefix):
+            return partner
+    return ""
+
 
 def cell(row, idx):
     return row[idx].strip() if idx < len(row) and row[idx] else ""

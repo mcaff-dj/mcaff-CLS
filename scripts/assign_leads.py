@@ -39,7 +39,8 @@ import lib
 from lead_priority import (
     COL_AGENT, COL_ATTEMPT, COL_AWB_CODE, COL_CONNECTED, COL_DISPOSITION,
     COL_ORDER_ID, COL_PAYMENT_METHOD, COL_REMARKS, COL_RTO_INITIATED_DATE, COL_RTO_REASON,
-    DEFAULT_QUOTA, build_assignment_queue, cell, parse_rto_initiated_date, priority_tier,
+    DEFAULT_QUOTA, build_assignment_queue, cell, parse_rto_initiated_date, prefix_rule_partner,
+    priority_tier,
 )
 
 SPREADSHEET_ID = "1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI"
@@ -80,17 +81,24 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row):
     so in practice this only runs when the DB is reachable anyway).
 
     Also stamps awb_code (unique per lead_assignments row - see the UNIQUE
-    index in api/_lib/db.js's ensureSchema) so downstream reporting
-    (scripts/sync_lead_assignments_to_mysql.py) can key on it. Uses COALESCE
-    on conflict rather than blindly overwriting, so a re-run never clobbers an
-    awb_code already recorded by the disposal write path (api/_lib/db.js's
-    recordLeadDisposition) with a blank value."""
+    index in api/_lib/db.js's ensureSchema) and delivery_partner (derived from
+    awb_code via lead_priority.prefix_rule_partner - the same rule api/_lib/db.js's
+    JS mirror uses for leads recorded via the disposal path instead) so downstream
+    reporting (scripts/sync_lead_assignments_to_mysql.py) can key on either without
+    a separate sheet lookup. Both use COALESCE on conflict rather than blindly
+    overwriting, so a re-run never clobbers a value already recorded by the
+    disposal write path (api/_lib/db.js's recordLeadDisposition) with a blank
+    one."""
     conn_str = os.environ.get("POSTGRES_URL")
     if not conn_str or not assignments:
         return
     order_id_by_row = {row_index: order_id for row_index, _rto_initiated_date, order_id, _tier in unassigned_pending}
     rows = [
-        (order_id_by_row[row_index], email, awb_code_by_row.get(row_index) or None)
+        (
+            order_id_by_row[row_index], email,
+            awb_code_by_row.get(row_index) or None,
+            prefix_rule_partner(awb_code_by_row.get(row_index)) or None,
+        )
         for row_index, email in assignments.items() if row_index in order_id_by_row
     ]
     if not rows:
@@ -99,12 +107,13 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row):
         with conn.cursor() as cur:
             cur.executemany(
                 """
-                INSERT INTO lead_assignments (order_id, email, assigned_at, awb_code)
-                VALUES (%s, %s, now(), %s)
+                INSERT INTO lead_assignments (order_id, email, assigned_at, awb_code, delivery_partner)
+                VALUES (%s, %s, now(), %s, %s)
                 ON CONFLICT (order_id) DO UPDATE SET
                     email = EXCLUDED.email,
                     assigned_at = now(),
-                    awb_code = COALESCE(EXCLUDED.awb_code, lead_assignments.awb_code)
+                    awb_code = COALESCE(EXCLUDED.awb_code, lead_assignments.awb_code),
+                    delivery_partner = COALESCE(EXCLUDED.delivery_partner, lead_assignments.delivery_partner)
                 """,
                 rows,
             )
