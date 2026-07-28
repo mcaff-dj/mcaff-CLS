@@ -69,12 +69,30 @@ jobs:
         # these straight from S3 (see api/_lib/s3.js), they go there directly instead.
         # Uploaded on every run regardless of whether the data-cache JSONs below
         # changed, since the reports themselves are always freshly regenerated.
+        #
+        # mcaffeine.html/hyphen.html are gzip-compressed before upload (20MB/13MB
+        # uncompressed - both well over CloudFront's 10MB limit for its own automatic
+        # on-the-fly compression, so without this they'd always be served raw). The S3
+        # key/path stays the same either way; --content-encoding gzip is what tells
+        # CloudFront and the browser this object's bytes are already gzipped, so it's
+        # decompressed transparently on arrival - nothing downstream (api/report/[card].js,
+        # the report page itself) needs to know or change.
         run: |
+          function Publish-CompressedHtml($path, $key) {
+            $gz = "$path.gz"
+            $input = [System.IO.File]::OpenRead((Resolve-Path $path))
+            $output = [System.IO.File]::Create($gz)
+            $gzipStream = New-Object System.IO.Compression.GzipStream($output, [System.IO.Compression.CompressionMode]::Compress)
+            $input.CopyTo($gzipStream)
+            $gzipStream.Close(); $output.Close(); $input.Close()
+            aws s3 cp $gz "s3://mcaff-cls-reports/reports/$key" --content-type "text/html; charset=utf-8" --content-encoding gzip
+            Remove-Item $gz
+          }
           if (Test-Path "api/_reports/mcaffeine.html") {
-            aws s3 cp api/_reports/mcaffeine.html s3://mcaff-cls-reports/reports/mcaffeine.html --content-type "text/html; charset=utf-8"
+            Publish-CompressedHtml "api/_reports/mcaffeine.html" "mcaffeine.html"
           }
           if (Test-Path "api/_reports/hyphen.html") {
-            aws s3 cp api/_reports/hyphen.html s3://mcaff-cls-reports/reports/hyphen.html --content-type "text/html; charset=utf-8"
+            Publish-CompressedHtml "api/_reports/hyphen.html" "hyphen.html"
           }
           Get-ChildItem -Path api/_reports -Filter "*_raw_*.csv.gz" -ErrorAction SilentlyContinue | ForEach-Object {
             aws s3 cp $_.FullName "s3://mcaff-cls-reports/reports/$($_.Name)" --content-type "application/gzip"
