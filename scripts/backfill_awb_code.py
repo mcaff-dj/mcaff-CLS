@@ -48,7 +48,7 @@ def main(conn_str):
     updated, not_found, conflicts = 0, 0, []
     seen_not_found = set()
 
-    # Neon's pooled endpoint has killed the connection mid-run every time (after a
+    # The pooled endpoint has been observed killing the connection mid-run (after a
     # couple hundred round trips) - each UPDATE commits individually and this whole
     # function is idempotent (only ever touches rows still NULL), so on a dropped
     # connection we just reconnect and pick up wherever the fresh missing-list says

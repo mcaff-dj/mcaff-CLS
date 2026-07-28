@@ -308,8 +308,8 @@ async function handleRecordDisposition(req, res) {
   } catch (e) {
     // A failed disposition write here has no other trace anywhere - the Sheet write
     // already succeeded independently, and the client's postJsonWithRetry only sees a
-    // non-2xx status, not why. Log the real cause (e.g. a Neon cold-start timeout) so
-    // it's actually findable via `vercel logs` instead of silently vanishing.
+    // non-2xx status, not why. Log the real cause so it's actually findable via
+    // CloudWatch instead of silently vanishing.
     console.error('recordDisposition failed for order', orderId, e);
     res.status(500).json({ error: 'Failed to record disposition' });
     return;
@@ -329,10 +329,10 @@ module.exports = async (req, res) => {
   try {
     await handler(req, res);
   } catch (e) {
-    // Without this, an unhandled DB error (e.g. a Neon cold-start timeout) crashes the
-    // function with a generic platform error and no application-level log line - the
-    // exact failure mode that let disposed-lead writes vanish silently. Every handler
-    // above that does its own DB work still gets a real error logged here as a backstop.
+    // Without this, an unhandled DB error crashes the function with a generic platform
+    // error and no application-level log line - the exact failure mode that let
+    // disposed-lead writes vanish silently. Every handler above that does its own DB
+    // work still gets a real error logged here as a backstop.
     console.error(`Unhandled error in auth/${action}:`, e);
     if (!res.headersSent) res.status(500).json({ error: 'Internal server error' });
   }

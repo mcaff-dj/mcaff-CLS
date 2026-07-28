@@ -39,12 +39,12 @@ vercel --prod # production deploy
 ## Access control
 
 Reports require Google sign-in and per-user, per-report permission (granted by an
-admin at `/admin.html`) — they are no longer public static files. Required Vercel
-project environment variables:
+admin at `/admin.html`) — they are no longer public static files. Required environment
+variables on the API Lambda:
 
 | Variable | Purpose |
 |----------|---------|
-| `POSTGRES_URL` | Postgres connection string (Vercel Postgres/Neon or any standard Postgres provider) — stores users, permissions, audit log |
+| `POSTGRES_URL` | Postgres connection string (Supabase or any standard Postgres provider) — RTO CRM agent presence/lead assignments; MySQL handles users, permissions, audit log |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | OAuth Client ID credentials (Google Cloud Console → Credentials), redirect URI `https://<your-domain>/api/auth/callback` |
 | `SESSION_SECRET` | Random string (e.g. `openssl rand -hex 32`) used to sign session cookies |
 | `ADMIN_EMAILS` | Comma-separated emails auto-promoted to admin (with access to every report) on first login — bootstraps the first admin(s) since there's no self-serve signup |

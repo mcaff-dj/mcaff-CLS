@@ -11,25 +11,33 @@ const secretsClient = new SecretsManagerClient({});
 let pool = null;
 
 // RTO CRM operational state (agent_presence, lead_assignments) intentionally stays on
-// its own Postgres (Neon) database, separate from the MySQL PEP_CLS schema above -
+// its own Postgres (Supabase) database, separate from the MySQL PEP_CLS schema above -
 // scripts/assign_leads.py and scripts/sync_lead_assignments_to_mysql.py already talk
 // to this same Postgres directly via psycopg; only this file's schema bootstrap and
 // the handful of functions below need a Postgres connection of their own.
-// @vercel/postgres's `sql` specifically reads process.env.POSTGRES_URL - but Vercel
-// storage integrations name their connection string var all sorts of things
-// (sometimes with a custom prefix, e.g. this project's Neon integration uses
-// "auth_POSTGRES_URL" etc.), so search broadly for it rather than requiring an exact
-// name.
-if (!process.env.POSTGRES_URL) {
-  const candidateNames = Object.keys(process.env).filter((k) =>
-    /(^|_)(POSTGRES_URL|DATABASE_URL)$/.test(k) && !/_UNPOOLING|NON_POOLING|UNPOOLED|NO_SSL|PRISMA/.test(k)
-  );
-  const preferred = candidateNames.find((k) => k.endsWith('POSTGRES_URL')) || candidateNames.find((k) => k.endsWith('DATABASE_URL'));
-  if (preferred) {
-    process.env.POSTGRES_URL = process.env[preferred];
-  }
+const { Pool: PgPool } = require('pg');
+let pgPool = null;
+function getPgPool() {
+  if (pgPool) return pgPool;
+  const conn = process.env.POSTGRES_URL;
+  if (!conn) throw new Error('Missing POSTGRES_URL env var');
+  pgPool = new PgPool({ connectionString: conn, ssl: { rejectUnauthorized: false } });
+  return pgPool;
 }
-const { sql: pgSql } = require('@vercel/postgres');
+// Same sql`...` tagged-template calling convention every call site below already
+// uses (and the same trick the MySQL sql() shim above plays) - just against a plain
+// `pg` Pool instead of a provider-specific driver, so this works against any
+// standard Postgres endpoint (Supabase, RDS, etc.), not tied to one vendor's proxy
+// protocol.
+async function pgSql(strings, ...values) {
+  let text = '';
+  strings.forEach((s, i) => {
+    text += s;
+    if (i < values.length) text += `$${i + 1}`;
+  });
+  const { rows } = await getPgPool().query(text, values);
+  return { rows };
+}
 
 // Fetched once per warm Lambda instance, then reused - same "do it once, cache it"
 // idea as ensureSchema()'s schemaReady flag below.

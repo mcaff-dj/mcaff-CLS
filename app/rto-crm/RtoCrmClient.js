@@ -178,12 +178,12 @@ const localStorage = typeof window !== 'undefined'
       }
     }
 
-    // Best-effort POST to our own API with one retry after a short delay - Neon's
-    // serverless Postgres can auto-suspend when idle and take a few seconds to wake on
-    // the next connection, which is long enough to fail a single fire-and-forget request
-    // outright (fetch() doesn't reject on a non-2xx status, so a plain `.catch(()=>{})`
-    // never even sees it - the write silently vanishes with zero trace). Never blocks the
-    // caller's UI; failures are only logged to the console for later debugging.
+    // Best-effort POST to our own API with one retry after a short delay - a transient
+    // network blip or a cold Lambda container is long enough to fail a single
+    // fire-and-forget request outright (fetch() doesn't reject on a non-2xx status, so a
+    // plain `.catch(()=>{})` never even sees it - the write silently vanishes with zero
+    // trace). Never blocks the caller's UI; failures are only logged to the console for
+    // later debugging.
     async function postJsonWithRetry(url, body, attempts = 2) {
       for (let i = 0; i < attempts; i++) {
         try {
@@ -1238,7 +1238,7 @@ const localStorage = typeof window !== 'undefined'
         });
 
         // The signed-in user's own status is authoritative locally (no round-trip lag).
-        // Everyone else's status comes from serverPresence (Neon Postgres agent_presence,
+        // Everyone else's status comes from serverPresence (Supabase Postgres agent_presence,
         // fetched by fetchServerPresence above) when available, so the roster table shows
         // each agent's real reported status instead of a stale local/seeded default.
         const myEmail = googleUser?.email ? googleUser.email.toLowerCase() : null;

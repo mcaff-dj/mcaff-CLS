@@ -27,7 +27,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # continue-on-error so a lead-assignments hiccup (e.g. a transient Neon
+      # continue-on-error so a lead-assignments hiccup (e.g. a transient DB
       # timeout) doesn't also block the unrelated presence-log sync below.
       - name: Sync yesterday's disposed leads
         continue-on-error: true

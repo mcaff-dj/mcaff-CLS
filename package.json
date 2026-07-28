@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "mysql2": "^3.11.0",
-    "@vercel/postgres": "^0.10.0",
+    "pg": "^8.13.0",
     "@aws-sdk/client-secrets-manager": "^3.600.0",
     "@aws-sdk/client-s3": "^3.600.0",
     "@aws-sdk/s3-request-presigner": "^3.600.0",
