@@ -30,7 +30,17 @@ module.exports = async (req, res) => {
 
   try {
     const url = await signedReportUrl(`reports/${card}.html`);
-    res.writeHead(302, { Location: url, 'Cache-Control': 'no-store' });
+    // Redirect to a same-origin-relative path (just pathname+query, not the full
+    // https://d1lqcvzr613wr4.cloudfront.net/... URL) so the browser's iframe stays on
+    // this same Amplify domain instead of navigating to a different origin. Amplify's
+    // own /reports/<*> rewrite rule then transparently proxies it through to the real
+    // CloudFront reports domain server-side - the signature was computed against that
+    // domain (see reportUrls.js), so it still validates correctly there. Staying
+    // same-origin is required for the dashboard's own JS to reach into the report
+    // iframe's document (see HomeClient.js's onIframeLoaded) - browsers block that
+    // across origins.
+    const { pathname, search } = new URL(url);
+    res.writeHead(302, { Location: pathname + search, 'Cache-Control': 'no-store' });
     res.end();
     const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
     logAccess(session.uid, session.email, card, ip).catch(() => {});
