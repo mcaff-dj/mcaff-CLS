@@ -302,6 +302,8 @@ async function handleRecordDisposition(req, res) {
       connected: body.connected,
       attempt: body.attempt,
       refundAmount: typeof body.refundAmount === 'number' ? body.refundAmount : null,
+      newOrderId: (body.newOrderId || '').toString().trim() || null,
+      rtoReason: (body.rtoReason || '').toString().trim() || null,
     });
   } catch (e) {
     // A failed disposition write here has no other trace anywhere - the Sheet write

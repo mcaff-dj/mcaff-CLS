@@ -194,6 +194,21 @@ async function ensurePgSchema() {
   // column - both writers already know the AWB when they write, so there's no reason
   // to make Postgres re-derive it on every read.
   await pgSql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS delivery_partner TEXT`;
+  // Append-only history of every status transition an agent has ever had (Online /
+  // Busy / Offline), so agent_presence above can stay a single row per agent while this
+  // one answers "when did each change happen" - e.g. for a future audit trail or
+  // break-duration report. Written by upsertAgentPresence only when the status actually
+  // changes, not on every heartbeat, so it doesn't fill up with repeated identical rows.
+  await pgSql`
+    CREATE TABLE IF NOT EXISTS agent_presence_log (
+      id SERIAL PRIMARY KEY,
+      email TEXT NOT NULL,
+      name TEXT,
+      status TEXT NOT NULL,
+      changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await pgSql`CREATE INDEX IF NOT EXISTS agent_presence_log_email_idx ON agent_presence_log (email, changed_at DESC)`;
   pgSchemaReady = true;
 }
 
@@ -304,11 +319,18 @@ async function logAccess(userId, email, cardKey, ip) {
 // design insecure).
 async function upsertAgentPresence(email, name, status) {
   await ensurePgSchema();
+  const { rows: prevRows } = await pgSql`SELECT status FROM agent_presence WHERE email = ${email}`;
+  const prevStatus = prevRows[0]?.status;
   await pgSql`
     INSERT INTO agent_presence (email, name, status, updated_at)
     VALUES (${email}, ${name}, ${status}, now())
     ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, status = EXCLUDED.status, updated_at = now()
   `;
+  // Only log an actual transition (including an agent's very first report), not every
+  // periodic heartbeat re-sending the same status - see agent_presence_log's comment.
+  if (prevStatus !== status) {
+    await pgSql`INSERT INTO agent_presence_log (email, name, status, changed_at) VALUES (${email}, ${name}, ${status}, now())`;
+  }
 }
 
 // Returns every agent's last-reported status, keyed by lowercase email - lets the
@@ -340,9 +362,9 @@ async function getRecentLeadAssignments(sinceHours) {
 // hand if the rule ever changes (same tradeoff already accepted elsewhere in this repo,
 // e.g. rto-crm's own JS mirror of that same script's priority_tier()).
 const AWB_PREFIX_RULES = [
-  ['SF', 'Shadowfax'], ['MC', 'ElasticRun'], ['PD', 'Pidge'],
+  ['SF', 'Shadowfax'], ['MC', 'ElasticRun'], ['PD', 'Pidge'], ['PA', 'Pikendle'],
   ['76', 'Bluedart'], ['77', 'Bluedart'], ['78', 'Bluedart'], ['80', 'Bluedart'], ['90', 'Bluedart'],
-  ['23', 'Delhivery'], ['15', 'Xpressbees'], ['18', 'Delhivery'],
+  ['23', 'Delhivery'], ['15', 'Xpressbees'], ['18', 'Delhivery'], ['53', 'Delhivery'],
 ];
 function resolvePartnerFromAwb(awbCode) {
   const awb = (awbCode || '').trim();
@@ -360,13 +382,22 @@ function resolvePartnerFromAwb(awbCode) {
 // awbCode/delivery_partner use COALESCE on conflict rather than overwriting, so a
 // disposal call without an AWB (e.g. an older cached client) never clobbers what
 // assign_leads.py already stamped for this order_id.
+//
+// rto_reason/delivery_partner can end up NULL from the original assignment (sheet's RTO
+// Reason cell was still blank then, or the AWB's prefix wasn't in AWB_PREFIX_RULES yet).
+// The client always has the sheet's current values by the time an agent disposes
+// (RtoCrmClient.js's dispTkt.rtoReason/awbCode), so this is a second chance to fill them
+// in - but only the gaps: rto_reason prefers whatever's already stored (COALESCE(existing,
+// new)) since it shouldn't legitimately change once set, while delivery_partner keeps its
+// existing "recompute every time" behavior (COALESCE(new, existing)) since
+// resolvePartnerFromAwb is deterministic from the AWB alone.
 async function recordLeadDisposition(orderId, email, awbCode, details) {
   await ensurePgSchema();
-  const { disposition, agentRemarks, connected, attempt, refundAmount, newOrderId } = details || {};
+  const { disposition, agentRemarks, connected, attempt, refundAmount, newOrderId, rtoReason } = details || {};
   const deliveryPartner = resolvePartnerFromAwb(awbCode);
   await pgSql`
-    INSERT INTO lead_assignments (order_id, email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount, awb_code, new_order_id, delivery_partner)
-    VALUES (${orderId}, ${email}, now(), now(), ${disposition || null}, ${agentRemarks || null}, ${connected || null}, ${attempt || null}, ${refundAmount || null}, ${awbCode || null}, ${newOrderId || null}, ${deliveryPartner})
+    INSERT INTO lead_assignments (order_id, email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount, awb_code, new_order_id, rto_reason, delivery_partner)
+    VALUES (${orderId}, ${email}, now(), now(), ${disposition || null}, ${agentRemarks || null}, ${connected || null}, ${attempt || null}, ${refundAmount || null}, ${awbCode || null}, ${newOrderId || null}, ${rtoReason || null}, ${deliveryPartner})
     ON CONFLICT (order_id) DO UPDATE SET
       disposed_at = now(),
       disposition = EXCLUDED.disposition,
@@ -376,6 +407,7 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
       refund_amount = EXCLUDED.refund_amount,
       awb_code = COALESCE(EXCLUDED.awb_code, lead_assignments.awb_code),
       new_order_id = COALESCE(EXCLUDED.new_order_id, lead_assignments.new_order_id),
+      rto_reason = COALESCE(lead_assignments.rto_reason, EXCLUDED.rto_reason),
       delivery_partner = COALESCE(EXCLUDED.delivery_partner, lead_assignments.delivery_partner)
   `;
 }

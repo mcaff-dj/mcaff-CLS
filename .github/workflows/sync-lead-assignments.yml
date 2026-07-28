@@ -1,4 +1,4 @@
-name: Sync lead assignments to MySQL
+name: Sync calling CRM data to MySQL
 
 on:
   schedule:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: sync-lead-assignments
+  group: sync-calling-crm-to-mysql
   cancel-in-progress: false
 
 jobs:
@@ -27,7 +27,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # continue-on-error so a lead-assignments hiccup (e.g. a transient Neon
+      # timeout) doesn't also block the unrelated presence-log sync below.
       - name: Sync yesterday's disposed leads
+        continue-on-error: true
         env:
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
           MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
@@ -36,3 +39,13 @@ jobs:
           MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
           MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
         run: python scripts/sync_lead_assignments_to_mysql.py
+
+      - name: Sync new agent presence log rows
+        env:
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+        run: python scripts/sync_agent_presence_log_to_mysql.py

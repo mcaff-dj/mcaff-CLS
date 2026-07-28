@@ -492,6 +492,9 @@ const localStorage = typeof window !== 'undefined'
 
       const [agentFilter, setAgentFilter] = useState('ALL');
       const [agentStatus, setAgentStatus] = useState(()=>localStorage.getItem('rto_agent_status')||'Online');
+      // Team Roster tab: filters the roster table by an agent's live status (Online /
+      // On Break / Offline) - purely a client-side view filter, doesn't touch the server.
+      const [rosterStatusFilter, setRosterStatusFilter] = useState('All');
 
       // Real presence from Postgres (agent_presence table), keyed by lowercase email -
       // {}'d out for non-admin sessions (the GET is admin-only), in which case the
@@ -928,6 +931,7 @@ const localStorage = typeof window !== 'undefined'
         const dbSynced = await postJsonWithRetry('/api/auth/recordDisposition', {
           orderId: dispTkt.orderNumber,
           awbCode: dispTkt.awbCode,
+          rtoReason: dispTkt.rtoReason,
           disposition: dispReason,
           agentRemarks: (isAlreadyRef ? '[Already Refunded] ' : '') + agentRemarks.trim(),
           connected: dispConn==='YES'?'Yes':'No',
@@ -1438,6 +1442,12 @@ const localStorage = typeof window !== 'undefined'
         { value: 'Online', label: 'Online', icon: '🟢' },
         { value: 'Busy', label: 'On Break', icon: '🟡' },
         { value: 'Offline', label: 'Offline', icon: '⚪' },
+      ];
+
+      // Team Roster tab's status filter - same three live statuses plus an "All" option.
+      const rosterStatusOptions = [
+        { value: 'All', label: 'All Statuses', icon: '📋' },
+        ...statusOptions,
       ];
 
       const roleOptions = [
@@ -1996,6 +2006,12 @@ const localStorage = typeof window !== 'undefined'
                           <p className="text-[13px] text-zinc-500 mt-0.5">Manage agent roles, lead capacity limits, reassign active agent boxes, or wipe Column Q in Google Sheet.</p>
                         </div>
                         <div className="flex items-center gap-2">
+                          <CustomSelect
+                            value={rosterStatusFilter}
+                            onChange={setRosterStatusFilter}
+                            options={rosterStatusOptions}
+                            placeholder="Filter by status"
+                          />
                           <button
                             type="button"
                             onClick={() => {
@@ -2059,7 +2075,9 @@ const localStorage = typeof window !== 'undefined'
                             <th className="py-3 px-4 text-right font-medium">Actions</th>
                           </tr></thead>
                           <tbody className="divide-y divide-zinc-800/50">
-                            {agentMetrics.map(a => (
+                            {agentMetrics
+                              .filter(a => rosterStatusFilter === 'All' || a.status === rosterStatusFilter)
+                              .map(a => (
                               <tr key={a.email} className="hover:bg-zinc-800/30 transition-colors">
                                 <td className="py-3 px-4">
                                   <div className="flex items-center gap-2.5">
