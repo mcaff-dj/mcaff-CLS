@@ -24,9 +24,18 @@ async function getSigningKey() {
 
 // path e.g. "reports/mcaffeine.html" - matches the key layout the refresh workflow
 // already uploads to (see .github/workflows/refresh.yml's "Upload reports to S3" step).
+//
+// REPORTS_BASE_URL is deliberately separate from PUBLIC_BASE_URL: the latter is the
+// frontend's own public origin (used for OAuth redirect_uri construction - see
+// auth/[action].js's publicBaseUrl()), which now points at Amplify. This one must stay
+// pointed at the CloudFront distribution that actually fronts the reports S3 bucket
+// (d1lqcvzr613wr4.cloudfront.net) - the two used to be the same domain back when
+// CloudFront also served the frontend, but split apart once the frontend moved to
+// Amplify. Signing a URL against the wrong one produces a link Amplify doesn't know how
+// to serve (404), since Amplify has no /reports/* route of its own.
 async function signedReportUrl(path, expiresInSeconds = 60) {
   const { KEY_PAIR_ID, PRIVATE_KEY } = await getSigningKey();
-  const base = process.env.PUBLIC_BASE_URL;
+  const base = process.env.REPORTS_BASE_URL || process.env.PUBLIC_BASE_URL;
   const url = `${base}/${path}`;
   const expires = Math.floor(Date.now() / 1000) + expiresInSeconds;
   return getSignedUrl({ url, keyPairId: KEY_PAIR_ID, privateKey: PRIVATE_KEY, dateLessThan: new Date(expires * 1000) });
