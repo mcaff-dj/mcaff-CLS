@@ -1,0 +1,27 @@
+name: One-off - fix delivery_partner generated column
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fix delivery_partner column
+        env:
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+        run: python scripts/fix_delivery_partner_generated_column.py
