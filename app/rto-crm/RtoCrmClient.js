@@ -683,8 +683,19 @@ const localStorage = typeof window !== 'undefined'
       // assignment trigger, not just an explicit dropdown change - a stale/low
       // pend reading here (tickets not fully synced yet) only risks one harmless
       // extra assignment pass, same tradeoff as the admin-override path.
+      //
+      // Deliberately does NOT push a locally-cached 'Offline' this same way: unlike
+      // Online/Busy, this cached value could just be leftover from a stale/background
+      // tab (rto_agent_status in localStorage, read once on mount) rather than anything
+      // the agent actually just chose - blindly replaying it here could silently flip a
+      // genuinely-Online agent (set from a different, currently-active tab) back to
+      // Offline with no explicit action on this tab's part at all. Only an agent's own
+      // dropdown click (setAgentStatusManually) should ever write Offline - same
+      // principle already applied to the idle-timer removal above.
       useEffect(() => {
-        if (googleUser?.email) syncPresenceToServer(agentStatus, { pendingBox: agentStatus === 'Online' ? pend : undefined });
+        if (googleUser?.email && agentStatus !== 'Offline') {
+          syncPresenceToServer(agentStatus, { pendingBox: agentStatus === 'Online' ? pend : undefined });
+        }
       }, [googleUser]);
 
       // Presence heartbeat: keeps this agent's agent_presence row fresh in Postgres every
