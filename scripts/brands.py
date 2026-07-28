@@ -37,6 +37,9 @@ BRANDS = [
                 "wh": 21, "prosales": 22, "lastsource": 3, "platform": 32, "visdamage": 30, "outerpkg": 29, "statezone": 28,
                 "order_id": 2, "awb": 9},
         "small_tabs": {"mom": "MoM", "prodnps": "MCF:PRODUCT NPS", "agent": "AGENT", "ai": "AI"},
+        # RTO-Conversion tab: monthly RTO vs. punched/delivered/conversion figures, lives in
+        # this same spreadsheet's "Sales per month" tab (not the ticket-row sheet above).
+        "rto_conv_range": "AN:AT",
         # CSAT (Agent/AI split) now comes from mcaff_dwh MySQL for Mar'26 onward,
         # spliced onto the frozen Dec'25-Feb'26 history still sitting in the
         # AGENT/AI sheet tabs above (mcaff_dwh has no CSAT data before Mar'26) -
@@ -64,6 +67,9 @@ BRANDS = [
                 "wh": 22, "prosales": 21, "lastsource": 3, "platform": 40, "visdamage": 33, "outerpkg": 32, "statezone": 34,
                 "order_id": 2, "awb": 9},
         "small_tabs": {"mom": "Hyp: MoM", "prodnps": "HYP:PRODUCT NPS", "agent": "Hyp Agent Chart", "ai": "HYP AI Chart"},
+        # RTO-Conversion tab: monthly RTO vs. punched/delivered/conversion figures, lives in
+        # this same spreadsheet's "Sales per month" tab (not the ticket-row sheet above).
+        "rto_conv_range": "AS:AY",
         "csat_mysql": {"csat_table": "hyphen_tickets_csat", "tickets_table": "hyphen_tickets"},
     },
 ]

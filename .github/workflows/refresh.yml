@@ -110,6 +110,7 @@ jobs:
             "data/mcaffeine_primary_cache.json", "data/hyphen_primary_cache.json",
             "data/mcaffeine_secondary_cache.json",
             "data/mcaffeine_smalltabs_cache.json", "data/hyphen_smalltabs_cache.json",
+            "data/mcaffeine_rtoconv_cache.json", "data/hyphen_rtoconv_cache.json",
             "data/mcaffeine_awb_geo_cache.json", "data/hyphen_awb_geo_cache.json",
             "data/mcaffeine_geo_orders_cache.json", "data/hyphen_geo_orders_cache.json"
           ) | Where-Object { Test-Path $_ }

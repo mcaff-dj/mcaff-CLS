@@ -2,7 +2,7 @@
 // tabs within a card" admin feature (UI-level convenience only - see
 // report_tab_permissions in db.js). Keep this in sync BY HAND with the tab lists
 // actually built in scripts/gen_panels.py's assemble_report() (csat/nps/overview/
-// monthly/<brand classes>/prodpkg) and scripts/generate_product_kyc.py
+// monthly/<brand classes>/prodpkg/rtoconv) and scripts/generate_product_kyc.py
 // (PKYC_CATEGORY_LABELS in productkyc_config.py) - those are Python and can't be
 // imported here, so nothing enforces this automatically. `calling`'s entries
 // mirror index.html's own CALLING_TEAM_SUBITEMS (a hardcoded sidebar structure,
@@ -22,6 +22,7 @@ const CARD_TABS = {
     { key: 'product', label: 'Product' },
     { key: 'suggestion', label: 'Product Suggestion' },
     { key: 'prodpkg', label: 'Product & Packaging wrt Sales' },
+    { key: 'rtoconv', label: 'RTO-Conversion' },
   ],
   hyphen: [
     { key: 'csat', label: 'CSAT' },
@@ -34,6 +35,7 @@ const CARD_TABS = {
     { key: 'packaging', label: 'Packaging & Operational' },
     { key: 'product', label: 'Product' },
     { key: 'prodpkg', label: 'Product & Packaging wrt Sales' },
+    { key: 'rtoconv', label: 'RTO-Conversion' },
   ],
   productkyc: [
     { key: 'bodywash', label: 'Body Wash' },

@@ -1072,6 +1072,71 @@ def build_weekly_prod_pkg_block(ctx):
     return "".join(parts)
 
 
+def build_rto_conversion_panel(ctx):
+    """RTO (Return to Origin) volume vs. how many of that month's RTOs were re-punched
+    and ultimately re-delivered, pulled straight from the brand's own "Sales per month"
+    sheet tab (see brands.py's rto_conv_range) - a plain read-through table, not derived
+    from ticket rows like every other tab here."""
+    rows = ctx.rto_conv_rows or []
+    if len(rows) < 2:
+        return ('  <div class="tab-panel" id="panel-rtoconv"><section><h2>RTO Conversion</h2>'
+                '<p class="note">No RTO-Conversion data found.</p></section></div>')
+
+    header, data = rows[0], rows[1:]
+    idx = {str(name).strip(): i for i, name in enumerate(header)}
+
+    def cell(r, name):
+        i = idx.get(name)
+        return r[i] if i is not None and i < len(r) else ""
+
+    def num(v):
+        try:
+            return float(str(v).replace(",", "").replace("%", "").strip())
+        except (ValueError, AttributeError):
+            return 0.0
+
+    body_rows = []
+    zebra_i = 0
+    for r in data:
+        mo = cell(r, "Month")
+        if not str(mo).strip():
+            continue
+        rto, punched, delivered, conv, rev = (
+            num(cell(r, k)) for k in ("Total RTO", "Total Punched", "Total Delivered", "Conversion%", "Tentative Revenue")
+        )
+        z = "zebra" if zebra_i % 2 == 1 else ""
+        zebra_i += 1
+        body_rows.append(
+            f"<tr class='{z}'><td class='rowlabel'>{h_enc(pretty_month(mo))}</td>"
+            f"<td class='num'>{n0(rto)}</td><td class='num'>{n0(punched)}</td><td class='num'>{n0(delivered)}</td>"
+            f"<td class='num'>{fnum(round(conv, 2))}%</td><td class='num'>{n0(rev)}</td></tr>"
+        )
+
+    last_data_row = next((r for r in reversed(data) if str(cell(r, "Month")).strip()), None)
+    kpi = ""
+    if last_data_row is not None:
+        conv = num(cell(last_data_row, "Conversion%"))
+        rev = num(cell(last_data_row, "Tentative Revenue"))
+        rto = num(cell(last_data_row, "Total RTO"))
+        kpi = (f'<div class="kpi-row"><div class="kpi"><div class="label">Latest Month</div><div class="value">{h_enc(pretty_month(cell(last_data_row, "Month")))}</div></div>'
+               f'<div class="kpi"><div class="label">Total RTO</div><div class="value">{n0(rto)}</div></div>'
+               f'<div class="kpi"><div class="label">Conversion%</div><div class="value">{fnum(round(conv, 2))}%</div></div>'
+               f'<div class="kpi"><div class="label">Tentative Revenue</div><div class="value">{n0(rev)}</div></div></div>')
+
+    table = ("<div class='pivot-wrap'><div class='pivot-title'>RTO Conversion by Month</div><div class='pivot-scroll'>"
+             "<table class='pivot-table'><thead><tr><th class='corner'>Month</th><th>Total RTO</th><th>Total Punched</th>"
+             f"<th>Total Delivered</th><th>Conversion%</th><th>Tentative Revenue</th></tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>")
+
+    return f"""  <div class="tab-panel" id="panel-rtoconv">
+    <section>
+      <h2>RTO Conversion</h2>
+      <p class="desc">Monthly RTO (Return to Origin) volume against how many were re-punched and ultimately delivered, from the "Sales per month" sheet tab.</p>
+      {kpi}
+      {table}
+    </section>
+  </div>"""
+
+
 def assemble_report(ctx, here_dir):
     with open(here_dir / "_shell_head.html", "r", encoding="utf-8") as f:
         head = f.read()
@@ -1082,6 +1147,7 @@ def assemble_report(ctx, here_dir):
     for c in ctx.b["classes"]:
         nav += f'<button class="tab-btn" data-tab="{c["id"]}">{h_enc(c["label"])}</button>'
     nav += '<button class="tab-btn" data-tab="prodpkg">Product &amp; Packaging wrt Sales</button>'
+    nav += '<button class="tab-btn" data-tab="rtoconv">RTO-Conversion</button>'
 
     panels = [f'<div class="tab-panel" id="panel-overview">{ctx.overview_html}</div>']
     panels.append(build_monthly_analysis_panel(ctx))
@@ -1324,6 +1390,7 @@ def assemble_report(ctx, here_dir):
   {build_nps_panel(ctx)}
   {''.join(panels)}
   {build_prod_pkg_panel(ctx)}
+  {build_rto_conversion_panel(ctx)}
   {foot}
 </div>
 {tabjs}

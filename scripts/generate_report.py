@@ -211,6 +211,18 @@ def main():
         with open(small_tabs_cache_path, "w", encoding="utf-8") as f:
             json.dump({"mom": mom, "prodnps": prodnps, "agent": agent_hist, "ai": ai_hist}, f, separators=(",", ":"))
 
+    rtoconv_cache_path = REPO_ROOT / f"data/{b['brand']}_rtoconv_cache.json"
+    if args.quick and rtoconv_cache_path.exists():
+        print(f"[{b['brand']}] quick refresh: reusing cached RTO-Conversion data")
+        with open(rtoconv_cache_path, "r", encoding="utf-8-sig") as f:
+            rto_conv_rows = json.load(f)
+    else:
+        print(f"[{b['brand']}] fetching RTO-Conversion data ('Sales per month'!{b['rto_conv_range']})...")
+        rto_conv_rows = lib.get_sheet_values(b["spreadsheet_id"], f"'Sales per month'!{b['rto_conv_range']}")
+        with open(rtoconv_cache_path, "w", encoding="utf-8") as f:
+            json.dump(rto_conv_rows, f, separators=(",", ":"))
+    ctx.rto_conv_rows = rto_conv_rows
+
     print(f"[{b['brand']}] fetching Agent/AI CSAT from MySQL...")
     agent_mysql, ai_mysql = csat_source.fetch_agent_ai_csat(b["csat_mysql"]["csat_table"], b["csat_mysql"]["tickets_table"])
     agent = csat_source.splice_with_sheet_history(agent_hist, agent_mysql)
