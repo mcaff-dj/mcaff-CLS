@@ -25,7 +25,8 @@ var COMING_SOON = {
 // through /api/report/{key}'s static-file-serving path.
 var NEXT_PAGE_ROUTES = {
   onboarding: '/onboarding',
-  productkyc: '/productkyc'
+  productkyc: '/productkyc',
+  deepdive: '/deepdive'
 };
 
 // Calling Team has its own three nested nav sub-items instead of one blanket

@@ -66,11 +66,14 @@ module.exports = async (req, res) => {
         const obj = await s3Client.send(new GetObjectCommand({ Bucket: REPORTS_BUCKET, Key: `reports/${route.file}` }));
         body = await streamToString(obj.Body);
       } catch (e) {
-        if (e.name === 'NoSuchKey') {
-          res.status(404).json({ error: `Data for "${key}" has not been generated yet.` });
-          return;
-        }
-        throw e;
+        // Any failure to fetch (missing key, or an access-denied that S3 returns instead
+        // of a clean NoSuchKey when the caller also lacks s3:ListBucket on the bucket) is
+        // reported the same user-facing way - a raw AWS SDK error/ARN has no actionable
+        // meaning for someone looking at the dashboard, and logging it server-side is
+        // what CloudWatch is for.
+        console.error(`Failed to fetch reports/${route.file} from S3:`, e);
+        res.status(404).json({ error: `Data for "${key}" has not been generated yet.` });
+        return;
       }
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.setHeader('Cache-Control', 'no-store');
