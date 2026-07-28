@@ -98,6 +98,23 @@ jobs:
             aws s3 cp $_.FullName "s3://mcaff-cls-reports/reports/$($_.Name)" --content-type "application/gzip"
           }
 
+      - name: Invalidate CloudFront cache for updated reports
+        shell: pwsh
+        # The S3 upload above doesn't bust CloudFront's edge cache on its own, so
+        # without this, every viewer kept getting served whatever mcaffeine.html/
+        # hyphen.html was cached from before this run - sometimes for a full day -
+        # even though S3 already had the fresh file (this is why the RTO-conversion
+        # tab didn't show up for hours despite the report having regenerated with it
+        # correctly on every run). Distribution ID is resolved by domain rather than
+        # hardcoded, since it isn't recorded anywhere else in this repo - see
+        # api/_lib/reportUrls.js's comment on d1lqcvzr613wr4.cloudfront.net.
+        run: |
+          $distId = aws cloudfront list-distributions --query "DistributionList.Items[?DomainName=='d1lqcvzr613wr4.cloudfront.net'].Id" --output text
+          if (-not $distId) {
+            throw "Could not resolve the CloudFront distribution ID for d1lqcvzr613wr4.cloudfront.net - check that domain still matches api/_lib/reportUrls.js, or hardcode the ID here instead."
+          }
+          aws cloudfront create-invalidation --distribution-id $distId --paths "/reports/mcaffeine.html" "/reports/hyphen.html"
+
       - name: Commit & push if changed
         shell: pwsh
         run: |
