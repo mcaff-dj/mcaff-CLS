@@ -1,4 +1,4 @@
-import RtoCrmClient from './RtoCrmClient';
+import RtoCrmClient from './RtoCrmClientLoader';
 
 export const metadata = {
   title: 'RTO CRM — Agent Inbox & Refund Portal',
