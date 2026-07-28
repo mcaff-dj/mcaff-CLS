@@ -166,9 +166,13 @@ def main():
             # count, not settled_rows' count - the MySQL mirror can fold in rows the primary
             # tab alone doesn't carry, e.g. a merged secondary/legacy sheet, so its row count
             # doesn't line up with the primary sheet's own row numbering) and keeps only the
-            # target month(s) from it.
+            # target month(s) from it. Scaled per target month (busy months have run past
+            # 20k rows on their own, e.g. Jun'26) - undershooting the true window only risks
+            # silently dropping real target-month rows, so this errs generous; the Month
+            # filter cheaply discards whatever extra historical rows a large window catches.
+            buffer_rows = 25000 * len(target_months)
             fresh_rows = lib.get_sheet_tail_for_months(b["spreadsheet_id"], b["sheet_name"], b["last_col"],
-                                                        20000, col["month"], target_months)
+                                                        buffer_rows, col["month"], target_months)
             data_rows = settled_rows + fresh_rows
             primary_cache_path.parent.mkdir(parents=True, exist_ok=True)
             with open(primary_cache_path, "w", encoding="utf-8") as f:
