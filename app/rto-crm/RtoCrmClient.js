@@ -56,7 +56,7 @@ const localStorage = typeof window !== 'undefined'
     function buildWaLink(t) {
       const digits = (t.phone || '').replace(/\D/g, '');
       const withCountry = digits.length === 10 ? `91${digits}` : digits;
-      const msg = `Hi ${t.customerName}, this is regarding your order ${t.orderNumber}. We noticed: ${t.rtoReason}. Could you please confirm your delivery details so we can get this resolved?`;
+      const msg = `Hi ${t.customerName}, this is regarding your order ${t.orderNumber}. We tried reaching you for recent order placed with us which has been marked rto unfortunately we were not able to connect do let us know suitable time to connect on same`;
       return `https://wa.me/${withCountry}?text=${encodeURIComponent(msg)}`;
     }
 
@@ -2588,7 +2588,7 @@ const localStorage = typeof window !== 'undefined'
 
                                 {/* RTO Reason & Remarks Preview */}
                                 <td className="py-3 px-4 max-w-[220px]">
-                                  <span className="truncate block text-zinc-300">{t.rtoReason}</span>
+                                  {userRole !== 'Agent' && <span className="truncate block text-zinc-300">{t.rtoReason}</span>}
                                   {t.agentRemarks && (
                                     <span className="inline-flex items-center gap-1 mt-1 text-[11px] text-indigo-300 bg-indigo-950/50 border border-indigo-800/40 px-2 py-0.5 rounded-md truncate max-w-full" title={t.agentRemarks}>
                                       💬 {t.agentRemarks}
@@ -2662,7 +2662,7 @@ const localStorage = typeof window !== 'undefined'
 
                             {/* RTO Reason & Remarks */}
                             <div>
-                              <span className="block text-zinc-300 text-[13px]">{t.rtoReason}</span>
+                              {userRole !== 'Agent' && <span className="block text-zinc-300 text-[13px]">{t.rtoReason}</span>}
                               {t.agentRemarks && (
                                 <span className="inline-flex items-center gap-1 mt-1 text-[11px] text-indigo-300 bg-indigo-950/50 border border-indigo-800/40 px-2 py-0.5 rounded-md max-w-full" title={t.agentRemarks}>
                                   💬 {t.agentRemarks}

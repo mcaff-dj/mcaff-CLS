@@ -71,7 +71,7 @@ def fetch_online_agents():
             return [row[0].lower() for row in cur.fetchall()]
 
 
-def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row):
+def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row):
     """Stamps assigned_at=now() for every lead just assigned, keyed by the sheet's
     own Order ID, so rto-crm.html's resetStalePendingLeads() can tell a
     fresh assignment apart from a genuinely stale one (the lead's own Calling
@@ -81,14 +81,14 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row):
     so in practice this only runs when the DB is reachable anyway).
 
     Also stamps awb_code (unique per lead_assignments row - see the UNIQUE
-    index in api/_lib/db.js's ensureSchema) and delivery_partner (derived from
-    awb_code via lead_priority.prefix_rule_partner - the same rule api/_lib/db.js's
-    JS mirror uses for leads recorded via the disposal path instead) so downstream
-    reporting (scripts/sync_lead_assignments_to_mysql.py) can key on either without
-    a separate sheet lookup. Both use COALESCE on conflict rather than blindly
-    overwriting, so a re-run never clobbers a value already recorded by the
-    disposal write path (api/_lib/db.js's recordLeadDisposition) with a blank
-    one."""
+    index in api/_lib/db.js's ensureSchema), rto_reason (the sheet's own Column D -
+    see lead_priority.COL_RTO_REASON), and delivery_partner (derived from awb_code via
+    lead_priority.prefix_rule_partner - the same rule api/_lib/db.js's JS mirror uses
+    for leads recorded via the disposal path instead) so downstream reporting
+    (scripts/sync_lead_assignments_to_mysql.py) can key on any of them without a
+    separate sheet lookup. All three use COALESCE on conflict rather than blindly
+    overwriting, so a re-run never clobbers a value already recorded by the disposal
+    write path (api/_lib/db.js's recordLeadDisposition) with a blank one."""
     conn_str = os.environ.get("POSTGRES_URL")
     if not conn_str or not assignments:
         return
@@ -97,6 +97,7 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row):
         (
             order_id_by_row[row_index], email,
             awb_code_by_row.get(row_index) or None,
+            rto_reason_by_row.get(row_index) or None,
             prefix_rule_partner(awb_code_by_row.get(row_index)) or None,
         )
         for row_index, email in assignments.items() if row_index in order_id_by_row
@@ -107,12 +108,13 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row):
         with conn.cursor() as cur:
             cur.executemany(
                 """
-                INSERT INTO lead_assignments (order_id, email, assigned_at, awb_code, delivery_partner)
-                VALUES (%s, %s, now(), %s, %s)
+                INSERT INTO lead_assignments (order_id, email, assigned_at, awb_code, rto_reason, delivery_partner)
+                VALUES (%s, %s, now(), %s, %s, %s)
                 ON CONFLICT (order_id) DO UPDATE SET
                     email = EXCLUDED.email,
                     assigned_at = now(),
                     awb_code = COALESCE(EXCLUDED.awb_code, lead_assignments.awb_code),
+                    rto_reason = COALESCE(EXCLUDED.rto_reason, lead_assignments.rto_reason),
                     delivery_partner = COALESCE(EXCLUDED.delivery_partner, lead_assignments.delivery_partner)
                 """,
                 rows,
@@ -143,6 +145,7 @@ def main():
     current_load = {email: 0 for email in online_agents}
     unassigned_pending = []  # (row_index, rto_initiated_date, order_id, tier)
     awb_code_by_row = {}
+    rto_reason_by_row = {}
     tier_counts = {0: 0, 1: 0, 2: 0, 3: 0}
 
     for i, row in enumerate(rows):
@@ -165,6 +168,7 @@ def main():
         if is_unassigned:
             unassigned_pending.append((i, rto_initiated_date, order_id, tier))
             awb_code_by_row[i] = cell(row, COL_AWB_CODE)
+            rto_reason_by_row[i] = cell(row, COL_RTO_REASON)
             tier_counts[tier] += 1
         elif agent_raw in current_load:
             current_load[agent_raw] += 1
@@ -189,7 +193,7 @@ def main():
     ]
     print(f"Writing {len(value_ranges)} Column Q assignment(s)...")
     lib.set_sheet_values_batch(SPREADSHEET_ID, value_ranges)
-    record_lead_assignments(assignments, unassigned_pending, awb_code_by_row)
+    record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row)
 
     per_agent = {}
     for email in assignments.values():
