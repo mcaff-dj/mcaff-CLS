@@ -13,7 +13,11 @@
 //   POST   /api/admin/business-hours  -> save one process's week: { processKey, week: {mon:{open,close},...} }
 //   GET    /api/admin/calling-agents?process=rto -> that process's roster + per-process status/quota
 //   POST   /api/admin/calling-agents  -> { processKey, email, status?, maxQuota? }
+//   DELETE /api/admin/calling-agents  -> revoke ONE process's access for one agent, leaving
+//                                        every other process/card they hold untouched:
+//                                        { processKey, email }
 const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser,
+  getUserByEmail, getUserTabPermissions,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours, logEvent,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
   isCallingProcessAdmin, getAdministeredProcesses } = require('../_lib/db');
@@ -299,6 +303,55 @@ async function handleCallingAgents(req, res, session) {
     } catch (e) {
       res.status(400).json({ error: e.message || 'Could not update agent' });
     }
+    return;
+  }
+
+  if (req.method === 'DELETE') {
+    const body = parseBody(req);
+    if (!known.includes(body.processKey)) {
+      res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
+      return;
+    }
+    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, body.processKey))) {
+      res.status(403).json({ error: 'You do not administer that process' });
+      return;
+    }
+    const email = (body.email || '').trim().toLowerCase();
+    const user = email && await getUserByEmail(email);
+    if (!user) {
+      res.status(404).json({ error: `No user found for ${body.email || '(blank email)'}` });
+      return;
+    }
+    // The "no tab rows = every process" convention (see api/_lib/tabs.js) cuts both ways: to
+    // take away ONE process while leaving the rest untouched, an unrestricted user has to be
+    // converted to an EXPLICIT list of every other calling tab - there is no way to express
+    // "everything except X" other than spelling out "everything except X". A user who already
+    // has an explicit list just loses this one entry from it.
+    const currentTabs = (await getUserTabPermissions(user.id)).calling;
+    const allCallingTabs = (CARD_TABS.calling || []).map((t) => t.key);
+    const newTabs = (currentTabs && currentTabs.length)
+      ? currentTabs.filter((k) => k !== body.processKey)
+      : allCallingTabs.filter((k) => k !== body.processKey);
+    if (newTabs.length === 0) {
+      // setTabPermissions([]) DELETEs every tab row for this card, which - per the same
+      // "no rows = every tab" convention this whole computation relies on - would turn a
+      // revoke into an accidental grant of full access. If nothing is left after removing
+      // this process, the correct outcome is no calling access at all, so the card permission
+      // itself is revoked instead of leaving a zero-row "unrestricted" state behind.
+      await sql`DELETE FROM permissions WHERE user_id = ${user.id} AND card_key = 'calling'`;
+    } else {
+      await setTabPermissions(user.id, 'calling', newTabs);
+    }
+    // Clears any per-process state alongside the access, not just is_process_admin: a stale
+    // Online/quota row surviving a revoke is harmless on its own (membership no longer comes
+    // from this table), but a stale is_process_admin=true would silently hand back
+    // process-admin rights the moment anyone re-invites this person - a real privilege
+    // surviving what looks like a full revoke.
+    try {
+      await setCallingProcessAgent(body.processKey, email, { status: 'Offline', isProcessAdmin: false }, session.email);
+    } catch (e) { /* best-effort - the access revocation above is what actually matters */ }
+    await logEvent(session.uid, session.email, 'calling', 'process-revoke', `${body.processKey}: revoked for ${email}`);
+    res.status(200).json({ ok: true });
     return;
   }
 

@@ -1269,7 +1269,7 @@ const localStorage = typeof window !== 'undefined'
       // effectiveAgentRoster's dynamic discovery will re-add them with generic defaults
       // (role: Agent, quota: 10), since the roster is partly derived from the sheet itself,
       // not just this list. An agent with zero ticket history disappears entirely.
-      const removeAgentFromRoster = (email, name) => {
+      const removeAgentFromRoster = async (email, name) => {
         const lower = (email || '').toLowerCase();
         if (!lower) return;
         const prefix = lower.split('@')[0];
@@ -1299,12 +1299,32 @@ const localStorage = typeof window !== 'undefined'
         // history at all still reappears immediately if they're currently INVITED to this
         // process (present in processAgents - see the "anyone invited to THIS process" merge
         // above, added so a newly invited agent shows up before they've touched a single
-        // lead). An invited agent's row is rebuilt from that invitation on every render, same
-        // as the ticket-history case just above - removing them from this local list changes
-        // nothing about the invitation that keeps bringing them back.
+        // lead). Unlike the ticket-history case above, this one CAN be fixed directly - an
+        // invitation is exactly the kind of thing Remove can revoke - so it does, rather than
+        // only explaining. Confirmed first: this now performs a real, if narrowly scoped,
+        // access change, not the harmless no-op Remove used to be.
         const invited = (processAgents || []).some(pa => (pa.email || '').toLowerCase() === lower);
         if (invited) {
-          showToast(`Can't remove ${name} from this list — they're currently invited to ${currentProcess ? currentProcess.label.replace(/^Process:\s*/, '') : 'this process'}, so this table rebuilds their row from that invitation every time it loads. Revoke access from Admin → Permissions instead.`);
+          const label = currentProcess ? currentProcess.label.replace(/^Process:\s*/, '') : 'this process';
+          if (!window.confirm(`Revoke ${name}'s access to ${label}? They will no longer see or be able to work this process. Their access to any OTHER process or report is untouched.`)) {
+            return;
+          }
+          try {
+            const r = await fetch('/api/admin/calling-agents', {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ processKey: activeProcess, email: lower }),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) {
+              showToast(`⚠️ ${d.error || `Could not revoke access (${r.status})`}`);
+              return;
+            }
+            showToast(`Revoked ${name}'s access to ${label}.`);
+            loadProcessAgents(activeProcess); // refresh so they drop off the roster immediately
+          } catch (e) {
+            showToast(`⚠️ ${e.message || 'Could not revoke access'}`);
+          }
           return;
         }
 
@@ -2849,7 +2869,7 @@ const localStorage = typeof window !== 'undefined'
                                       type="button"
                                       onClick={() => removeAgentFromRoster(a.email, a.name)}
                                       className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-red-950/60 text-zinc-400 hover:text-red-300 border border-zinc-700 hover:border-red-800/80 text-[11px] font-bold transition-all shadow-xs"
-                                      title="Remove this agent's row from the roster entirely. Blocked while they hold pending leads."
+                                      title="If they're invited to this process, revokes that access (asks first). Blocked while they hold pending leads, or have historical leads under their name."
                                     >
                                       🗑️ Remove
                                     </button>
