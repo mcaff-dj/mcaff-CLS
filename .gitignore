@@ -28,3 +28,4 @@ data/hyphen_primary_cache.json
 ~$*.xlsx
 .vercel
 .env*
+.claude/settings.local.json
