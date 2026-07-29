@@ -610,10 +610,18 @@ const localStorage = typeof window !== 'undefined'
             const u={name:d.name||d.email.split('@')[0],email:d.email,picture:`https://api.dicebear.com/7.x/avataaars/svg?seed=${d.email}`};
             setGoogleUser(u);
             localStorage.setItem('rto_google_user',JSON.stringify(u));
+            // Role defaults from the account itself (users.is_admin), not from a hardcoded
+            // list of names - an admin who isn't called vighnesh or vikash is still an admin.
             const savedRole = localStorage.getItem('rto_active_role');
             if(!savedRole){
-              const defaultRole = (d.isAdmin||d.email.toLowerCase().includes('vighnesh')||d.email.toLowerCase().includes('vikash')) ? 'Admin' : 'Agent';
-              setUserRole(defaultRole);
+              setUserRole(d.isAdmin ? 'Admin' : 'Agent');
+            } else if (!d.isAdmin && savedRole !== 'Agent') {
+              // A cached role can only ever LOWER what you see, never raise it: someone who is
+              // not an admin on the server must not keep an 'Admin' view just because their
+              // browser remembers one. (The panels behind it are all server-gated anyway, so
+              // this is about not showing controls that would only fail.)
+              setUserRole('Agent');
+              try { localStorage.setItem('rto_active_role', 'Agent'); } catch {}
             }
             // Which processes this account has actually been invited to. getSession() reads
             // report_tab_permissions fresh from the database on every request, so this is the
@@ -1430,9 +1438,12 @@ const localStorage = typeof window !== 'undefined'
         if (googleUser && googleUser.email && !rosterMap.has(googleUser.email.toLowerCase())) {
           const email = googleUser.email.toLowerCase();
           const name = googleUser.name || email.split('@')[0].split('.').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
-          const isAdmin = email.includes('vighnesh') || email.includes('vikash');
+          // sessionIsAdmin (users.is_admin) rather than matching the email against two
+          // hardcoded names, which mislabelled every other real admin as an Agent in their own
+          // roster row.
           rosterMap.set(email, {
-            email, name, role: isAdmin ? 'Admin' : 'Agent', maxQuota: isAdmin ? 10 : 20, status: 'Online', aht: '2.5m', breakTime: '15m'
+            email, name, role: sessionIsAdmin ? 'Admin' : 'Agent',
+            maxQuota: sessionIsAdmin ? 10 : 20, status: 'Online', aht: '2.5m', breakTime: '15m'
           });
         }
 
@@ -1499,7 +1510,10 @@ const localStorage = typeof window !== 'undefined'
         });
 
         return Array.from(rosterMap.values());
-      }, [agentRoster, tickets, overrides, googleUser, agentStatus, serverPresence, processAgents]);
+        // sessionIsAdmin is in here because it starts false and flips true once /api/auth/me
+        // resolves - without it this memo would keep the pre-auth value and leave an admin
+        // labelled 'Agent' in their own roster row.
+      }, [agentRoster, tickets, overrides, googleUser, agentStatus, serverPresence, processAgents, sessionIsAdmin]);
 
       // Derived data & STRICT Calling Date (Latest First) Sorting
       const allTickets = useMemo(()=>{
@@ -2142,11 +2156,17 @@ const localStorage = typeof window !== 'undefined'
                 {/* UI Role Switcher - hidden for genuine Agents, who have no legitimate
                     reason to switch into Admin/Team Lead view (handleSwitchRole is a plain
                     client-side setUserRole with no server-side check, so this is the only
-                    gate). Gated on the underlying account (same vighnesh/vikash check used
-                    for the initial default role elsewhere), NOT on the current userRole -
+                    gate). Gated on the underlying account, NOT on the current userRole -
                     otherwise a real admin who switches into "Agent" view to preview it would
-                    lose the only control that switches them back. */}
-                {(googleUser?.email || '').toLowerCase().match(/vighnesh|vikash/) && (
+                    lose the only control that switches them back.
+
+                    Now keyed on the session's own isAdmin (users.is_admin, re-read from the
+                    database on every request) instead of a hardcoded vighnesh|vikash email
+                    match. That match was both too narrow and self-defeating: a genuine admin
+                    whose name isn't in it - soumya.shah, for one - could never reach the admin
+                    panel at all, and an admin with a stale 'Agent' in localStorage had no way
+                    back, because the switcher that fixes it was the thing being hidden. */}
+                {sessionIsAdmin && (
                   <CustomSelect
                     value={userRole}
                     onChange={handleSwitchRole}
