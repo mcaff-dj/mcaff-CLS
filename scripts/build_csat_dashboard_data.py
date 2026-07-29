@@ -12,10 +12,12 @@ import pymysql
 
 OUT = r"mcaff-CLS/data/csat_dashboard_data.json"
 
-# CSAT/ticket tables live in the mcaff_dwh schema specifically, not whatever
+# CSAT/ticket tables live in the PEP_CLS schema specifically, not whatever
 # database MYSQL_DATABASE points at (mcaff_prod) - host/user/password still come
-# from mysql_lib's normal env var / .env.local resolution.
-DWH_DATABASE = "mcaff_dwh"
+# from mysql_lib's normal env var / .env.local resolution. Migrated here from
+# mcaff_dwh (the Flowcall ETL Lambda's own destination schema was moved to
+# match) - same RDS instance, same tables/columns, just a different schema.
+DWH_DATABASE = "PEP_CLS"
 
 # agent := 'AI' whenever the ticket was AI-resolved (overrides whatever's in
 # assigned_to for that handful of tickets where a human name leaked through)

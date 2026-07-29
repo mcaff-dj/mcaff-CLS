@@ -1,4 +1,4 @@
-"""Pushes today's resolved Delivery-class tickets from mcaff_dwh into the
+"""Pushes today's resolved Delivery-class tickets from PEP_CLS into the
 Hyphen/mCaff tabs of the "Internal Escalation" sheet. Run every 2 hours via
 GitHub Actions (see .github/workflows/sync-delivery-tickets.yml).
 
@@ -75,7 +75,7 @@ def fetch_today_delivery_tickets(table):
               AND (subcategory IS NULL OR subcategory != 'Estimated time of delivery')
         ORDER BY resolved_at
     """
-    rows = mysql_lib.query(sql, params=("%Delivery%",), database="mcaff_dwh")
+    rows = mysql_lib.query(sql, params=("%Delivery%",), database="PEP_CLS")
     if rows is None:
         raise RuntimeError("MYSQL_* credentials not configured - cannot fetch tickets.")
     return rows
