@@ -646,10 +646,15 @@ const localStorage = typeof window !== 'undefined'
       }, []);
 
       useEffect(() => {
-        if (tab === 'admin' && (userRole === 'Admin' || userRole === 'Team Lead') && hoursByProcess === null) {
+        // Deliberately NOT gated on the active tab: `tab` is declared further down the
+        // component, and naming it in this dependency array read it before initialization -
+        // a temporal-dead-zone ReferenceError that broke the whole page on load, since
+        // dependency arrays are evaluated during render rather than when the effect runs.
+        // Loading once per admin session is cheap enough not to need the gate.
+        if ((userRole === 'Admin' || userRole === 'Team Lead') && hoursByProcess === null) {
           loadBusinessHours();
         }
-      }, [tab, userRole, hoursByProcess, loadBusinessHours]);
+      }, [userRole, hoursByProcess, loadBusinessHours]);
 
       // Editing starts from whatever the server returned for the process currently selected in
       // the header, so the card always shows the hours for the process being administered.
