@@ -1905,103 +1905,14 @@ const localStorage = typeof window !== 'undefined'
       // Available for EVERY process, built or not: a process's roster and hours are exactly
       // what you set up before its lead workspace exists, so gating them on `implemented`
       // (as the rest of the workspace is) left an unbuilt process with no way to be configured.
-      const renderProcessAdminCards = () => (
+      // Hours only. The per-process roster card that used to live here duplicated the Team
+      // Roster table below, which already lists everyone and whose Status/Quota controls now
+      // write the same per-process rows - so for a BUILT process there is one table, not two.
+      // Simple roster, used ONLY for a process with no lead workspace yet - there the Team
+      // Roster table can't be shown (its metrics are computed from tickets that don't exist),
+      // but the process still needs its people managed.
+      const renderProcessRosterCard = () => (
         <>
-                {/* ═══ CALLING HOURS ═══
-                    Per weekday, for the process selected in the header - a single open/close
-                    pair for the whole week couldn't express "Friday closes early" or "Sunday
-                    closed". Leaving both boxes of a day blank means closed. These are the same
-                    values scripts/assign_leads.py reads, so changing them here genuinely stops
-                    and starts automatic lead hand-out; it does NOT stop an agent recording a
-                    call they've already made. */}
-                {hoursDraft && currentProcess && (
-                  <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
-                    <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
-                      <div className="flex items-start gap-3">
-                        <span className="h-9 w-9 shrink-0 rounded-xl bg-emerald-950/60 border border-emerald-800/60 flex items-center justify-center text-emerald-300">🕒</span>
-                        <div>
-                          <h2 className="text-lg font-bold text-zinc-100">
-                            Calling Hours &mdash; {currentProcess.label.replace(/^Process:\s*/, '')}
-                          </h2>
-                          <p className="text-[13px] text-zinc-500">
-                            Automatic lead hand-out only runs inside these hours ({(hoursByProcess?.[activeProcess]?.timezone) || 'IST'}).
-                            Leave a day blank to close it. Agents can still record calls they&apos;ve already made at any time.
-                            {hoursByProcess?.[activeProcess]?.isDefault && (
-                              <span className="text-amber-400"> Currently using defaults &mdash; not yet set by an admin.</span>
-                            )}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => setHoursDraft(JSON.parse(JSON.stringify(hoursByProcess[activeProcess].week)))}
-                          disabled={hoursSaving}
-                          className="h-8 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[13px] font-semibold transition-colors disabled:opacity-40"
-                        >
-                          Reset
-                        </button>
-                        <button
-                          onClick={saveBusinessHours}
-                          disabled={hoursSaving}
-                          className="h-8 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-50"
-                        >
-                          {hoursSaving ? 'Saving…' : 'Save hours'}
-                        </button>
-                      </div>
-                    </div>
-
-                    {hoursError && (
-                      <p className="mt-3 text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2">
-                        {hoursError}
-                      </p>
-                    )}
-
-                    <div className="mt-4 space-y-1.5">
-                      {BUSINESS_HOUR_DAY_LABELS.map(([key, label]) => {
-                        const day = hoursDraft[key] || { open: '', close: '' };
-                        const closed = !day.open && !day.close;
-                        const setDay = (field, value) =>
-                          setHoursDraft(p => ({ ...p, [key]: { ...(p[key] || { open: '', close: '' }), [field]: value } }));
-                        return (
-                          <div key={key} className="flex items-center justify-between gap-3 rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-4 py-2.5">
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <span className="text-[13px] font-semibold text-zinc-200 w-24">{label}</span>
-                              {closed && <span className="text-[11px] font-bold uppercase tracking-wide text-zinc-500 bg-zinc-800/80 border border-zinc-700/60 rounded-md px-2 py-0.5">Closed</span>}
-                            </div>
-                            <div className="flex items-center gap-3 shrink-0">
-                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
-                                Open:
-                                <input
-                                  type="time"
-                                  value={day.open || ''}
-                                  onChange={e => setDay('open', e.target.value)}
-                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                                />
-                              </label>
-                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
-                                Close:
-                                <input
-                                  type="time"
-                                  value={day.close || ''}
-                                  onChange={e => setDay('close', e.target.value)}
-                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                                />
-                              </label>
-                              <button
-                                onClick={() => setHoursDraft(p => ({ ...p, [key]: { open: '', close: '' } }))}
-                                title="Close this day"
-                                className="h-7 px-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[11px] font-semibold transition-colors"
-                              >
-                                Clear
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
                 {/* ═══ PER-PROCESS ROSTER ═══
                     Who is invited to the process selected in the header, and their availability
                     and capacity FOR THAT PROCESS. The processes are independent, so an agent can
@@ -2109,6 +2020,106 @@ const localStorage = typeof window !== 'undefined'
                         ))}
                       </div>
                     )}
+                  </div>
+                )}
+
+        </>
+      );
+
+      const renderCallingHoursCard = () => (
+        <>
+                {/* ═══ CALLING HOURS ═══
+                    Per weekday, for the process selected in the header - a single open/close
+                    pair for the whole week couldn't express "Friday closes early" or "Sunday
+                    closed". Leaving both boxes of a day blank means closed. These are the same
+                    values scripts/assign_leads.py reads, so changing them here genuinely stops
+                    and starts automatic lead hand-out; it does NOT stop an agent recording a
+                    call they've already made. */}
+                {hoursDraft && currentProcess && (
+                  <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
+                    <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
+                      <div className="flex items-start gap-3">
+                        <span className="h-9 w-9 shrink-0 rounded-xl bg-emerald-950/60 border border-emerald-800/60 flex items-center justify-center text-emerald-300">🕒</span>
+                        <div>
+                          <h2 className="text-lg font-bold text-zinc-100">
+                            Calling Hours &mdash; {currentProcess.label.replace(/^Process:\s*/, '')}
+                          </h2>
+                          <p className="text-[13px] text-zinc-500">
+                            Automatic lead hand-out only runs inside these hours ({(hoursByProcess?.[activeProcess]?.timezone) || 'IST'}).
+                            Leave a day blank to close it. Agents can still record calls they&apos;ve already made at any time.
+                            {hoursByProcess?.[activeProcess]?.isDefault && (
+                              <span className="text-amber-400"> Currently using defaults &mdash; not yet set by an admin.</span>
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setHoursDraft(JSON.parse(JSON.stringify(hoursByProcess[activeProcess].week)))}
+                          disabled={hoursSaving}
+                          className="h-8 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[13px] font-semibold transition-colors disabled:opacity-40"
+                        >
+                          Reset
+                        </button>
+                        <button
+                          onClick={saveBusinessHours}
+                          disabled={hoursSaving}
+                          className="h-8 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-50"
+                        >
+                          {hoursSaving ? 'Saving…' : 'Save hours'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {hoursError && (
+                      <p className="mt-3 text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2">
+                        {hoursError}
+                      </p>
+                    )}
+
+                    <div className="mt-4 space-y-1.5">
+                      {BUSINESS_HOUR_DAY_LABELS.map(([key, label]) => {
+                        const day = hoursDraft[key] || { open: '', close: '' };
+                        const closed = !day.open && !day.close;
+                        const setDay = (field, value) =>
+                          setHoursDraft(p => ({ ...p, [key]: { ...(p[key] || { open: '', close: '' }), [field]: value } }));
+                        return (
+                          <div key={key} className="flex items-center justify-between gap-3 rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-4 py-2.5">
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <span className="text-[13px] font-semibold text-zinc-200 w-24">{label}</span>
+                              {closed && <span className="text-[11px] font-bold uppercase tracking-wide text-zinc-500 bg-zinc-800/80 border border-zinc-700/60 rounded-md px-2 py-0.5">Closed</span>}
+                            </div>
+                            <div className="flex items-center gap-3 shrink-0">
+                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
+                                Open:
+                                <input
+                                  type="time"
+                                  value={day.open || ''}
+                                  onChange={e => setDay('open', e.target.value)}
+                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                                />
+                              </label>
+                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
+                                Close:
+                                <input
+                                  type="time"
+                                  value={day.close || ''}
+                                  onChange={e => setDay('close', e.target.value)}
+                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                                />
+                              </label>
+                              <button
+                                onClick={() => setHoursDraft(p => ({ ...p, [key]: { open: '', close: '' } }))}
+                                title="Close this day"
+                                className="h-7 px-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[11px] font-semibold transition-colors"
+                              >
+                                Clear
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
 
@@ -2309,7 +2320,7 @@ const localStorage = typeof window !== 'undefined'
                 stay hidden, since there is genuinely nothing behind them. */}
             {currentProcess && !currentProcess.implemented
               && (userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin)
-              && renderProcessAdminCards()}
+              && (<>{renderCallingHoursCard()}{renderProcessRosterCard()}</>)}
 
             {currentProcess && currentProcess.implemented && (<>
 
@@ -2585,7 +2596,7 @@ const localStorage = typeof window !== 'undefined'
                  ══════════════════════════════════════════════════════════════════════ */
               <div className="space-y-6 animate-fadeIn">
 
-                {renderProcessAdminCards()}
+                {renderCallingHoursCard()}
 
                 {(() => {
                   const agentMetrics = effectiveAgentRoster.map(ag => {
@@ -2684,6 +2695,10 @@ const localStorage = typeof window !== 'undefined'
                             <th className="py-3 px-4 text-center font-medium">Disposed</th>
                             <th className="py-3 px-4 text-center font-medium">Connect %</th>
                             <th className="py-3 px-4 text-left font-medium">Quota</th>
+                            {/* Runs THIS process (roster + its calling hours) without being a
+                                company-wide admin. Only a full admin can set it - the API
+                                refuses it from a process admin, so it is read-only for them. */}
+                            <th className="py-3 px-4 text-center font-medium" title="Can manage this process's roster and calling hours - nothing else">Process admin</th>
                             <th className="py-3 px-4 text-right font-medium">Actions</th>
                           </tr></thead>
                           <tbody className="divide-y divide-zinc-800/50">
@@ -2756,6 +2771,20 @@ const localStorage = typeof window !== 'undefined'
                                       { value: 30, label: '30 leads' }
                                     ]}
                                   />
+                                </td>
+                                <td className="py-3 px-4 text-center">
+                                  {a.isAdmin ? (
+                                    <span className="text-[11px] text-zinc-500" title="Company-wide admin - already administers every process">all</span>
+                                  ) : (
+                                    <input
+                                      type="checkbox"
+                                      checked={!!a.isProcessAdmin}
+                                      disabled={!sessionIsAdmin || savingAgentEmail === a.email}
+                                      onChange={e => saveProcessAgent(a.email, { isProcessAdmin: e.target.checked })}
+                                      className="accent-emerald-500"
+                                      title={sessionIsAdmin ? 'Let this person manage this process' : 'Only a full admin can change this'}
+                                    />
+                                  )}
                                 </td>
                                 <td className="py-3 px-4 text-right">
                                   <div className="flex items-center justify-end gap-2">

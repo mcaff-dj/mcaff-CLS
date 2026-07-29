@@ -657,14 +657,26 @@ const CALLING_STATUSES = ['Online', 'Busy', 'Offline'];
 async function getCallingProcessAgents(processKey) {
   await ensureSchema();
   await ensurePgSchema();
+  // Membership has to follow the same convention the rest of the app uses: holding the
+  // 'calling' card with NO tab rows means unrestricted - every process - so those people
+  // belong in every process's roster. An earlier version required an explicit tab row, which
+  // listed only the handful of people who happened to have one and silently omitted everybody
+  // with blanket access (including a process admin, who then couldn't see their own roster).
+  //
+  // So: in if you hold the card and either have no calling tab rows at all, or have one for
+  // THIS process. Global admins are always in, since they hold no tab rows by convention.
   const { rows: members } = await sql`
     SELECT u.id, u.email, u.name, u.is_admin
     FROM users u
-    LEFT JOIN report_tab_permissions rtp
-      ON rtp.user_id = u.id AND rtp.card_key = 'calling' AND rtp.tab_key = ${processKey}
     LEFT JOIN permissions p
       ON p.user_id = u.id AND p.card_key = 'calling'
-    WHERE rtp.tab_key IS NOT NULL OR u.is_admin = 1
+    WHERE u.is_admin = 1
+       OR (p.card_key IS NOT NULL AND (
+            EXISTS (SELECT 1 FROM report_tab_permissions r
+                     WHERE r.user_id = u.id AND r.card_key = 'calling' AND r.tab_key = ${processKey})
+            OR NOT EXISTS (SELECT 1 FROM report_tab_permissions r2
+                     WHERE r2.user_id = u.id AND r2.card_key = 'calling')
+          ))
     GROUP BY u.id, u.email, u.name, u.is_admin
     ORDER BY u.is_admin DESC, u.name ASC
   `;
