@@ -1970,16 +1970,26 @@ const localStorage = typeof window !== 'undefined'
       // One Team Roster table for every process, built or not - status/quota/process-admin
       // per invited agent read the same per-process rows regardless of whether the process
       // has a lead workspace yet, so there's no reason for an unbuilt process to get a
-      // different, simpler card. Assigned/Disposed/Connect% are ticket-derived, and there is
-      // no per-process ticket source yet beyond RTO's sheet, so those columns read 0 for an
-      // unbuilt process rather than showing another process's numbers under its name.
+      // different, simpler card.
+      //
+      // Rows are filtered to effectiveAgentRoster's `inProcess` flag - true only for someone
+      // processAgents (the active process's real invitees) actually returned - NOT the full
+      // roster. effectiveAgentRoster also carries everyone ever seen in an RTO ticket and
+      // everyone in the browser's legacy localStorage list, neither of which is scoped to a
+      // process; showing those rows here leaked every RTO-era agent into every other
+      // process's roster regardless of whether they were ever invited to it.
+      //
+      // Assigned/Disposed/Connect% are ticket-derived, and RTO's Google Sheet is the only
+      // per-process ticket source that exists - computing them from allTickets under any
+      // other process would show RTO's real numbers mislabelled as that process's own.
       const renderTeamRosterTable = () => {
-        const agentMetrics = effectiveAgentRoster.map(ag => {
+        const isRto = currentProcess?.key === 'rto';
+        const agentMetrics = effectiveAgentRoster.filter(a => a.inProcess).map(ag => {
           const email = ag.email.toLowerCase();
           const prefix = email.split('@')[0];
           const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(prefix));
 
-          const assigned = allTickets.filter(t => isMine(t.assignedAgent));
+          const assigned = isRto ? allTickets.filter(t => isMine(t.assignedAgent)) : [];
           const disposed = assigned.filter(t => t.disposition || t.agentRemarks || t.status !== 'Pending');
           const connected = disposed.filter(t => t.connected === 'Yes');
 
@@ -2167,7 +2177,7 @@ const localStorage = typeof window !== 'undefined'
                             }}
                             options={[
                               { value: 'REASSIGN', label: '🔄 Reassign…' },
-                              ...effectiveAgentRoster.filter(target => target.email !== a.email).map(target => ({
+                              ...agentMetrics.filter(target => target.email !== a.email).map(target => ({
                                 value: target.email,
                                 label: `➡️ ${target.name}`
                               }))
