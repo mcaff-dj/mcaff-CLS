@@ -1863,6 +1863,204 @@ const localStorage = typeof window !== 'undefined'
       const pages=Math.ceil(filtered.length/perPage)||1;
       const visible=filtered.slice((page-1)*perPage,page*perPage);
 
+      // Rendered as a plain function rather than a component so the two call sites below
+      // can't give it a different identity between renders - that would remount these inputs
+      // and drop focus/typed text while an admin is editing a quota or a closing time.
+      //
+      // Available for EVERY process, built or not: a process's roster and hours are exactly
+      // what you set up before its lead workspace exists, so gating them on `implemented`
+      // (as the rest of the workspace is) left an unbuilt process with no way to be configured.
+      const renderProcessAdminCards = () => (
+        <>
+                {/* ═══ CALLING HOURS ═══
+                    Per weekday, for the process selected in the header - a single open/close
+                    pair for the whole week couldn't express "Friday closes early" or "Sunday
+                    closed". Leaving both boxes of a day blank means closed. These are the same
+                    values scripts/assign_leads.py reads, so changing them here genuinely stops
+                    and starts automatic lead hand-out; it does NOT stop an agent recording a
+                    call they've already made. */}
+                {hoursDraft && currentProcess && (
+                  <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
+                    <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
+                      <div className="flex items-start gap-3">
+                        <span className="h-9 w-9 shrink-0 rounded-xl bg-emerald-950/60 border border-emerald-800/60 flex items-center justify-center text-emerald-300">🕒</span>
+                        <div>
+                          <h2 className="text-lg font-bold text-zinc-100">
+                            Calling Hours &mdash; {currentProcess.label.replace(/^Process:\s*/, '')}
+                          </h2>
+                          <p className="text-[13px] text-zinc-500">
+                            Automatic lead hand-out only runs inside these hours ({(hoursByProcess?.[activeProcess]?.timezone) || 'IST'}).
+                            Leave a day blank to close it. Agents can still record calls they&apos;ve already made at any time.
+                            {hoursByProcess?.[activeProcess]?.isDefault && (
+                              <span className="text-amber-400"> Currently using defaults &mdash; not yet set by an admin.</span>
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setHoursDraft(JSON.parse(JSON.stringify(hoursByProcess[activeProcess].week)))}
+                          disabled={hoursSaving}
+                          className="h-8 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[13px] font-semibold transition-colors disabled:opacity-40"
+                        >
+                          Reset
+                        </button>
+                        <button
+                          onClick={saveBusinessHours}
+                          disabled={hoursSaving}
+                          className="h-8 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-50"
+                        >
+                          {hoursSaving ? 'Saving…' : 'Save hours'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {hoursError && (
+                      <p className="mt-3 text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2">
+                        {hoursError}
+                      </p>
+                    )}
+
+                    <div className="mt-4 space-y-1.5">
+                      {BUSINESS_HOUR_DAY_LABELS.map(([key, label]) => {
+                        const day = hoursDraft[key] || { open: '', close: '' };
+                        const closed = !day.open && !day.close;
+                        const setDay = (field, value) =>
+                          setHoursDraft(p => ({ ...p, [key]: { ...(p[key] || { open: '', close: '' }), [field]: value } }));
+                        return (
+                          <div key={key} className="flex items-center justify-between gap-3 rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-4 py-2.5">
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <span className="text-[13px] font-semibold text-zinc-200 w-24">{label}</span>
+                              {closed && <span className="text-[11px] font-bold uppercase tracking-wide text-zinc-500 bg-zinc-800/80 border border-zinc-700/60 rounded-md px-2 py-0.5">Closed</span>}
+                            </div>
+                            <div className="flex items-center gap-3 shrink-0">
+                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
+                                Open:
+                                <input
+                                  type="time"
+                                  value={day.open || ''}
+                                  onChange={e => setDay('open', e.target.value)}
+                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                                />
+                              </label>
+                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
+                                Close:
+                                <input
+                                  type="time"
+                                  value={day.close || ''}
+                                  onChange={e => setDay('close', e.target.value)}
+                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                                />
+                              </label>
+                              <button
+                                onClick={() => setHoursDraft(p => ({ ...p, [key]: { open: '', close: '' } }))}
+                                title="Close this day"
+                                className="h-7 px-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[11px] font-semibold transition-colors"
+                              >
+                                Clear
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* ═══ PER-PROCESS ROSTER ═══
+                    Who is invited to the process selected in the header, and their availability
+                    and capacity FOR THAT PROCESS. The processes are independent, so an agent can
+                    be Online on RTO with 20 leads and Offline on NDR at the same time.
+                    These are the rows scripts/assign_leads.py reads, so they decide who actually
+                    receives leads - unlike the legacy roster below, which is browser-held.
+                    Membership itself comes from the invitation (Admin → Permissions), not from
+                    here, so an agent can't be added to a process by this card. */}
+                {currentProcess && (
+                  <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
+                    <div className="flex items-start gap-3 mb-4">
+                      <span className="h-9 w-9 shrink-0 rounded-xl bg-indigo-950/60 border border-indigo-800/60 flex items-center justify-center text-indigo-300">👥</span>
+                      <div className="min-w-0">
+                        <h2 className="text-lg font-bold text-zinc-100">
+                          {currentProcess.label.replace(/^Process:\s*/, '')} &mdash; Roster &amp; Capacity
+                        </h2>
+                        <p className="text-[13px] text-zinc-500">
+                          Availability and lead capacity for <b className="text-zinc-400">this process only</b>.
+                          Agents appear here once they&apos;ve been invited to it under Admin &rarr; Permissions.
+                          An agent still has to be at their desk (heartbeat) to receive leads.
+                        </p>
+                      </div>
+                    </div>
+
+                    {processAgentsError && (
+                      <p className="text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2 mb-3">
+                        {processAgentsError}
+                      </p>
+                    )}
+
+                    {processAgents === null && !processAgentsError && (
+                      <p className="text-[13px] text-zinc-500">Loading roster…</p>
+                    )}
+
+                    {processAgents !== null && processAgents.length === 0 && (
+                      <p className="text-[13px] text-zinc-500">
+                        Nobody has been invited to this process yet.
+                      </p>
+                    )}
+
+                    {processAgents !== null && processAgents.length > 0 && (
+                      <div className="space-y-1.5">
+                        {processAgents.map(a => (
+                          <div key={a.email} className="flex items-center justify-between gap-3 rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-4 py-2.5">
+                            <div className="min-w-0">
+                              <div className="text-[13px] font-semibold text-zinc-200 truncate flex items-center gap-2">
+                                {a.name}
+                                {a.isAdmin && <span className="text-[10px] font-bold uppercase tracking-wide text-indigo-300 bg-indigo-950/70 border border-indigo-800/60 rounded px-1.5 py-0.5">Admin</span>}
+                              </div>
+                              <div className="text-[11px] font-mono text-zinc-500 truncate">{a.email}</div>
+                            </div>
+                            <div className="flex items-center gap-3 shrink-0">
+                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
+                                Status:
+                                <select
+                                  value={a.status}
+                                  disabled={savingAgentEmail === a.email}
+                                  onChange={e => saveProcessAgent(a.email, { status: e.target.value })}
+                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 disabled:opacity-40"
+                                >
+                                  <option value="Online">Online</option>
+                                  <option value="Busy">On Break</option>
+                                  <option value="Offline">Offline</option>
+                                </select>
+                              </label>
+                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
+                                Quota:
+                                <input
+                                  type="number"
+                                  min="0"
+                                  // Blank means "unset" -> the process default, NOT zero.
+                                  placeholder={String(leadAssignmentRules.assignmentQuota)}
+                                  defaultValue={a.maxQuota ?? ''}
+                                  disabled={savingAgentEmail === a.email}
+                                  onBlur={e => {
+                                    const v = e.target.value.trim();
+                                    if (v === String(a.maxQuota ?? '')) return;   // unchanged
+                                    saveProcessAgent(a.email, { maxQuota: v === '' ? null : v });
+                                  }}
+                                  className="w-20 bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50 disabled:opacity-40"
+                                />
+                              </label>
+                              <span className={`h-2 w-2 rounded-full shrink-0 ${a.status === 'Online' ? 'bg-emerald-400' : a.status === 'Busy' ? 'bg-amber-400' : 'bg-zinc-600'}`} />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+        </>
+      );
+
       const tabs = [
         { key: 'overview', label: userRole === 'Agent' ? '📊 My Overview & Team Metrics' : '📊 Overview (Agents Data)', count: effectiveAgentRoster.length },
         { key: 'all', label: 'All Leads (Disposed)', count: dispCount },
@@ -2041,6 +2239,15 @@ const localStorage = typeof window !== 'undefined'
                 </div>
               </div>
             )}
+
+            {/* An unbuilt process still gets its admin controls. There is no lead workspace to
+                show yet, but its roster and its calling hours are precisely what has to be set
+                up BEFORE one exists - gating them on `implemented` along with the rest of the
+                workspace left a process that could never be configured. The lead-working tabs
+                stay hidden, since there is genuinely nothing behind them. */}
+            {currentProcess && !currentProcess.implemented
+              && (userRole === 'Admin' || userRole === 'Team Lead')
+              && renderProcessAdminCards()}
 
             {currentProcess && currentProcess.implemented && (<>
 
@@ -2316,191 +2523,7 @@ const localStorage = typeof window !== 'undefined'
                  ══════════════════════════════════════════════════════════════════════ */
               <div className="space-y-6 animate-fadeIn">
 
-                {/* ═══ CALLING HOURS ═══
-                    Per weekday, for the process selected in the header - a single open/close
-                    pair for the whole week couldn't express "Friday closes early" or "Sunday
-                    closed". Leaving both boxes of a day blank means closed. These are the same
-                    values scripts/assign_leads.py reads, so changing them here genuinely stops
-                    and starts automatic lead hand-out; it does NOT stop an agent recording a
-                    call they've already made. */}
-                {hoursDraft && currentProcess && (
-                  <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
-                    <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
-                      <div className="flex items-start gap-3">
-                        <span className="h-9 w-9 shrink-0 rounded-xl bg-emerald-950/60 border border-emerald-800/60 flex items-center justify-center text-emerald-300">🕒</span>
-                        <div>
-                          <h2 className="text-lg font-bold text-zinc-100">
-                            Calling Hours &mdash; {currentProcess.label.replace(/^Process:\s*/, '')}
-                          </h2>
-                          <p className="text-[13px] text-zinc-500">
-                            Automatic lead hand-out only runs inside these hours ({(hoursByProcess?.[activeProcess]?.timezone) || 'IST'}).
-                            Leave a day blank to close it. Agents can still record calls they&apos;ve already made at any time.
-                            {hoursByProcess?.[activeProcess]?.isDefault && (
-                              <span className="text-amber-400"> Currently using defaults &mdash; not yet set by an admin.</span>
-                            )}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => setHoursDraft(JSON.parse(JSON.stringify(hoursByProcess[activeProcess].week)))}
-                          disabled={hoursSaving}
-                          className="h-8 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[13px] font-semibold transition-colors disabled:opacity-40"
-                        >
-                          Reset
-                        </button>
-                        <button
-                          onClick={saveBusinessHours}
-                          disabled={hoursSaving}
-                          className="h-8 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-50"
-                        >
-                          {hoursSaving ? 'Saving…' : 'Save hours'}
-                        </button>
-                      </div>
-                    </div>
-
-                    {hoursError && (
-                      <p className="mt-3 text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2">
-                        {hoursError}
-                      </p>
-                    )}
-
-                    <div className="mt-4 space-y-1.5">
-                      {BUSINESS_HOUR_DAY_LABELS.map(([key, label]) => {
-                        const day = hoursDraft[key] || { open: '', close: '' };
-                        const closed = !day.open && !day.close;
-                        const setDay = (field, value) =>
-                          setHoursDraft(p => ({ ...p, [key]: { ...(p[key] || { open: '', close: '' }), [field]: value } }));
-                        return (
-                          <div key={key} className="flex items-center justify-between gap-3 rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-4 py-2.5">
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <span className="text-[13px] font-semibold text-zinc-200 w-24">{label}</span>
-                              {closed && <span className="text-[11px] font-bold uppercase tracking-wide text-zinc-500 bg-zinc-800/80 border border-zinc-700/60 rounded-md px-2 py-0.5">Closed</span>}
-                            </div>
-                            <div className="flex items-center gap-3 shrink-0">
-                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
-                                Open:
-                                <input
-                                  type="time"
-                                  value={day.open || ''}
-                                  onChange={e => setDay('open', e.target.value)}
-                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                                />
-                              </label>
-                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
-                                Close:
-                                <input
-                                  type="time"
-                                  value={day.close || ''}
-                                  onChange={e => setDay('close', e.target.value)}
-                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                                />
-                              </label>
-                              <button
-                                onClick={() => setHoursDraft(p => ({ ...p, [key]: { open: '', close: '' } }))}
-                                title="Close this day"
-                                className="h-7 px-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[11px] font-semibold transition-colors"
-                              >
-                                Clear
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* ═══ PER-PROCESS ROSTER ═══
-                    Who is invited to the process selected in the header, and their availability
-                    and capacity FOR THAT PROCESS. The processes are independent, so an agent can
-                    be Online on RTO with 20 leads and Offline on NDR at the same time.
-                    These are the rows scripts/assign_leads.py reads, so they decide who actually
-                    receives leads - unlike the legacy roster below, which is browser-held.
-                    Membership itself comes from the invitation (Admin → Permissions), not from
-                    here, so an agent can't be added to a process by this card. */}
-                {currentProcess && (
-                  <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
-                    <div className="flex items-start gap-3 mb-4">
-                      <span className="h-9 w-9 shrink-0 rounded-xl bg-indigo-950/60 border border-indigo-800/60 flex items-center justify-center text-indigo-300">👥</span>
-                      <div className="min-w-0">
-                        <h2 className="text-lg font-bold text-zinc-100">
-                          {currentProcess.label.replace(/^Process:\s*/, '')} &mdash; Roster &amp; Capacity
-                        </h2>
-                        <p className="text-[13px] text-zinc-500">
-                          Availability and lead capacity for <b className="text-zinc-400">this process only</b>.
-                          Agents appear here once they&apos;ve been invited to it under Admin &rarr; Permissions.
-                          An agent still has to be at their desk (heartbeat) to receive leads.
-                        </p>
-                      </div>
-                    </div>
-
-                    {processAgentsError && (
-                      <p className="text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2 mb-3">
-                        {processAgentsError}
-                      </p>
-                    )}
-
-                    {processAgents === null && !processAgentsError && (
-                      <p className="text-[13px] text-zinc-500">Loading roster…</p>
-                    )}
-
-                    {processAgents !== null && processAgents.length === 0 && (
-                      <p className="text-[13px] text-zinc-500">
-                        Nobody has been invited to this process yet.
-                      </p>
-                    )}
-
-                    {processAgents !== null && processAgents.length > 0 && (
-                      <div className="space-y-1.5">
-                        {processAgents.map(a => (
-                          <div key={a.email} className="flex items-center justify-between gap-3 rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-4 py-2.5">
-                            <div className="min-w-0">
-                              <div className="text-[13px] font-semibold text-zinc-200 truncate flex items-center gap-2">
-                                {a.name}
-                                {a.isAdmin && <span className="text-[10px] font-bold uppercase tracking-wide text-indigo-300 bg-indigo-950/70 border border-indigo-800/60 rounded px-1.5 py-0.5">Admin</span>}
-                              </div>
-                              <div className="text-[11px] font-mono text-zinc-500 truncate">{a.email}</div>
-                            </div>
-                            <div className="flex items-center gap-3 shrink-0">
-                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
-                                Status:
-                                <select
-                                  value={a.status}
-                                  disabled={savingAgentEmail === a.email}
-                                  onChange={e => saveProcessAgent(a.email, { status: e.target.value })}
-                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 disabled:opacity-40"
-                                >
-                                  <option value="Online">Online</option>
-                                  <option value="Busy">On Break</option>
-                                  <option value="Offline">Offline</option>
-                                </select>
-                              </label>
-                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
-                                Quota:
-                                <input
-                                  type="number"
-                                  min="0"
-                                  // Blank means "unset" -> the process default, NOT zero.
-                                  placeholder={String(leadAssignmentRules.assignmentQuota)}
-                                  defaultValue={a.maxQuota ?? ''}
-                                  disabled={savingAgentEmail === a.email}
-                                  onBlur={e => {
-                                    const v = e.target.value.trim();
-                                    if (v === String(a.maxQuota ?? '')) return;   // unchanged
-                                    saveProcessAgent(a.email, { maxQuota: v === '' ? null : v });
-                                  }}
-                                  className="w-20 bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50 disabled:opacity-40"
-                                />
-                              </label>
-                              <span className={`h-2 w-2 rounded-full shrink-0 ${a.status === 'Online' ? 'bg-emerald-400' : a.status === 'Busy' ? 'bg-amber-400' : 'bg-zinc-600'}`} />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
+                {renderProcessAdminCards()}
 
                 {(() => {
                   const agentMetrics = effectiveAgentRoster.map(ag => {
