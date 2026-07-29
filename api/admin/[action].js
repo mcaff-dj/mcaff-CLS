@@ -15,7 +15,8 @@
 //   POST   /api/admin/calling-agents  -> { processKey, email, status?, maxQuota? }
 const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours, logEvent,
-  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent } = require('../_lib/db');
+  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
+  isCallingProcessAdmin, getAdministeredProcesses } = require('../_lib/db');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { CARD_TABS } = require('../_lib/tabs');
 const { getSession } = require('../_lib/session');
@@ -210,6 +211,10 @@ async function handleBusinessHours(req, res, session) {
       res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
       return;
     }
+    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, body.processKey))) {
+      res.status(403).json({ error: 'You do not administer that process' });
+      return;
+    }
     try {
       await setCallingBusinessHours(body.processKey, body.week || {}, session.email);
     } catch (e) {
@@ -223,6 +228,7 @@ async function handleBusinessHours(req, res, session) {
   }
 
   const saved = await getCallingBusinessHours();
+  const allowed = session.isAdmin ? null : await getAdministeredProcesses(session.email);
   const processes = CALLING_PROCESSES.processes.map((p) => {
     const savedWeek = saved[p.key];
     const defaults = p.businessHours || {};
@@ -247,7 +253,12 @@ async function handleBusinessHours(req, res, session) {
       week,
     };
   });
-  res.status(200).json({ days: BUSINESS_HOUR_DAYS, processes });
+  // A process admin only gets the processes they actually administer, so the editor can't
+  // show them hours they have no business changing (the POST above would refuse anyway).
+  const visible = session.isAdmin
+    ? processes
+    : processes.filter((p) => (allowed || []).includes(p.key));
+  res.status(200).json({ days: BUSINESS_HOUR_DAYS, processes: visible });
 }
 
 // GET  ?process=<key> -> everyone invited to that process, with their PER-PROCESS status and
@@ -265,10 +276,21 @@ async function handleCallingAgents(req, res, session) {
       res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
       return;
     }
+    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, body.processKey))) {
+      res.status(403).json({ error: 'You do not administer that process' });
+      return;
+    }
+    // Only a company-wide admin may make someone a process admin. Without this a process
+    // admin could promote themselves elsewhere or mint peers, which is privilege escalation -
+    // the whole point of this role is that it stays confined to one process.
+    if (body.isProcessAdmin !== undefined && !session.isAdmin) {
+      res.status(403).json({ error: 'Only a full admin can grant or revoke process-admin rights' });
+      return;
+    }
     try {
       const agents = await setCallingProcessAgent(
         body.processKey, body.email,
-        { status: body.status, maxQuota: body.maxQuota },
+        { status: body.status, maxQuota: body.maxQuota, isProcessAdmin: body.isProcessAdmin },
         session.email,
       );
       await logEvent(session.uid, session.email, 'calling', 'process-agent',
@@ -285,18 +307,31 @@ async function handleCallingAgents(req, res, session) {
     res.status(400).json({ error: `process must be one of: ${known.join(', ')}` });
     return;
   }
+  if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, processKey))) {
+    res.status(403).json({ error: 'You do not administer that process' });
+    return;
+  }
   res.status(200).json({ statuses: CALLING_STATUSES, agents: await getCallingProcessAgents(processKey) });
 }
 
 module.exports = async (req, res) => {
   const session = await getSession(req);
-  if (!session || !session.isAdmin) {
+  if (!session) {
+    res.status(403).json({ error: 'Forbidden' });
+    return;
+  }
+  const action = req.query && req.query.action;
+
+  // A process admin runs one calling process, so they may reach these two routes and nothing
+  // else here - users/permissions/audit stay company-wide-admin only, because those can
+  // re-grant anyone's access. Each handler then checks they administer the SPECIFIC process
+  // being read or written; passing this gate alone authorises nothing.
+  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'calling-agents'];
+  if (!session.isAdmin && !PROCESS_ADMIN_ACTIONS.includes(action)) {
     res.status(403).json({ error: 'Forbidden' });
     return;
   }
   await ensureSchema();
-
-  const action = req.query && req.query.action;
   if (action === 'users') return handleUsers(req, res, session);
   if (action === 'permissions') return handlePermissions(req, res);
   if (action === 'audit') return handleAudit(req, res);

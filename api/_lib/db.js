@@ -209,6 +209,15 @@ async function ensurePgSchema() {
       PRIMARY KEY (email, process_key)
     )
   `;
+  // Admin OF ONE PROCESS: may manage that process's roster and calling hours, and nothing
+  // else. Deliberately not users.is_admin, which is company-wide - it would also hand over
+  // every other report plus /admin, where someone can re-grant anyone's access and delete
+  // users. "Run the RTO desk" and "administer the whole site" are different jobs, and only
+  // this table can express the narrow one, since it is already keyed per (agent, process).
+  //
+  // Grants no data access on its own: the agent still needs the 'calling' card and that
+  // process's invitation row to see the process at all.
+  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS is_process_admin BOOLEAN NOT NULL DEFAULT false`;
   // Disposal side of the same lead lifecycle - written by rto-crm.html's submitDisp()
   // in real time (via a new recordDisposition auth action) alongside its existing
   // direct-to-Sheet write, so this history survives independent of the Google Sheet
@@ -660,7 +669,7 @@ async function getCallingProcessAgents(processKey) {
     ORDER BY u.is_admin DESC, u.name ASC
   `;
   const { rows: state } = await pgSql`
-    SELECT email, status, max_quota, updated_at, updated_by
+    SELECT email, status, max_quota, is_process_admin, updated_at, updated_by
     FROM calling_agent_process WHERE process_key = ${processKey}
   `;
   const byEmail = {};
@@ -673,6 +682,7 @@ async function getCallingProcessAgents(processKey) {
       isAdmin: !!m.is_admin,
       status: (s && s.status) || 'Offline',
       maxQuota: s && s.max_quota != null ? s.max_quota : null,
+      isProcessAdmin: !!(s && s.is_process_admin),
       updatedAt: (s && s.updated_at) || null,
       updatedBy: (s && s.updated_by) || null,
     };
@@ -681,7 +691,7 @@ async function getCallingProcessAgents(processKey) {
 
 // Upserts one agent's status and/or quota for one process. Either field may be omitted, so an
 // agent flipping their own status can't accidentally reset a quota an admin set.
-async function setCallingProcessAgent(processKey, email, { status, maxQuota } = {}, updatedBy) {
+async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin } = {}, updatedBy) {
   await ensurePgSchema();
   const key = String(email || '').trim().toLowerCase();
   if (!processKey || !key) throw new Error('processKey and email are required');
@@ -695,16 +705,48 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota } = 
   }
   // COALESCE(EXCLUDED.x, table.x) so an omitted field keeps its stored value instead of being
   // overwritten with null.
+  // isProcessAdmin is a real tri-state here: undefined means "leave it alone", true/false mean
+  // set it. A plain COALESCE would make `false` indistinguishable from "not supplied" and so
+  // make revoking impossible.
+  const adminFlag = (isProcessAdmin === undefined || isProcessAdmin === null) ? null : !!isProcessAdmin;
   await pgSql`
-    INSERT INTO calling_agent_process (email, process_key, status, max_quota, updated_at, updated_by)
-    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, now(), ${updatedBy || null})
+    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, updated_at, updated_by)
+    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, now(), ${updatedBy || null})
     ON CONFLICT (email, process_key) DO UPDATE
       SET status = COALESCE(${status || null}, calling_agent_process.status),
           max_quota = COALESCE(${quota}, calling_agent_process.max_quota),
+          is_process_admin = COALESCE(${adminFlag}, calling_agent_process.is_process_admin),
           updated_at = now(),
           updated_by = ${updatedBy || null}
   `;
   return getCallingProcessAgents(processKey);
+}
+
+// Does this person administer this ONE process? Used to let a process admin through the
+// admin routes for their own process only - it is not company-wide admin (users.is_admin) and
+// must never be treated as such.
+async function isCallingProcessAdmin(email, processKey) {
+  await ensurePgSchema();
+  if (!email || !processKey) return false;
+  const { rows } = await pgSql`
+    SELECT 1 FROM calling_agent_process
+    WHERE lower(email) = ${String(email).toLowerCase()}
+      AND process_key = ${processKey}
+      AND is_process_admin = true
+    LIMIT 1
+  `;
+  return rows.length > 0;
+}
+
+// Every process this person administers, for narrowing what a process admin is shown.
+async function getAdministeredProcesses(email) {
+  await ensurePgSchema();
+  if (!email) return [];
+  const { rows } = await pgSql`
+    SELECT process_key FROM calling_agent_process
+    WHERE lower(email) = ${String(email).toLowerCase()} AND is_process_admin = true
+  `;
+  return rows.map((r) => r.process_key);
 }
 
 // Per-partner disposition breakdown (delivery_partner, derived from awb_code - see
@@ -772,4 +814,5 @@ module.exports = {
   getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
+  isCallingProcessAdmin, getAdministeredProcesses,
 };

@@ -512,6 +512,12 @@ const localStorage = typeof window !== 'undefined'
       // the same rows, so a browser-only value would change nothing about who gets leads. This
       // is separate from `agentRoster` (localStorage), which stays as the legacy RTO view.
       const [processAgents, setProcessAgents] = useState(null);
+      // Whether the signed-in user administers the ACTIVE process (calling_agent_process
+      // .is_process_admin). Separate from sessionIsAdmin, which is company-wide: a process
+      // admin runs one process's roster and hours and gets nothing else. Server-derived - the
+      // roster it reads comes from an endpoint that already refuses processes you don't
+      // administer, so the browser can't grant this to itself.
+      const [isProcessAdmin, setIsProcessAdmin] = useState(false);
       const [processAgentsError, setProcessAgentsError] = useState('');
       const [savingAgentEmail, setSavingAgentEmail] = useState('');
 
@@ -684,20 +690,23 @@ const localStorage = typeof window !== 'undefined'
           const d = await r.json().catch(() => ({}));
           if (!r.ok) { setProcessAgentsError(d.error || `Could not load roster (${r.status})`); return; }
           setProcessAgents(d.agents || []);
+          const me = (d.agents || []).find(a => (a.email || '').toLowerCase() === (googleUser?.email || '').toLowerCase());
+          setIsProcessAdmin(!!(me && me.isProcessAdmin));
         } catch (e) {
           setProcessAgentsError(e.message || 'Could not load roster');
         }
-      }, []);
+      }, [googleUser]);
 
       // Not tab-gated: the roster feeds effectiveAgentRoster, which the Overview metrics and the
       // reassignment dropdowns use too, not just the admin panel. Reloaded on process change
       // because each process has its own roster. A non-admin simply gets 403 and processAgents
       // stays null, which effectiveAgentRoster treats as "no per-process data" and falls back.
+      // Fetched for everyone signed in: the endpoint itself decides (403s a process you don't
+      // administer), and it's the only way to learn you ARE a process admin - gating the fetch
+      // on a role the browser holds would make that unknowable.
       useEffect(() => {
-        if (userRole === 'Admin' || userRole === 'Team Lead') {
-          loadProcessAgents(activeProcess);
-        }
-      }, [userRole, activeProcess, loadProcessAgents]);
+        if (googleUser?.email) loadProcessAgents(activeProcess);
+      }, [googleUser, activeProcess, loadProcessAgents]);
 
       // One agent, one process, one field at a time. status and maxQuota are sent
       // independently so changing availability never disturbs a quota an admin set.
@@ -2040,11 +2049,30 @@ const localStorage = typeof window !== 'undefined'
                             <div className="min-w-0">
                               <div className="text-[13px] font-semibold text-zinc-200 truncate flex items-center gap-2">
                                 {a.name}
+                                {/* Two different badges on purpose: "Admin" is company-wide
+                                    (users.is_admin), "Process admin" runs only this process. */}
                                 {a.isAdmin && <span className="text-[10px] font-bold uppercase tracking-wide text-indigo-300 bg-indigo-950/70 border border-indigo-800/60 rounded px-1.5 py-0.5">Admin</span>}
+                                {!a.isAdmin && a.isProcessAdmin && <span className="text-[10px] font-bold uppercase tracking-wide text-emerald-300 bg-emerald-950/70 border border-emerald-800/60 rounded px-1.5 py-0.5">Process admin</span>}
                               </div>
                               <div className="text-[11px] font-mono text-zinc-500 truncate">{a.email}</div>
                             </div>
                             <div className="flex items-center gap-3 shrink-0">
+                              {/* Only a company-wide admin may grant/revoke this - the API
+                                  refuses it from a process admin, so showing the control to one
+                                  would just produce a 403. Hidden for accounts that are already
+                                  full admins, where it would be redundant. */}
+                              {sessionIsAdmin && !a.isAdmin && (
+                                <label className="flex items-center gap-1.5 text-[12px] text-zinc-500 cursor-pointer" title="Can manage this process's roster and calling hours - nothing else">
+                                  <input
+                                    type="checkbox"
+                                    checked={!!a.isProcessAdmin}
+                                    disabled={savingAgentEmail === a.email}
+                                    onChange={e => saveProcessAgent(a.email, { isProcessAdmin: e.target.checked })}
+                                    className="accent-emerald-500"
+                                  />
+                                  Process admin
+                                </label>
+                              )}
                               <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
                                 Status:
                                 <select
@@ -2092,7 +2120,9 @@ const localStorage = typeof window !== 'undefined'
         { key: 'all', label: 'All Leads (Disposed)', count: dispCount },
         { key: 'fresh', label: '⚡ Fresh Leads (Assigned)', count: freshAssignedCount }
       ];
-      if (userRole === 'Admin' || userRole === 'Team Lead') {
+      // isProcessAdmin too: someone who runs this one process needs the tab that holds its
+      // roster and hours, without being a company-wide admin.
+      if (userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin) {
         tabs.push({ key: 'admin', label: 'Admin Panel & Roster', count: effectiveAgentRoster.length });
       }
       if (userRole === 'Admin') {
@@ -2101,7 +2131,7 @@ const localStorage = typeof window !== 'undefined'
 
       // Automatically redirect away from Admin-only tabs if role switched to Agent
       useEffect(() => {
-        if (userRole === 'Agent' && (tab === 'admin' || tab === 'predicted')) {
+        if (userRole === 'Agent' && !isProcessAdmin && (tab === 'admin' || tab === 'predicted')) {
           setTab('all');
         }
       }, [userRole, tab]);
@@ -2278,7 +2308,7 @@ const localStorage = typeof window !== 'undefined'
                 workspace left a process that could never be configured. The lead-working tabs
                 stay hidden, since there is genuinely nothing behind them. */}
             {currentProcess && !currentProcess.implemented
-              && (userRole === 'Admin' || userRole === 'Team Lead')
+              && (userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin)
               && renderProcessAdminCards()}
 
             {currentProcess && currentProcess.implemented && (<>
@@ -2549,7 +2579,7 @@ const localStorage = typeof window !== 'undefined'
                   );
                 })()}
               </div>
-            ):tab==='admin'&&(userRole==='Admin'||userRole==='Team Lead')?(
+            ):tab==='admin'&&(userRole==='Admin'||userRole==='Team Lead'||isProcessAdmin)?(
               /* ══════════════════════════════════════════════════════════════════════
                  🛡️ ADMIN PANEL: TEAM ROSTER & BULK REASSIGNMENT CONTROL
                  ══════════════════════════════════════════════════════════════════════ */
