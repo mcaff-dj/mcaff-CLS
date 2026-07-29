@@ -1492,16 +1492,22 @@ const localStorage = typeof window !== 'undefined'
       }, []);
 
       // Dynamic Roster that automatically includes EVERY unique agent found in Google Sheet tickets or overrides
+      // "badshasab.pathan" -> "Badshasab Pathan" - the fallback used whenever nothing better
+      // (a real name from googleUser, a ticket's own agent string, or users.name server-side)
+      // is available. Several MySQL users.name values are blank or malformed (a data gap, not
+      // this function's job to fix), so this fallback is what actually renders for them.
+      const emailToDisplayName = (email) => email.split('@')[0].split('.').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+
       const effectiveAgentRoster = useMemo(() => {
         const rosterMap = new Map();
-        
+
         (agentRoster || []).forEach(a => {
           if (a && a.email) rosterMap.set(a.email.toLowerCase(), { ...a });
         });
 
         if (googleUser && googleUser.email && !rosterMap.has(googleUser.email.toLowerCase())) {
           const email = googleUser.email.toLowerCase();
-          const name = googleUser.name || email.split('@')[0].split('.').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+          const name = googleUser.name || emailToDisplayName(email);
           // sessionIsAdmin (users.is_admin) rather than matching the email against two
           // hardcoded names, which mislabelled every other real admin as an Agent in their own
           // roster row.
@@ -1522,8 +1528,7 @@ const localStorage = typeof window !== 'undefined'
               name = agt.split('(')[0].trim();
             } else if (agt.includes('@')) {
               email = agt.toLowerCase().trim();
-              const parts = email.split('@')[0].split('.');
-              name = parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+              name = emailToDisplayName(email);
             } else {
               email = `${agt.toLowerCase().replace(/\s+/g, '.')}@mcaffeine.com`;
               name = agt;
@@ -1544,7 +1549,7 @@ const localStorage = typeof window !== 'undefined'
             aht: '2.8m', breakTime: '15m',
             ...existing,
             email,
-            name: pa.name || existing.name || email.split('@')[0],
+            name: (pa.name && pa.name.trim()) || existing.name || emailToDisplayName(email),
             role: pa.isAdmin ? 'Admin' : (existing.role || 'Agent'),
           });
         });
