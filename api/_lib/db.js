@@ -361,7 +361,14 @@ async function bootstrapAdminIfNeeded(email, name) {
 
 // action: 'view' | 'login' | 'csv_export' | 'raw_download'. detail is free text (e.g. the
 // tab/table that was exported) - null where there's nothing more specific to record.
-async function logEvent(userId, email, cardKey, action, detail, ip) {
+// ip defaults to null, not undefined: mysql2 rejects an undefined bind parameter outright
+// ("Bind parameters must not contain undefined") rather than treating it as SQL NULL, so any
+// caller that omits ip - three call sites in api/admin/[action].js did, all added today - made
+// this throw AFTER whatever real write already happened in the same handler, which reported
+// the whole request as failed even though the actual change had already committed. Every
+// pre-existing call site in the codebase already passes ip explicitly; this default is a
+// backstop against the next one that doesn't, not a fix for those.
+async function logEvent(userId, email, cardKey, action, detail, ip = null) {
   await ensureSchema();
   await sql`INSERT INTO audit_log (user_id, email, card_key, action, detail, ip) VALUES (${userId}, ${email}, ${cardKey}, ${action}, ${detail}, ${ip})`;
 }

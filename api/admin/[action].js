@@ -208,6 +208,7 @@ async function handleAudit(req, res) {
 //         stored as closed; days omitted from `week` are left untouched.
 // Admin-only by virtue of the gate in this file's own handler below.
 async function handleBusinessHours(req, res, session) {
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
   if (req.method === 'POST') {
     const body = parseBody(req);
     const known = CALLING_PROCESSES.processes.map((p) => p.key);
@@ -228,7 +229,7 @@ async function handleBusinessHours(req, res, session) {
       res.status(400).json({ error: e.message || 'Could not save business hours' });
       return;
     }
-    await logEvent(session.uid, session.email, 'calling', 'business-hours', `Updated ${body.processKey} hours`);
+    await logEvent(session.uid, session.email, 'calling', 'business-hours', `Updated ${body.processKey} hours`, ip);
   }
 
   const saved = await getCallingBusinessHours();
@@ -272,6 +273,7 @@ async function handleBusinessHours(req, res, session) {
 // POST                -> { processKey, email, status?, maxQuota? } for one agent. Fields are
 //                        independent: omitting maxQuota leaves an admin-set quota alone.
 async function handleCallingAgents(req, res, session) {
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
   const known = CALLING_PROCESSES.processes.map((p) => p.key);
 
   if (req.method === 'POST') {
@@ -298,7 +300,7 @@ async function handleCallingAgents(req, res, session) {
         session.email,
       );
       await logEvent(session.uid, session.email, 'calling', 'process-agent',
-        `${body.processKey}: ${body.email} status=${body.status ?? '-'} quota=${body.maxQuota ?? '-'}`);
+        `${body.processKey}: ${body.email} status=${body.status ?? '-'} quota=${body.maxQuota ?? '-'}`, ip);
       res.status(200).json({ statuses: CALLING_STATUSES, agents });
     } catch (e) {
       res.status(400).json({ error: e.message || 'Could not update agent' });
@@ -350,7 +352,7 @@ async function handleCallingAgents(req, res, session) {
     try {
       await setCallingProcessAgent(body.processKey, email, { status: 'Offline', isProcessAdmin: false }, session.email);
     } catch (e) { /* best-effort - the access revocation above is what actually matters */ }
-    await logEvent(session.uid, session.email, 'calling', 'process-revoke', `${body.processKey}: revoked for ${email}`);
+    await logEvent(session.uid, session.email, 'calling', 'process-revoke', `${body.processKey}: revoked for ${email}`, ip);
     res.status(200).json({ ok: true });
     return;
   }
