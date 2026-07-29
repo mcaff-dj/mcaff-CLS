@@ -792,6 +792,18 @@ const localStorage = typeof window !== 'undefined'
         if (!lower) return;
         const isSelf = googleUser?.email && googleUser.email.toLowerCase() === lower;
 
+        // Availability has two halves and BOTH have to be written, or assign_leads.py won't
+        // agree with what this row shows: agent_presence ("at their desk", global) and
+        // calling_agent_process ("available for this process"). Writing only the first is what
+        // made this control look effective while changing nothing about who receives leads.
+        if (activeProcess) {
+          if (isSelf) {
+            postJsonWithRetry('/api/auth/processPresence', { processKey: activeProcess, status: newStatus });
+          } else {
+            saveProcessAgent(lower, { status: newStatus });
+          }
+        }
+
         if (isSelf) {
           setAgentStatus(newStatus);
           try { localStorage.setItem('rto_agent_status', newStatus); } catch {}
@@ -2644,11 +2656,20 @@ const localStorage = typeof window !== 'undefined'
                                   </div>
                                 </td>
                                 <td className="py-3 px-4">
+                                  {/* STILL LOCAL-ONLY, unlike Status and Quota beside it. It
+                                      changes what this browser shows, and grants nothing: real
+                                      authority comes from users.is_admin plus the per-card
+                                      permission rows. That table has no way to express
+                                      "Team Lead" (only the is_admin flag), so making this
+                                      authoritative needs a `role` column and a decision about
+                                      what a Team Lead may do - a permissions change that belongs
+                                      with the invite flow, not this roster. Left as a view
+                                      setting until then; the toast says so. */}
                                   <CustomSelect
                                     value={a.role}
                                     onChange={(newRole) => {
                                       setAgentRoster(p => { const u = p.map(x => x.email === a.email ? { ...x, role: newRole } : x); localStorage.setItem('rto_agent_roster', JSON.stringify(u)); return u; });
-                                      showToast(`Role updated for ${a.name}`);
+                                      showToast(`Role set to ${newRole} for ${a.name} (this view only - grants no access)`);
                                     }}
                                     options={[
                                       { value: 'Agent', label: 'Agent' },
@@ -2668,16 +2689,21 @@ const localStorage = typeof window !== 'undefined'
                                 <td className="py-3 px-4 text-center font-bold text-indigo-400 tabular-nums">{a.disposed}</td>
                                 <td className="py-3 px-4 text-center font-bold text-emerald-400 tabular-nums">{a.connectRate}%</td>
                                 <td className="py-3 px-4">
+                                  {/* Writes the PER-PROCESS quota server-side (the same row
+                                      assign_leads.py reads), not localStorage as it used to -
+                                      an admin setting a cap here previously changed nothing
+                                      about how many leads that agent actually received.
+                                      '' = unset, meaning the process default rather than 0. */}
                                   <CustomSelect
-                                    value={a.maxQuota}
-                                    onChange={(val) => {
-                                      setAgentRoster(p => { const u = p.map(x => x.email === a.email ? { ...x, maxQuota: +val } : x); localStorage.setItem('rto_agent_roster', JSON.stringify(u)); return u; });
-                                    }}
+                                    value={a.maxQuota ?? ''}
+                                    onChange={(val) => saveProcessAgent(a.email, { maxQuota: val === '' ? null : +val })}
                                     options={[
+                                      { value: '', label: `Default (${leadAssignmentRules.assignmentQuota})` },
                                       { value: 5, label: '5 leads' },
                                       { value: 10, label: '10 leads' },
                                       { value: 15, label: '15 leads' },
-                                      { value: 20, label: '20 leads' }
+                                      { value: 20, label: '20 leads' },
+                                      { value: 30, label: '30 leads' }
                                     ]}
                                   />
                                 </td>
