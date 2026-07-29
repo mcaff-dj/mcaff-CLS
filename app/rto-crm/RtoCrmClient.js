@@ -720,10 +720,22 @@ const localStorage = typeof window !== 'undefined'
             body: JSON.stringify({ processKey: activeProcess, email, ...patch }),
           });
           const d = await r.json().catch(() => ({}));
-          if (!r.ok) { setProcessAgentsError(d.error || `Could not save (${r.status})`); return; }
+          if (!r.ok) {
+            const msg = d.error || `Could not save (${r.status})`;
+            setProcessAgentsError(msg);
+            // processAgentsError only renders inside the simple roster card, used for an
+            // UNBUILT process - the Team Roster table (a built process, e.g. RTO) has nowhere
+            // to show it, so a rejected save (wrong permissions, a stale process key) looked
+            // exactly like a checkbox that silently did nothing. The toast is the one place
+            // both contexts already render.
+            showToast(`⚠️ ${msg}`);
+            return;
+          }
           setProcessAgents(d.agents || []);
         } catch (e) {
-          setProcessAgentsError(e.message || 'Could not save');
+          const msg = e.message || 'Could not save';
+          setProcessAgentsError(msg);
+          showToast(`⚠️ ${msg}`);
         } finally {
           setSavingAgentEmail('');
         }
@@ -1261,15 +1273,25 @@ const localStorage = typeof window !== 'undefined'
         const lower = (email || '').toLowerCase();
         if (!lower) return;
         const prefix = lower.split('@')[0];
-
-        const activeCount = allTickets.filter(t => {
-          if (t.status !== 'Pending' || t.disposition || t.agentRemarks) return false;
+        const isMine = (t) => {
           const currAgt = (t.assignedAgent || '').toLowerCase();
           return currAgt.includes(lower) || currAgt.includes(prefix);
-        }).length;
+        };
 
+        const activeCount = allTickets.filter(t => isMine(t) && t.status === 'Pending' && !t.disposition && !t.agentRemarks).length;
         if (activeCount > 0) {
           showToast(`Can't remove ${name} — they still have ${activeCount} pending lead(s). Reassign or unassign those first.`);
+          return;
+        }
+
+        // Any OTHER ticket history (disposed leads, mostly) means this would be a no-op that
+        // looks like a bug rather than one that behaves as intended: effectiveAgentRoster
+        // rebuilds itself from ticket history on every render, so it would re-add this exact
+        // row on the very next one - the button would appear to do nothing at all, silently.
+        // Told upfront rather than after a click that visibly changed nothing.
+        const historyCount = allTickets.filter(isMine).length - activeCount;
+        if (historyCount > 0) {
+          showToast(`Can't remove ${name} from this list — they have ${historyCount} historical lead(s), so this table rebuilds their row from that history every time it loads. This list has never controlled real access anyway; revoke access from Admin → Permissions instead.`);
           return;
         }
 
@@ -1512,6 +1534,13 @@ const localStorage = typeof window !== 'undefined'
             // null quota means "unset" -> the process default, never 0.
             if (perProcess[email].maxQuota != null) a.maxQuota = perProcess[email].maxQuota;
             a.inProcess = true;
+            // isAdmin/isProcessAdmin were previously never copied here, only onto the
+            // separate roster card's own objects - so the Team Roster's "Process admin"
+            // checkbox always rendered checked={undefined} (always unchecked) no matter what
+            // was actually saved, and real admins never got the "all" badge in this table.
+            // A save could succeed server-side and the checkbox would still look untouched.
+            a.isAdmin = !!perProcess[email].isAdmin;
+            a.isProcessAdmin = !!perProcess[email].isProcessAdmin;
           }
           // Own status last: locally authoritative so the header control doesn't visibly
           // bounce while the write is in flight.
