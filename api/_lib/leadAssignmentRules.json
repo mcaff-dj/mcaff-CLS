@@ -1,0 +1,57 @@
+{
+  "_readme": [
+    "SINGLE SOURCE OF TRUTH for RTO lead-assignment rules. Edit here only - three places read",
+    "this file and previously carried hand-copied duplicates of these values:",
+    "  - scripts/lead_priority.py   (the Python cron that actually writes assignments)",
+    "  - app/rto-crm/RtoCrmClient.js (the Admin 'Next to Assign' preview)",
+    "  - api/_lib/db.js             (awbPrefixRules, for leads recorded via the disposal path)",
+    "Kept under api/_lib/ specifically because deploy.yml bundles only api/ into the Lambda:",
+    "anywhere else and db.js would throw at runtime unless the packaging step changed too.",
+    "Values are DATA only - the tier ordering and the round-robin loop are still implemented",
+    "once per language (Python cannot execute JS), but both are driven entirely by what's here,",
+    "so tuning reasons/quota/prefixes needs no code change in either.",
+    "assignmentQuota was the one value that had already drifted: Python used 20 while the CRM",
+    "preview used 10, so the preview predicted assignments for half the real quota."
+  ],
+
+  "assignmentQuota": 20,
+
+  "_highPriorityNote": "Tier 1 - COD whose ORIGINAL system/courier RTO reason contains one of these (case-insensitive substring). The consignee has already refused or OTP-verified the cancellation, so the outcome is effectively known and worth acting on quickly. Prepaid is tier 0 and wins outright regardless of reason.",
+  "highPriorityCodRtoReasons": [
+    "consignee opened the package and refused to accept",
+    "consignee refused to accept",
+    "customer refused to accept",
+    "customer refused to accept:verified",
+    "elasticrun_otp_verified",
+    "entry refused",
+    "kyc|customer refused to share kyc/ ndc/ scd",
+    "prf|receiver refused delivery(cir)",
+    "refused to accept",
+    "refused to accept (no cancellation code)"
+  ],
+
+  "_lowPriorityNote": "Tier 3 - deliberately behind even 'every other COD order' (tier 2). These OTP outcomes are handled last in the assignment queue.",
+  "lowPriorityCodRtoReasons": [
+    "otp validation successful",
+    "otp verified cancellation",
+    "refused to accept (with cancellation code)",
+    "rto pending - otp validated cancellation"
+  ],
+
+  "_awbPrefixNote": "Delivery partner from an AWB code's prefix, first matching prefix wins. Business rule confirmed manually against known AWB ranges - nothing in the AWB format itself is self-describing.",
+  "awbPrefixRules": [
+    ["SF", "Shadowfax"],
+    ["MC", "ElasticRun"],
+    ["PD", "Pidge"],
+    ["PA", "Pikendle"],
+    ["76", "Bluedart"],
+    ["77", "Bluedart"],
+    ["78", "Bluedart"],
+    ["80", "Bluedart"],
+    ["90", "Bluedart"],
+    ["23", "Delhivery"],
+    ["15", "Xpressbees"],
+    ["18", "Delhivery"],
+    ["53", "Delhivery"]
+  ]
+}

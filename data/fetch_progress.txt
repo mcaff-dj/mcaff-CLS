@@ -1,0 +1,13 @@
+Fetch started 07/09/2026 00:41:11
+Header fetched.
+Fetched rows 2-10001 (10001 total so far) at 07/09/2026 00:41:40
+Fetched rows 10002-20001 (20001 total so far) at 07/09/2026 00:42:00
+Fetched rows 20002-30001 (30001 total so far) at 07/09/2026 00:42:21
+Fetched rows 30002-40001 (40001 total so far) at 07/09/2026 00:42:47
+Fetched rows 40002-50001 (50001 total so far) at 07/09/2026 00:43:06
+Fetched rows 50002-60001 (60001 total so far) at 07/09/2026 00:43:24
+Fetched rows 60002-70001 (70001 total so far) at 07/09/2026 00:43:43
+Fetched rows 70002-80001 (80001 total so far) at 07/09/2026 00:43:53
+Fetched rows 80002-90001 (90001 total so far) at 07/09/2026 00:44:01
+Fetched rows 90002-91675 (91675 total so far) at 07/09/2026 00:44:05
+DONE. Total rows cached (incl header): 91675 at 07/09/2026 00:44:06

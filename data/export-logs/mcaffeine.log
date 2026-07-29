@@ -1,0 +1,77 @@
+﻿[2026-07-15T12:39:48.2865032+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=30256
+[mcaffeine] fetching tickets resolved 2026-07-15T05:42:05.940Z -> 2026-07-15T07:09:48.403Z
+[mcaffeine] appended 291 rows (window 2026-07-15T05:42:05.940Z -> 2026-07-15T07:09:48.403Z)
+[2026-07-15T13:01:57.6301669+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=29716
+[mcaffeine] fetching tickets resolved 2026-07-15T07:09:48.403Z -> 2026-07-15T07:31:57.676Z
+[mcaffeine] appended 81 rows (window 2026-07-15T07:09:48.403Z -> 2026-07-15T07:31:57.676Z)
+[2026-07-15T15:15:54.1677196+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=32152
+[mcaffeine] fetching tickets resolved 2026-07-15T07:09:48.403Z -> 2026-07-15T09:45:54.218Z
+[mcaffeine] appended 452 rows (window 2026-07-15T07:09:48.403Z -> 2026-07-15T09:45:54.218Z)
+[2026-07-15T17:31:37.8973978+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=39212
+[mcaffeine] fetching tickets resolved 2026-07-14T15:54:12.415Z -> 2026-07-15T12:01:37.982Z
+[2026-07-15T19:38:44.5349081+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=39396
+[mcaffeine] fetching tickets resolved 2026-07-15T12:32:52.525Z -> 2026-07-15T14:08:44.594Z
+[mcaffeine] appended 197 rows at row 3003 (window 2026-07-15T12:32:52.525Z -> 2026-07-15T14:08:44.594Z)
+[2026-07-15T22:53:22.3749981+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=19268
+[mcaffeine] fetching tickets resolved 2026-07-15T12:32:52.525Z -> 2026-07-15T17:23:23.550Z
+[2026-07-15T23:01:57.4934866+05:30] wrapper started, PSScriptRoot=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=42716
+[mcaffeine] fetching tickets resolved 2026-07-15T12:32:52.525Z -> 2026-07-15T17:31:57.558Z
+[2026-07-16T00:27:30.615700+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=46024
+[mcaffeine] fetching tickets resolved 2026-07-15T12:32:52.525Z -> 2026-07-15T18:57:30.857Z
+[mcaffeine] appended 574 rows at row 3003 (window 2026-07-15T12:32:52.525Z -> 2026-07-15T18:57:30.857Z)
+[2026-07-16T01:01:57.502153+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=24768
+[mcaffeine] fetching tickets resolved 2026-07-15T18:57:30.857Z -> 2026-07-15T19:31:57.714Z
+[mcaffeine] appended 35 rows at row 3577 (window 2026-07-15T18:57:30.857Z -> 2026-07-15T19:31:57.714Z)
+[2026-07-16T03:01:57.509058+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=17156
+[2026-07-17T23:08:45.649465+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=45864
+[2026-07-17T23:14:35.632614+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=34188
+[2026-07-18T01:14:09.760942+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=34836
+[mcaffeine] fetching tickets resolved 2026-07-15T19:31:57.714Z -> 2026-07-17T19:44:10.574Z
+[mcaffeine] appended 3349 rows at row 3612 (window 2026-07-15T19:31:57.714Z -> 2026-07-17T19:44:10.574Z)
+[2026-07-18T03:01:58.105389+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=45256
+[mcaffeine] fetching tickets resolved 2026-07-17T19:44:10.574Z -> 2026-07-17T21:31:58.304Z
+[mcaffeine] appended 44 rows at row 6961 (window 2026-07-17T19:44:10.574Z -> 2026-07-17T21:31:58.304Z)
+[2026-07-18T21:01:58.268576+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=13816
+[2026-07-18T23:01:57.887768+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=22712
+[2026-07-19T17:01:57.444958+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=20824
+[mcaffeine] fetching tickets resolved 2026-07-17T21:31:58.304Z -> 2026-07-19T11:31:57.619Z
+  write rows 7605-7904 attempt 1 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27mcaffeine%27%21A7605%3AKM7904?valueInputOption=USER_ENTERED
+  write rows 7605-7904 attempt 2 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27mcaffeine%27%21A7605%3AKM7904?valueInputOption=USER_ENTERED
+  write rows 7605-7904 attempt 3 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27mcaffeine%27%21A7605%3AKM7904?valueInputOption=USER_ENTERED
+  write rows 7605-7904 attempt 4 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27mcaffeine%27%21A7605%3AKM7904?valueInputOption=USER_ENTERED
+  write rows 7605-7904 attempt 5 failed: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27mcaffeine%27%21A7605%3AKM7904?valueInputOption=USER_ENTERED
+Traceback (most recent call last):
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\export_resolved_tickets.py", line 133, in <module>
+    main()
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\export_resolved_tickets.py", line 124, in main
+    lib.set_sheet_rows_at_row(SHEET_ID, tab_name, data_rows, next_row)
+  File "C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts\lib.py", line 186, in set_sheet_rows_at_row
+    resp.raise_for_status()
+  File "C:\Users\VIKASH PATHAK\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\models.py", line 1167, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 400 Client Error: Bad Request for url: https://sheets.googleapis.com/v4/spreadsheets/1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A/values/%27mcaffeine%27%21A7605%3AKM7904?valueInputOption=USER_ENTERED
+[2026-07-19T19:01:57.461453+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=20232
+[2026-07-19T21:01:57.477199+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=22836
+[mcaffeine] fetching tickets resolved 2026-07-17T21:31:58.304Z -> 2026-07-19T15:31:57.681Z
+[mcaffeine] tab has no header yet - writing 299 column headers
+[mcaffeine] appended 4873 rows at row 2 (window 2026-07-17T21:31:58.304Z -> 2026-07-19T15:31:57.681Z)
+[2026-07-19T23:01:57.484533+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=24200
+[2026-07-20T01:01:57.512583+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=26232
+[2026-07-20T12:29:44.766629+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=21356
+[mcaffeine] fetching tickets resolved 2026-07-19T15:31:57.681Z -> 2026-07-20T06:59:44.960Z
+[mcaffeine] appended 967 rows at row 4608 (window 2026-07-19T15:31:57.681Z -> 2026-07-20T06:59:44.960Z)
+[2026-07-20T17:52:50.949982+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=16060
+[mcaffeine] fetching tickets resolved 2026-07-19T15:31:57.681Z -> 2026-07-20T12:22:51.265Z
+[mcaffeine] appended 2023 rows at row 5575 (window 2026-07-19T15:31:57.681Z -> 2026-07-20T12:22:51.265Z)
+[2026-07-20T19:12:31.692710+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=23828
+[2026-07-20T23:08:55.558362+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=26936
+[2026-07-20T23:14:51.327769+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=30096
+[2026-07-21T13:51:03.615348+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=20448
+[2026-07-21T17:11:09.763992+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=30200
+[mcaffeine] fetching tickets resolved 2026-07-21T08:26:29.092Z -> 2026-07-21T11:41:10.000Z
+[mcaffeine] appended 538 rows at row 64 (window 2026-07-21T08:26:29.092Z -> 2026-07-21T11:41:10.000Z)
+[2026-07-21T19:19:07.934467+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=8084
+[mcaffeine] fetching tickets resolved 2026-07-21T13:20:50.598Z -> 2026-07-21T13:49:08.126Z
+[mcaffeine] appended 75 rows at row 1980 (window 2026-07-21T13:20:50.598Z -> 2026-07-21T13:49:08.126Z)
+[2026-07-21T23:01:09.874344+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=16512
+[2026-07-21T23:01:57.510190+05:30] wrapper started, script_dir=C:\Users\VIKASH PATHAK\Desktop\Service account\mcaff-CLS\scripts, PID=27240

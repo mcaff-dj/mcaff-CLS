@@ -1,0 +1,246 @@
+name: Refresh reports
+
+on:
+  schedule:
+    - cron: '30 8 * * *'    # 08:30 UTC = 2:00 PM IST, daily - reports only, NPS from cache
+    - cron: '30 21 * * *'   # 21:30 UTC = 3:00 AM IST next day - the one run that re-queries NPS
+  workflow_dispatch: {}     # manual "Run workflow" button - never re-queries NPS
+
+permissions:
+  contents: write
+  id-token: write   # lets this workflow request an OIDC token to assume the AWS role below - no stored AWS keys anywhere
+
+concurrency:
+  group: refresh-reports
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    # ubuntu, not windows-latest: nothing here needs Windows, and the Linux runners boot
+    # faster and are markedly quicker at the three things this job actually does a lot of -
+    # git checkout, pip install, and gzipping ~33MB of HTML.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Partial + sparse clone. This job only reads scripts/, requirements-report.txt and
+          # the ~11MB of caches listed below, but a full checkout also pulls ~150MB of data/
+          # that nothing here touches (the *_full_raw.json dumps, the xlsx sources) plus ~33MB
+          # of stale api/_reports HTML that gets overwritten anyway.
+          #
+          # Non-cone mode because cone mode can only include whole directories, and data/ has
+          # to be filtered file by file. Anything omitted here is still present in the index as
+          # skip-worktree, so it is NOT seen as deleted by the commit step below.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /scripts/
+            /requirements-report.txt
+            /data/*_smalltabs_cache.json
+            /data/*_rtoconv_cache.json
+            /data/*_nps_cache.json
+            /data/*_awb_geo_cache.json
+            /data/*_geo_orders_cache.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements-report.txt
+
+      - name: Install dependencies
+        # requirements-report.txt, not requirements.txt: the latter also pulls
+        # psycopg[binary] (a large wheel) for assign_leads.py / backfill_awb_code.py, neither
+        # of which runs here.
+        run: pip install --disable-pip-version-check -r requirements-report.txt
+
+      - name: Regenerate reports from Google Sheets
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+          EVENT_NAME: ${{ github.event_name }}
+          # Which cron fired, for scheduled runs ('' for workflow_dispatch) - this is how the
+          # 3 AM IST NPS run is told apart from the 2 PM IST reports-only one.
+          SCHEDULE: ${{ github.event.schedule }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GOOGLE_SA_KEY_JSON:-}" ]; then
+            echo "Missing repository secret GOOGLE_SA_KEY (paste the service-account JSON there)." >&2
+            exit 1
+          fi
+          if [ -z "${MYSQL_HOST:-}" ] || [ -z "${MYSQL_USER:-}" ] || [ -z "${MYSQL_PASSWORD:-}" ] || [ -z "${MYSQL_DATABASE:-}" ]; then
+            echo "Missing MYSQL_HOST/MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE repository secrets - needed for the settled-month ticket rows (CLS_KYC_* in PEP_CLS)." >&2
+            exit 1
+          fi
+          # The "Refresh data now" button on the site calls workflow_dispatch; the daily
+          # 2 PM IST cron fires as a schedule event. Every run - button or schedule - only
+          # ever pulls the last ~30 days live from the primary sheet (settled months come from
+          # the CLS_KYC_mCaff/CLS_KYC_Hyphen MySQL mirrors instead, see kyc_source.py). --quick
+          # only changes whether the small tabs / RTO-Conversion data get refetched live
+          # (schedule) or reused from cache (button).
+          QUICK=""
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "Manual trigger - running a quick refresh (reusing cached small tabs/RTO-Conversion data)."
+            QUICK="--quick"
+          fi
+          # NPS (mcaff_dwh.nps_delivery / nps_product) is re-queried on exactly ONE run a day -
+          # the 3 AM IST schedule - and read from data/<brand>_nps_cache.json on every other
+          # run, including the site's Refresh-now button. Neither table has an index on `brand`,
+          # so each query is a full scan costing ~10-15s per brand on a cold buffer pool, and
+          # survey NPS doesn't move meaningfully within a day.
+          NPS=""
+          if [ "${SCHEDULE:-}" = "30 21 * * *" ]; then
+            echo "3 AM IST schedule - re-querying the NPS tables."
+            NPS="--refresh-nps"
+          fi
+          # refresh.py runs both brands concurrently; -u keeps their interleaved per-stage
+          # timing lines in real order in this log.
+          python -u ./scripts/refresh.py $QUICK $NPS
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::157320387454:role/github-actions-mcaff-cls-deploy
+          aws-region: ap-south-1
+
+      - name: Upload reports to S3
+        # The report HTML/raw CSVs used to be committed to git purely to trigger a
+        # Vercel redeploy - now that api/report/[card].js and api/report/raw.js read
+        # these straight from S3 (see api/_lib/s3.js), they go there directly instead.
+        # Uploaded on every run regardless of whether the data-cache JSONs below
+        # changed, since the reports themselves are always freshly regenerated.
+        #
+        # mcaffeine/hyphen html are gzipped before upload (20MB/13MB uncompressed - both well
+        # over CloudFront's 10MB limit for its own automatic on-the-fly compression, so without
+        # this they'd always be served raw). The S3 key/path stays the same either way;
+        # --content-encoding gzip is what tells CloudFront and the browser this object's bytes
+        # are already gzipped, so it's decompressed transparently on arrival - nothing
+        # downstream (api/report/[card].js, the report page itself) needs to know or change.
+        #
+        # gzip -1: this was the single biggest cost in this step, and the default level buys
+        # maybe 10-15% smaller output on a payload that ends up ~4MB either way - not worth the
+        # seconds, since what fetches it is a CDN, not a bandwidth-constrained client.
+        #
+        # --cache-control is what actually keeps viewers from getting a stale report: with no
+        # Cache-Control on the object, CloudFront (and any caching layer in front of it, e.g.
+        # Amplify's own /reports/* proxy - see reportUrls.js) falls back to its own default TTL
+        # instead of picking up each run's fresh upload, which is how a report ended up stuck
+        # showing a 3-day-old "Updated" timestamp despite refreshing correctly underneath.
+        # no-cache forces a revalidation with the origin on every request rather than trusting
+        # a locally cached copy.
+        run: |
+          set -euo pipefail
+          publish() {
+            gzip -1 -c "$1" > "$1.gz"
+            aws s3 cp "$1.gz" "s3://mcaff-cls-reports/reports/$2" \
+              --content-type "text/html; charset=utf-8" --content-encoding gzip \
+              --cache-control "no-cache, must-revalidate" --only-show-errors
+            rm -f "$1.gz"
+          }
+          # Plain keys (mcaffeine.html / hyphen.html) again, now that
+          # github-actions-mcaff-cls-deploy actually has cloudfront:ListDistributions +
+          # CreateInvalidation (see the Invalidate step below) - the ".v2." key was a
+          # temporary workaround for when that role lacked those permissions and a stale
+          # edge-cached copy of the legacy key couldn't be busted. With invalidation
+          # actually working now, there's no reason to keep two parallel key schemes
+          # (and the double-gzip cost of also publishing a legacy key nothing read).
+          #
+          # The two brands are compressed+uploaded concurrently: independent files, and each is
+          # mostly waiting on the S3 PUT.
+          pids=""
+          if [ -f api/_reports/mcaffeine.html ]; then
+            publish api/_reports/mcaffeine.html mcaffeine.html &
+            pids="$pids $!"
+          fi
+          if [ -f api/_reports/hyphen.html ]; then
+            publish api/_reports/hyphen.html hyphen.html &
+            pids="$pids $!"
+          fi
+          for p in $pids; do wait "$p"; done
+          # One recursive cp rather than a cp per file - these are already .gz on disk.
+          if compgen -G "api/_reports/*_raw_*.csv.gz" > /dev/null; then
+            aws s3 cp api/_reports/ s3://mcaff-cls-reports/reports/ --recursive \
+              --exclude "*" --include "*_raw_*.csv.gz" --content-type "application/gzip" --only-show-errors
+          fi
+
+      - name: Invalidate CloudFront cache for updated reports
+        # The S3 upload above doesn't bust CloudFront's edge cache on its own, so
+        # without this, viewers can keep getting served whatever was cached from before this
+        # run. Distribution ID is resolved by domain rather than hardcoded, since it isn't
+        # recorded anywhere else in this repo - see api/_lib/reportUrls.js's comment on
+        # d1lqcvzr613wr4.cloudfront.net.
+        #
+        run: |
+          set -euo pipefail
+          distId="$(aws cloudfront list-distributions --query "DistributionList.Items[?DomainName=='d1lqcvzr613wr4.cloudfront.net'].Id" --output text)"
+          if [ -z "$distId" ] || [ "$distId" = "None" ]; then
+            echo "Could not resolve the CloudFront distribution ID for d1lqcvzr613wr4.cloudfront.net - check that domain still matches api/_lib/reportUrls.js, or hardcode the ID here instead." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation --distribution-id "$distId" \
+            --paths "/reports/mcaffeine.html" "/reports/hyphen.html"
+
+      - name: Commit & push if changed
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Just the data-cache JSONs now - the report HTML/raw CSVs above go to S3, not
+          # git, so this commit is purely the pipeline's own incremental-refresh state,
+          # not anything that needs to trigger a redeploy (see deploy.yml's path filter).
+          #
+          # The two *_primary_cache.json files used to be committed here too. They are no
+          # longer written at all: their only reader was lib.get_sheet_rows_incremental (the
+          # sheet-only fallback, since removed), so the pipeline was rewriting and committing
+          # ~94MB of JSON per run that nothing ever read again - the main reason .git had grown
+          # past 500MB against a working tree a fraction of that size.
+          paths=""
+          for f in data/mcaffeine_smalltabs_cache.json data/hyphen_smalltabs_cache.json \
+                   data/mcaffeine_rtoconv_cache.json data/hyphen_rtoconv_cache.json \
+                   data/mcaffeine_nps_cache.json data/hyphen_nps_cache.json \
+                   data/mcaffeine_awb_geo_cache.json data/hyphen_awb_geo_cache.json \
+                   data/mcaffeine_geo_orders_cache.json data/hyphen_geo_orders_cache.json; do
+            if [ -f "$f" ]; then paths="$paths $f"; fi
+          done
+          if [ -z "$paths" ]; then
+            echo "No cache files present; nothing to commit."
+            exit 0
+          fi
+          git add $paths
+          if [ -z "$(git status --porcelain $paths)" ]; then
+            echo "No data changes; nothing to commit."
+            exit 0
+          fi
+          stamp="$(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M')"
+          git commit -m "Auto-refresh reports ($stamp IST)"
+
+          # This repo gets pushed to frequently from elsewhere while this job is busy
+          # regenerating reports, so a bare `git push` here regularly loses the race with a
+          # non-fast-forward rejection even though generation succeeded. Rebase onto the latest
+          # main and retry instead of failing the whole run - the files this job touches are
+          # data/report outputs that don't overlap with unrelated code changes, so a rebase
+          # conflict here would be exceptional, not expected.
+          pushed=0
+          for i in 1 2 3 4 5; do
+            if git push; then
+              pushed=1
+              break
+            fi
+            echo "Push rejected (attempt $i/5) - fetching and rebasing onto latest main..."
+            git fetch origin main
+            if ! git rebase origin/main; then
+              echo "Rebase onto origin/main failed after a push rejection - needs manual resolution." >&2
+              exit 1
+            fi
+          done
+          if [ "$pushed" != "1" ]; then
+            echo "Failed to push after 5 attempts - main is moving too fast to catch up." >&2
+            exit 1
+          fi
+          echo "Pushed refreshed reports."

@@ -1,0 +1,8 @@
+# Just what the report pipeline (scripts/refresh.py -> generate_report.py) imports.
+# Split out from requirements.txt so refresh.yml doesn't spend time installing
+# psycopg[binary] - a large wheel that only assign_leads.py / backfill_awb_code.py use,
+# neither of which runs in that workflow. requirements.txt pulls this in, so these three
+# stay single-sourced here rather than being duplicated.
+cryptography>=42.0
+requests>=2.31
+pymysql>=1.1

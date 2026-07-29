@@ -1,0 +1,30 @@
+# Never commit the Google service-account private key
+*.pem
+*.key
+sheetdata-*.json
+sa_key*
+
+node_modules/
+.next/
+.env
+.env.*
+!.env.example
+CRM-PEP/.shiprocket_token.json
+
+__pycache__/
+*.pyc
+
+# Exceeds GitHub's 100MB push limit
+data/combined_data.xlsx
+data/combined_data_mcaffeine.xlsx
+
+# Write-only leftovers: generate_report.py no longer produces these (their only reader was
+# lib.get_sheet_rows_incremental, since removed), and committing ~94MB of them per refresh is
+# what grew .git past 500MB. Ignored so a stale local copy can't get re-committed.
+data/mcaffeine_primary_cache.json
+data/hyphen_primary_cache.json
+
+# Excel lock files
+~$*.xlsx
+.vercel
+.env*

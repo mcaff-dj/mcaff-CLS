@@ -1,0 +1,96 @@
+name: Refresh Deep Dive report
+
+on:
+  workflow_dispatch: {}      # dispatched by the "Refresh data" button inside deepdive.html
+
+permissions:
+  contents: write
+  id-token: write   # lets this workflow request an OIDC token to assume the AWS role below - no stored AWS keys anywhere
+
+concurrency:
+  group: refresh-deepdive
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Rebuild CSAT data, Agent wise analysis data, and the report itself
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+        run: |
+          python scripts/build_csat_dashboard_data.py
+          python scripts/build_agent_shift_status.py
+          python scripts/build_csat_artifact.py
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::157320387454:role/github-actions-mcaff-cls-deploy
+          aws-region: ap-south-1
+
+      - name: Upload report to S3
+        # api/report/[card].js reads deepdive.html from S3, not from this repo - the
+        # git commit below is no longer what makes a refresh visible on the live site,
+        # this step is (same reasoning as refresh.yml's "Upload reports to S3" step).
+        # csat_dashboard_data.json/agent_shift_status.json need the same treatment -
+        # api/report/data/[key].js reads these from S3 too now, not from the Lambda's
+        # own filesystem (deploy.yml never bundles data/ into the Lambda package, and
+        # doesn't even trigger on data/** changes, so committing these to git alone
+        # never actually reached production).
+        run: |
+          if [ -f "api/_reports/deepdive.html" ]; then
+            aws s3 cp api/_reports/deepdive.html s3://mcaff-cls-reports/reports/deepdive.html --content-type "text/html; charset=utf-8"
+          fi
+          if [ -f "data/csat_dashboard_data.json" ]; then
+            aws s3 cp data/csat_dashboard_data.json s3://mcaff-cls-reports/reports/csat_dashboard_data.json --content-type "application/json; charset=utf-8"
+          fi
+          if [ -f "data/agent_shift_status.json" ]; then
+            aws s3 cp data/agent_shift_status.json s3://mcaff-cls-reports/reports/agent_shift_status.json --content-type "application/json; charset=utf-8"
+          fi
+
+      - name: Commit & push if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/csat_dashboard_data.json data/agent_shift_status.json api/_reports/deepdive.html
+          if git diff --cached --quiet; then
+            echo "No data changes; nothing to commit."
+            exit 0
+          fi
+          stamp=$(TZ='Asia/Kolkata' date '+%Y-%m-%d %H:%M')
+          git commit -m "Auto-refresh Deep Dive report ($stamp IST)"
+
+          # Same rebase-and-retry as refresh.yml - this repo gets pushed to from
+          # elsewhere while this job runs, so a bare push regularly loses the race.
+          pushed=false
+          for i in 1 2 3 4 5; do
+            if git push; then
+              pushed=true
+              break
+            fi
+            echo "Push rejected (attempt $i/5) - fetching and rebasing onto latest main..."
+            git fetch origin main
+            git rebase origin/main || { echo "Rebase onto origin/main failed - needs manual resolution."; exit 1; }
+          done
+          if [ "$pushed" != "true" ]; then
+            echo "Failed to push after 5 attempts - main is moving too fast to catch up."
+            exit 1
+          fi
+          echo "Pushed refreshed Deep Dive report."

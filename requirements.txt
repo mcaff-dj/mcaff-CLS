@@ -1,0 +1,5 @@
+# The report pipeline's own three deps live in requirements-report.txt (refresh.yml installs
+# only that, to skip the psycopg[binary] wheel it never imports); this file stays the
+# everything-for-local-work list, so installing it still gets you the full set.
+-r requirements-report.txt
+psycopg[binary]>=3.1

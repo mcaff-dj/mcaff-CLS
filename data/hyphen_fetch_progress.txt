@@ -1,0 +1,13 @@
+Fetch started 07/09/2026 12:48:55
+Fetched rows 2-10001 (10000 total so far) at 07/09/2026 12:48:58
+Fetched rows 10002-20001 (20000 total so far) at 07/09/2026 12:49:00
+Fetched rows 20002-30001 (30000 total so far) at 07/09/2026 12:49:01
+Fetched rows 30002-40001 (40000 total so far) at 07/09/2026 12:49:03
+Fetched rows 40002-50001 (50000 total so far) at 07/09/2026 12:49:05
+Fetched rows 50002-60001 (60000 total so far) at 07/09/2026 12:49:08
+Fetched rows 60002-70001 (70000 total so far) at 07/09/2026 12:49:10
+Fetched rows 70002-80001 (80000 total so far) at 07/09/2026 12:49:12
+Fetched rows 80002-90001 (90000 total so far) at 07/09/2026 12:49:14
+Fetched rows 90002-100001 (100000 total so far) at 07/09/2026 12:49:17
+Fetched rows 100002-100468 (100467 total so far) at 07/09/2026 12:49:17
+DONE. Total data rows cached: 100467 at 07/09/2026 12:49:20

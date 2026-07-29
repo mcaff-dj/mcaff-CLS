@@ -1,0 +1,76 @@
+name: Export resolved tickets
+
+on:
+  schedule:
+    # 30 min past every even UTC hour = 6am, 8am, 10am, 12pm, 2pm, 4pm, 6pm,
+    # 8pm, 10pm, 12am, 2am, 4am IST (UTC+5:30) - i.e. 10am/12pm/2pm/4pm/6pm/
+    # 8pm/10pm/12am/2am/4am/6am/8am IST as requested.
+    - cron: '30 */2 * * *'
+  workflow_dispatch: {}      # manual "Run workflow" button
+
+permissions:
+  contents: write
+
+concurrency:
+  group: export-resolved-tickets
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Export hyphen
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+        run: python scripts/export_recurring.py --api-token "${{ secrets.FLOWCALL_TOKEN_HYPHEN }}" --tab-name hyphen
+
+      - name: Push hyphen to dashboard
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+        run: python scripts/push_hyphen_to_dashboard.py
+
+      - name: Export mcaffeine
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+        run: python scripts/export_recurring.py --api-token "${{ secrets.FLOWCALL_TOKEN_MCAFFEINE }}" --tab-name mcaffeine
+
+      - name: Push mcaffeine to dashboard
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+        run: python scripts/push_mcaffeine_to_dashboard.py
+
+      - name: Commit state file if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/resolved-ticket-export-state.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update export state ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+            # A manual "Re-run jobs" click reuses the ORIGINAL stale checkout,
+            # not latest main - if main has moved since (e.g. this same run
+            # already pushed once), a plain push is rejected as a non-fast-
+            # forward. Rebase onto the latest main and retry a few times
+            # instead of failing outright.
+            for attempt in 1 2 3 4 5; do
+              if git push; then
+                break
+              fi
+              echo "push attempt $attempt failed - fetching and rebasing onto latest main"
+              git fetch origin main
+              git rebase origin/main
+              sleep 3
+            done
+          else
+            echo "No state change; nothing to commit."
+          fi

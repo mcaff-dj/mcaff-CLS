@@ -1,0 +1,68 @@
+name: Deploy
+
+# Fires on every push to main that touches the API Lambda's own code or its
+# dependencies. Deliberately does NOT fire on changes to data/*.json (refresh.yml's
+# own cache bookkeeping) or the generated report HTML (those go straight to S3 from
+# refresh.yml, not through this workflow) - so the daily automated data refresh
+# doesn't cause a pointless same-code redeploy every day, while any real code
+# change - from anyone - deploys within about a minute of landing on main, with no
+# manual step. The app/ frontend is NOT deployed by this workflow at all - it's
+# hosted separately on AWS Amplify, which has its own GitHub-triggered build.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/deploy.yml'
+
+permissions:
+  id-token: write   # lets this workflow request an OIDC token to assume the AWS role below - no stored AWS keys anywhere
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install production dependencies
+        run: npm ci --omit=dev
+
+      - name: Package the Lambda function
+        # node_modules now also contains next/react/tailwindcss (the Next.js
+        # frontend's dependencies, listed in the same package.json for Amplify's own
+        # build to use) - the Lambda's own code never requires() any of these, so
+        # they're pruned before zipping rather than shipped as dead weight in every
+        # deploy (Next.js alone is a large chunk of a typical node_modules).
+        run: |
+          mkdir -p build/api
+          cp -r api/. build/api/
+          rm -rf build/api/_reports
+          cp -r node_modules build/node_modules
+          rm -rf build/node_modules/next build/node_modules/@next build/node_modules/react build/node_modules/react-dom \
+                 build/node_modules/canvas-confetti build/node_modules/tailwindcss build/node_modules/postcss \
+                 build/node_modules/autoprefixer build/node_modules/styled-jsx build/node_modules/@swc \
+                 build/node_modules/caniuse-lite build/node_modules/bowser
+          cp package.json build/package.json
+          cd build && zip -r ../lambda.zip . -x "*.git*" && cd ..
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::157320387454:role/github-actions-mcaff-cls-deploy
+          aws-region: ap-south-1
+
+      - name: Update Lambda function code
+        run: aws lambda update-function-code --function-name mcaff-cls-api --zip-file fileb://lambda.zip
