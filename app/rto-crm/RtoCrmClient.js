@@ -157,7 +157,12 @@ const localStorage = typeof window !== 'undefined'
           valueRanges.push({ range: `Data!T${rowNumber}`, values: [[updates.disposition]] });
         }
         if (updates.remarks !== undefined) {
-          valueRanges.push({ range: `Data!U${rowNumber}`, values: [[updates.remarks]] });
+          // Z, not U: U is the sheet's "New product needed" column - agent remarks belong in
+          // Z (" Remark"). Writing them to U put ~645 rows of remark text ("Already placed",
+          // "[Already Refunded]", "NA") into a column that means something else entirely.
+          // mapTkt already reads r['c20'] || r['c25'] || r['c29'], so remarks written to Z are
+          // still picked up, and the rows that landed in U keep displaying.
+          valueRanges.push({ range: `Data!Z${rowNumber}`, values: [[updates.remarks]] });
         }
         if (updates.newOrderId !== undefined) {
           valueRanges.push({ range: `Data!V${rowNumber}`, values: [[updates.newOrderId]] });

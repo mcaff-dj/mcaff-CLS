@@ -35,7 +35,13 @@ COL_AGENT = 16            # Q
 COL_CONNECTED = 17        # R
 COL_ATTEMPT = 18          # S
 COL_DISPOSITION = 19      # T - agent's own "RTO Reason - Agent" disposition entry
-COL_REMARKS = 20          # U
+COL_REMARKS = 25          # Z - " Remark", the sheet's actual agent-remarks column.
+# U is "New product needed", NOT remarks - but writeToSheetRow wrote agent remarks there for a
+# long time, so ~645 rows carry remark text ("Already placed", "[Already Refunded]", "NA") in
+# U. Kept as a separate constant so the disposed-lead check in assign_leads.py can still see
+# that history: treating those rows as un-worked would put already-called customers back in
+# the assignment queue.
+COL_REMARKS_LEGACY_U = 20  # U
 COL_NEW_ORDER_ID = 21     # V
 COL_NEW_ADDRESS = 23      # X
 COL_CALLING_DATE = 24     # Y

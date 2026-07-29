@@ -38,7 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib
 from lead_priority import (
     COL_AGENT, COL_ATTEMPT, COL_AWB_CODE, COL_CONNECTED, COL_DISPOSITION,
-    COL_ORDER_ID, COL_PAYMENT_METHOD, COL_REMARKS, COL_RTO_INITIATED_DATE, COL_RTO_REASON,
+    COL_ORDER_ID, COL_PAYMENT_METHOD, COL_REMARKS, COL_REMARKS_LEGACY_U,
+    COL_RTO_INITIATED_DATE, COL_RTO_REASON,
     DEFAULT_QUOTA, build_assignment_queue, cell, parse_rto_initiated_date, prefix_rule_partner,
     priority_tier,
 )
@@ -153,9 +154,14 @@ def main():
         if not order_id:
             continue
 
+        # COL_REMARKS_LEGACY_U as well as COL_REMARKS: remarks were written to U for a long
+        # time before that was corrected to Z, so a lead whose only evidence of having been
+        # worked is a remark in U must still count as disposed - otherwise this would queue
+        # already-called customers for another round of calls.
         is_disposed = bool(
             cell(row, COL_CONNECTED) or cell(row, COL_ATTEMPT) or
-            cell(row, COL_DISPOSITION) or cell(row, COL_REMARKS)
+            cell(row, COL_DISPOSITION) or cell(row, COL_REMARKS) or
+            cell(row, COL_REMARKS_LEGACY_U)
         )
         if is_disposed:
             continue  # already worked - not part of either load or the unassigned queue
