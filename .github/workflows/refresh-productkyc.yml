@@ -1,0 +1,126 @@
+name: Refresh Product Calling KYC report
+
+# Nothing ran scripts/generate_product_kyc.py before this workflow existed - not refresh.yml,
+# not any other - so reports/productkyc_data.json was never produced or uploaded and the
+# /productkyc page only ever showed 'Data for "productkyc" has not been generated yet.'
+#
+# Deliberately its own workflow rather than a step inside refresh.yml: that one is tuned to
+# finish fast (sparse checkout, both brands in parallel) and runs twice a day, while this
+# reads a separate workbook that changes far more slowly. Folding it in would slow every
+# refresh and every click of the site's Refresh-now button for no benefit.
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 02:00 UTC = 7:30 AM IST, daily
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  id-token: write   # lets this workflow request an OIDC token to assume the AWS role below - no stored AWS keys anywhere
+
+concurrency:
+  group: refresh-productkyc
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements-report.txt
+
+      - name: Install dependencies
+        # requirements-report.txt, not requirements.txt: this script only needs the Sheets
+        # client's deps (requests/cryptography via scripts/lib.py), not psycopg[binary].
+        run: pip install --disable-pip-version-check -r requirements-report.txt
+
+      - name: Rebuild the Product KYC data + report
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GOOGLE_SA_KEY_JSON:-}" ]; then
+            echo "Missing repository secret GOOGLE_SA_KEY (paste the service-account JSON there)." >&2
+            exit 1
+          fi
+          python -u scripts/generate_product_kyc.py
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::157320387454:role/github-actions-mcaff-cls-deploy
+          aws-region: ap-south-1
+
+      - name: Upload to S3
+        # productkyc_data.json is the one that matters for the live page:
+        # api/report/data/[key].js reads reports/productkyc_data.json from S3, never from the
+        # Lambda's own filesystem (deploy.yml doesn't bundle data/, nor trigger on data/**),
+        # so committing it to git alone would never reach production. productkyc.html is the
+        # older self-contained report still served by api/report/[card].js for direct access.
+        run: |
+          set -euo pipefail
+          if [ -f "data/productkyc_data.json" ]; then
+            aws s3 cp data/productkyc_data.json s3://mcaff-cls-reports/reports/productkyc_data.json \
+              --content-type "application/json; charset=utf-8" --cache-control "no-cache, must-revalidate" --only-show-errors
+          else
+            echo "data/productkyc_data.json missing after generation - refusing to report success." >&2
+            exit 1
+          fi
+          if [ -f "api/_reports/productkyc.html" ]; then
+            aws s3 cp api/_reports/productkyc.html s3://mcaff-cls-reports/reports/productkyc.html \
+              --content-type "text/html; charset=utf-8" --cache-control "no-cache, must-revalidate" --only-show-errors
+          fi
+
+      - name: Invalidate CloudFront cache
+        # Same reasoning as refresh.yml's own invalidation step - an S3 upload doesn't bust the
+        # edge cache on its own. The data JSON is fetched through the API rather than the CDN,
+        # but productkyc.html is served over it.
+        run: |
+          set -euo pipefail
+          distId="$(aws cloudfront list-distributions --query "DistributionList.Items[?DomainName=='d1lqcvzr613wr4.cloudfront.net'].Id" --output text)"
+          if [ -z "$distId" ] || [ "$distId" = "None" ]; then
+            echo "Could not resolve the CloudFront distribution ID for d1lqcvzr613wr4.cloudfront.net." >&2
+            exit 1
+          fi
+          aws cloudfront create-invalidation --distribution-id "$distId" \
+            --paths "/reports/productkyc.html" "/reports/productkyc_data.json"
+
+      - name: Commit & push if changed
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/productkyc_data.json api/_reports/productkyc.html
+          if git diff --cached --quiet; then
+            echo "No data changes; nothing to commit."
+            exit 0
+          fi
+          stamp="$(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M')"
+          git commit -m "Auto-refresh Product Calling KYC report ($stamp IST)"
+
+          # Same rebase-and-retry as refresh.yml / refresh-deepdive.yml - this repo gets
+          # pushed to from elsewhere while this job runs, so a bare push loses the race.
+          pushed=0
+          for i in 1 2 3 4 5; do
+            if git push; then
+              pushed=1
+              break
+            fi
+            echo "Push rejected (attempt $i/5) - fetching and rebasing onto latest main..."
+            git fetch origin main
+            if ! git rebase origin/main; then
+              echo "Rebase onto origin/main failed - needs manual resolution." >&2
+              exit 1
+            fi
+          done
+          if [ "$pushed" != "1" ]; then
+            echo "Failed to push after 5 attempts - main is moving too fast to catch up." >&2
+            exit 1
+          fi
+          echo "Pushed refreshed Product Calling KYC report."

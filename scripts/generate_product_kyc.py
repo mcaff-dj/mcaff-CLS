@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Generates product-kyc.html from the "Product feedback KYC" workbook.
+"""Generates the Product Calling KYC report from the "Product feedback KYC" workbook, in
+two forms from a single pass over the sheet data:
+
+  - data/productkyc_data.json - what the live page actually renders. app/productkyc's
+    ProductKycClient fetches it via /api/report/data/productkyc, which reads
+    reports/productkyc_data.json from S3 (see api/report/data/[key].js's DATA_ROUTES).
+    Nothing in this repo produced that file before, so that page had only ever shown
+    'Data for "productkyc" has not been generated yet.' - the page was migrated to a JSON
+    consumer while this script still only emitted the HTML below.
+  - api/_reports/productkyc.html - the older self-contained report, still served by
+    api/report/[card].js for direct /api/report/productkyc access. Kept as-is.
+
+Both are built from the same rows and the same helper calls, so the numbers can't diverge:
+the truncation/sample sizes they share are the *_TOP_N / THEME_* constants below rather than
+literals repeated per builder.
+
 Each product tab has its own bespoke question schema (no shared template), so products
 are configured individually in productkyc_config.py rather than via a generic column map.
 
@@ -12,6 +27,7 @@ pulled directly from free-text columns (dislikes/improvements/remarks) - not syn
 
 Python port of Generate-ProductKYC.ps1.
 """
+import json
 import re
 import sys
 from datetime import datetime, timedelta, timezone
@@ -25,6 +41,15 @@ from report_context import h_enc
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
 OUT_PATH = REPO_ROOT / "api" / "_reports" / "productkyc.html"
+# Same data/<name>.json convention as build_csat_dashboard_data.py's outputs - the workflow
+# uploads it to reports/<name>.json in S3, which is where api/report/data/[key].js looks.
+DATA_OUT_PATH = REPO_ROOT / "data" / "productkyc_data.json"
+
+# Shared by the JSON and HTML builders so the two can never show different numbers.
+COMPARE_TOP_N = 2      # breakdown entries per side of a head-to-head comparison table
+STANDALONE_TOP_N = 3   # breakdown entries per row of a standalone product's table
+THEME_KEYWORDS_N = 6
+THEME_QUOTES_N = 2
 
 PKYC_STOPWORDS = {
     "the", "and", "for", "are", "was", "were", "this", "that", "with", "have", "has", "had", "not", "but", "you", "your",
@@ -117,8 +142,8 @@ def split_compare_groups(rows, compare_cfg):
 def build_compare_table(categorical_cfg, group_a, group_b, short_a, short_b):
     out = [f"<table class='pk-table'><thead><tr><th>Category</th><th>{h_enc(short_a)}</th><th>{h_enc(short_b)}</th></tr></thead><tbody>"]
     for f in categorical_cfg:
-        bd_a = get_categorical_breakdown(group_a, f["c"])["list"][:2]
-        bd_b = get_categorical_breakdown(group_b, f["c"])["list"][:2]
+        bd_a = get_categorical_breakdown(group_a, f["c"])["list"][:COMPARE_TOP_N]
+        bd_b = get_categorical_breakdown(group_b, f["c"])["list"][:COMPARE_TOP_N]
         cell_a = ", ".join(f"{h_enc(x['value'])} ({net_num(x['pct'])}%)" for x in bd_a) or "-"
         cell_b = ", ".join(f"{h_enc(x['value'])} ({net_num(x['pct'])}%)" for x in bd_b) or "-"
         out.append(f"<tr><td class='pk-rowlabel'>{h_enc(f['l'])}</td><td>{cell_a}</td><td>{cell_b}</td></tr>")
@@ -129,7 +154,7 @@ def build_compare_table(categorical_cfg, group_a, group_b, short_a, short_b):
 def build_standalone_stats(categorical_cfg, rows):
     out = ["<table class='pk-table'><thead><tr><th>Category</th><th>Breakdown</th></tr></thead><tbody>"]
     for f in categorical_cfg:
-        top = get_categorical_breakdown(rows, f["c"])["list"][:3]
+        top = get_categorical_breakdown(rows, f["c"])["list"][:STANDALONE_TOP_N]
         cell_str = ", ".join(f"{h_enc(x['value'])} ({net_num(x['pct'])}%)" for x in top) or "-"
         out.append(f"<tr><td class='pk-rowlabel'>{h_enc(f['l'])}</td><td>{cell_str}</td></tr>")
     out.append("</tbody></table>")
@@ -140,8 +165,8 @@ def build_themes_block(free_text_cfg, rows):
     out = []
     for ft in free_text_cfg:
         texts = [cell(r, ft["c"]) for r in rows]
-        kw = get_top_keywords(texts, 6)
-        quotes = get_sample_quotes(texts, 2)
+        kw = get_top_keywords(texts, THEME_KEYWORDS_N)
+        quotes = get_sample_quotes(texts, THEME_QUOTES_N)
         if not kw and not quotes:
             continue
         out.append(f"<div class='pk-theme'><div class='pk-theme-label'>{h_enc(ft['l'])}</div>")
@@ -154,11 +179,84 @@ def build_themes_block(free_text_cfg, rows):
     return "".join(out)
 
 
+def _breakdown_items(rows, col_idx, top_n):
+    """[{value, pct}] for the JSON payload - ProductKycClient's BreakdownList renders
+    `${value} (${pct}%)` and does its own integer-vs-1-decimal formatting (its formatPct),
+    which is why pct stays a number here rather than being pre-formatted like the HTML's
+    net_num()."""
+    return [
+        {"value": x["value"], "pct": x["pct"]}
+        for x in get_categorical_breakdown(rows, col_idx)["list"][:top_n]
+    ]
+
+
+def build_themes_data(free_text_cfg, rows):
+    """[{label, keywords: [{word, count}], quotes: [str]}] - same shape ThemesBlock expects.
+    Mirrors build_themes_block's skip-if-nothing-found rule so a theme that would render as
+    an empty block in the HTML is absent from the JSON too."""
+    out = []
+    for ft in free_text_cfg:
+        texts = [cell(r, ft["c"]) for r in rows]
+        kw = get_top_keywords(texts, THEME_KEYWORDS_N)
+        quotes = get_sample_quotes(texts, THEME_QUOTES_N)
+        if not kw and not quotes:
+            continue
+        out.append({"label": ft["l"], "keywords": kw, "quotes": quotes})
+    return out
+
+
+def build_product_data(p, rows):
+    """One entry of the JSON payload's `products` array. ProductCard switches on
+    kind == 'comparison'; anything else takes the standalone branch."""
+    if p["kind"] == "comparison":
+        group_a, group_b = split_compare_groups(rows, p["compare"])
+        short_a, short_b = p["compare"]["shortA"], p["compare"]["shortB"]
+        return {
+            "kind": "comparison",
+            "key": p["key"],
+            "category": p["category"],
+            "title": f"{short_a} vs {short_b}",
+            "meta": {
+                "countA": len(group_a),
+                "countB": len(group_b),
+                "shortA": short_a,
+                "shortB": short_b,
+                "totalRows": len(rows),
+            },
+            "compareTable": [
+                {
+                    "label": f["l"],
+                    "a": _breakdown_items(group_a, f["c"], COMPARE_TOP_N),
+                    "b": _breakdown_items(group_b, f["c"], COMPARE_TOP_N),
+                }
+                for f in p["categorical"]
+            ],
+            # Themes cover both groups, matching the HTML card's own group_a + group_b.
+            "themes": build_themes_data(p["freeText"], group_a + group_b),
+        }
+    return {
+        "kind": "standalone",
+        "key": p["key"],
+        "category": p["category"],
+        "title": p["label"],
+        "meta": {"totalRows": len(rows)},
+        "statsTable": [
+            {"label": f["l"], "breakdown": _breakdown_items(rows, f["c"], STANDALONE_TOP_N)}
+            for f in p["categorical"]
+        ],
+        "themes": build_themes_data(p["freeText"], rows),
+    }
+
+
 def build_product_card(p):
+    """(html, data) for one product from a SINGLE fetch of its tab - the sheet read is by
+    far the expensive part here, so the JSON and HTML forms share it rather than each
+    pulling the tab again."""
     print(f"  [{p['key']}] fetching '{p['tab']}'...")
     rows = lib.get_sheet_rows_chunked(PKYC_SPREADSHEET_ID, p["tab"], "AF")
     print(f"  [{p['key']}] fetched {len(rows)} rows")
 
+    data = build_product_data(p, rows)
     out = []
     if p["kind"] == "comparison":
         group_a, group_b = split_compare_groups(rows, p["compare"])
@@ -181,17 +279,33 @@ def build_product_card(p):
         if themes:
             out.append(f"<div class='pk-themes-title'>Common themes in constructive feedback</div>{themes}")
         out.append("</div>")
-    return "".join(out)
+    return "".join(out), data
 
 
 def main():
     print("Building Product Calling KYC report...")
     cards_by_category = {cat: [] for cat in PKYC_CATEGORY_LABELS}
+    products_data = []
     for p in PKYC_PRODUCTS:
-        html = build_product_card(p)
+        html, data = build_product_card(p)
         cards_by_category[p["category"]].append(html)
+        products_data.append(data)
 
     now_str = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%d %b %Y, %H:%M") + " IST"
+
+    # The JSON payload the live page renders. Category order follows PKYC_CATEGORY_LABELS,
+    # same as the HTML's tab order, and ProductKycClient selects categories[0] as the
+    # initially-active tab - so this order is what decides which tab opens first.
+    DATA_OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "generatedAt": now_str,
+        "categories": [{"key": cat, "label": label} for cat, label in PKYC_CATEGORY_LABELS.items()],
+        "products": products_data,
+    }
+    with open(DATA_OUT_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+    print(f"Wrote {DATA_OUT_PATH} ({len(products_data)} products, "
+          f"{round(DATA_OUT_PATH.stat().st_size / 1024)} KB)")
 
     tab_nav_html = []
     tab_panels_html = []
