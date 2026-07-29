@@ -823,12 +823,22 @@ const localStorage = typeof window !== 'undefined'
       };
 
       const openDisp = (t)=>{
-        if (agentStatus === 'Offline' && userRole !== 'Admin') {
-          showToast('⚠️ Cannot process leads while Offline. Switch status to Online first.');
-          return;
-        }
-        // Auto-assign lead to active agent when opening call form if unassigned
-        if(!t.assignedAgent || t.assignedAgent === 'Unassigned') {
+        // Disposing is allowed whatever the agent's live status is - previously anyone who
+        // wasn't an Admin was blocked while Offline. An agent who has already spoken to the
+        // customer has to be able to record that outcome even if their status has since
+        // flipped to Offline (auto-idle, tab closed, end of shift), and refusing the write
+        // just loses the disposition: the call already happened either way.
+        //
+        // Claiming NEW leads while Offline is still refused (see claimLeadForAgent) - that's
+        // the case actually worth guarding, since it pulls unworked leads out of the pool for
+        // someone who isn't taking calls.
+        //
+        // Auto-claim on open is skipped while Offline for that reason: claimLeadForAgent would
+        // refuse and toast about it, which reads as though the disposal itself was rejected.
+        // Nothing is lost by skipping it - submitDisp writes assignedAgent into Column Q on
+        // submit (unless the lead genuinely belongs to another agent, i.e. claimBlocked), so
+        // the lead is still attributed to whoever recorded the disposition.
+        if((!t.assignedAgent || t.assignedAgent === 'Unassigned') && agentStatus !== 'Offline') {
           claimLeadForAgent(t);
         }
 
