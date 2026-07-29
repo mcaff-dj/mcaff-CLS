@@ -548,6 +548,47 @@ a failure roughly 200 times a day.)
 
 ---
 
+## 10d. Before handing out a lead — is it already refunded?
+
+A prepaid order can be refunded through a completely different channel than an agent's own
+"Refund Requested" disposition — before the Robot ever gets to hand that lead to anyone. Calling
+a customer to chase money that's already gone back to them wastes the agent's time and annoys
+someone who's already been made whole. So for every still-unassigned **prepaid** lead, right
+before it would enter the hand-out pool, the Robot asks GoKwik (the payment company) directly:
+"has this one already been refunded?"
+
+```mermaid
+flowchart LR
+    A["📤 Unassigned<br/>prepaid lead"] --> B{"Ask GoKwik:<br/>already refunded?"}
+    B -->|"Yes, confirmed"| C["✍️ Stamp the sheet<br/>'Already Refunded'"]
+    C --> D["⛔ Never<br/>hand out"]
+    B -->|"No, or can't tell"| E["📤 Hand out<br/>as normal"]
+
+    style D fill:#e5e7eb,stroke:#6b7280,color:#000
+    style E fill:#bbf7d0,stroke:#15803d,color:#000
+```
+
+**COD is never asked.** Nothing was paid upfront on a Cash-on-Delivery order, so there's
+nothing GoKwik could have already refunded.
+
+**GoKwik doesn't know the lead by the sheet's own Order ID.** It has its own internal order
+number, so the Robot first looks that up in a separate finance database before it can even ask
+the question.
+
+**"Can't tell" always hands the lead out anyway.** If the lookup fails, GoKwik doesn't answer,
+or credentials are misconfigured, the Robot doesn't shrug and leave the customer un-called
+forever — it hands the lead out exactly as if nothing had been refunded. One extra call to a
+customer who happens to already be refunded is a minor annoyance; a real, still-owed customer
+whose lead silently vanishes because of a glitch is a much worse outcome. Only a *confirmed*
+"yes, refunded" ever stops a hand-out.
+
+**A confirmed refund is stamped permanently, not just skipped once.** The sheet's own
+disposition/attempt columns get marked "Already Refunded," which is the same signal the Robot
+(and the CRM) already use to mean "this lead has been worked" — so it stays out of the pool for
+good, not just this one run.
+
+---
+
 ## 11. Who's allowed to see what?
 
 ```mermaid

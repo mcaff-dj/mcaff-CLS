@@ -27,6 +27,18 @@ script, regardless of quota, regardless of whether that agent is online. An
 earlier version trimmed over-quota agents' oldest excess back to unassigned;
 that silently cleared a manually-assigned lead and was removed for exactly
 that reason - only touch what is genuinely blank.
+
+Before a still-unassigned PREPAID lead enters the pool, its refund status is checked live
+against GoKwik (see is_already_refunded_via_gokwik) - a customer who's already been refunded
+should never be called about their order again. GoKwik doesn't recognise the sheet's own Order
+ID, so the check first resolves it to GoKwik's numeric platformOrderId via Item_level_data (see
+lookup_platform_order_id). A confirmed refund gets S/T/U stamped "Already Refunded" on the
+sheet - permanently marking the row worked to every other reader, not just skipped this once -
+and never reaches the assignment pool. COD is never checked: nothing was paid upfront to
+refund before delivery. Every failure mode here - no platform order ID match, missing
+credentials, a network error, a non-200 - fails OPEN (assigns normally): one extra call to an
+already-refunded customer is preferred over silently stalling a genuinely-pending lead because
+of a flaky request.
 """
 import json
 import os
@@ -35,22 +47,125 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg
+import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 REPO_ROOT = Path(__file__).resolve().parent.parent
 import lib
+import mysql_lib
 from lead_priority import (
     COL_AGENT, COL_ATTEMPT, COL_AWB_CODE, COL_CONNECTED, COL_DISPOSITION,
     COL_ORDER_ID, COL_PAYMENT_METHOD, COL_REMARKS, COL_REMARKS_LEGACY_U,
     COL_RTO_INITIATED_DATE, COL_RTO_REASON,
-    DEFAULT_QUOTA, build_assignment_queue, cell, parse_rto_initiated_date, prefix_rule_partner,
-    priority_tier,
+    DEFAULT_QUOTA, build_assignment_queue, cell, is_prepaid, parse_rto_initiated_date,
+    prefix_rule_partner, priority_tier,
 )
 
 SPREADSHEET_ID = "1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI"
 SHEET_TAB = "Data"
 
 STALE_MINUTES = 10  # must match the CRM's own heartbeat cadence assumptions
+
+# Item-level DWH schema the GoKwik refund-status lookup resolves a sheet Order ID against -
+# see lookup_platform_order_id.
+ITEM_LEVEL_SCHEMA = "mcaff_prod"
+
+GOKWIK_REFUND_STATUS_URL = "https://gkx.gokwik.co/v1/payments/refunds"
+GOKWIK_TIMEOUT_SEC = 8
+
+# Same order-number-prefix -> vendor rule as api/refund/gokwik-initiate.js (kept in that
+# order - Fien and Hyphen are prefix-distinguishable, mcaffeine is the plain-numeric
+# catch-all and must stay last).
+GOKWIK_VENDORS = [
+    {"key": "hyphen", "prefix": "HYP", "env_prefix": "GOKWIK_HYPHEN"},
+    {"key": "fien", "prefix": "Fien", "env_prefix": "GOKWIK_FIEN"},
+    {"key": "mcaffeine", "prefix": None, "env_prefix": "GOKWIK_MCAFFEINE"},  # catch-all, stays last
+]
+
+
+def resolve_gokwik_vendor(order_id):
+    order_id = order_id or ""
+    for vendor in GOKWIK_VENDORS:
+        if vendor["prefix"] is None or order_id.lower().startswith(vendor["prefix"].lower()):
+            return vendor
+    return None  # unreachable - the catch-all always matches
+
+
+def lookup_platform_order_id(order_id):
+    """The sheet's own Order ID (Display_Order_Code) isn't what GoKwik knows an order by -
+    GoKwik expects its own numeric platformOrderId. Item_level_data carries the mapping, but
+    NOT reliably: a Display_Order_Code can have a row per sync channel, and only the
+    '*SHOPIFY' channel's Sale_Order_Code is the real GoKwik-recognizable numeric ID - a
+    'HYPHEN_D2C' row for the same order was observed carrying Sale_Order_Code equal to the
+    Display_Order_Code itself (a placeholder, not a real platform ID). Oldest-by-Created among
+    the Shopify-channel rows picks the original order over any later re-sync. A stray leading
+    backtick (a spreadsheet-import artifact seen even in plain numeric IDs, e.g. mCaffeine
+    order 21494) is stripped before the numeric check.
+
+    Returns None (never raises) on no match OR a lookup error - lookup failures fail OPEN
+    (assign as normal) rather than blocking a genuinely-pending lead over a flaky DB call."""
+    try:
+        rows = mysql_lib.query(
+            """
+            SELECT Sale_Order_Code
+            FROM Item_level_data
+            WHERE Display_Order_Code = %s
+              AND Channel_Name LIKE '%%SHOPIFY%%'
+            ORDER BY Created ASC
+            LIMIT 1
+            """,
+            (order_id,),
+            database=ITEM_LEVEL_SCHEMA,
+        )
+    except Exception as e:
+        print(f"    (Item_level_data lookup for {order_id} failed: {e} - treating as not-refunded)")
+        return None
+    if not rows or not rows[0][0]:
+        return None
+    platform_order_id = rows[0][0].strip().lstrip("`")
+    if not platform_order_id.isdigit():
+        return None
+    return platform_order_id
+
+
+def is_already_refunded_via_gokwik(order_id):
+    """True only on a confirmed GoKwik refund (success + a Completed entry). Every other
+    outcome - no platform order ID found, missing credentials for this order's vendor, a
+    network error, a non-200, an unparseable body - returns False, per the same fail-open
+    philosophy as lookup_platform_order_id: never block a real pending lead over infrastructure
+    flakiness, only ever skip one that's positively confirmed refunded."""
+    platform_order_id = lookup_platform_order_id(order_id)
+    if not platform_order_id:
+        return False
+
+    vendor = resolve_gokwik_vendor(order_id)
+    if vendor is None:
+        return False
+    app_id = os.environ.get(f"{vendor['env_prefix']}_APPID")
+    app_secret = os.environ.get(f"{vendor['env_prefix']}_APPSECRET")
+    if not app_id or not app_secret:
+        return False
+
+    try:
+        resp = requests.get(
+            GOKWIK_REFUND_STATUS_URL,
+            params={"platformOrderId": platform_order_id},
+            headers={"gk-app-id": app_id, "gk-app-secret": app_secret},
+            timeout=GOKWIK_TIMEOUT_SEC,
+        )
+    except Exception as e:
+        print(f"    (GoKwik refund-status call for {order_id} failed: {e} - treating as not-refunded)")
+        return False
+    if resp.status_code != 200:
+        return False
+    try:
+        body = resp.json()
+    except Exception:
+        return False
+    if not body.get("success"):
+        return False
+    refunds = body.get("data") or []
+    return any(r.get("status") == "Completed" for r in refunds)
 
 
 def fetch_online_agents(process_key=None):
@@ -281,6 +396,7 @@ def main():
     awb_code_by_row = {}
     rto_reason_by_row = {}
     tier_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+    already_refunded_rows = []  # row indices confirmed refunded via GoKwik this run
 
     for i, row in enumerate(rows):
         order_id = cell(row, COL_ORDER_ID)
@@ -302,7 +418,16 @@ def main():
         agent_raw = cell(row, COL_AGENT).lower()
         is_unassigned = (not agent_raw) or agent_raw == "unassigned"
         rto_initiated_date = parse_rto_initiated_date(cell(row, COL_RTO_INITIATED_DATE))
-        tier = priority_tier(cell(row, COL_PAYMENT_METHOD), cell(row, COL_RTO_REASON))
+        payment_method = cell(row, COL_PAYMENT_METHOD)
+        tier = priority_tier(payment_method, cell(row, COL_RTO_REASON))
+
+        # Prepaid only - COD has nothing paid upfront to refund before delivery, so there is
+        # nothing for GoKwik to have already refunded. Checked only for a lead that would
+        # otherwise enter the assignment pool this run; an already-assigned pending lead is
+        # left alone regardless; a genuinely disposed one was already skipped above.
+        if is_unassigned and is_prepaid(payment_method) and is_already_refunded_via_gokwik(order_id):
+            already_refunded_rows.append(i)
+            continue  # never enters the unassigned pool - no agent ever sees it
 
         if is_unassigned:
             unassigned_pending.append((i, rto_initiated_date, order_id, tier))
@@ -315,6 +440,22 @@ def main():
         # way. Column Q having any value at all is enough to exempt a lead permanently.
 
     print(f"  unassigned pool by priority: Prepaid={tier_counts[0]}, COD+high-priority reason={tier_counts[1]}, other COD={tier_counts[2]}, COD+low-priority reason={tier_counts[3]}")
+
+    # Stamped even if nothing else is assignable this run, and BEFORE the early-return below -
+    # a confirmed refund shouldn't wait on there being other assignable leads this run. Columns
+    # S/T/U are exactly what is_disposed (above) checks, so this permanently marks the row
+    # worked for every future run too, not just skipped once.
+    if already_refunded_rows:
+        print(f"  {len(already_refunded_rows)} prepaid lead(s) confirmed already refunded via GoKwik - stamping, not assigning.")
+        refund_value_ranges = [
+            {
+                "range": f"'{SHEET_TAB}'!S{row_index + 2}:U{row_index + 2}",
+                "values": [["Already Refunded", "Already Refunded",
+                            "Auto-detected via GoKwik refund status check - not assigned."]],
+            }
+            for row_index in already_refunded_rows
+        ]
+        lib.set_sheet_values_batch(SPREADSHEET_ID, refund_value_ranges)
 
     if not unassigned_pending:
         print("No unassigned pending leads found - nothing to assign.")

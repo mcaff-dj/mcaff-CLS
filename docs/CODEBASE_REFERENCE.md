@@ -311,6 +311,43 @@ can't execute the JS, so this duplication is unavoidable — but **all values** 
 the shared JSON. They had already drifted once: quota 10 in JS vs 20 in Python, so the
 preview forecast half the real volume.
 
+### Refund-status pre-check (GoKwik)
+
+Before a still-unassigned **prepaid** row enters `unassigned_pending`, `assign_leads.py` asks
+GoKwik whether it's already been refunded through some channel other than an agent's own
+disposition — COD is never checked, since nothing was paid upfront to refund pre-delivery.
+
+1. **Resolve GoKwik's vendor** by the sheet Order ID's prefix — same rule as
+   [gokwik-initiate.js](../api/refund/gokwik-initiate.js): `HYP*` → hyphen, `Fien*` → fien,
+   else → mcaffeine (catch-all, checked last). Picks which `GOKWIK_*_APPID/APPSECRET` pair to
+   use.
+2. **Resolve the sheet's Order ID to GoKwik's numeric `platformOrderId`** via `mcaff_prod`'s
+   `Item_level_data` (`lookup_platform_order_id`). Two real data-quality landmines here,
+   found by direct inspection rather than assumed:
+   - A `Display_Order_Code` can carry more than one `Sale_Order_Code` across sync channels —
+     only the `*SHOPIFY`-channel row's value is GoKwik's real numeric ID; a `HYPHEN_D2C` row
+     for the same order carried a placeholder equal to the Display code itself. Filtered to
+     `Channel_Name LIKE '%SHOPIFY%'`, oldest by `Created`, to always land on the original.
+   - Some numeric `Sale_Order_Code` values carry a stray leading backtick (a spreadsheet-import
+     artifact — seen on Fien orders *and* a plain mCaffeine order, so it's stripped
+     unconditionally, not vendor-specific) before the purely-numeric check.
+3. **Call `GET https://gkx.gokwik.co/v1/payments/refunds?platformOrderId=…`** with
+   `gk-app-id`/`gk-app-secret` headers, 8s timeout. Refunded = `success: true` and at least one
+   `data[]` entry with `status: "Completed"`.
+4. **Confirmed refunded** → stamp `S:U` = `"Already Refunded", "Already Refunded", "<note>"` in
+   one batched `set_sheet_values_batch` call (S/T are exactly what the `is_disposed` check
+   elsewhere in this file treats as "already worked," so this is a permanent mark, not a
+   one-run skip) and `continue` — the row never reaches `unassigned_pending`, never gets a
+   Column Q write, never reaches `lead_assignments`.
+5. **Every other outcome fails OPEN** (assign normally): no platform-order-ID match, missing
+   credentials, a MySQL error, a GoKwik network error/non-200/unparseable body. Deliberate —
+   one extra call to an already-refunded customer beats silently stalling a genuinely-pending
+   lead over infrastructure flakiness.
+
+Secrets (`MYSQL_*`, `GOKWIK_*_APPID/APPSECRET`) are wired into
+[assign-leads.yml](../.github/workflows/assign-leads.yml)'s job env — this cron had no MySQL or
+GoKwik access at all before this check existed.
+
 ### Invariants
 
 - **Column Q is write-once.** `assign_leads.py` only ever writes a genuinely blank/`Unassigned`
