@@ -1988,7 +1988,7 @@ const localStorage = typeof window !== 'undefined'
       // per-process ticket source that exists - computing them from allTickets under any
       // other process would show RTO's real numbers mislabelled as that process's own.
       const renderTeamRosterTable = () => {
-        const isRto = currentProcess?.key === 'rto';
+        const isRto = currentProcess?.value === 'rto';
         const agentMetrics = effectiveAgentRoster.filter(a => a.inProcess).map(ag => {
           const email = ag.email.toLowerCase();
           const prefix = email.split('@')[0];
