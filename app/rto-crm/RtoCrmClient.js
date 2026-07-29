@@ -1295,6 +1295,19 @@ const localStorage = typeof window !== 'undefined'
           return;
         }
 
+        // A SECOND, now more common source of the same problem: someone with zero ticket
+        // history at all still reappears immediately if they're currently INVITED to this
+        // process (present in processAgents - see the "anyone invited to THIS process" merge
+        // above, added so a newly invited agent shows up before they've touched a single
+        // lead). An invited agent's row is rebuilt from that invitation on every render, same
+        // as the ticket-history case just above - removing them from this local list changes
+        // nothing about the invitation that keeps bringing them back.
+        const invited = (processAgents || []).some(pa => (pa.email || '').toLowerCase() === lower);
+        if (invited) {
+          showToast(`Can't remove ${name} from this list — they're currently invited to ${currentProcess ? currentProcess.label.replace(/^Process:\s*/, '') : 'this process'}, so this table rebuilds their row from that invitation every time it loads. Revoke access from Admin → Permissions instead.`);
+          return;
+        }
+
         setAgentRoster(p => {
           const u = p.filter(a => (a.email || '').toLowerCase() !== lower);
           try { localStorage.setItem('rto_agent_roster', JSON.stringify(u)); } catch {}
