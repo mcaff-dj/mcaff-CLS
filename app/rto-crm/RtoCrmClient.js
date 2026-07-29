@@ -463,6 +463,19 @@ const localStorage = typeof window !== 'undefined'
         try { localStorage.setItem('rto_theme', theme); } catch {}
       }, [theme]);
 
+      // Which calling process this page is showing. Only 'rto' has an interface today - the
+      // rest are declared in PROCESSES (further down, next to the other CustomSelect option
+      // lists) and render a "not wired up yet" panel, because each is expected to bring its
+      // own calling fields, dispositions and data source rather than reusing this one's.
+      // Persisted like the other view preferences so a reload doesn't bounce an agent back to
+      // a process they weren't working.
+      const [activeProcess, setActiveProcess] = useState(() => {
+        try { return localStorage.getItem('rto_active_process') || 'rto'; } catch { return 'rto'; }
+      });
+      useEffect(() => {
+        try { localStorage.setItem('rto_active_process', activeProcess); } catch {}
+      }, [activeProcess]);
+
       const [agentRoster, setAgentRoster] = useState(()=>{
         try { const s = localStorage.getItem('rto_agent_roster'); if (s) { const p = JSON.parse(s); if (Array.isArray(p) && p.length) return p; } } catch {}
         return [
@@ -1474,6 +1487,34 @@ const localStorage = typeof window !== 'undefined'
         { value: 'purple', label: 'Theme: Purple', icon: '🔮' },
       ];
 
+      // The calling processes this CRM covers. Only 'rto' is built: everything below the
+      // header - the tab bar, the KPI cards, the lead table, the disposition modal - is
+      // specific to RTO's sheet columns and its own disposition list, so the others are
+      // declared here and gated on `implemented` rather than being pointed at the same UI.
+      // Each is expected to differ in its calling fields, its dispositions AND its source of
+      // data, so `blurb` records what each one still needs before it can be wired up - the
+      // work is a per-process data layer, not a relabelling of this one.
+      const PROCESSES = [
+        {
+          value: 'rto', label: 'Process: RTO Calling', icon: '📦', implemented: true,
+          blurb: 'Return-to-origin leads from the RTO "Data" sheet tab.',
+        },
+        {
+          value: 'ndr', label: 'Process: NDR Calling', icon: '🚚', implemented: false,
+          blurb: 'Non-delivery-report leads. Needs its own source sheet/table, the NDR attempt fields (courier reason, attempt count, next-attempt date) and an NDR disposition list - none of which map onto RTO\'s columns.',
+        },
+        {
+          value: 'detractor', label: 'Process: Detractor Calling', icon: '📉', implemented: false,
+          blurb: 'NPS detractors to call back. Source would be mcaff_dwh.nps_delivery / nps_product (already used by the NPS charts), keyed on response_id with the survey\'s own score and verbatim feedback rather than an order/AWB.',
+        },
+        {
+          value: 'productkyc', label: 'Process: Product KYC Calling', icon: '🧪', implemented: false,
+          blurb: 'Product feedback KYC calls. Source is the "Product feedback KYC" workbook (see scripts/productkyc_config.py), where every product tab has its own bespoke question schema - so the calling form is per-product, not one fixed set of fields.',
+        },
+      ];
+      const processOptions = PROCESSES.map(({ value, label, icon }) => ({ value, label, icon }));
+      const currentProcess = PROCESSES.find(p => p.value === activeProcess) || PROCESSES[0];
+
       const connectedOutcomes = [
         { value: 'Customer Agreed to Accept', label: 'Customer Agreed to Accept (Reorder)', icon: '📦', desc: 'Customer agreed to receive shipment / converted reorder' },
         { value: 'Delivered', label: 'Delivered', icon: '✅', desc: 'Shipment has already been delivered to customer' },
@@ -1655,6 +1696,14 @@ const localStorage = typeof window !== 'undefined'
                   <span className="hidden md:inline">{isSyncing?'Syncing…':'Refresh'}</span>
                 </button>
 
+                {/* Process switcher - which calling process this page is showing (see PROCESSES). */}
+                <CustomSelect
+                  value={activeProcess}
+                  onChange={setActiveProcess}
+                  options={processOptions}
+                  className="shrink-0"
+                />
+
                 {/* UI Role Switcher - hidden for genuine Agents, who have no legitimate
                     reason to switch into Admin/Team Lead view (handleSwitchRole is a plain
                     client-side setUserRole with no server-side check, so this is the only
@@ -1715,6 +1764,40 @@ const localStorage = typeof window !== 'undefined'
 
           {/* ═══ MAIN WORKSPACE ═══ */}
           <main className="flex-1 max-w-[1440px] w-full mx-auto px-5 py-5 space-y-5">
+
+            {/* Everything below is RTO's own workspace - its tab bar, KPI cards, lead table
+                and disposition flow all read RTO's sheet columns and its disposition list.
+                A process that isn't built yet gets this panel instead of being pointed at a
+                UI that can't represent its data. */}
+            {!currentProcess.implemented && (
+              <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-8 shadow-xl backdrop-blur-md">
+                <div className="max-w-2xl space-y-4">
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">{currentProcess.icon}</span>
+                    <h2 className="text-lg font-bold text-zinc-100">
+                      {currentProcess.label.replace(/^Process:\s*/, '')}
+                    </h2>
+                    <span className="px-2 py-0.5 rounded-md bg-amber-950/60 text-amber-300 border border-amber-800/60 text-[11px] font-bold uppercase tracking-wide">
+                      Not wired up yet
+                    </span>
+                  </div>
+                  <p className="text-[13px] text-zinc-400 leading-relaxed">{currentProcess.blurb}</p>
+                  <p className="text-[13px] text-zinc-500 leading-relaxed">
+                    This process needs its own calling fields, disposition list and data source before it
+                    can be worked here - it isn&apos;t a relabelling of the RTO view, so nothing is shown
+                    rather than showing RTO&apos;s data under a different name.
+                  </p>
+                  <button
+                    onClick={() => setActiveProcess('rto')}
+                    className="h-8 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50"
+                  >
+                    ← Back to RTO Calling
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {currentProcess.implemented && (<>
 
             {/* ══════════════════════════════════════════════════════════════════════
                🚀 PROMINENT DEDICATED WORKSPACE NAVIGATION BAR
@@ -2710,6 +2793,8 @@ const localStorage = typeof window !== 'undefined'
                 )}
               </>
             )}
+
+            </>)}
           </main>
 
           {/* ═══ HIGH-END CALL DISPOSITION MODAL ═══ */}
