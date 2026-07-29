@@ -1,0 +1,82 @@
+{
+  "_readme": [
+    "SINGLE SOURCE OF TRUTH for the Calling CRM's processes. Read by:",
+    "  - app/rto-crm/RtoCrmClient.js  (the Process switcher, and which processes an agent may see)",
+    "  - api/_lib/tabs.js             (so the admin Permissions UI can grant a process)",
+    "  - scripts/assign_leads.py      (business hours - whether auto-assignment may run now)",
+    "Under api/_lib/ because deploy.yml bundles only api/ into the Lambda; anywhere else and",
+    "tabs.js would throw at runtime. Same reasoning as leadAssignmentRules.json.",
+    "",
+    "ACCESS: a process key doubles as its tab_key in report_tab_permissions (card_key",
+    "'calling'). An agent sees a process only if they hold that row - i.e. only invited agents",
+    "can work a process, enforced server-side by getSession()/getUserTabPermissions rather than",
+    "by the browser. Admins (users.is_admin) get an empty tabPerms, which means unrestricted.",
+    "Note the localStorage 'rto_agent_roster' is NOT access control - it is a UI convenience",
+    "any agent can edit from DevTools, which is why invitations live in the database instead.",
+    "",
+    "BUSINESS HOURS gate AUTO-ASSIGNMENT ONLY. Outside the window assign_leads.py assigns",
+    "nothing, but an agent can still open, claim and dispose leads they already hold - a call",
+    "that already happened must always be recordable (see openDisp).",
+    "Times are local wall-clock in the process's own timezone, `end` exclusive. Days use names",
+    "so nothing depends on whether a language counts weekdays from Sunday or Monday.",
+    "",
+    "`implemented: false` means the process has no workspace yet - the CRM shows a panel",
+    "explaining what it still needs. Each is expected to bring its own calling fields,",
+    "dispositions and data source; none of them share RTO's."
+  ],
+
+  "processes": [
+    {
+      "key": "rto",
+      "label": "RTO Calling",
+      "icon": "📦",
+      "implemented": true,
+      "blurb": "Return-to-origin leads from the RTO \"Data\" sheet tab.",
+      "businessHours": {
+        "timezone": "IST",
+        "days": ["mon", "tue", "wed", "thu", "fri", "sat"],
+        "start": "09:30",
+        "end": "18:30"
+      }
+    },
+    {
+      "key": "ndr",
+      "label": "NDR Calling",
+      "icon": "🚚",
+      "implemented": false,
+      "blurb": "Non-delivery-report leads. Needs its own source sheet/table, the NDR attempt fields (courier reason, attempt count, next-attempt date) and an NDR disposition list - none of which map onto RTO's columns.",
+      "businessHours": {
+        "timezone": "IST",
+        "days": ["mon", "tue", "wed", "thu", "fri", "sat"],
+        "start": "09:30",
+        "end": "18:30"
+      }
+    },
+    {
+      "key": "detractor",
+      "label": "Detractor Calling",
+      "icon": "📉",
+      "implemented": false,
+      "blurb": "NPS detractors to call back. Source would be mcaff_dwh.nps_delivery / nps_product (already used by the NPS charts), keyed on response_id with the survey's own score and verbatim feedback rather than an order/AWB.",
+      "businessHours": {
+        "timezone": "IST",
+        "days": ["mon", "tue", "wed", "thu", "fri", "sat"],
+        "start": "10:00",
+        "end": "19:00"
+      }
+    },
+    {
+      "key": "productkyc",
+      "label": "Product KYC Calling",
+      "icon": "🧪",
+      "implemented": false,
+      "blurb": "Product feedback KYC calls. Source is the \"Product feedback KYC\" workbook (see scripts/productkyc_config.py), where every product tab has its own bespoke question schema - so the calling form is per-product, not one fixed set of fields.",
+      "businessHours": {
+        "timezone": "IST",
+        "days": ["mon", "tue", "wed", "thu", "fri", "sat"],
+        "start": "10:00",
+        "end": "19:00"
+      }
+    }
+  ]
+}

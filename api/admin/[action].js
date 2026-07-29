@@ -9,7 +9,14 @@
 //   DELETE /api/admin/permissions -> revoke whole card        { userId, cardKey }
 //   PUT    /api/admin/permissions -> set tab restriction      { userId, cardKey, tabKeys }
 //   GET    /api/admin/audit       -> most recent 200 access events (admin only)
-const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser } = require('../_lib/db');
+//   GET    /api/admin/business-hours  -> every calling process's week (saved, or defaults)
+//   POST   /api/admin/business-hours  -> save one process's week: { processKey, week: {mon:{open,close},...} }
+//   GET    /api/admin/calling-agents?process=rto -> that process's roster + per-process status/quota
+//   POST   /api/admin/calling-agents  -> { processKey, email, status?, maxQuota? }
+const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser,
+  BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours, logEvent,
+  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent } = require('../_lib/db');
+const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { CARD_TABS } = require('../_lib/tabs');
 const { getSession } = require('../_lib/session');
 const { sendMail, siteBaseUrl } = require('../_lib/mail');
@@ -189,6 +196,98 @@ async function handleAudit(req, res) {
   res.status(200).json({ entries: rows.map((r) => ({ ...r, cardLabel: r.card_key ? (CARD_LABELS[r.card_key] || r.card_key) : '' })) });
 }
 
+// GET  -> every process, each with its effective week (saved hours, or the defaults from
+//         callingProcesses.json where nothing has been saved yet) plus `isDefault` so the UI
+//         can show whether an admin has actually set them.
+// POST -> { processKey, week: { mon: {open,close}, ... } }. A day with both times blank is
+//         stored as closed; days omitted from `week` are left untouched.
+// Admin-only by virtue of the gate in this file's own handler below.
+async function handleBusinessHours(req, res, session) {
+  if (req.method === 'POST') {
+    const body = parseBody(req);
+    const known = CALLING_PROCESSES.processes.map((p) => p.key);
+    if (!body.processKey || !known.includes(body.processKey)) {
+      res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
+      return;
+    }
+    try {
+      await setCallingBusinessHours(body.processKey, body.week || {}, session.email);
+    } catch (e) {
+      // Validation errors from setCallingBusinessHours are the admin's own input being wrong
+      // (bad time, close before open, one time without the other) - worth showing verbatim
+      // rather than as a generic 500.
+      res.status(400).json({ error: e.message || 'Could not save business hours' });
+      return;
+    }
+    await logEvent(session.uid, session.email, 'calling', 'business-hours', `Updated ${body.processKey} hours`);
+  }
+
+  const saved = await getCallingBusinessHours();
+  const processes = CALLING_PROCESSES.processes.map((p) => {
+    const savedWeek = saved[p.key];
+    const defaults = p.businessHours || {};
+    const defaultDays = (defaults.days || []).map((d) => d.toLowerCase());
+    const week = {};
+    for (const day of BUSINESS_HOUR_DAYS) {
+      if (savedWeek && savedWeek[day]) {
+        week[day] = savedWeek[day];
+      } else if (defaultDays.includes(day)) {
+        week[day] = { open: defaults.start || '', close: defaults.end || '' };
+      } else {
+        week[day] = { open: '', close: '' };   // not a working day in the defaults
+      }
+    }
+    return {
+      key: p.key,
+      label: p.label,
+      icon: p.icon,
+      implemented: !!p.implemented,
+      timezone: defaults.timezone || 'IST',
+      isDefault: !savedWeek,
+      week,
+    };
+  });
+  res.status(200).json({ days: BUSINESS_HOUR_DAYS, processes });
+}
+
+// GET  ?process=<key> -> everyone invited to that process, with their PER-PROCESS status and
+//                        quota (see getCallingProcessAgents). Membership comes from the
+//                        invitation rows, so this is also the answer to "who works this
+//                        process".
+// POST                -> { processKey, email, status?, maxQuota? } for one agent. Fields are
+//                        independent: omitting maxQuota leaves an admin-set quota alone.
+async function handleCallingAgents(req, res, session) {
+  const known = CALLING_PROCESSES.processes.map((p) => p.key);
+
+  if (req.method === 'POST') {
+    const body = parseBody(req);
+    if (!known.includes(body.processKey)) {
+      res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
+      return;
+    }
+    try {
+      const agents = await setCallingProcessAgent(
+        body.processKey, body.email,
+        { status: body.status, maxQuota: body.maxQuota },
+        session.email,
+      );
+      await logEvent(session.uid, session.email, 'calling', 'process-agent',
+        `${body.processKey}: ${body.email} status=${body.status ?? '-'} quota=${body.maxQuota ?? '-'}`);
+      res.status(200).json({ statuses: CALLING_STATUSES, agents });
+    } catch (e) {
+      res.status(400).json({ error: e.message || 'Could not update agent' });
+    }
+    return;
+  }
+
+  const processKey = (req.query && req.query.process) || '';
+  if (!known.includes(processKey)) {
+    res.status(400).json({ error: `process must be one of: ${known.join(', ')}` });
+    return;
+  }
+  res.status(200).json({ statuses: CALLING_STATUSES, agents: await getCallingProcessAgents(processKey) });
+}
+
 module.exports = async (req, res) => {
   const session = await getSession(req);
   if (!session || !session.isAdmin) {
@@ -201,6 +300,8 @@ module.exports = async (req, res) => {
   if (action === 'users') return handleUsers(req, res, session);
   if (action === 'permissions') return handlePermissions(req, res);
   if (action === 'audit') return handleAudit(req, res);
+  if (action === 'business-hours') return handleBusinessHours(req, res, session);
+  if (action === 'calling-agents') return handleCallingAgents(req, res, session);
 
   res.status(404).json({ error: 'Unknown admin route' });
 };

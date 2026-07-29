@@ -169,6 +169,46 @@ async function ensurePgSchema() {
       assigned_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `;
+  // Per-process, per-weekday calling hours, editable by an admin from the CRM's own admin
+  // panel. Lives here rather than in api/_lib/callingProcesses.json because it has to be
+  // changeable at runtime - that file now only supplies the DEFAULTS used to seed a process
+  // that has never been edited. scripts/assign_leads.py reads this table directly (its own
+  // psycopg connection, same as agent_presence) to decide whether it may hand out leads.
+  //
+  // open_time/close_time are 'HH:MM' local wall-clock in the process's timezone, close
+  // exclusive. Either being NULL/'' means CLOSED that day - which is how a blank Sunday in the
+  // editor is stored, rather than deleting the row and losing the fact that it was set.
+  await pgSql`
+    CREATE TABLE IF NOT EXISTS calling_business_hours (
+      process_key TEXT NOT NULL,
+      day TEXT NOT NULL,
+      open_time TEXT,
+      close_time TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_by TEXT,
+      PRIMARY KEY (process_key, day)
+    )
+  `;
+  // Per-process availability and capacity for one agent. The processes are independent, so an
+  // agent can be Online for RTO and Offline for NDR with a different quota in each - which a
+  // single row per agent (agent_presence, above) cannot express.
+  //
+  // This is operational state ONLY. Whether an agent belongs to a process at all is decided by
+  // their invitation (report_tab_permissions, card 'calling', tab '<process>'), so a row here
+  // for an uninvited agent grants nothing. It also replaces the browser-held
+  // 'rto_agent_roster' as the authority for status/quota: that lives in localStorage, which the
+  // agent can edit, so scripts/assign_leads.py could never have trusted it.
+  await pgSql`
+    CREATE TABLE IF NOT EXISTS calling_agent_process (
+      email TEXT NOT NULL,
+      process_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'Offline',
+      max_quota INTEGER,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_by TEXT,
+      PRIMARY KEY (email, process_key)
+    )
+  `;
   // Disposal side of the same lead lifecycle - written by rto-crm.html's submitDisp()
   // in real time (via a new recordDisposition auth action) alongside its existing
   // direct-to-Sheet write, so this history survives independent of the Google Sheet
@@ -522,6 +562,151 @@ async function getCallingHourlyStats(dateFrom, dateTo) {
   return byHour;
 }
 
+// ── Calling business hours ────────────────────────────────────────────────────────────
+// Stored per (process, weekday) so a single day can differ from the rest - Friday closing
+// early, Sunday closed entirely - which a single start/end pair per process couldn't express.
+const BUSINESS_HOUR_DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+
+// 'HH:MM' (00:00-23:59) or '' / null for "closed". Rejects anything else rather than storing
+// a value assign_leads.py would later fail to parse - a malformed close time that silently
+// meant "closed" would stop lead assignment without anyone being told why.
+function normalizeTimeOfDay(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(s);
+  if (!m) throw new Error(`Invalid time "${s}" - expected HH:MM (24-hour), or blank for closed`);
+  return `${m[1].padStart(2, '0')}:${m[2]}`;
+}
+
+// { [processKey]: { mon: {open, close}, ... } } for whatever has been saved. A process with no
+// saved rows is simply absent - callers fall back to callingProcesses.json's defaults, so
+// hours behave as documented until an admin actually changes them.
+async function getCallingBusinessHours() {
+  await ensurePgSchema();
+  const { rows } = await pgSql`
+    SELECT process_key, day, open_time, close_time FROM calling_business_hours
+  `;
+  const out = {};
+  for (const r of rows) {
+    (out[r.process_key] = out[r.process_key] || {})[r.day] = {
+      open: r.open_time || '',
+      close: r.close_time || '',
+    };
+  }
+  return out;
+}
+
+// Replaces one process's whole week in a single transaction-less upsert per day. Days absent
+// from `week` are left untouched rather than deleted, so a partial payload can't silently
+// close days the admin never looked at.
+async function setCallingBusinessHours(processKey, week, updatedBy) {
+  await ensurePgSchema();
+  if (!processKey) throw new Error('processKey is required');
+  for (const day of Object.keys(week || {})) {
+    if (!BUSINESS_HOUR_DAYS.includes(day)) {
+      throw new Error(`Unknown day "${day}" - expected one of ${BUSINESS_HOUR_DAYS.join(', ')}`);
+    }
+    const open = normalizeTimeOfDay(week[day] && week[day].open);
+    const close = normalizeTimeOfDay(week[day] && week[day].close);
+    // One time without the other is ambiguous ("open at 10:00 until when?"), so both are
+    // required together or the day counts as closed.
+    if ((open && !close) || (close && !open)) {
+      throw new Error(`${day}: set both an open and a close time, or leave both blank for closed`);
+    }
+    if (open && close && open >= close) {
+      // String compare is safe on zero-padded HH:MM. Overnight windows aren't supported -
+      // assign_leads.py treats the window as a single same-day range.
+      throw new Error(`${day}: close time ${close} must be after open time ${open}`);
+    }
+    await pgSql`
+      INSERT INTO calling_business_hours (process_key, day, open_time, close_time, updated_at, updated_by)
+      VALUES (${processKey}, ${day}, ${open}, ${close}, now(), ${updatedBy || null})
+      ON CONFLICT (process_key, day) DO UPDATE
+        SET open_time = EXCLUDED.open_time,
+            close_time = EXCLUDED.close_time,
+            updated_at = now(),
+            updated_by = EXCLUDED.updated_by
+    `;
+  }
+  return getCallingBusinessHours();
+}
+
+// ── Per-process calling roster ─────────────────────────────────────────────────────────
+const CALLING_STATUSES = ['Online', 'Busy', 'Offline'];
+
+// Everyone invited to a process, with their per-process status and quota.
+//
+// Membership comes from the invitation rows (MySQL: users + report_tab_permissions), and the
+// operational state from calling_agent_process (Postgres) - two different databases, so this
+// joins them in JS rather than in SQL. Admins are included: they hold no per-process rows by
+// convention (see getUserTabPermissions), so they'd otherwise vanish from every roster.
+//
+// An agent with no row yet is reported as Offline with a null quota, meaning "fall back to the
+// process default" rather than "zero capacity" - a missing row must never read as a quota of 0,
+// which would quietly make them ineligible for any lead.
+async function getCallingProcessAgents(processKey) {
+  await ensureSchema();
+  await ensurePgSchema();
+  const { rows: members } = await sql`
+    SELECT u.id, u.email, u.name, u.is_admin
+    FROM users u
+    LEFT JOIN report_tab_permissions rtp
+      ON rtp.user_id = u.id AND rtp.card_key = 'calling' AND rtp.tab_key = ${processKey}
+    LEFT JOIN permissions p
+      ON p.user_id = u.id AND p.card_key = 'calling'
+    WHERE rtp.tab_key IS NOT NULL OR u.is_admin = 1
+    GROUP BY u.id, u.email, u.name, u.is_admin
+    ORDER BY u.is_admin DESC, u.name ASC
+  `;
+  const { rows: state } = await pgSql`
+    SELECT email, status, max_quota, updated_at, updated_by
+    FROM calling_agent_process WHERE process_key = ${processKey}
+  `;
+  const byEmail = {};
+  for (const s of state) byEmail[String(s.email).toLowerCase()] = s;
+  return members.map((m) => {
+    const s = byEmail[String(m.email).toLowerCase()];
+    return {
+      email: m.email,
+      name: m.name || String(m.email).split('@')[0],
+      isAdmin: !!m.is_admin,
+      status: (s && s.status) || 'Offline',
+      maxQuota: s && s.max_quota != null ? s.max_quota : null,
+      updatedAt: (s && s.updated_at) || null,
+      updatedBy: (s && s.updated_by) || null,
+    };
+  });
+}
+
+// Upserts one agent's status and/or quota for one process. Either field may be omitted, so an
+// agent flipping their own status can't accidentally reset a quota an admin set.
+async function setCallingProcessAgent(processKey, email, { status, maxQuota } = {}, updatedBy) {
+  await ensurePgSchema();
+  const key = String(email || '').trim().toLowerCase();
+  if (!processKey || !key) throw new Error('processKey and email are required');
+  if (status !== undefined && status !== null && !CALLING_STATUSES.includes(status)) {
+    throw new Error(`status must be one of: ${CALLING_STATUSES.join(', ')}`);
+  }
+  let quota = null;
+  if (maxQuota !== undefined && maxQuota !== null && maxQuota !== '') {
+    quota = parseInt(maxQuota, 10);
+    if (!Number.isFinite(quota) || quota < 0) throw new Error('maxQuota must be a non-negative whole number');
+  }
+  // COALESCE(EXCLUDED.x, table.x) so an omitted field keeps its stored value instead of being
+  // overwritten with null.
+  await pgSql`
+    INSERT INTO calling_agent_process (email, process_key, status, max_quota, updated_at, updated_by)
+    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, now(), ${updatedBy || null})
+    ON CONFLICT (email, process_key) DO UPDATE
+      SET status = COALESCE(${status || null}, calling_agent_process.status),
+          max_quota = COALESCE(${quota}, calling_agent_process.max_quota),
+          updated_at = now(),
+          updated_by = ${updatedBy || null}
+  `;
+  return getCallingProcessAgents(processKey);
+}
+
 // Per-partner disposition breakdown (delivery_partner, derived from awb_code - see
 // ensurePgSchema). Surfaces "Customer Agreed to Accept" specifically alongside the total,
 // so it directly answers "which partner is most of our Customer Agreed to Accept coming
@@ -585,4 +770,6 @@ module.exports = {
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
   getAllAgentPresence, getRecentLeadAssignments, recordLeadDisposition,
   getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
+  BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
+  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
 };

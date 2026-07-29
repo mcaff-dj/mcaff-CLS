@@ -8,6 +8,10 @@ import confetti from 'canvas-confetti';
 // It sits under api/_lib/ so deploy.yml's `cp -r api/.` bundles it into the Lambda - see that
 // file's own notes. Imported as JSON, so it's inlined into this client bundle at build time.
 import leadAssignmentRules from '../../api/_lib/leadAssignmentRules.json';
+// The processes this CRM covers, plus each one's business hours. Shared with api/_lib/tabs.js
+// (which turns these into the grantable 'calling' tabs) and scripts/assign_leads.py (business
+// hours). Same directory, and same reason, as leadAssignmentRules.json above.
+import CALLING_PROCESSES from '../../api/_lib/callingProcesses.json';
 
 // Next.js still server-renders this "use client" component once for the initial HTML,
 // where `localStorage` doesn't exist - unlike the old CDN-script version, which only ever
@@ -481,6 +485,36 @@ const localStorage = typeof window !== 'undefined'
         try { localStorage.setItem('rto_active_process', activeProcess); } catch {}
       }, [activeProcess]);
 
+      // Server-granted process access, filled in by the auth sync below. null = no explicit
+      // grant on this account (admins, or an agent with no per-process rows); the list is only
+      // narrowed when the database actually says which processes were granted. Kept out of
+      // localStorage on purpose - it is an authorisation answer, so it gets re-fetched from
+      // the session on every load rather than remembered by the browser.
+      const [invitedProcessKeys, setInvitedProcessKeys] = useState(null);
+      const [sessionIsAdmin, setSessionIsAdmin] = useState(false);
+      const [processPermsLoaded, setProcessPermsLoaded] = useState(false);
+
+      // Admin-editable calling hours, per process and per weekday. Server-owned (the
+      // calling_business_hours table, via /api/admin/business-hours) rather than local state,
+      // because scripts/assign_leads.py has to read the same values to decide whether it may
+      // hand out leads - a browser-only setting would change nothing about that.
+      const BUSINESS_HOUR_DAY_LABELS = [
+        ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'],
+        ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday'],
+      ];
+      const [hoursByProcess, setHoursByProcess] = useState(null);   // null = not loaded yet
+      const [hoursDraft, setHoursDraft] = useState(null);           // the week being edited
+      const [hoursSaving, setHoursSaving] = useState(false);
+      const [hoursError, setHoursError] = useState('');
+
+      // The active process's own roster: who is invited to it, and their status/quota FOR THIS
+      // PROCESS. Server-owned for the same reason as the hours above - assign_leads.py reads
+      // the same rows, so a browser-only value would change nothing about who gets leads. This
+      // is separate from `agentRoster` (localStorage), which stays as the legacy RTO view.
+      const [processAgents, setProcessAgents] = useState(null);
+      const [processAgentsError, setProcessAgentsError] = useState('');
+      const [savingAgentEmail, setSavingAgentEmail] = useState('');
+
       const [agentRoster, setAgentRoster] = useState(()=>{
         try { const s = localStorage.getItem('rto_agent_roster'); if (s) { const p = JSON.parse(s); if (Array.isArray(p) && p.length) return p; } } catch {}
         return [
@@ -531,6 +565,24 @@ const localStorage = typeof window !== 'undefined'
         return () => clearInterval(t);
       }, [fetchServerPresence]);
 
+      // The signed-in agent's own availability is per process, so switching process has to show
+      // that process's answer rather than carrying the previous one over - being Online for RTO
+      // says nothing about NDR. Read from the server (not localStorage) because this is the
+      // value assign_leads.py acts on; the local copy is only a first-paint placeholder.
+      useEffect(() => {
+        if (!googleUser?.email || !activeProcess) return;
+        let cancelled = false;
+        fetch(`/api/auth/processPresence?process=${encodeURIComponent(activeProcess)}`)
+          .then(r => r.ok ? r.json() : null)
+          .then(d => {
+            if (cancelled || !d || !d.status) return;
+            setAgentStatus(d.status);
+            try { localStorage.setItem('rto_agent_status', d.status); } catch {}
+          })
+          .catch(() => {});
+        return () => { cancelled = true; };
+      }, [googleUser, activeProcess]);
+
       const [toast, setToast] = useState(null);
       const showToast = useCallback(m=>{setToast(m);setTimeout(()=>setToast(null),3000);},[]);
 
@@ -563,9 +615,125 @@ const localStorage = typeof window !== 'undefined'
               const defaultRole = (d.isAdmin||d.email.toLowerCase().includes('vighnesh')||d.email.toLowerCase().includes('vikash')) ? 'Admin' : 'Agent';
               setUserRole(defaultRole);
             }
+            // Which processes this account has actually been invited to. getSession() reads
+            // report_tab_permissions fresh from the database on every request, so this is the
+            // real grant, not something the browser can talk itself into: an agent editing
+            // localStorage still can't add a process here. is_admin users come back with an
+            // empty tabPerms, which by that model's own convention means "unrestricted".
+            setSessionIsAdmin(!!d.isAdmin);
+            const callingTabs = (d.tabPerms && d.tabPerms.calling) || null;
+            setInvitedProcessKeys(Array.isArray(callingTabs) && callingTabs.length ? callingTabs : null);
+            setProcessPermsLoaded(true);
+          } else {
+            setProcessPermsLoaded(true);
           }
-        }).catch(()=>{});
+        }).catch(()=>{ setProcessPermsLoaded(true); });
       },[]);
+
+      // Calling hours: loaded once an admin actually opens the panel that shows them, rather
+       // than on every page load - agents never see this card, so most sessions have no reason
+      // to make the call. /api/admin/* is admin-only server-side, so a non-admin simply gets a
+      // 403 here and the card stays hidden.
+      const loadBusinessHours = useCallback(async () => {
+        try {
+          const r = await fetch('/api/admin/business-hours');
+          if (!r.ok) return;
+          const d = await r.json();
+          const byKey = {};
+          (d.processes || []).forEach(p => { byKey[p.key] = p; });
+          setHoursByProcess(byKey);
+        } catch { /* leave unloaded - the card just won't render */ }
+      }, []);
+
+      useEffect(() => {
+        if (tab === 'admin' && (userRole === 'Admin' || userRole === 'Team Lead') && hoursByProcess === null) {
+          loadBusinessHours();
+        }
+      }, [tab, userRole, hoursByProcess, loadBusinessHours]);
+
+      // Editing starts from whatever the server returned for the process currently selected in
+      // the header, so the card always shows the hours for the process being administered.
+      useEffect(() => {
+        if (hoursByProcess && activeProcess && hoursByProcess[activeProcess]) {
+          setHoursDraft(JSON.parse(JSON.stringify(hoursByProcess[activeProcess].week)));
+          setHoursError('');
+        }
+      }, [hoursByProcess, activeProcess]);
+
+      // Per-process roster, reloaded whenever the admin switches process - the whole point is
+      // that each process has its own answer, so it can't be cached across them.
+      const loadProcessAgents = useCallback(async (processKey) => {
+        if (!processKey) return;
+        setProcessAgents(null);
+        setProcessAgentsError('');
+        try {
+          const r = await fetch(`/api/admin/calling-agents?process=${encodeURIComponent(processKey)}`);
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) { setProcessAgentsError(d.error || `Could not load roster (${r.status})`); return; }
+          setProcessAgents(d.agents || []);
+        } catch (e) {
+          setProcessAgentsError(e.message || 'Could not load roster');
+        }
+      }, []);
+
+      // Not tab-gated: the roster feeds effectiveAgentRoster, which the Overview metrics and the
+      // reassignment dropdowns use too, not just the admin panel. Reloaded on process change
+      // because each process has its own roster. A non-admin simply gets 403 and processAgents
+      // stays null, which effectiveAgentRoster treats as "no per-process data" and falls back.
+      useEffect(() => {
+        if (userRole === 'Admin' || userRole === 'Team Lead') {
+          loadProcessAgents(activeProcess);
+        }
+      }, [userRole, activeProcess, loadProcessAgents]);
+
+      // One agent, one process, one field at a time. status and maxQuota are sent
+      // independently so changing availability never disturbs a quota an admin set.
+      const saveProcessAgent = async (email, patch) => {
+        setSavingAgentEmail(email);
+        setProcessAgentsError('');
+        try {
+          const r = await fetch('/api/admin/calling-agents', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ processKey: activeProcess, email, ...patch }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) { setProcessAgentsError(d.error || `Could not save (${r.status})`); return; }
+          setProcessAgents(d.agents || []);
+        } catch (e) {
+          setProcessAgentsError(e.message || 'Could not save');
+        } finally {
+          setSavingAgentEmail('');
+        }
+      };
+
+      const saveBusinessHours = async () => {
+        if (!hoursDraft || !activeProcess) return;
+        setHoursSaving(true);
+        setHoursError('');
+        try {
+          const r = await fetch('/api/admin/business-hours', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ processKey: activeProcess, week: hoursDraft }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            // The server validates each day (close after open, both-or-neither) and returns a
+            // readable reason - surfaced as-is so the admin can correct the actual field.
+            setHoursError(d.error || `Could not save (${r.status})`);
+            return;
+          }
+          const byKey = {};
+          (d.processes || []).forEach(p => { byKey[p.key] = p; });
+          setHoursByProcess(byKey);
+          showToast('🕒 Calling hours saved');
+        } catch (e) {
+          setHoursError(e.message || 'Could not save calling hours');
+        } finally {
+          setHoursSaving(false);
+        }
+      };
 
       // Cross-Tab & Multi-Client Real-Time Status & Activity Broadcast Sync
       useEffect(() => {
@@ -663,7 +831,15 @@ const localStorage = typeof window !== 'undefined'
       const handleSetStatus = (s)=>{
         setAgentStatus(s);
         try { localStorage.setItem('rto_agent_status', s); } catch {}
+        // Two different facts, both needed before assign_leads.py will hand this agent a lead:
+        //   /auth/presence        -> "at their desk" (global, heartbeat-backed)
+        //   /auth/processPresence -> "available for THIS process" (per process, no heartbeat)
+        // Written together so one status control keeps both true, rather than leaving an agent
+        // who looks Online in the header but is invisible to the process they're working.
         syncPresenceToServer(s, { pendingBox: s === 'Online' ? pend : undefined });
+        if (activeProcess) {
+          postJsonWithRetry('/api/auth/processPresence', { processKey: activeProcess, status: s });
+        }
         const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const newLog = {
           time: t,
@@ -1266,21 +1442,47 @@ const localStorage = typeof window !== 'undefined'
           }
         });
 
-        // The signed-in user's own status is authoritative locally (no round-trip lag).
-        // Everyone else's status comes from serverPresence (Supabase Postgres agent_presence,
-        // fetched by fetchServerPresence above) when available, so the roster table shows
-        // each agent's real reported status instead of a stale local/seeded default.
+        // Anyone invited to THIS process, whether or not they hold a lead yet - so a newly
+        // invited agent shows up immediately instead of only once a lead lands on them.
+        (processAgents || []).forEach(pa => {
+          const email = (pa.email || '').toLowerCase();
+          if (!email) return;
+          const existing = rosterMap.get(email) || {};
+          rosterMap.set(email, {
+            aht: '2.8m', breakTime: '15m',
+            ...existing,
+            email,
+            name: pa.name || existing.name || email.split('@')[0],
+            role: pa.isAdmin ? 'Admin' : (existing.role || 'Agent'),
+          });
+        });
+
+        // Status/quota resolution, most authoritative last.
+        //
+        // The per-process rows (calling_agent_process, via processAgents) win over the global
+        // agent_presence table, because the processes are independent: being Online at your desk
+        // is not the same as being available for THIS process, and assign_leads.py requires both.
+        // The localStorage roster is never consulted for either value - an agent can edit it, so
+        // it could never have been trusted for something that decides who gets work.
         const myEmail = googleUser?.email ? googleUser.email.toLowerCase() : null;
+        const perProcess = {};
+        (processAgents || []).forEach(pa => { perProcess[(pa.email || '').toLowerCase()] = pa; });
+
         rosterMap.forEach((a, email) => {
-          if (email === myEmail) {
-            a.status = agentStatus;
-          } else if (serverPresence[email]?.status) {
-            a.status = serverPresence[email].status;
+          if (serverPresence[email]?.status) a.status = serverPresence[email].status;
+          if (perProcess[email]) {
+            a.status = perProcess[email].status;
+            // null quota means "unset" -> the process default, never 0.
+            if (perProcess[email].maxQuota != null) a.maxQuota = perProcess[email].maxQuota;
+            a.inProcess = true;
           }
+          // Own status last: locally authoritative so the header control doesn't visibly
+          // bounce while the write is in flight.
+          if (email === myEmail) a.status = agentStatus;
         });
 
         return Array.from(rosterMap.values());
-      }, [agentRoster, tickets, overrides, googleUser, agentStatus, serverPresence]);
+      }, [agentRoster, tickets, overrides, googleUser, agentStatus, serverPresence, processAgents]);
 
       // Derived data & STRICT Calling Date (Latest First) Sorting
       const allTickets = useMemo(()=>{
@@ -1502,33 +1704,36 @@ const localStorage = typeof window !== 'undefined'
         { value: 'purple', label: 'Theme: Purple', icon: '🔮' },
       ];
 
-      // The calling processes this CRM covers. Only 'rto' is built: everything below the
-      // header - the tab bar, the KPI cards, the lead table, the disposition modal - is
-      // specific to RTO's sheet columns and its own disposition list, so the others are
-      // declared here and gated on `implemented` rather than being pointed at the same UI.
-      // Each is expected to differ in its calling fields, its dispositions AND its source of
-      // data, so `blurb` records what each one still needs before it can be wired up - the
-      // work is a per-process data layer, not a relabelling of this one.
-      const PROCESSES = [
-        {
-          value: 'rto', label: 'Process: RTO Calling', icon: '📦', implemented: true,
-          blurb: 'Return-to-origin leads from the RTO "Data" sheet tab.',
-        },
-        {
-          value: 'ndr', label: 'Process: NDR Calling', icon: '🚚', implemented: false,
-          blurb: 'Non-delivery-report leads. Needs its own source sheet/table, the NDR attempt fields (courier reason, attempt count, next-attempt date) and an NDR disposition list - none of which map onto RTO\'s columns.',
-        },
-        {
-          value: 'detractor', label: 'Process: Detractor Calling', icon: '📉', implemented: false,
-          blurb: 'NPS detractors to call back. Source would be mcaff_dwh.nps_delivery / nps_product (already used by the NPS charts), keyed on response_id with the survey\'s own score and verbatim feedback rather than an order/AWB.',
-        },
-        {
-          value: 'productkyc', label: 'Process: Product KYC Calling', icon: '🧪', implemented: false,
-          blurb: 'Product feedback KYC calls. Source is the "Product feedback KYC" workbook (see scripts/productkyc_config.py), where every product tab has its own bespoke question schema - so the calling form is per-product, not one fixed set of fields.',
-        },
-      ];
+      // Every process the CRM knows about, from the shared registry - the same file
+      // api/_lib/tabs.js builds the grantable 'calling' tabs from, so a process can never be
+      // offered here without also being grantable, or vice versa. Only 'rto' is built:
+      // everything below the header (tab bar, KPI cards, lead table, disposition modal) is
+      // specific to RTO's sheet columns and disposition list, so the rest are gated on
+      // `implemented` rather than pointed at the same UI.
+      const ALL_PROCESSES = CALLING_PROCESSES.processes.map(p => ({
+        value: p.key,
+        label: `Process: ${p.label}`,
+        icon: p.icon,
+        implemented: !!p.implemented,
+        blurb: p.blurb,
+        businessHours: p.businessHours,
+      }));
+
+      // Only the processes this account was invited to. invitedProcessKeys comes from the
+      // session's report_tab_permissions rows (card 'calling'), so this narrowing is a
+      // reflection of a server-side grant rather than a decision the browser makes: an agent
+      // who edits localStorage still gets the same list back on reload. Admins and accounts
+      // with no per-process rows keep the full list, matching how tabPerms already works for
+      // every other report ('' / empty = unrestricted).
+      const PROCESSES = (!invitedProcessKeys || sessionIsAdmin)
+        ? ALL_PROCESSES
+        : ALL_PROCESSES.filter(p => invitedProcessKeys.includes(p.value));
       const processOptions = PROCESSES.map(({ value, label, icon }) => ({ value, label, icon }));
-      const currentProcess = PROCESSES.find(p => p.value === activeProcess) || PROCESSES[0];
+      // Falls back to the first PERMITTED process, so a stale localStorage
+      // 'rto_active_process' pointing at a process this agent isn't invited to can't pin them
+      // on it. PROCESSES can be briefly empty while the session is still loading, and while an
+      // agent genuinely holds no calling grant at all - both handled where it's rendered.
+      const currentProcess = PROCESSES.find(p => p.value === activeProcess) || PROCESSES[0] || null;
 
       const connectedOutcomes = [
         { value: 'Customer Agreed to Accept', label: 'Customer Agreed to Accept (Reorder)', icon: '📦', desc: 'Customer agreed to receive shipment / converted reorder' },
@@ -1780,11 +1985,31 @@ const localStorage = typeof window !== 'undefined'
           {/* ═══ MAIN WORKSPACE ═══ */}
           <main className="flex-1 max-w-[1440px] w-full mx-auto px-5 py-5 space-y-5">
 
+            {/* No process available to this account at all: they're signed in but hold no
+                'calling' process grant, so there is nothing for them to work. Shown only once
+                the session has actually been read - otherwise the first paint would accuse a
+                legitimately-invited agent of having no access. */}
+            {processPermsLoaded && !currentProcess && (
+              <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-8 shadow-xl backdrop-blur-md">
+                <div className="max-w-2xl space-y-3">
+                  <h2 className="text-lg font-bold text-zinc-100">No calling process assigned</h2>
+                  <p className="text-[13px] text-zinc-400 leading-relaxed">
+                    This account hasn&apos;t been invited to any calling process yet, so there are no
+                    leads to work here. An admin can grant one from Admin &rarr; Permissions by
+                    ticking the relevant process under the Calling card.
+                  </p>
+                  <p className="text-[13px] text-zinc-500">
+                    Signed in as {googleUser?.email || 'an unknown account'}.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Everything below is RTO's own workspace - its tab bar, KPI cards, lead table
                 and disposition flow all read RTO's sheet columns and its disposition list.
                 A process that isn't built yet gets this panel instead of being pointed at a
                 UI that can't represent its data. */}
-            {!currentProcess.implemented && (
+            {currentProcess && !currentProcess.implemented && (
               <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-8 shadow-xl backdrop-blur-md">
                 <div className="max-w-2xl space-y-4">
                   <div className="flex items-center gap-3">
@@ -1812,7 +2037,7 @@ const localStorage = typeof window !== 'undefined'
               </div>
             )}
 
-            {currentProcess.implemented && (<>
+            {currentProcess && currentProcess.implemented && (<>
 
             {/* ══════════════════════════════════════════════════════════════════════
                🚀 PROMINENT DEDICATED WORKSPACE NAVIGATION BAR
@@ -2085,6 +2310,193 @@ const localStorage = typeof window !== 'undefined'
                  🛡️ ADMIN PANEL: TEAM ROSTER & BULK REASSIGNMENT CONTROL
                  ══════════════════════════════════════════════════════════════════════ */
               <div className="space-y-6 animate-fadeIn">
+
+                {/* ═══ CALLING HOURS ═══
+                    Per weekday, for the process selected in the header - a single open/close
+                    pair for the whole week couldn't express "Friday closes early" or "Sunday
+                    closed". Leaving both boxes of a day blank means closed. These are the same
+                    values scripts/assign_leads.py reads, so changing them here genuinely stops
+                    and starts automatic lead hand-out; it does NOT stop an agent recording a
+                    call they've already made. */}
+                {hoursDraft && currentProcess && (
+                  <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
+                    <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
+                      <div className="flex items-start gap-3">
+                        <span className="h-9 w-9 shrink-0 rounded-xl bg-emerald-950/60 border border-emerald-800/60 flex items-center justify-center text-emerald-300">🕒</span>
+                        <div>
+                          <h2 className="text-lg font-bold text-zinc-100">
+                            Calling Hours &mdash; {currentProcess.label.replace(/^Process:\s*/, '')}
+                          </h2>
+                          <p className="text-[13px] text-zinc-500">
+                            Automatic lead hand-out only runs inside these hours ({(hoursByProcess?.[activeProcess]?.timezone) || 'IST'}).
+                            Leave a day blank to close it. Agents can still record calls they&apos;ve already made at any time.
+                            {hoursByProcess?.[activeProcess]?.isDefault && (
+                              <span className="text-amber-400"> Currently using defaults &mdash; not yet set by an admin.</span>
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setHoursDraft(JSON.parse(JSON.stringify(hoursByProcess[activeProcess].week)))}
+                          disabled={hoursSaving}
+                          className="h-8 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[13px] font-semibold transition-colors disabled:opacity-40"
+                        >
+                          Reset
+                        </button>
+                        <button
+                          onClick={saveBusinessHours}
+                          disabled={hoursSaving}
+                          className="h-8 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-50"
+                        >
+                          {hoursSaving ? 'Saving…' : 'Save hours'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {hoursError && (
+                      <p className="mt-3 text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2">
+                        {hoursError}
+                      </p>
+                    )}
+
+                    <div className="mt-4 space-y-1.5">
+                      {BUSINESS_HOUR_DAY_LABELS.map(([key, label]) => {
+                        const day = hoursDraft[key] || { open: '', close: '' };
+                        const closed = !day.open && !day.close;
+                        const setDay = (field, value) =>
+                          setHoursDraft(p => ({ ...p, [key]: { ...(p[key] || { open: '', close: '' }), [field]: value } }));
+                        return (
+                          <div key={key} className="flex items-center justify-between gap-3 rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-4 py-2.5">
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <span className="text-[13px] font-semibold text-zinc-200 w-24">{label}</span>
+                              {closed && <span className="text-[11px] font-bold uppercase tracking-wide text-zinc-500 bg-zinc-800/80 border border-zinc-700/60 rounded-md px-2 py-0.5">Closed</span>}
+                            </div>
+                            <div className="flex items-center gap-3 shrink-0">
+                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
+                                Open:
+                                <input
+                                  type="time"
+                                  value={day.open || ''}
+                                  onChange={e => setDay('open', e.target.value)}
+                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                                />
+                              </label>
+                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
+                                Close:
+                                <input
+                                  type="time"
+                                  value={day.close || ''}
+                                  onChange={e => setDay('close', e.target.value)}
+                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                                />
+                              </label>
+                              <button
+                                onClick={() => setHoursDraft(p => ({ ...p, [key]: { open: '', close: '' } }))}
+                                title="Close this day"
+                                className="h-7 px-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[11px] font-semibold transition-colors"
+                              >
+                                Clear
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* ═══ PER-PROCESS ROSTER ═══
+                    Who is invited to the process selected in the header, and their availability
+                    and capacity FOR THAT PROCESS. The processes are independent, so an agent can
+                    be Online on RTO with 20 leads and Offline on NDR at the same time.
+                    These are the rows scripts/assign_leads.py reads, so they decide who actually
+                    receives leads - unlike the legacy roster below, which is browser-held.
+                    Membership itself comes from the invitation (Admin → Permissions), not from
+                    here, so an agent can't be added to a process by this card. */}
+                {currentProcess && (
+                  <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
+                    <div className="flex items-start gap-3 mb-4">
+                      <span className="h-9 w-9 shrink-0 rounded-xl bg-indigo-950/60 border border-indigo-800/60 flex items-center justify-center text-indigo-300">👥</span>
+                      <div className="min-w-0">
+                        <h2 className="text-lg font-bold text-zinc-100">
+                          {currentProcess.label.replace(/^Process:\s*/, '')} &mdash; Roster &amp; Capacity
+                        </h2>
+                        <p className="text-[13px] text-zinc-500">
+                          Availability and lead capacity for <b className="text-zinc-400">this process only</b>.
+                          Agents appear here once they&apos;ve been invited to it under Admin &rarr; Permissions.
+                          An agent still has to be at their desk (heartbeat) to receive leads.
+                        </p>
+                      </div>
+                    </div>
+
+                    {processAgentsError && (
+                      <p className="text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2 mb-3">
+                        {processAgentsError}
+                      </p>
+                    )}
+
+                    {processAgents === null && !processAgentsError && (
+                      <p className="text-[13px] text-zinc-500">Loading roster…</p>
+                    )}
+
+                    {processAgents !== null && processAgents.length === 0 && (
+                      <p className="text-[13px] text-zinc-500">
+                        Nobody has been invited to this process yet.
+                      </p>
+                    )}
+
+                    {processAgents !== null && processAgents.length > 0 && (
+                      <div className="space-y-1.5">
+                        {processAgents.map(a => (
+                          <div key={a.email} className="flex items-center justify-between gap-3 rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-4 py-2.5">
+                            <div className="min-w-0">
+                              <div className="text-[13px] font-semibold text-zinc-200 truncate flex items-center gap-2">
+                                {a.name}
+                                {a.isAdmin && <span className="text-[10px] font-bold uppercase tracking-wide text-indigo-300 bg-indigo-950/70 border border-indigo-800/60 rounded px-1.5 py-0.5">Admin</span>}
+                              </div>
+                              <div className="text-[11px] font-mono text-zinc-500 truncate">{a.email}</div>
+                            </div>
+                            <div className="flex items-center gap-3 shrink-0">
+                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
+                                Status:
+                                <select
+                                  value={a.status}
+                                  disabled={savingAgentEmail === a.email}
+                                  onChange={e => saveProcessAgent(a.email, { status: e.target.value })}
+                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 disabled:opacity-40"
+                                >
+                                  <option value="Online">Online</option>
+                                  <option value="Busy">On Break</option>
+                                  <option value="Offline">Offline</option>
+                                </select>
+                              </label>
+                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
+                                Quota:
+                                <input
+                                  type="number"
+                                  min="0"
+                                  // Blank means "unset" -> the process default, NOT zero.
+                                  placeholder={String(leadAssignmentRules.assignmentQuota)}
+                                  defaultValue={a.maxQuota ?? ''}
+                                  disabled={savingAgentEmail === a.email}
+                                  onBlur={e => {
+                                    const v = e.target.value.trim();
+                                    if (v === String(a.maxQuota ?? '')) return;   // unchanged
+                                    saveProcessAgent(a.email, { maxQuota: v === '' ? null : v });
+                                  }}
+                                  className="w-20 bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50 disabled:opacity-40"
+                                />
+                              </label>
+                              <span className={`h-2 w-2 rounded-full shrink-0 ${a.status === 'Online' ? 'bg-emerald-400' : a.status === 'Busy' ? 'bg-amber-400' : 'bg-zinc-600'}`} />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {(() => {
                   const agentMetrics = effectiveAgentRoster.map(ag => {
                     const email = ag.email.toLowerCase();

@@ -1,7 +1,9 @@
 // Consolidated auth routes (login/logout/callback/me/presence) into one dynamic-route
 // file to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells
 // us which logical route was hit; URLs are unchanged.
-const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getRecentLeadAssignments, recordLeadDisposition } = require('../_lib/db');
+const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getRecentLeadAssignments, recordLeadDisposition,
+  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent } = require('../_lib/db');
+const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
 
 const PRESENCE_STATUSES = new Set(['Online', 'Busy', 'Offline']);
@@ -317,7 +319,63 @@ async function handleRecordDisposition(req, res) {
   res.status(200).json({ ok: true });
 }
 
-const HANDLERS = { login: handleLogin, logout: handleLogout, me: handleMe, callback: handleCallback, presence: handlePresence, recentAssignments: handleRecentAssignments, recordDisposition: handleRecordDisposition };
+// An agent's OWN availability for ONE calling process. The processes are independent, so
+// "Online" is not a single global fact about a person - they can be taking RTO calls and not
+// NDR ones. The global /presence route above still records "at their desk" (heartbeat);
+// this records "available for this process", and scripts/assign_leads.py requires BOTH.
+//
+// Self-only by construction: the email comes from the caller's session, never the body, so an
+// agent cannot set anyone else's availability. Admins change other people's rows through
+// /api/admin/calling-agents instead, which is gated on isAdmin.
+async function handleProcessPresence(req, res) {
+  const session = await getSession(req);
+  if (!session || !session.email) {
+    res.status(401).json({ error: 'Not signed in' });
+    return;
+  }
+  const known = CALLING_PROCESSES.processes.map((p) => p.key);
+
+  if (req.method === 'GET') {
+    const processKey = (req.query && req.query.process) || '';
+    if (!known.includes(processKey)) {
+      res.status(400).json({ error: `process must be one of: ${known.join(', ')}` });
+      return;
+    }
+    // Only ever the caller's own row - an agent has no business reading the roster.
+    const mine = (await getCallingProcessAgents(processKey))
+      .find((a) => a.email.toLowerCase() === session.email.toLowerCase());
+    res.status(200).json({
+      statuses: CALLING_STATUSES,
+      status: (mine && mine.status) || 'Offline',
+      maxQuota: (mine && mine.maxQuota) ?? null,
+    });
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  let body = req.body;
+  if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = {}; } }
+  body = body || {};
+  if (!known.includes(body.processKey)) {
+    res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
+    return;
+  }
+  try {
+    // maxQuota is deliberately NOT accepted here - capacity is an admin decision, so an agent
+    // can change their availability without being able to raise their own lead cap.
+    await setCallingProcessAgent(body.processKey, session.email, { status: body.status }, session.email);
+  } catch (e) {
+    res.status(400).json({ error: e.message || 'Could not update availability' });
+    return;
+  }
+  res.status(200).json({ ok: true, processKey: body.processKey, status: body.status });
+}
+
+const HANDLERS = { login: handleLogin, logout: handleLogout, me: handleMe, callback: handleCallback, presence: handlePresence, recentAssignments: handleRecentAssignments, recordDisposition: handleRecordDisposition, processPresence: handleProcessPresence };
 
 module.exports = async (req, res) => {
   const action = req.query && req.query.action;

@@ -28,13 +28,16 @@ earlier version trimmed over-quota agents' oldest excess back to unassigned;
 that silently cleared a manually-assigned lead and was removed for exactly
 that reason - only touch what is genuinely blank.
 """
+import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+REPO_ROOT = Path(__file__).resolve().parent.parent
 import lib
 from lead_priority import (
     COL_AGENT, COL_ATTEMPT, COL_AWB_CODE, COL_CONNECTED, COL_DISPOSITION,
@@ -50,15 +53,32 @@ SHEET_TAB = "Data"
 STALE_MINUTES = 10  # must match the CRM's own heartbeat cadence assumptions
 
 
-def fetch_online_agents():
-    """Emails (lowercased) currently 'Online' in Postgres's agent_presence table,
-    heartbeat-fresh within STALE_MINUTES. Returns [] (not an error) if
-    POSTGRES_URL isn't configured, so a missing secret fails safe (no
-    assignment) rather than crashing the whole run."""
+def fetch_online_agents(process_key=None):
+    """(emails, quotas) of the agents eligible for this process's leads right now.
+
+    Two things have to be true, and they answer different questions:
+
+      * agent_presence  - "are they actually at their desk?" One row per agent, refreshed by
+        the CRM's heartbeat, so staleness is meaningful here.
+      * calling_agent_process - "are they available for THIS process, and for how many leads?"
+        One row per (agent, process). It has no heartbeat, so on its own it would keep somebody
+        Online forever after an admin set it once.
+
+    So eligibility is the INTERSECTION: marked Online for the process AND heartbeat-fresh.
+    A process with no per-process rows at all falls back to the global agent_presence status,
+    which is exactly the behaviour before processes existed - so RTO keeps working unchanged
+    until someone actually sets per-process availability.
+
+    quotas is {email: max_quota} for whatever has been set per process; agents absent from it
+    fall back to DEFAULT_QUOTA in build_assignment_queue.
+
+    Returns ([], {}) (not an error) if POSTGRES_URL isn't configured, so a missing secret fails
+    safe - no assignment - rather than crashing the whole run.
+    """
     conn_str = os.environ.get("POSTGRES_URL")
     if not conn_str:
         print("POSTGRES_URL not configured - cannot determine online agents.")
-        return []
+        return [], {}
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -69,7 +89,34 @@ def fetch_online_agents():
                 """,
                 (STALE_MINUTES,),
             )
-            return [row[0].lower() for row in cur.fetchall()]
+            present = [row[0].lower() for row in cur.fetchall()]
+
+            if not process_key:
+                return present, {}
+
+            try:
+                cur.execute(
+                    "SELECT email, status, max_quota FROM calling_agent_process WHERE process_key = %s",
+                    (process_key,),
+                )
+                per_process = cur.fetchall()
+            except Exception as e:
+                # Table not created yet (no admin has opened the panel) - fall back rather than
+                # refuse to assign, which would stop the queue over a missing config table.
+                print(f"  (calling_agent_process unavailable: {e} - using global presence)")
+                return present, {}
+
+    if not per_process:
+        print(f"  no per-process availability set for '{process_key}' - using global presence")
+        return present, {}
+
+    online_for_process = {e.lower() for e, status, _ in per_process if status == "Online"}
+    quotas = {e.lower(): q for e, _, q in per_process if q is not None}
+    eligible = sorted(online_for_process & set(present))
+    if online_for_process and not eligible:
+        print(f"  {len(online_for_process)} agent(s) marked Online for '{process_key}', but none are "
+              f"heartbeat-fresh (within {STALE_MINUTES}m) - nobody is actually at their desk.")
+    return eligible, quotas
 
 
 def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row):
@@ -123,9 +170,95 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
         conn.commit()
 
 
+PROCESS_KEY = "rto"  # this script assigns the RTO process's leads; see callingProcesses.json
+
+
+DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def _default_week(process_key):
+    """Fallback week from api/_lib/callingProcesses.json, used for any day an admin has never
+    saved. That file supplies DEFAULTS only - calling_business_hours in Postgres is the source
+    of truth once an admin edits the hours from the CRM's admin panel."""
+    path = REPO_ROOT / "api" / "_lib" / "callingProcesses.json"
+    with open(path, "r", encoding="utf-8") as f:
+        proc = next((p for p in json.load(f)["processes"] if p["key"] == process_key), None)
+    bh = (proc or {}).get("businessHours") or {}
+    days = [d.lower() for d in bh.get("days", [])]
+    return {d: ((bh.get("start"), bh.get("end")) if d in days else (None, None)) for d in DAY_KEYS}
+
+
+def _saved_week(process_key):
+    """This process's week as saved by an admin: {day: (open, close)}. Days with no row are
+    absent, and a row with either time NULL/'' means explicitly CLOSED that day. Returns {} if
+    the table isn't reachable/doesn't exist yet, so a fresh environment still runs on defaults
+    rather than refusing to assign anything."""
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
+    if not dsn:
+        return {}
+    try:
+        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT day, open_time, close_time FROM calling_business_hours WHERE process_key = %s",
+                (process_key,),
+            )
+            return {d: (o or None, c or None) for d, o, c in cur.fetchall()}
+    except Exception as e:
+        print(f"  (could not read calling_business_hours: {e} - falling back to defaults)")
+        return {}
+
+
+def within_business_hours(process_key=PROCESS_KEY, now_utc=None):
+    """(allowed: bool, explanation: str) for a process's own business-hours window.
+
+    Hours are per process AND per weekday, so Friday can close early and Sunday can be closed
+    entirely. Admin-set values come from the calling_business_hours table (edited in the CRM's
+    admin panel via /api/admin/business-hours); any day never saved falls back to
+    callingProcesses.json's defaults.
+
+    Times are IST wall-clock. Computed as a fixed UTC+5:30 offset (the convention used
+    throughout this repo) rather than via zoneinfo: IST has no DST, and zoneinfo needs the
+    tzdata package on Windows, which would make this script fail locally for no benefit.
+
+    Gates AUTO-ASSIGNMENT ONLY, deliberately. An agent can still open, claim and dispose leads
+    they already hold outside these hours - a call that already happened has to be recordable.
+    """
+    week = _default_week(process_key)
+    week.update(_saved_week(process_key))
+
+    now = (now_utc or datetime.now(timezone.utc)) + timedelta(hours=5, minutes=30)
+    day = DAY_KEYS[now.weekday()]
+    open_t, close_t = week.get(day, (None, None))
+    if not open_t or not close_t:
+        return False, f"{day} is closed (now {now:%a %H:%M} IST)"
+
+    try:
+        start_h, start_m = (int(x) for x in str(open_t).split(":"))
+        end_h, end_m = (int(x) for x in str(close_t).split(":"))
+    except (ValueError, AttributeError):
+        # Refusing to assign on an unparseable window would silently halt the queue, so this
+        # errs the other way and says so loudly instead.
+        return True, f"could not parse {day} window {open_t!r}-{close_t!r} - not gating"
+
+    window = f"{open_t}-{close_t} IST"
+    minutes = now.hour * 60 + now.minute
+    # `close` exclusive, so an 18:30 close stops assigning at 18:30 rather than 18:31.
+    if not (start_h * 60 + start_m <= minutes < end_h * 60 + end_m):
+        return False, f"{now:%H:%M} IST is outside {day} {window}"
+    return True, f"{now:%a %H:%M} IST is within {window}"
+
+
 def main():
-    print("Fetching online agents from Postgres...")
-    online_agents = fetch_online_agents()
+    allowed, why = within_business_hours()
+    print(f"Business hours ({PROCESS_KEY}): {why}")
+    if not allowed:
+        # Not an error: this job runs every 5 minutes around the clock, so most of its runs
+        # legitimately fall outside the window. Exiting 0 keeps the workflow green.
+        print("Outside business hours - not assigning any leads. Exiting.")
+        return
+
+    print(f"Fetching agents available for '{PROCESS_KEY}' from Postgres...")
+    online_agents, agent_quotas = fetch_online_agents(PROCESS_KEY)
     if not online_agents:
         print("No agents currently online - nothing to assign. Exiting.")
         return
@@ -187,7 +320,10 @@ def main():
         print("No unassigned pending leads found - nothing to assign.")
         return
 
-    assignments = build_assignment_queue(unassigned_pending, online_agents, current_load, quota=DEFAULT_QUOTA)
+    # Per-agent quotas where set for this process (calling_agent_process.max_quota); anyone
+    # without one falls back to DEFAULT_QUOTA inside build_assignment_queue.
+    assignments = build_assignment_queue(unassigned_pending, online_agents, current_load,
+                                         quota=agent_quotas or DEFAULT_QUOTA)
 
     if not assignments:
         print(f"{len(unassigned_pending)} unassigned lead(s) found, but every eligible agent is already at quota ({DEFAULT_QUOTA}). Nothing to assign.")

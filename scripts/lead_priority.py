@@ -166,6 +166,11 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     online_agents: list of agent emails eligible to receive leads this round.
     current_load: {email: int} - pending leads that agent already holds; only
     caps how many more they can receive, never reduced/reassigned here.
+    quota: an int applied to everyone, OR {email: int} for per-agent capacity - the
+    processes each keep their own quota per agent (calling_agent_process.max_quota), so a
+    single number can't express "20 leads on RTO, 5 on NDR". An agent missing from the dict
+    falls back to DEFAULT_QUOTA rather than to zero: a missing quota means "unset", and
+    treating it as no capacity would silently make that agent ineligible for every lead.
 
     Returns {row_index: agent_email}.
     """
@@ -182,7 +187,13 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
 
     sorted_pool = sorted(unassigned_pending, key=lambda t: (t[3], -_date_seconds(t[1])))
 
-    needed = {email: max(0, quota - current_load.get(email, 0)) for email in online_agents}
+    def _quota_for(email):
+        if isinstance(quota, dict):
+            q = quota.get(email)
+            return DEFAULT_QUOTA if q is None else q
+        return quota
+
+    needed = {email: max(0, _quota_for(email) - current_load.get(email, 0)) for email in online_agents}
     assignments = {}
     queue_pos = 0
     agent_cycle = [e for e in online_agents if needed[e] > 0]
