@@ -497,6 +497,18 @@ you change for one affects another.
 > theirs to set — they know if they've stepped away. Capacity is a management decision, so the
 > save route simply refuses a quota sent by an agent.
 
+**One Team Roster table, every process, in the same order.** Whether the process already has a
+working lead list (RTO) or not (NDR, Detractor, Product KYC), the Admin Panel shows the *same*
+Team Roster table — Agent, Role, Status, Assigned, Disposed, Connect %, Quota, Process admin,
+Actions — with that process's Calling Hours card rendered directly below it. There used to be
+two different roster views (a simple one for unbuilt processes, the full table for RTO); they
+were merged into one so a process's people are always managed in the same place, the same way.
+
+> Assigned / Disposed / Connect % are derived from ticket data, and RTO's Google Sheet is
+> currently the only per-process ticket source that exists — so those three columns read 0 for
+> NDR, Detractor and Product KYC until each gets its own data source. That's expected, not a
+> bug: it's not borrowing RTO's numbers under a different process's name.
+
 ### A blank cap doesn't mean zero
 
 If nobody has set an agent's cap for a process, the field is empty and they get the **process

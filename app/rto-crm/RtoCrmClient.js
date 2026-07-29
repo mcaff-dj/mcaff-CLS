@@ -1967,126 +1967,230 @@ const localStorage = typeof window !== 'undefined'
       // Available for EVERY process, built or not: a process's roster and hours are exactly
       // what you set up before its lead workspace exists, so gating them on `implemented`
       // (as the rest of the workspace is) left an unbuilt process with no way to be configured.
-      // Hours only. The per-process roster card that used to live here duplicated the Team
-      // Roster table below, which already lists everyone and whose Status/Quota controls now
-      // write the same per-process rows - so for a BUILT process there is one table, not two.
-      // Simple roster, used ONLY for a process with no lead workspace yet - there the Team
-      // Roster table can't be shown (its metrics are computed from tickets that don't exist),
-      // but the process still needs its people managed.
-      const renderProcessRosterCard = () => (
-        <>
-                {/* ═══ PER-PROCESS ROSTER ═══
-                    Who is invited to the process selected in the header, and their availability
-                    and capacity FOR THAT PROCESS. The processes are independent, so an agent can
-                    be Online on RTO with 20 leads and Offline on NDR at the same time.
-                    These are the rows scripts/assign_leads.py reads, so they decide who actually
-                    receives leads - unlike the legacy roster below, which is browser-held.
-                    Membership itself comes from the invitation (Admin → Permissions), not from
-                    here, so an agent can't be added to a process by this card. */}
-                {currentProcess && (
-                  <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
-                    <div className="flex items-start gap-3 mb-4">
-                      <span className="h-9 w-9 shrink-0 rounded-xl bg-indigo-950/60 border border-indigo-800/60 flex items-center justify-center text-indigo-300">👥</span>
-                      <div className="min-w-0">
-                        <h2 className="text-lg font-bold text-zinc-100">
-                          {currentProcess.label.replace(/^Process:\s*/, '')} &mdash; Roster &amp; Capacity
-                        </h2>
-                        <p className="text-[13px] text-zinc-500">
-                          Availability and lead capacity for <b className="text-zinc-400">this process only</b>.
-                          Agents appear here once they&apos;ve been invited to it under Admin &rarr; Permissions.
-                          An agent still has to be at their desk (heartbeat) to receive leads.
-                        </p>
-                      </div>
-                    </div>
+      // One Team Roster table for every process, built or not - status/quota/process-admin
+      // per invited agent read the same per-process rows regardless of whether the process
+      // has a lead workspace yet, so there's no reason for an unbuilt process to get a
+      // different, simpler card. Assigned/Disposed/Connect% are ticket-derived, and there is
+      // no per-process ticket source yet beyond RTO's sheet, so those columns read 0 for an
+      // unbuilt process rather than showing another process's numbers under its name.
+      const renderTeamRosterTable = () => {
+        const agentMetrics = effectiveAgentRoster.map(ag => {
+          const email = ag.email.toLowerCase();
+          const prefix = email.split('@')[0];
+          const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(prefix));
 
-                    {processAgentsError && (
-                      <p className="text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2 mb-3">
-                        {processAgentsError}
-                      </p>
-                    )}
+          const assigned = allTickets.filter(t => isMine(t.assignedAgent));
+          const disposed = assigned.filter(t => t.disposition || t.agentRemarks || t.status !== 'Pending');
+          const connected = disposed.filter(t => t.connected === 'Yes');
 
-                    {processAgents === null && !processAgentsError && (
-                      <p className="text-[13px] text-zinc-500">Loading roster…</p>
-                    )}
+          return {
+            ...ag,
+            assigned: assigned.length,
+            disposed: disposed.length,
+            connectRate: disposed.length > 0 ? Math.round((connected.length / disposed.length) * 100) : 0,
+          };
+        });
 
-                    {processAgents !== null && processAgents.length === 0 && (
-                      <p className="text-[13px] text-zinc-500">
-                        Nobody has been invited to this process yet.
-                      </p>
-                    )}
+        return (
+          <>
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div>
+                <h2 className="text-lg font-bold text-zinc-100">Team Roster & Bulk Lead Reassignment Control</h2>
+                <p className="text-[13px] text-zinc-500 mt-0.5">Manage agent roles, lead capacity limits, reassign active agent boxes, or wipe Column Q in Google Sheet.</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <CustomSelect
+                  value={rosterStatusFilter}
+                  onChange={setRosterStatusFilter}
+                  options={rosterStatusOptions}
+                  placeholder="Filter by status"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!window.confirm(`Mark all ${agentMetrics.length} agents Offline? This updates each agent's live status on the server.`)) return;
+                    agentMetrics.forEach(a => setAgentStatusManually(a.email, 'Offline'));
+                    showToast('⚪ All agents marked Offline');
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
+                  title="Set every agent's status to Offline (syncs to the server for each row)"
+                >
+                  ⚪ Mark All Offline
+                </button>
+              </div>
+            </div>
 
-                    {processAgents !== null && processAgents.length > 0 && (
-                      <div className="space-y-1.5">
-                        {processAgents.map(a => (
-                          <div key={a.email} className="flex items-center justify-between gap-3 rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-4 py-2.5">
-                            <div className="min-w-0">
-                              <div className="text-[13px] font-semibold text-zinc-200 truncate flex items-center gap-2">
-                                {a.name}
-                                {/* Two different badges on purpose: "Admin" is company-wide
-                                    (users.is_admin), "Process admin" runs only this process. */}
-                                {a.isAdmin && <span className="text-[10px] font-bold uppercase tracking-wide text-indigo-300 bg-indigo-950/70 border border-indigo-800/60 rounded px-1.5 py-0.5">Admin</span>}
-                                {!a.isAdmin && a.isProcessAdmin && <span className="text-[10px] font-bold uppercase tracking-wide text-emerald-300 bg-emerald-950/70 border border-emerald-800/60 rounded px-1.5 py-0.5">Process admin</span>}
-                              </div>
-                              <div className="text-[11px] font-mono text-zinc-500 truncate">{a.email}</div>
+            {/* Add a new agent to the roster before they've ever logged in or been
+                assigned a lead - see addAgentToRoster's comment for why this exists. */}
+            <div className="flex items-center gap-2 bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-3">
+              <input
+                type="email"
+                value={newAgentEmail}
+                onChange={(e) => setNewAgentEmail(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    addAgentToRoster(newAgentEmail, newAgentRole);
+                    setNewAgentEmail('');
+                  }
+                }}
+                placeholder="new.agent@mcaffeine.com"
+                className="flex-1 min-w-0 px-3 py-1.5 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-100 text-[12px] placeholder-zinc-500 focus:outline-none focus:border-indigo-600"
+              />
+              <CustomSelect
+                value={newAgentRole}
+                onChange={setNewAgentRole}
+                options={[
+                  { value: 'Agent', label: 'Agent' },
+                  { value: 'Team Lead', label: 'Team Lead' },
+                  { value: 'Admin', label: 'Admin' }
+                ]}
+              />
+              <button
+                type="button"
+                onClick={() => { addAgentToRoster(newAgentEmail, newAgentRole); setNewAgentEmail(''); }}
+                className="px-3 py-1.5 rounded-xl bg-indigo-700 hover:bg-indigo-600 text-white text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
+              >
+                ➕ Add Agent
+              </button>
+            </div>
+
+            {/* Agent Roster & Reassignment Table */}
+            <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 overflow-hidden">
+              <table className="w-full text-[13px]">
+                <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
+                  <th className="py-3 px-4 text-left font-medium">Agent</th>
+                  <th className="py-3 px-4 text-left font-medium">Role</th>
+                  <th className="py-3 px-4 text-left font-medium">Status</th>
+                  <th className="py-3 px-4 text-center font-medium">Assigned</th>
+                  <th className="py-3 px-4 text-center font-medium">Disposed</th>
+                  <th className="py-3 px-4 text-center font-medium">Connect %</th>
+                  <th className="py-3 px-4 text-left font-medium">Quota</th>
+                  {/* Runs THIS process (roster + its calling hours) without being a
+                      company-wide admin. Only a full admin can set it - the API
+                      refuses it from a process admin, so it is read-only for them. */}
+                  <th className="py-3 px-4 text-center font-medium" title="Can manage this process's roster and calling hours - nothing else">Process admin</th>
+                  <th className="py-3 px-4 text-right font-medium">Actions</th>
+                </tr></thead>
+                <tbody className="divide-y divide-zinc-800/50">
+                  {agentMetrics
+                    .filter(a => rosterStatusFilter === 'All' || a.status === rosterStatusFilter)
+                    .map(a => (
+                    <tr key={a.email} className="hover:bg-zinc-800/30 transition-colors">
+                      <td className="py-3 px-4">
+                        <div className="flex items-center gap-2.5">
+                          <div className="relative">
+                            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-600 to-violet-700 flex items-center justify-center text-white font-bold text-[11px] shadow">
+                              {a.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
                             </div>
-                            <div className="flex items-center gap-3 shrink-0">
-                              {/* Only a company-wide admin may grant/revoke this - the API
-                                  refuses it from a process admin, so showing the control to one
-                                  would just produce a 403. Hidden for accounts that are already
-                                  full admins, where it would be redundant. */}
-                              {sessionIsAdmin && !a.isAdmin && (
-                                <label className="flex items-center gap-1.5 text-[12px] text-zinc-500 cursor-pointer" title="Can manage this process's roster and calling hours - nothing else">
-                                  <input
-                                    type="checkbox"
-                                    checked={!!a.isProcessAdmin}
-                                    disabled={savingAgentEmail === a.email}
-                                    onChange={e => saveProcessAgent(a.email, { isProcessAdmin: e.target.checked })}
-                                    className="accent-emerald-500"
-                                  />
-                                  Process admin
-                                </label>
-                              )}
-                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
-                                Status:
-                                <select
-                                  value={a.status}
-                                  disabled={savingAgentEmail === a.email}
-                                  onChange={e => saveProcessAgent(a.email, { status: e.target.value })}
-                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 disabled:opacity-40"
-                                >
-                                  <option value="Online">Online</option>
-                                  <option value="Busy">On Break</option>
-                                  <option value="Offline">Offline</option>
-                                </select>
-                              </label>
-                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
-                                Quota:
-                                <input
-                                  type="number"
-                                  min="0"
-                                  // Blank means "unset" -> the process default, NOT zero.
-                                  placeholder={String(leadAssignmentRules.assignmentQuota)}
-                                  defaultValue={a.maxQuota ?? ''}
-                                  disabled={savingAgentEmail === a.email}
-                                  onBlur={e => {
-                                    const v = e.target.value.trim();
-                                    if (v === String(a.maxQuota ?? '')) return;   // unchanged
-                                    saveProcessAgent(a.email, { maxQuota: v === '' ? null : v });
-                                  }}
-                                  className="w-20 bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50 disabled:opacity-40"
-                                />
-                              </label>
-                              <span className={`h-2 w-2 rounded-full shrink-0 ${a.status === 'Online' ? 'bg-emerald-400' : a.status === 'Busy' ? 'bg-amber-400' : 'bg-zinc-600'}`} />
-                            </div>
+                            <span className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-zinc-900 ${a.status === 'Online' ? 'bg-emerald-500' : a.status === 'Busy' ? 'bg-amber-400' : 'bg-zinc-500'}`}></span>
                           </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-        </>
-      );
+                          <div>
+                            <p className="font-semibold text-zinc-100">{a.name}</p>
+                            <p className="text-zinc-500 text-[11px] font-mono">{a.email}</p>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-3 px-4">
+                        {/* STILL LOCAL-ONLY, unlike Status and Quota beside it. It
+                            changes what this browser shows, and grants nothing: real
+                            authority comes from users.is_admin plus the per-card
+                            permission rows. That table has no way to express
+                            "Team Lead" (only the is_admin flag), so making this
+                            authoritative needs a `role` column and a decision about
+                            what a Team Lead may do - a permissions change that belongs
+                            with the invite flow, not this roster. Left as a view
+                            setting until then; the toast says so. */}
+                        <CustomSelect
+                          value={a.role}
+                          onChange={(newRole) => {
+                            setAgentRoster(p => { const u = p.map(x => x.email === a.email ? { ...x, role: newRole } : x); localStorage.setItem('rto_agent_roster', JSON.stringify(u)); return u; });
+                            showToast(`Role set to ${newRole} for ${a.name} (this view only - grants no access)`);
+                          }}
+                          options={[
+                            { value: 'Agent', label: 'Agent' },
+                            { value: 'Team Lead', label: 'Team Lead' },
+                            { value: 'Admin', label: 'Admin' }
+                          ]}
+                        />
+                      </td>
+                      <td className="py-3 px-4">
+                        <CustomSelect
+                          value={a.status}
+                          onChange={(newStatus) => setAgentStatusManually(a.email, newStatus)}
+                          options={statusOptions}
+                        />
+                      </td>
+                      <td className="py-3 px-4 text-center font-bold text-zinc-100 tabular-nums">{a.assigned}</td>
+                      <td className="py-3 px-4 text-center font-bold text-indigo-400 tabular-nums">{a.disposed}</td>
+                      <td className="py-3 px-4 text-center font-bold text-emerald-400 tabular-nums">{a.connectRate}%</td>
+                      <td className="py-3 px-4">
+                        {/* Writes the PER-PROCESS quota server-side (the same row
+                            assign_leads.py reads), not localStorage as it used to -
+                            an admin setting a cap here previously changed nothing
+                            about how many leads that agent actually received.
+                            '' = unset, meaning the process default rather than 0. */}
+                        <CustomSelect
+                          value={a.maxQuota ?? ''}
+                          onChange={(val) => saveProcessAgent(a.email, { maxQuota: val === '' ? null : +val })}
+                          options={[
+                            { value: '', label: `Default (${leadAssignmentRules.assignmentQuota})` },
+                            { value: 5, label: '5 leads' },
+                            { value: 10, label: '10 leads' },
+                            { value: 15, label: '15 leads' },
+                            { value: 20, label: '20 leads' },
+                            { value: 30, label: '30 leads' }
+                          ]}
+                        />
+                      </td>
+                      <td className="py-3 px-4 text-center">
+                        {a.isAdmin ? (
+                          <span className="text-[11px] text-zinc-500" title="Company-wide admin - already administers every process">all</span>
+                        ) : (
+                          <input
+                            type="checkbox"
+                            checked={!!a.isProcessAdmin}
+                            disabled={!sessionIsAdmin || savingAgentEmail === a.email}
+                            onChange={e => saveProcessAgent(a.email, { isProcessAdmin: e.target.checked })}
+                            className="accent-emerald-500"
+                            title={sessionIsAdmin ? 'Let this person manage this process' : 'Only a full admin can change this'}
+                          />
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <CustomSelect
+                            value="REASSIGN"
+                            onChange={(targetAgentEmail) => {
+                              if (targetAgentEmail !== 'REASSIGN') {
+                                adminBulkAction(a.email, targetAgentEmail);
+                              }
+                            }}
+                            options={[
+                              { value: 'REASSIGN', label: '🔄 Reassign…' },
+                              ...effectiveAgentRoster.filter(target => target.email !== a.email).map(target => ({
+                                value: target.email,
+                                label: `➡️ ${target.name}`
+                              }))
+                            ]}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => removeAgentFromRoster(a.email, a.name)}
+                            className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-red-950/60 text-zinc-400 hover:text-red-300 border border-zinc-700 hover:border-red-800/80 text-[11px] font-bold transition-all shadow-xs"
+                            title="If they're invited to this process, revokes that access (asks first). Blocked while they hold pending leads, or have historical leads under their name."
+                          >
+                            🗑️ Remove
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        );
+      };
 
       const renderCallingHoursCard = () => (
         <>
@@ -2382,7 +2486,7 @@ const localStorage = typeof window !== 'undefined'
                 stay hidden, since there is genuinely nothing behind them. */}
             {currentProcess && !currentProcess.implemented
               && (userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin)
-              && (<>{renderCallingHoursCard()}{renderProcessRosterCard()}</>)}
+              && (<>{renderTeamRosterTable()}{renderCallingHoursCard()}</>)}
 
             {currentProcess && currentProcess.implemented && (<>
 
@@ -2658,229 +2762,13 @@ const localStorage = typeof window !== 'undefined'
                  ══════════════════════════════════════════════════════════════════════ */
               <div className="space-y-6 animate-fadeIn">
 
+                {renderTeamRosterTable()}
+
                 {renderCallingHoursCard()}
 
                 {(() => {
-                  const agentMetrics = effectiveAgentRoster.map(ag => {
-                    const email = ag.email.toLowerCase();
-                    const prefix = email.split('@')[0];
-                    const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(prefix));
-
-                    const assigned = allTickets.filter(t => isMine(t.assignedAgent));
-                    const disposed = assigned.filter(t => t.disposition || t.agentRemarks || t.status !== 'Pending');
-                    const pending = assigned.filter(t => t.status === 'Pending' && !t.disposition && !t.agentRemarks);
-                    // Same fix as the Overview tab's connect-rate KPI: t.connected already comes
-                    // from allTickets' merge of the local override with the sheet's own synced
-                    // value, so read it directly instead of re-deriving from overrides[t.id] alone.
-                    const connected = disposed.filter(t => t.connected === 'Yes');
-
-                    return {
-                      ...ag,
-                      assigned: assigned.length,
-                      disposed: disposed.length,
-                      pending: pending.length,
-                      connectRate: disposed.length > 0 ? Math.round((connected.length / disposed.length) * 100) : 0,
-                    };
-                  });
-
                   return (
                     <>
-                      <div className="flex items-center justify-between flex-wrap gap-3">
-                        <div>
-                          <h2 className="text-lg font-bold text-zinc-100">Team Roster & Bulk Lead Reassignment Control</h2>
-                          <p className="text-[13px] text-zinc-500 mt-0.5">Manage agent roles, lead capacity limits, reassign active agent boxes, or wipe Column Q in Google Sheet.</p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <CustomSelect
-                            value={rosterStatusFilter}
-                            onChange={setRosterStatusFilter}
-                            options={rosterStatusOptions}
-                            placeholder="Filter by status"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (!window.confirm(`Mark all ${agentMetrics.length} agents Offline? This updates each agent's live status on the server.`)) return;
-                              agentMetrics.forEach(a => setAgentStatusManually(a.email, 'Offline'));
-                              showToast('⚪ All agents marked Offline');
-                            }}
-                            className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
-                            title="Set every agent's status to Offline (syncs to the server for each row)"
-                          >
-                            ⚪ Mark All Offline
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Add a new agent to the roster before they've ever logged in or been
-                          assigned a lead - see addAgentToRoster's comment for why this exists. */}
-                      <div className="flex items-center gap-2 bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-3">
-                        <input
-                          type="email"
-                          value={newAgentEmail}
-                          onChange={(e) => setNewAgentEmail(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              addAgentToRoster(newAgentEmail, newAgentRole);
-                              setNewAgentEmail('');
-                            }
-                          }}
-                          placeholder="new.agent@mcaffeine.com"
-                          className="flex-1 min-w-0 px-3 py-1.5 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-100 text-[12px] placeholder-zinc-500 focus:outline-none focus:border-indigo-600"
-                        />
-                        <CustomSelect
-                          value={newAgentRole}
-                          onChange={setNewAgentRole}
-                          options={[
-                            { value: 'Agent', label: 'Agent' },
-                            { value: 'Team Lead', label: 'Team Lead' },
-                            { value: 'Admin', label: 'Admin' }
-                          ]}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => { addAgentToRoster(newAgentEmail, newAgentRole); setNewAgentEmail(''); }}
-                          className="px-3 py-1.5 rounded-xl bg-indigo-700 hover:bg-indigo-600 text-white text-[12px] font-bold transition-all shadow-xs flex items-center gap-2"
-                        >
-                          ➕ Add Agent
-                        </button>
-                      </div>
-
-                      {/* Agent Roster & Reassignment Table */}
-                      <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 overflow-hidden">
-                        <table className="w-full text-[13px]">
-                          <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
-                            <th className="py-3 px-4 text-left font-medium">Agent</th>
-                            <th className="py-3 px-4 text-left font-medium">Role</th>
-                            <th className="py-3 px-4 text-left font-medium">Status</th>
-                            <th className="py-3 px-4 text-center font-medium">Assigned</th>
-                            <th className="py-3 px-4 text-center font-medium">Disposed</th>
-                            <th className="py-3 px-4 text-center font-medium">Connect %</th>
-                            <th className="py-3 px-4 text-left font-medium">Quota</th>
-                            {/* Runs THIS process (roster + its calling hours) without being a
-                                company-wide admin. Only a full admin can set it - the API
-                                refuses it from a process admin, so it is read-only for them. */}
-                            <th className="py-3 px-4 text-center font-medium" title="Can manage this process's roster and calling hours - nothing else">Process admin</th>
-                            <th className="py-3 px-4 text-right font-medium">Actions</th>
-                          </tr></thead>
-                          <tbody className="divide-y divide-zinc-800/50">
-                            {agentMetrics
-                              .filter(a => rosterStatusFilter === 'All' || a.status === rosterStatusFilter)
-                              .map(a => (
-                              <tr key={a.email} className="hover:bg-zinc-800/30 transition-colors">
-                                <td className="py-3 px-4">
-                                  <div className="flex items-center gap-2.5">
-                                    <div className="relative">
-                                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-600 to-violet-700 flex items-center justify-center text-white font-bold text-[11px] shadow">
-                                        {a.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
-                                      </div>
-                                      <span className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-zinc-900 ${a.status === 'Online' ? 'bg-emerald-500' : a.status === 'Busy' ? 'bg-amber-400' : 'bg-zinc-500'}`}></span>
-                                    </div>
-                                    <div>
-                                      <p className="font-semibold text-zinc-100">{a.name}</p>
-                                      <p className="text-zinc-500 text-[11px] font-mono">{a.email}</p>
-                                    </div>
-                                  </div>
-                                </td>
-                                <td className="py-3 px-4">
-                                  {/* STILL LOCAL-ONLY, unlike Status and Quota beside it. It
-                                      changes what this browser shows, and grants nothing: real
-                                      authority comes from users.is_admin plus the per-card
-                                      permission rows. That table has no way to express
-                                      "Team Lead" (only the is_admin flag), so making this
-                                      authoritative needs a `role` column and a decision about
-                                      what a Team Lead may do - a permissions change that belongs
-                                      with the invite flow, not this roster. Left as a view
-                                      setting until then; the toast says so. */}
-                                  <CustomSelect
-                                    value={a.role}
-                                    onChange={(newRole) => {
-                                      setAgentRoster(p => { const u = p.map(x => x.email === a.email ? { ...x, role: newRole } : x); localStorage.setItem('rto_agent_roster', JSON.stringify(u)); return u; });
-                                      showToast(`Role set to ${newRole} for ${a.name} (this view only - grants no access)`);
-                                    }}
-                                    options={[
-                                      { value: 'Agent', label: 'Agent' },
-                                      { value: 'Team Lead', label: 'Team Lead' },
-                                      { value: 'Admin', label: 'Admin' }
-                                    ]}
-                                  />
-                                </td>
-                                <td className="py-3 px-4">
-                                  <CustomSelect
-                                    value={a.status}
-                                    onChange={(newStatus) => setAgentStatusManually(a.email, newStatus)}
-                                    options={statusOptions}
-                                  />
-                                </td>
-                                <td className="py-3 px-4 text-center font-bold text-zinc-100 tabular-nums">{a.assigned}</td>
-                                <td className="py-3 px-4 text-center font-bold text-indigo-400 tabular-nums">{a.disposed}</td>
-                                <td className="py-3 px-4 text-center font-bold text-emerald-400 tabular-nums">{a.connectRate}%</td>
-                                <td className="py-3 px-4">
-                                  {/* Writes the PER-PROCESS quota server-side (the same row
-                                      assign_leads.py reads), not localStorage as it used to -
-                                      an admin setting a cap here previously changed nothing
-                                      about how many leads that agent actually received.
-                                      '' = unset, meaning the process default rather than 0. */}
-                                  <CustomSelect
-                                    value={a.maxQuota ?? ''}
-                                    onChange={(val) => saveProcessAgent(a.email, { maxQuota: val === '' ? null : +val })}
-                                    options={[
-                                      { value: '', label: `Default (${leadAssignmentRules.assignmentQuota})` },
-                                      { value: 5, label: '5 leads' },
-                                      { value: 10, label: '10 leads' },
-                                      { value: 15, label: '15 leads' },
-                                      { value: 20, label: '20 leads' },
-                                      { value: 30, label: '30 leads' }
-                                    ]}
-                                  />
-                                </td>
-                                <td className="py-3 px-4 text-center">
-                                  {a.isAdmin ? (
-                                    <span className="text-[11px] text-zinc-500" title="Company-wide admin - already administers every process">all</span>
-                                  ) : (
-                                    <input
-                                      type="checkbox"
-                                      checked={!!a.isProcessAdmin}
-                                      disabled={!sessionIsAdmin || savingAgentEmail === a.email}
-                                      onChange={e => saveProcessAgent(a.email, { isProcessAdmin: e.target.checked })}
-                                      className="accent-emerald-500"
-                                      title={sessionIsAdmin ? 'Let this person manage this process' : 'Only a full admin can change this'}
-                                    />
-                                  )}
-                                </td>
-                                <td className="py-3 px-4 text-right">
-                                  <div className="flex items-center justify-end gap-2">
-                                    <CustomSelect
-                                      value="REASSIGN"
-                                      onChange={(targetAgentEmail) => {
-                                        if (targetAgentEmail !== 'REASSIGN') {
-                                          adminBulkAction(a.email, targetAgentEmail);
-                                        }
-                                      }}
-                                      options={[
-                                        { value: 'REASSIGN', label: '🔄 Reassign…' },
-                                        ...effectiveAgentRoster.filter(target => target.email !== a.email).map(target => ({
-                                          value: target.email,
-                                          label: `➡️ ${target.name}`
-                                        }))
-                                      ]}
-                                    />
-                                    <button
-                                      type="button"
-                                      onClick={() => removeAgentFromRoster(a.email, a.name)}
-                                      className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-red-950/60 text-zinc-400 hover:text-red-300 border border-zinc-700 hover:border-red-800/80 text-[11px] font-bold transition-all shadow-xs"
-                                      title="If they're invited to this process, revokes that access (asks first). Blocked while they hold pending leads, or have historical leads under their name."
-                                    >
-                                      🗑️ Remove
-                                    </button>
-                                  </div>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-
                       {/* Central Audit Trail */}
                       <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
                         <div className="flex items-center justify-between">
