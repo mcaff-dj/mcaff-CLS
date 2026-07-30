@@ -1,5 +1,5 @@
 """Monthly NPS - Overall / NPS - Product data for the main report, sourced from the
-mcaff_dwh.nps_delivery / mcaff_dwh.nps_product MySQL tables instead of the old
+PEP_CLS.nps_delivery / PEP_CLS.nps_product MySQL tables instead of the old
 hand-maintained "MoM" / "*:PRODUCT NPS" Google Sheet tabs.
 
 Both tables were inspected directly (DESCRIBE + sample queries) before writing this, since
@@ -41,7 +41,7 @@ import calendar
 
 import mysql_lib
 
-DWH_DATABASE = "mcaff_dwh"
+DWH_DATABASE = "PEP_CLS"
 
 
 def _month_label(yr, mo):
