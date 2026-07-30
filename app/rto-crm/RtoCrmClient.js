@@ -3228,7 +3228,7 @@ const localStorage = typeof window !== 'undefined'
                             return(
                               <tr key={t.id} className="hover:bg-zinc-800/25 transition-colors">
                                 <td className="py-3 px-4"><span className="font-mono font-semibold text-zinc-200">{t.orderNumber}</span></td>
-                                <td className="py-3 px-4"><span className="text-zinc-200 font-medium">{t.customerName}</span><span className="block text-[12px] text-zinc-500 mt-0.5 truncate max-w-[160px]">{t.email||t.phone}</span></td>
+                                <td className="py-3 px-4"><span className="text-zinc-200 font-medium">{t.customerName}</span><span className="block text-[12px] text-zinc-500 mt-0.5 truncate max-w-[160px]">{t.phone||t.email}</span></td>
 
                                 {/* Column Q: Agent Name + Email ID */}
                                 <td className="py-3 px-4">
@@ -3303,7 +3303,7 @@ const localStorage = typeof window !== 'undefined'
                               <div className="min-w-0">
                                 <span className="font-mono font-semibold text-zinc-200 text-[13px]">{t.orderNumber}</span>
                                 <p className="text-zinc-200 font-medium text-[13px] mt-0.5 truncate">{t.customerName}</p>
-                                <p className="text-[12px] text-zinc-500 truncate">{t.email||t.phone}</p>
+                                <p className="text-[12px] text-zinc-500 truncate">{t.phone||t.email}</p>
                               </div>
                               <div className="flex flex-col items-end gap-1.5 shrink-0">
                                 <Badge color={t.paymentMethod==='COD'?'amber':'blue'}>{t.paymentMethod}</Badge>
