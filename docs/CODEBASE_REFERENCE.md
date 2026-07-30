@@ -406,6 +406,13 @@ Connected column reads "No" is eligible to go to a *different* agent, up to
   removed deliberately.
 - **The archiver deletes by the exact `order_id` list it just upserted**, never by
   re-running a date filter.
+- **`isProcessAdmin` is exempt from every "an Agent only sees their own leads" restriction**,
+  not just the Admin-tab redirect. `myScopeEmail`, `targetEmail`, `restrictToEmail`,
+  `visibleAgentMetrics`, and every "My X" vs "Team X" label all check
+  `userRole === 'Agent' && !isProcessAdmin` - a bare `userRole === 'Agent'` check anywhere in
+  this file is very likely a bug (it was, in 10 places, before this was fixed): someone running
+  one process without being a company-wide admin doesn't personally work leads, so the
+  Agent-only personal-scope view showed them nothing.
 
 ### Timings
 

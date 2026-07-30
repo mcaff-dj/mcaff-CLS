@@ -509,6 +509,14 @@ were merged into one so a process's people are always managed in the same place,
 > NDR, Detractor and Product KYC until each gets its own data source. That's expected, not a
 > bug: it's not borrowing RTO's numbers under a different process's name.
 
+**A process admin sees that process's whole team, not just their own leads.** Someone who runs
+one process without being a company-wide admin used to still get the personal "only my own
+leads" view every plain Agent gets — meaning their own Overview, All Leads, and Fresh Leads tabs
+showed nothing (they don't personally work leads), even though the Admin Panel &amp; Roster tab
+correctly showed everyone. Now every one of those "an Agent only sees their own" restrictions is
+waived for a process admin, the same way it already was for the Admin tab itself — they see the
+full team's leads and metrics for their process, exactly as a real Admin would.
+
 ### A blank cap doesn't mean zero
 
 If nobody has set an agent's cap for a process, the field is empty and they get the **process

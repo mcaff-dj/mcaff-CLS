@@ -209,11 +209,15 @@ async function ensurePgSchema() {
       PRIMARY KEY (email, process_key)
     )
   `;
-  // Admin OF ONE PROCESS: may manage that process's roster and calling hours, and nothing
-  // else. Deliberately not users.is_admin, which is company-wide - it would also hand over
-  // every other report plus /admin, where someone can re-grant anyone's access and delete
-  // users. "Run the RTO desk" and "administer the whole site" are different jobs, and only
-  // this table can express the narrow one, since it is already keyed per (agent, process).
+  // Admin OF ONE PROCESS: may manage that process's roster and calling hours, and sees that
+  // process's full team data (leads, tickets, per-agent metrics) the same way a company-wide
+  // admin would - RtoCrmClient.js exempts isProcessAdmin from every "an Agent only sees their
+  // own leads" restriction, same as it already exempted them from the Admin-tab redirect.
+  // Nothing outside this one process, and no access to other cards/reports/the /admin panel.
+  // Deliberately not users.is_admin, which is company-wide - it would also hand over every
+  // other report plus /admin, where someone can re-grant anyone's access and delete users.
+  // "Run the RTO desk" and "administer the whole site" are different jobs, and only this
+  // table can express the narrow one, since it is already keyed per (agent, process).
   //
   // Grants no data access on its own: the agent still needs the 'calling' card and that
   // process's invitation row to see the process at all.

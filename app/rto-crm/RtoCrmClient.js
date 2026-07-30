@@ -1779,7 +1779,10 @@ const localStorage = typeof window !== 'undefined'
 
       // Same restriction as `filtered` above: an Agent's tab-count badges must only ever
       // reflect their own leads, never every agent's, regardless of agentFilter's value.
-      const myScopeEmail = userRole === 'Agent' ? (googleUser?.email || '').toLowerCase() : '';
+      // isProcessAdmin runs this whole process (roster + hours) even without being a
+      // company-wide admin, so they see the same full team view an Admin/Team Lead would -
+      // not personally restricted like a plain Agent.
+      const myScopeEmail = userRole === 'Agent' && !isProcessAdmin ? (googleUser?.email || '').toLowerCase() : '';
       const inMyScope = (t) => {
         if (!myScopeEmail) return true;
         const a = (t.assignedAgent || '').toLowerCase();
@@ -1908,7 +1911,7 @@ const localStorage = typeof window !== 'undefined'
 
       // Compute performance metrics for currently selected agent filter (or logged-in agent) & date scope
       const agentPerf = useMemo(() => {
-        const targetEmail = userRole === 'Agent' ? (googleUser?.email || '').toLowerCase() : agentFilter.toLowerCase();
+        const targetEmail = userRole === 'Agent' && !isProcessAdmin ? (googleUser?.email || '').toLowerCase() : agentFilter.toLowerCase();
         const targetPrefix = targetEmail !== 'all' ? targetEmail.split('@')[0] : '';
 
         const isTargetAgent = (agt) => {
@@ -1952,7 +1955,7 @@ const localStorage = typeof window !== 'undefined'
           connectRate,
           reorderRate
         };
-      }, [allTickets, agentFilter, googleUser, userRole, dateScope, customDateFrom, customDateTo, overrides]);
+      }, [allTickets, agentFilter, googleUser, userRole, isProcessAdmin, dateScope, customDateFrom, customDateTo, overrides]);
 
       useEffect(() => {
         setPage(1);
@@ -1964,7 +1967,9 @@ const localStorage = typeof window !== 'undefined'
         // the signed-in agent's own email inside handleSwitchRole's manual toggle, so a plain
         // Agent login that never touches that dropdown left it at its 'ALL' default, and
         // everyone's leads showed up. Force the restriction here instead of trusting that.
-        const restrictToEmail = userRole === 'Agent'
+        // isProcessAdmin is exempt, same as myScopeEmail above - they run this process without
+        // being a company-wide admin, and should see its full team, not just their own leads.
+        const restrictToEmail = userRole === 'Agent' && !isProcessAdmin
           ? (googleUser?.email || '').toLowerCase()
           : (agentFilter !== 'ALL' ? agentFilter.toLowerCase() : '');
 
@@ -1998,7 +2003,7 @@ const localStorage = typeof window !== 'undefined'
           if(search.trim()){const q=search.toLowerCase();if(![t.orderNumber,t.customerName,t.email,t.phone,t.rtoReason,t.callingDate,t.assignedAgent,t.agentRemarks,t.disposition].some(f=>(f||'').toLowerCase().includes(q)))return false;}
           return true;
         });
-      },[allTickets,tickets,overrides,agentFilter,tab,payFilter,search,userRole,googleUser]);
+      },[allTickets,tickets,overrides,agentFilter,tab,payFilter,search,userRole,isProcessAdmin,googleUser]);
 
       const pages=Math.ceil(filtered.length/perPage)||1;
       const visible=filtered.slice((page-1)*perPage,page*perPage);
@@ -2346,7 +2351,7 @@ const localStorage = typeof window !== 'undefined'
       );
 
       const tabs = [
-        { key: 'overview', label: userRole === 'Agent' ? '📊 My Overview & Team Metrics' : '📊 Overview (Agents Data)', count: effectiveAgentRoster.length },
+        { key: 'overview', label: userRole === 'Agent' && !isProcessAdmin ? '📊 My Overview & Team Metrics' : '📊 Overview (Agents Data)', count: effectiveAgentRoster.length },
         { key: 'all', label: 'All Leads (Disposed)', count: dispCount },
         { key: 'fresh', label: '⚡ Fresh Leads (Assigned)', count: freshAssignedCount }
       ];
@@ -2637,7 +2642,7 @@ const localStorage = typeof window !== 'undefined'
                   // in this tab is scoped down to just the signed-in agent's own entry first.
                   const myEmailLower = (googleUser?.email || '').toLowerCase();
                   const isMyAgent = (ag) => myEmailLower && (ag.email.toLowerCase() === myEmailLower || ag.email.toLowerCase().includes(myEmailLower.split('@')[0]));
-                  const visibleAgentMetrics = userRole === 'Agent' ? agentMetrics.filter(isMyAgent) : agentMetrics;
+                  const visibleAgentMetrics = userRole === 'Agent' && !isProcessAdmin ? agentMetrics.filter(isMyAgent) : agentMetrics;
 
                   const totalAssigned = visibleAgentMetrics.reduce((s, a) => s + a.assigned, 0);
                   const totalDisposed = visibleAgentMetrics.reduce((s, a) => s + a.disposed, 0);
@@ -2672,10 +2677,10 @@ const localStorage = typeof window !== 'undefined'
                       <div className="flex items-center justify-between">
                         <div>
                           <h2 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
-                            {userRole === 'Agent' ? '📊 My Performance Overview' : '📊 Executive Overview & Agents Performance'}
+                            {userRole === 'Agent' && !isProcessAdmin ? '📊 My Performance Overview' : '📊 Executive Overview & Agents Performance'}
                           </h2>
                           <p className="text-[13px] text-zinc-500 mt-0.5">
-                            {userRole === 'Agent'
+                            {userRole === 'Agent' && !isProcessAdmin
                               ? 'Your own real-time metrics, disposition breakdown, and lead activity.'
                               : `Comprehensive real-time metrics, disposition breakdown, and lead activity across all ${effectiveAgentRoster.length} team members.`}
                           </p>
@@ -2761,7 +2766,7 @@ const localStorage = typeof window !== 'undefined'
                         <div className="flex items-center justify-between">
                           <div>
                             <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                              {userRole === 'Agent' ? '📋 My Action Stream' : '📋 Live Agent Action Stream (All Agents)'}
+                              {userRole === 'Agent' && !isProcessAdmin ? '📋 My Action Stream' : '📋 Live Agent Action Stream (All Agents)'}
                             </h3>
                             <p className="text-[12px] text-zinc-500 mt-0.5">Real-time log of customer contacts, remarks, address updates & refunds.</p>
                           </div>
@@ -3111,7 +3116,7 @@ const localStorage = typeof window !== 'undefined'
                       <span className="h-1.5 w-1.5 rounded-full bg-zinc-400"></span> Active Pending Box
                     </p>
                     <p className="text-2xl font-extrabold text-zinc-100 tabular-nums tracking-tight">{pend.toLocaleString('en-IN')}</p>
-                    <p className="text-[11px] text-zinc-500 font-medium mt-1">{userRole === 'Agent' ? 'My Active Queue' : (agentFilter !== 'ALL' ? agentFilter.split('@')[0] : 'All agents')}</p>
+                    <p className="text-[11px] text-zinc-500 font-medium mt-1">{userRole === 'Agent' && !isProcessAdmin ? 'My Active Queue' : (agentFilter !== 'ALL' ? agentFilter.split('@')[0] : 'All agents')}</p>
                   </div>
 
                   <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs flex flex-col justify-between">
