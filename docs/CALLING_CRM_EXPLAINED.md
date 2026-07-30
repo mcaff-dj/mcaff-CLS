@@ -619,6 +619,12 @@ forever.
 "Connected: No" before this existed is left exactly as it was — this only affects leads called
 from that date onward, so nothing already-settled gets stirred up by a new rule appearing.
 
+**A lead nobody has ever called always comes first.** Every never-touched lead in the queue is
+handed out before a single reassignment is even considered, no matter how urgent the
+reassignment's own priority tier is (even a Prepaid reassignment waits behind a plain,
+low-priority COD lead that's never been attempted). Reassignment only gets a turn once there is
+genuinely nothing fresh left to hand out this run.
+
 **The reassigned lead looks brand new to its next agent.** The record of the earlier,
 unsuccessful call doesn't stay on the row — it's kept safely elsewhere so the same agent-history
 can't be handed out twice, but the agent picking it up next sees a clean, fresh lead to work.

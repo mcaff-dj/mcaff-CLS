@@ -368,6 +368,12 @@ Connected column reads "No" is eligible to go to a *different* agent, up to
   the core loop was rewritten to a per-lead cursor over a fixed `agent_order` array — verified
   behavior-identical to the old loop via 500 randomized trials before shipping (no exclusions
   case). `RtoCrmClient.js`'s `predictedAssignments` mirrors the same cursor-based loop.
+- **Fresh/never-touched leads always sort before reassignments, regardless of tier.** The sort
+  key is `(1 if row_index in excluded_by_row else 0, tier, -date)` — a lead nobody has ever
+  called outranks any reassignment, even a Prepaid one, so reassignments only get a shot once
+  the fresh pool is genuinely exhausted this run. `excluded_by_row`'s presence doubles as the
+  "this is a reassignment" signal for this ordering, since it's currently the only caller.
+  `predictedAssignments`'s `pool.sort` mirrors this with `item.excludedAgent`.
 - **`REASSIGN_BACKLOG_CUTOFF` (2026-07-19) / `REASSIGN_RETRY_CAP` (3)** live in
   `leadAssignmentRules.json` (`_reassignNote`), not hardcoded per-language — `lead_priority.py`
   parses the cutoff into a `datetime` once at import time; `RtoCrmClient.js` reads it as a JS

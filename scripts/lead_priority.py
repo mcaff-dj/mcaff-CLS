@@ -169,8 +169,11 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     function so the preview can never drift from what the real writer would do.
 
     unassigned_pending: list of (row_index, rto_initiated_date, order_id, tier) tuples,
-    NOT yet sorted - this function sorts them (tier asc, rto_initiated_date desc;
-    undated leads sort last within their tier).
+    NOT yet sorted - this function sorts them: fresh/never-touched leads first (ALL of them,
+    regardless of tier), THEN reassignments (any row_index in excluded_by_row), and within
+    each of those two groups, tier asc then rto_initiated_date desc (undated leads sort last
+    within their tier). A lead nobody has ever called always outranks one that's already been
+    tried and failed - reassignments only get a look once the fresh pool is fully exhausted.
     online_agents: list of agent emails eligible to receive leads this round.
     current_load: {email: int} - pending leads that agent already holds; only
     caps how many more they can receive, never reduced/reassigned here.
@@ -182,7 +185,8 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     excluded_by_row: optional {row_index: set(emails)} - agents who must never receive THIS
     particular lead, e.g. assign_leads.py's Connected=No reassignment excludes everyone who
     already failed to reach this same customer. Absent/empty for a lead means every online
-    agent is a candidate, same as before this parameter existed.
+    agent is a candidate, same as before this parameter existed. Its presence also marks that
+    row as a reassignment for the fresh-first ordering above - see that note.
 
     Returns {row_index: agent_email}.
     """
@@ -199,7 +203,16 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     def _date_seconds(dt):
         return (dt - EPOCH).total_seconds() if dt else 0.0
 
-    sorted_pool = sorted(unassigned_pending, key=lambda t: (t[3], -_date_seconds(t[1])))
+    # Reassignments (any row_index present in excluded_by_row) must fully exhaust the
+    # fresh/never-touched pool before competing for agent capacity at all - a lead nobody has
+    # ever called always outranks one that's already been tried and failed, regardless of
+    # tier. The only current caller that populates excluded_by_row is the Connected=No
+    # reassignment feature, so its presence doubles as this signal rather than adding a
+    # second parameter for the same thing.
+    sorted_pool = sorted(
+        unassigned_pending,
+        key=lambda t: (1 if t[0] in excluded_by_row else 0, t[3], -_date_seconds(t[1])),
+    )
 
     def _quota_for(email):
         if isinstance(quota, dict):

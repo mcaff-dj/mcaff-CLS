@@ -1718,9 +1718,14 @@ const localStorage = typeof window !== 'undefined'
           // else: held by someone (online or not) - left alone either way.
         });
 
+        // Reassignments (excludedAgent set) must fully exhaust the fresh/never-touched pool
+        // first - a lead nobody has ever called always outranks one already tried and failed,
+        // regardless of tier. Mirrors build_assignment_queue in scripts/lead_priority.py.
         // Tier ascending, then newest RTO Initiated Date first within each tier
         // (NOT Calling Date - see mapTkt's rtoInitiatedDate).
         pool.sort((a, b) => {
+          const ar = a.excludedAgent ? 1 : 0, br = b.excludedAgent ? 1 : 0;
+          if (ar !== br) return ar - br;
           if (a.tier !== b.tier) return a.tier - b.tier;
           const ad = a.ticket.rtoInitiatedDate ? a.ticket.rtoInitiatedDate.getTime() : 0;
           const bd = b.ticket.rtoInitiatedDate ? b.ticket.rtoInitiatedDate.getTime() : 0;
