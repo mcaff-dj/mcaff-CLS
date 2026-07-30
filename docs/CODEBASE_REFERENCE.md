@@ -331,7 +331,13 @@ below the KPI tiles: Agent Name, Total Leads Assigned, Total Disposed, Total Con
 Prepaid Assigned, Total Prepaid Connected, Total COD Assigned, Total Prepaid Converted, Total
 COD Converted, Logged In At, Total Break Time. Rows come from `visibleAgentMetrics` — same
 scoping as every other Overview number (a plain Agent sees only their own row; Admin/Team
-Lead/`isProcessAdmin` see everyone).
+Lead/`isProcessAdmin` see everyone) — **filtered further to `assigned > 0` for this table only**.
+An agent with nothing assigned in the current date scope would otherwise render a row of zeros
+and dashes across every column, which is pure noise; the KPI tiles above the table still sum
+`visibleAgentMetrics` **unfiltered**, since a 0-this-scope agent still belongs in the team-wide
+totals. The empty-state message reads "No agents with assigned leads in this date range" (not
+the generic "No agents in scope") specifically because it can now be true while
+`visibleAgentMetrics` itself is non-empty.
 
 - **The lead/conversion columns follow the page's date-scope filter**; **Logged In At** and
   **Total Break Time** deliberately do NOT — they always mean "today," since attendance isn't a

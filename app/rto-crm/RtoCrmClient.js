@@ -2813,7 +2813,12 @@ const localStorage = typeof window !== 'undefined'
                               </tr>
                             </thead>
                             <tbody>
-                              {visibleAgentMetrics.map(am => {
+                              {/* Rows with nothing assigned in the current date scope are pure
+                                  noise here (every other column is 0/dash too) - filtered out of
+                                  just this table's render, not out of visibleAgentMetrics itself,
+                                  which the KPI tiles above still need in full (an agent with 0
+                                  assigned this scope still belongs in the roster-wide totals). */}
+                              {visibleAgentMetrics.filter(am => am.assigned > 0).map(am => {
                                 const presence = serverPresence[am.email.toLowerCase()];
                                 return (
                                   <tr key={am.email} className="border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
@@ -2831,8 +2836,8 @@ const localStorage = typeof window !== 'undefined'
                                   </tr>
                                 );
                               })}
-                              {visibleAgentMetrics.length === 0 && (
-                                <tr><td colSpan={11} className="py-6 text-center text-zinc-500">No agents in scope.</td></tr>
+                              {visibleAgentMetrics.filter(am => am.assigned > 0).length === 0 && (
+                                <tr><td colSpan={11} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
                               )}
                             </tbody>
                           </table>
