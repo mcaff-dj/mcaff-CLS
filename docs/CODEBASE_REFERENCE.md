@@ -329,16 +329,47 @@ preview forecast half the real volume.
 A per-agent table on the Overview tab (`RtoCrmClient.js`, inside the `tab==='overview'` block),
 below the KPI tiles: Agent Name, Total Leads Assigned, Total Disposed, Total Connected, Total
 Prepaid Assigned, Total Prepaid Connected, Total COD Assigned, Total Prepaid Converted, Total
-COD Converted, Logged In At, Total Break Time. Rows come from `visibleAgentMetrics` — same
-scoping as every other Overview number (a plain Agent sees only their own row; Admin/Team
-Lead/`isProcessAdmin` see everyone) — **filtered further to `assigned > 0` for this table only**.
-An agent with nothing assigned in the current date scope would otherwise render a row of zeros
-and dashes across every column, which is pure noise; the KPI tiles above the table still sum
-`visibleAgentMetrics` **unfiltered**, since a 0-this-scope agent still belongs in the team-wide
-totals. The empty-state message reads "No agents with assigned leads in this date range" (not
-the generic "No agents in scope") specifically because it can now be true while
-`visibleAgentMetrics` itself is non-empty.
+COD Converted, Logged In At, Total Break Time. Rows come from `visibleTableAgentMetrics` — same
+`isMyAgent` scoping as every other Overview number (a plain Agent sees only their own row;
+Admin/Team Lead/`isProcessAdmin` see everyone) — **filtered further to `assigned > 0` for this
+table only**. An agent with nothing assigned in the current date scope would otherwise render a
+row of zeros and dashes across every column, which is pure noise; the KPI tiles above the table
+sum `visibleAgentMetrics` (a *different* computation — see below) **unfiltered**, since a
+0-this-scope agent still belongs in the team-wide totals. The empty-state message reads "No
+agents with assigned leads in this date range" (not the generic "No agents in scope")
+specifically because it can now be true while `visibleTableAgentMetrics` itself is non-empty.
 
+- **Two separate per-agent computations — not because the table needed a second date field, but
+  because it needs TWO independent ones on the SAME agent's tickets at once.**
+  `computeAgentMetrics(ag, ticketInScope)` (drives the KPI tiles + every other Overview number)
+  filters everything from one scoped `assigned` array using `inScope` (Calling Date/Order Date,
+  unchanged, long-standing behavior). The table instead has its own `computeTableAgentMetrics`:
+  Total Leads/Prepaid/COD Assigned come from an `assignedByDate` array scoped by the lead's REAL
+  `assigned_at`; Total Disposed/Connected/Prepaid Connected/Prepaid+COD Converted come from a
+  SEPARATE `disposedByDate` array scoped by the lead's real `disposed_at` instead. These are
+  deliberately independent, not one funnel filtered by a single date: a lead assigned yesterday
+  and disposed today counts toward today's Disposed/Connected/Converted numbers even though it
+  does **not** count toward today's Assigned numbers — "how many did I newly receive today" and
+  "how many did I action today" are different questions a call centre actually asks, and
+  `computeAgentMetrics`'s single-scoped-`assigned` shape can't express two different scopes for
+  two different subsets of one agent's tickets. This is why the table's "Total Leads Assigned"
+  and the KPI row's "Total Assigned" tile can legitimately disagree — the KPI tiles stayed on
+  Calling Date/Order Date, so the two are now answering genuinely different questions.
+- **Both dates come from `lead_assignments`** (Postgres, written by `assign_leads.py`/this CRM's
+  own disposal call — see the *Refund-status pre-check* section below for the rest of that
+  script), via a new unbounded read: `getAllLeadDates()` (`api/_lib/db.js`, returns
+  `{order_id: {assignedAt, disposedAt}}`) → `GET /api/auth/leadDates` (same auth level as the
+  pre-existing, previously-unused-by-this-page `recentAssignments` action — authenticated, not
+  admin-only) → `leadDates` client state (`{normalizeOrderKey(order_id): {assignedAt,
+  disposedAt}}`, fetched on mount and every 5 minutes — these barely change minute to minute).
+  `isLeadDateInScope(dateIso, scope, customFrom, customTo)` works for either field and is
+  deliberately its own function, not a branch inside `isDateInScope`: the two kinds of date
+  disagree on what a missing value means. `isDateInScope` treats a missing Calling Date as
+  "always in scope" (a blank cell shouldn't vanish from every report). A lead with no real
+  `assigned_at`/`disposed_at` at all — done before this Postgres tracking existed, or straight in
+  the sheet rather than through `assign_leads.py`/this CRM — is the opposite: **excluded from
+  every date-scoped view** (nothing real to filter by), except `ALL_TIME`, which by definition
+  applies no date filter to anything.
 - **The lead/conversion columns follow the page's date-scope filter**; **Logged In At** and
   **Total Break Time** deliberately do NOT — they always mean "today," since attendance isn't a
   thing you filter by an arbitrary historical range the way ticket counts are.

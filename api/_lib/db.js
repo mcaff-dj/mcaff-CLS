@@ -930,11 +930,44 @@ async function getCallingOverviewData(query) {
   return { stats, hourly, partnerBreakdown, rtoReasonBreakdown };
 }
 
+// {order_id: {assignedAt, disposedAt}} for EVERY lead ever assigned, not just a recent window
+// like getRecentLeadAssignments (that one exists for the "reset stale pending leads" feature,
+// capped at 30 days). The RTO CRM Overview tab's Agent Performance Summary table needs to
+// date-filter each column by the REAL date the underlying event happened - assigned_at for
+// "Total Leads Assigned"/"Total Prepaid Assigned"/"Total COD Assigned", disposed_at for
+// "Total Disposed"/"Total Connected"/"Total Prepaid Connected"/"Total Prepaid Converted"/
+// "Total COD Converted" - rather than the lead's own Calling Date/Order Date, which is what
+// every other column in this app still uses as a proxy for "when." These two are
+// deliberately independent, not one continuous funnel filtered by a single date: a lead
+// assigned yesterday and disposed today counts toward TODAY's Disposed/Connected/Converted
+// numbers even though it does NOT count toward today's Assigned numbers - "how many did I
+// action today" and "how many did I newly receive today" are different questions a call
+// centre actually asks. disposedAt is null for a lead not yet disposed (or disposed before
+// this Postgres column existed) - the frontend's isLeadDateInScope treats that the same as a
+// missing assignedAt: excluded from every date-scoped view except ALL_TIME.
+//
+// An unbounded read is fine here: this table is bounded by the sheet's own row count (a few
+// thousand), the same order of magnitude assign_leads.py already reads whole every 5 minutes.
+//
+// Deliberately reads the plain lead_assignments table (one upserted row per order_id in the
+// currently-deployed schema), NOT lead_assignments_current - that view belongs to a separate,
+// still-uncommitted append-only migration for this same table. Depending on it here would
+// make this endpoint 500 the moment it's called on the schema that's actually deployed today.
+// If/when that migration ships, this call site needs revisiting (see its own notes on what
+// "current" means once a lead can have more than one row).
+async function getAllLeadDates() {
+  await ensurePgSchema();
+  const { rows } = await pgSql`SELECT order_id, assigned_at, disposed_at FROM lead_assignments`;
+  const out = {};
+  for (const r of rows) out[r.order_id] = { assignedAt: r.assigned_at, disposedAt: r.disposed_at };
+  return out;
+}
+
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
-  getAllAgentPresence, getAgentPresenceLogSummary, getRecentLeadAssignments, recordLeadDisposition,
+  getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,

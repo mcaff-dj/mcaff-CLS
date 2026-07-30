@@ -1,7 +1,7 @@
 // Consolidated auth routes (login/logout/callback/me/presence) into one dynamic-route
 // file to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells
 // us which logical route was hit; URLs are unchanged.
-const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getAgentPresenceLogSummary, getRecentLeadAssignments, recordLeadDisposition,
+const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent } = require('../_lib/db');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
@@ -291,6 +291,27 @@ async function handleRecentAssignments(req, res) {
   res.status(200).json({ assignments });
 }
 
+// Every lead's real {assignedAt, disposedAt}, unbounded (see getAllLeadDates in db.js) - lets
+// the RTO CRM Overview tab's Agent Performance Summary table date-filter each column by the
+// real date its own event happened (assigned_at for the Assigned columns, disposed_at for the
+// Disposed/Connected/Converted ones) instead of the lead's own Calling Date/Order Date. Same
+// auth level as handleRecentAssignments above (authenticated, not admin-only): this is a
+// different pair of date fields for rows a signed-in agent can already see in the ticket data
+// itself, not new exposure.
+async function handleLeadDates(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+  const session = await getSession(req);
+  if (!session || !session.email) {
+    res.status(401).json({ error: 'Not signed in' });
+    return;
+  }
+  const leadDates = await getAllLeadDates();
+  res.status(200).json({ leadDates });
+}
+
 // Records the disposal side of a lead's lifecycle in Postgres (assigned_at is
 // assign_leads.py's side of the same row - see the lead_assignments comment in
 // api/_lib/db.js), called from rto-crm.html's submitDisp() alongside its existing
@@ -395,7 +416,7 @@ async function handleProcessPresence(req, res) {
   res.status(200).json({ ok: true, processKey: body.processKey, status: body.status });
 }
 
-const HANDLERS = { login: handleLogin, logout: handleLogout, me: handleMe, callback: handleCallback, presence: handlePresence, recentAssignments: handleRecentAssignments, recordDisposition: handleRecordDisposition, processPresence: handleProcessPresence };
+const HANDLERS = { login: handleLogin, logout: handleLogout, me: handleMe, callback: handleCallback, presence: handlePresence, recentAssignments: handleRecentAssignments, leadDates: handleLeadDates, recordDisposition: handleRecordDisposition, processPresence: handleProcessPresence };
 
 module.exports = async (req, res) => {
   const action = req.query && req.query.action;

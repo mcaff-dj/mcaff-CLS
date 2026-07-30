@@ -302,6 +302,31 @@ const localStorage = typeof window !== 'undefined'
       return true;
     }
 
+    // Same key normalization already used at the reassignment-map lookup further down this
+    // file (fetchLiveOrderRowMap's callers) - trim + uppercase, so a stray space or case
+    // difference between the sheet's Order Number and Postgres's order_id (assign_leads.py
+    // writes the sheet's own literal string) doesn't silently fail to match.
+    function normalizeOrderKey(orderNumber) {
+      return (orderNumber || '').toString().trim().toUpperCase();
+    }
+
+    // Like isDateInScope, but for a lead's REAL assigned_at/disposed_at (leadDates state, from
+    // GET /api/auth/leadDates - see getAllLeadDates in db.js) rather than its Calling
+    // Date/Order Date. Works for either date field - same "missing" semantics apply to both:
+    // deliberately NOT a branch inside isDateInScope itself, because the two kinds of date
+    // disagree on what a missing value means. isDateInScope treats a missing rowDate as
+    // "always in scope" (a bad/blank Calling Date shouldn't vanish from every report). A lead
+    // can have no assigned_at/disposed_at at all - assigned or disposed before this tracking
+    // existed, or done straight in the sheet rather than through assign_leads.py/this CRM's own
+    // disposal call - and for these fields that's treated the opposite way: excluded from every
+    // date-scoped view (nothing real to filter by), except ALL_TIME, which by definition
+    // applies no date filter to anything.
+    function isLeadDateInScope(dateIso, scope, customFrom, customTo) {
+      if (scope === 'ALL_TIME') return true;
+      if (!dateIso) return false;
+      return isDateInScope(new Date(dateIso), scope, customFrom, customTo);
+    }
+
     // Formats the /api/auth/presence-derived loggedInAt ISO string for the Agent Performance
     // Summary table (Overview tab) - IST wall-clock, since that's the convention the rest of
     // this app's calling-hours/scheduling already uses (see assign_leads.py's
@@ -597,6 +622,34 @@ const localStorage = typeof window !== 'undefined'
         const t = setInterval(fetchServerPresence, 30000);
         return () => clearInterval(t);
       }, [fetchServerPresence]);
+
+      // {order_id: {assignedAt, disposedAt}} for every lead ever assigned (GET
+      // /api/auth/leadDates - see getAllLeadDates in db.js) - the real dates a lead was handed
+      // to an agent and, separately, actually resolved, used only by the Overview tab's Agent
+      // Performance Summary table (see isLeadDateInScope above) to date-filter each column by
+      // its own real event date instead of the lead's Calling Date/Order Date. Keyed here by
+      // normalizeOrderKey(order_id) up front (not per-lookup) so every read against it is a
+      // plain dict hit. Polled far less often than presence - these barely change minute to
+      // minute, unlike who's online.
+      const [leadDates, setLeadDates] = useState({});
+      const fetchLeadDates = useCallback(() => {
+        fetch('/api/auth/leadDates')
+          .then(r => r.ok ? r.json() : null)
+          .then(d => {
+            if (!d || !d.leadDates) return;
+            const normalized = {};
+            for (const [orderId, dates] of Object.entries(d.leadDates)) {
+              normalized[normalizeOrderKey(orderId)] = dates;
+            }
+            setLeadDates(normalized);
+          })
+          .catch(() => {});
+      }, []);
+      useEffect(() => {
+        fetchLeadDates();
+        const t = setInterval(fetchLeadDates, 5 * 60000);
+        return () => clearInterval(t);
+      }, [fetchLeadDates]);
 
       // The signed-in agent's own availability is per process, so switching process has to show
       // that process's answer rather than carrying the previous one over - being Online for RTO
@@ -2594,12 +2647,18 @@ const localStorage = typeof window !== 'undefined'
                 {(() => {
                   const inScope = (t) => isDateInScope(t.rowDate, dateScope, customDateFrom, customDateTo);
 
-                  const agentMetrics = effectiveAgentRoster.map(ag => {
+                  // Drives agentMetrics below (Calling Date/Order Date, via inScope) - the KPI
+                  // tiles and every other Overview number EXCEPT the Agent Performance Summary
+                  // table, which has its own separate computeTableAgentMetrics further down:
+                  // that table needs two independent date scopes (assigned vs disposed) applied
+                  // to two different subsets of an agent's tickets, which this single-scope
+                  // shape can't express.
+                  const computeAgentMetrics = (ag, ticketInScope) => {
                     const email = ag.email.toLowerCase();
                     const prefix = email.split('@')[0];
                     const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(prefix));
 
-                    const assigned = allTickets.filter(t => isMine(t.assignedAgent) && inScope(t));
+                    const assigned = allTickets.filter(t => isMine(t.assignedAgent) && ticketInScope(t));
                     const disposed = assigned.filter(t => t.disposition || t.agentRemarks || t.status !== 'Pending');
                     const pending = assigned.filter(t => t.status === 'Pending' && !t.disposition && !t.agentRemarks);
                     // allTickets already merges a local override's connectedStatus with the
@@ -2659,7 +2718,9 @@ const localStorage = typeof window !== 'undefined'
                       agentLogs,
                       ticketLogs
                     };
-                  });
+                  };
+
+                  const agentMetrics = effectiveAgentRoster.map(ag => computeAgentMetrics(ag, inScope));
 
                   // An Agent's Overview tab must only ever reflect their own performance,
                   // never the whole team's - agentMetrics itself stays computed for every
@@ -2669,6 +2730,63 @@ const localStorage = typeof window !== 'undefined'
                   const myEmailLower = (googleUser?.email || '').toLowerCase();
                   const isMyAgent = (ag) => myEmailLower && (ag.email.toLowerCase() === myEmailLower || ag.email.toLowerCase().includes(myEmailLower.split('@')[0]));
                   const visibleAgentMetrics = userRole === 'Agent' && !isProcessAdmin ? agentMetrics.filter(isMyAgent) : agentMetrics;
+
+                  // Agent Performance Summary table ONLY (not the KPI tiles above, which stay on
+                  // Calling Date/Order Date via agentMetrics/computeAgentMetrics) - every column
+                  // filtered by the REAL date its own underlying event happened, via leadDates
+                  // (fetchLeadDates above) - NOT one single scope the way agentMetrics uses.
+                  // Assigned-flavored columns (Total Leads/Prepaid/COD Assigned) use assignedAt;
+                  // Disposed-flavored columns (Total Disposed/Connected/Prepaid
+                  // Connected/Prepaid+COD Converted) use disposedAt instead - deliberately two
+                  // independent universes of tickets, not one funnel filtered by a single date:
+                  // a lead assigned yesterday and disposed today counts toward TODAY's
+                  // Disposed/Connected/Converted numbers even though it does NOT count toward
+                  // today's Assigned numbers - "how many did I action today" and "how many did I
+                  // newly receive today" are different questions. This is why it's a separate
+                  // function from computeAgentMetrics rather than another call to it: that
+                  // helper filters everything from ONE scoped `assigned` set, which can't
+                  // express two different scopes for two different subsets of the same agent's
+                  // tickets.
+                  const assignedDateInScope = (t) => isLeadDateInScope(
+                    leadDates[normalizeOrderKey(t.orderNumber)]?.assignedAt, dateScope, customDateFrom, customDateTo
+                  );
+                  const disposedDateInScope = (t) => isLeadDateInScope(
+                    leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt, dateScope, customDateFrom, customDateTo
+                  );
+                  const computeTableAgentMetrics = (ag) => {
+                    const email = ag.email.toLowerCase();
+                    const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
+
+                    const assignedByDate = allTickets.filter(t => isMine(t.assignedAgent) && assignedDateInScope(t));
+                    const prepaidAssigned = assignedByDate.filter(t => t.paymentMethod === 'Prepaid');
+                    const codAssigned = assignedByDate.filter(t => t.paymentMethod === 'COD');
+
+                    // A "worked" ticket - any disposition/remark/non-Pending status - same test
+                    // computeAgentMetrics uses for `disposed`, just scoped by disposedAt here
+                    // instead of by whatever scoped `assigned` in the first place.
+                    const isWorked = t => !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
+                    const disposedByDate = allTickets.filter(t => isMine(t.assignedAgent) && isWorked(t) && disposedDateInScope(t));
+                    const connected = disposedByDate.filter(t => t.connected === 'Yes');
+                    const prepaidConnected = connected.filter(t => t.paymentMethod === 'Prepaid');
+                    const isConverted = t => !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
+                    const prepaidConverted = disposedByDate.filter(t => t.paymentMethod === 'Prepaid' && isConverted(t));
+                    const codConverted = disposedByDate.filter(t => t.paymentMethod === 'COD' && isConverted(t));
+
+                    return {
+                      ...ag,
+                      assigned: assignedByDate.length,
+                      disposed: disposedByDate.length,
+                      connected: connected.length,
+                      prepaidAssigned: prepaidAssigned.length,
+                      codAssigned: codAssigned.length,
+                      prepaidConnected: prepaidConnected.length,
+                      prepaidConverted: prepaidConverted.length,
+                      codConverted: codConverted.length,
+                    };
+                  };
+                  const tableAgentMetrics = effectiveAgentRoster.map(computeTableAgentMetrics);
+                  const visibleTableAgentMetrics = userRole === 'Agent' && !isProcessAdmin
+                    ? tableAgentMetrics.filter(isMyAgent) : tableAgentMetrics;
 
                   const totalAssigned = visibleAgentMetrics.reduce((s, a) => s + a.assigned, 0);
                   const totalDisposed = visibleAgentMetrics.reduce((s, a) => s + a.disposed, 0);
@@ -2792,7 +2910,12 @@ const localStorage = typeof window !== 'undefined'
                         <div>
                           <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">📋 Agent Performance Summary</h3>
                           <p className="text-[12px] text-zinc-500 mt-0.5">
-                            Leads/conversion columns follow the date range above; Logged In At and Total Break Time always reflect today.
+                            Follows the date range above, but each column uses its own REAL event date (not Calling Date/Order
+                            Date, unlike the KPI tiles above): Assigned columns use when the lead was actually handed to the
+                            agent; Disposed/Connected/Converted columns use when the agent actually resolved it - a lead
+                            assigned yesterday and disposed today counts toward today's Disposed/Connected/Converted numbers
+                            even though it doesn't count toward today's Assigned ones. Hover a header for which. Logged In At
+                            and Total Break Time always reflect today.
                           </p>
                         </div>
                         <div className="overflow-x-auto custom-scroll">
@@ -2800,25 +2923,27 @@ const localStorage = typeof window !== 'undefined'
                             <thead>
                               <tr className="text-left text-zinc-500 uppercase text-[10px] tracking-wider border-b border-zinc-800">
                                 <th className="py-2 pr-3 font-bold">Agent Name</th>
-                                <th className="py-2 px-3 font-bold text-right">Total Leads Assigned</th>
-                                <th className="py-2 px-3 font-bold text-right">Total Disposed</th>
-                                <th className="py-2 px-3 font-bold text-right">Total Connected</th>
-                                <th className="py-2 px-3 font-bold text-right">Total Prepaid Assigned</th>
-                                <th className="py-2 px-3 font-bold text-right">Total Prepaid Connected</th>
-                                <th className="py-2 px-3 font-bold text-right">Total COD Assigned</th>
-                                <th className="py-2 px-3 font-bold text-right">Total Prepaid Converted</th>
-                                <th className="py-2 px-3 font-bold text-right">Total COD Converted</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Leads Assigned</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Disposed</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Connected</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Prepaid Assigned</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Prepaid Connected</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total COD Assigned</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Prepaid Converted</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total COD Converted</th>
                                 <th className="py-2 px-3 font-bold">Logged In At</th>
                                 <th className="py-2 pl-3 font-bold">Total Break Time</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {/* Rows with nothing assigned in the current date scope are pure
+                              {/* visibleTableAgentMetrics, NOT visibleAgentMetrics - this table
+                                  is scoped by real assignment date (see assignedDateInScope
+                                  above), the KPI tiles above stay on Calling Date/Order Date.
+                                  Rows with nothing assigned in the current date scope are pure
                                   noise here (every other column is 0/dash too) - filtered out of
-                                  just this table's render, not out of visibleAgentMetrics itself,
-                                  which the KPI tiles above still need in full (an agent with 0
-                                  assigned this scope still belongs in the roster-wide totals). */}
-                              {visibleAgentMetrics.filter(am => am.assigned > 0).map(am => {
+                                  just this table's render, not out of visibleTableAgentMetrics
+                                  itself. */}
+                              {visibleTableAgentMetrics.filter(am => am.assigned > 0).map(am => {
                                 const presence = serverPresence[am.email.toLowerCase()];
                                 return (
                                   <tr key={am.email} className="border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
@@ -2836,7 +2961,7 @@ const localStorage = typeof window !== 'undefined'
                                   </tr>
                                 );
                               })}
-                              {visibleAgentMetrics.filter(am => am.assigned > 0).length === 0 && (
+                              {visibleTableAgentMetrics.filter(am => am.assigned > 0).length === 0 && (
                                 <tr><td colSpan={11} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
                               )}
                             </tbody>
