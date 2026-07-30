@@ -1104,6 +1104,14 @@ const localStorage = typeof window !== 'undefined'
       const [customDateFrom, setCustomDateFrom] = useState(()=>localStorage.getItem('rto_custom_date_from')||'');
       const [customDateTo, setCustomDateTo] = useState(()=>localStorage.getItem('rto_custom_date_to')||'');
 
+      // Local to the Time-of-Day Distribution table (below Agent Performance Summary) only -
+      // NOT the page-wide date-scope filter above, which this table still follows for WHICH
+      // leads count at all. These two just control how those leads get bucketed/counted once
+      // in scope: interval width for the time-of-day columns, and which per-lead metric fills
+      // the cells (Dialled/Connected/Converted).
+      const [heatmapIntervalMinutes, setHeatmapIntervalMinutes] = useState(() => Number(localStorage.getItem('rto_heatmap_interval')) || 30);
+      const [heatmapMetric, setHeatmapMetric] = useState(() => localStorage.getItem('rto_heatmap_metric') || 'dialled');
+
       // GET /api/auth/presence, now with dateFrom/dateTo (see scopeToDateBounds above) so
       // loggedInMinutes/breakMinutes follow the Overview tab's own date-scope filter instead of
       // always meaning "today" - re-fetches immediately when the filter changes (not just on
@@ -1964,6 +1972,19 @@ const localStorage = typeof window !== 'undefined'
         { value: 'ALL', label: 'All payments' },
         { value: 'Prepaid', label: 'Prepaid' },
         { value: 'COD', label: 'COD' },
+      ];
+
+      // Time-of-Day Distribution table's own two filters (see heatmapIntervalMinutes/
+      // heatmapMetric above) - local to that one table, not the page-wide date/payment filters.
+      const heatmapIntervalOptions = [
+        { value: 15, label: '15 min' },
+        { value: 30, label: '30 min' },
+        { value: 60, label: '1 hour' },
+      ];
+      const heatmapMetricOptions = [
+        { value: 'dialled', label: 'Total Dialled' },
+        { value: 'connected', label: 'Total Connected' },
+        { value: 'converted', label: 'Total Converted' },
       ];
 
       const perPageOptions = [
@@ -2890,6 +2911,55 @@ const localStorage = typeof window !== 'undefined'
                   const visibleTableAgentMetrics = userRole === 'Agent' && !isProcessAdmin
                     ? tableAgentMetrics.filter(isMyAgent) : tableAgentMetrics;
 
+                  // Time-of-Day Distribution table (below Agent Performance Summary) - a
+                  // SEPARATE per-agent breakdown, not derived from tableAgentMetrics: this needs
+                  // the underlying ticket-level disposedAt timestamps to bucket by time-of-day,
+                  // which computeTableAgentMetrics already collapses down to plain counts. Same
+                  // disposedDateInScope as the table above (so a multi-day page filter sums every
+                  // matching day's activity into the same time-of-day bucket, rather than
+                  // showing one day at a time), just re-sliced by heatmapIntervalMinutes/
+                  // heatmapMetric instead of by payment type.
+                  const isConvertedForHeatmap = t => !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
+                  const heatmapAgentData = effectiveAgentRoster.map(ag => {
+                    const email = ag.email.toLowerCase();
+                    const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
+                    const isWorked = t => !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
+                    const disposedByDate = allTickets.filter(t => isMine(t.assignedAgent) && isWorked(t) && disposedDateInScope(t));
+
+                    // 'dialled' = every disposed lead (connected or not) - the same set
+                    // Total Disposed already counts, just bucketed by time-of-day here instead
+                    // of totaled. 'connected'/'converted' narrow that same set further, matching
+                    // the existing Total Connected column / the Prepaid+COD Converted columns
+                    // combined (not split by payment type - this table has one Converted option).
+                    let metricTickets = disposedByDate;
+                    if (heatmapMetric === 'connected') metricTickets = disposedByDate.filter(t => t.connected === 'Yes');
+                    else if (heatmapMetric === 'converted') metricTickets = disposedByDate.filter(isConvertedForHeatmap);
+
+                    const bucketCounts = new Map(); // bucketIndex -> count
+                    for (const t of metricTickets) {
+                      const disposedAtIso = leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt;
+                      if (!disposedAtIso) continue;
+                      const mins = istMinutesSinceMidnightClient(new Date(disposedAtIso));
+                      const bucketIndex = Math.floor(mins / heatmapIntervalMinutes);
+                      bucketCounts.set(bucketIndex, (bucketCounts.get(bucketIndex) || 0) + 1);
+                    }
+                    return { ...ag, bucketCounts };
+                  });
+                  const visibleHeatmapAgentData = (userRole === 'Agent' && !isProcessAdmin
+                    ? heatmapAgentData.filter(isMyAgent) : heatmapAgentData
+                  ).filter(a => a.bucketCounts.size > 0); // no columns at all this range - pure noise, same as the table above
+
+                  // Columns span only the buckets SOMEONE actually has activity in (not a fixed
+                  // full-day grid, which for a 15-min interval would be 96 mostly-empty columns) -
+                  // the narrowest range that still shows every non-zero cell.
+                  const allHeatmapBucketIndexes = visibleHeatmapAgentData.flatMap(a => [...a.bucketCounts.keys()]);
+                  const heatmapBucketIndexes = [];
+                  if (allHeatmapBucketIndexes.length) {
+                    const minBucket = Math.min(...allHeatmapBucketIndexes);
+                    const maxBucket = Math.max(...allHeatmapBucketIndexes);
+                    for (let i = minBucket; i <= maxBucket; i++) heatmapBucketIndexes.push(i);
+                  }
+
                   const totalAssigned = visibleAgentMetrics.reduce((s, a) => s + a.assigned, 0);
                   const totalDisposed = visibleAgentMetrics.reduce((s, a) => s + a.disposed, 0);
                   const totalPending = visibleAgentMetrics.reduce((s, a) => s + a.pending, 0);
@@ -3084,6 +3154,65 @@ const localStorage = typeof window !== 'undefined'
                               })}
                               {visibleTableAgentMetrics.filter(am => am.assigned > 0).length === 0 && (
                                 <tr><td colSpan={18} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {/* Time-of-Day Distribution */}
+                      <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
+                        <div className="flex items-center justify-between flex-wrap gap-3">
+                          <div>
+                            <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">🕐 Time-of-Day Distribution</h3>
+                            <p className="text-[12px] text-zinc-500 mt-0.5">
+                              Same date range as above, bucketed by time of day - columns span only the buckets with any
+                              activity (not a fixed full-day grid). A multi-day range sums every matching day into the same
+                              time-of-day bucket.
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <CustomSelect
+                              value={heatmapMetric}
+                              onChange={(v) => { setHeatmapMetric(v); localStorage.setItem('rto_heatmap_metric', v); }}
+                              options={heatmapMetricOptions}
+                            />
+                            <CustomSelect
+                              value={heatmapIntervalMinutes}
+                              onChange={(v) => { setHeatmapIntervalMinutes(v); localStorage.setItem('rto_heatmap_interval', String(v)); }}
+                              options={heatmapIntervalOptions}
+                            />
+                          </div>
+                        </div>
+                        <div className="overflow-x-auto custom-scroll">
+                          <table className="w-full text-[12.5px] border-collapse">
+                            <thead>
+                              <tr className="text-left text-zinc-500 uppercase text-[10px] tracking-wider border-b border-zinc-800">
+                                <th className="py-2 pr-3 font-bold whitespace-nowrap">Agent Name</th>
+                                {heatmapBucketIndexes.map(idx => (
+                                  <th key={idx} className="py-2 px-3 font-bold text-right whitespace-nowrap">
+                                    {formatTimeOfDay(idx * heatmapIntervalMinutes)}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {visibleHeatmapAgentData.map(a => (
+                                <tr key={a.email} className="border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
+                                  <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap">{a.name}</td>
+                                  {heatmapBucketIndexes.map(idx => (
+                                    <td key={idx} className="py-2.5 px-3 text-right tabular-nums text-zinc-300">
+                                      {a.bucketCounts.get(idx) || 0}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                              {visibleHeatmapAgentData.length === 0 && (
+                                <tr>
+                                  <td colSpan={heatmapBucketIndexes.length + 1} className="py-6 text-center text-zinc-500">
+                                    No {heatmapMetricOptions.find(o => o.value === heatmapMetric)?.label.toLowerCase()} activity in this date range.
+                                  </td>
+                                </tr>
                               )}
                             </tbody>
                           </table>

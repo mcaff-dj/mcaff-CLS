@@ -491,6 +491,53 @@ specifically because it can now be true while `visibleTableAgentMetrics` itself 
   endpoint turning into a general everyone's-presence leak. The admin branch is unchanged
   (all agents, all fields).
 
+### Overview tab — Time-of-Day Distribution
+
+A second per-agent table, directly below Agent Performance Summary — when during the day
+dials/connects/conversions happen, not just how many. Columns are time-of-day buckets (e.g.
+`10:00 am`, `10:30 am`, …); rows are agents; cells are counts.
+
+- **Two filters, local to this table only** — `heatmapIntervalMinutes` (15/30/60 min,
+  `heatmapIntervalOptions`) and `heatmapMetric` (`dialled`/`connected`/`converted`,
+  `heatmapMetricOptions`), both `useState` + `localStorage`-persisted like every other filter in
+  this file. Neither touches the page-wide date-scope filter above — this table still follows
+  `disposedDateInScope` for WHICH leads count at all (same as Total Disposed/Connected/Converted
+  in the table above it), just re-slices that same set by time-of-day and by a different metric
+  choice instead of by payment type.
+- **A SEPARATE per-agent computation (`heatmapAgentData`), not derived from
+  `tableAgentMetrics`** — `computeTableAgentMetrics` already collapses each agent's tickets down
+  to plain counts, discarding the individual `disposedAt` timestamps this table needs to bucket
+  by time-of-day. Recomputes the same `disposedByDate` filter (`isMine` + `isWorked` +
+  `disposedDateInScope`) independently instead.
+- **Metric definitions**: `dialled` = every ticket in `disposedByDate` (the same set Total
+  Disposed counts — connected or not); `connected` = that set filtered to `connected === 'Yes'`
+  (matches the existing Total Connected column exactly); `converted` = that set filtered by the
+  same `isConverted` test the table above uses for Prepaid/COD Converted, but **not** split by
+  payment type here — this table has one combined Converted option, not two.
+- **Bucketing**: each qualifying ticket's `leadDates`-sourced `disposedAt` is converted to
+  IST minutes-since-midnight (`istMinutesSinceMidnightClient`, the same helper `firstCalledAtMinutes`
+  uses) and floor-divided by `heatmapIntervalMinutes` to get a bucket index — a ticket with no
+  resolvable `disposedAt` is skipped, same fail-open-to-nothing convention as First Called At.
+  A multi-day date-scope sums every matching day's activity into the same time-of-day bucket
+  (a `10:00 am` column reflects that half-hour across the WHOLE range, not one specific day) —
+  deliberate, not an oversight: this table answers "what time of day is busiest," a question
+  that's more useful aggregated than split by day.
+- **Columns span only the buckets with any activity — a contiguous range, not a fixed full-day
+  grid.** `heatmapBucketIndexes` runs from the minimum to the maximum bucket index that ANY
+  visible agent has a count in, filling any zero-activity buckets in between (so the timeline
+  doesn't visually jump — e.g. a gap at 11:00 between real activity at 10:30 and 11:30 still
+  gets its own all-zero column) rather than a 96-column grid for a 15-min interval covering an
+  entire day nobody was even online for most of.
+- **Agents with zero activity for the CURRENT metric are excluded from rows**
+  (`bucketCounts.size > 0`), same "hide pure noise" convention as the `assigned > 0` filter on
+  the table above — switching the metric filter can change which agents appear, not just the
+  numbers.
+- Verified with 13 tests covering: an entirely-inactive agent excluded from rows; the
+  contiguous-range gap-filling behavior explicitly; per-metric filtering (`dialled` vs
+  `connected` vs `converted`) each landing in the right bucket; interval-width changes
+  correctly collapsing/expanding bucket boundaries; and the fully-empty (no activity at all for
+  the chosen metric) case rendering zero columns and zero rows rather than erroring.
+
 ### Refund-status pre-check (GoKwik)
 
 Before a still-unassigned **prepaid** row enters `unassigned_pending`, `assign_leads.py` asks
