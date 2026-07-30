@@ -17,7 +17,8 @@ var brandColors = {
 // of pointing the iframe at /api/report/{key} (which would 404/500, since there's no
 // api/_reports/{key}.html for these). Remove an entry here once its report exists.
 var COMING_SOON = {
-  mom: 'MOM report is coming soon.'
+  mom: 'MOM report is coming soon.',
+  orgoverview: 'Org-wide overview is coming soon.'
 };
 
 // Cards that have been migrated to a real Next.js page instead of a Python-generated

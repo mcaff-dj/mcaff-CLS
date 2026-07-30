@@ -430,10 +430,11 @@ async function ensurePgSchema() {
   pgSchemaReady = true;
 }
 
-const CARD_KEYS = ['mcaffeine', 'hyphen', 'productkyc', 'mom', 'calling', 'onboarding', 'deepdive'];
+const CARD_KEYS = ['mcaffeine', 'hyphen', 'productkyc', 'mom', 'calling', 'onboarding', 'deepdive', 'orgoverview'];
 const CARD_LABELS = {
   mcaffeine: 'mCaffeine', hyphen: 'Hyphen', productkyc: 'Product Calling KYC',
   mom: 'MOM', calling: 'Calling Team', onboarding: 'Onboarding Test', deepdive: 'Deep Dive',
+  orgoverview: 'Org Overview',
 };
 
 async function getUserByEmail(email) {
