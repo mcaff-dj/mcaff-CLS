@@ -327,9 +327,11 @@ preview forecast half the real volume.
 ### Overview tab — Agent Performance Summary
 
 A per-agent table on the Overview tab (`RtoCrmClient.js`, inside the `tab==='overview'` block),
-below the KPI tiles: Agent Name, Total Leads Assigned, Total Disposed, Total Connected, Total
-Prepaid Assigned, Total Prepaid Connected, Total COD Assigned, Total Prepaid Converted, Total
-COD Converted, Logged In At, Total Break Time. Rows come from `visibleTableAgentMetrics` — same
+below the KPI tiles: Agent Name, Total Leads Assigned, Total Disposed, First Called At, Total
+Connected, Connected %, Total Prepaid Assigned, Total Prepaid Assigned %, Total Prepaid Connected,
+Total Prepaid Connected %, Total COD Assigned, Total COD Assigned %, Total Prepaid Converted,
+Total Prepaid Converted %, Total COD Converted, Total COD Converted %, Logged In At, Total Break
+Time. Rows come from `visibleTableAgentMetrics` — same
 `isMyAgent` scoping as every other Overview number (a plain Agent sees only their own row;
 Admin/Team Lead/`isProcessAdmin` see everyone) — **filtered further to `assigned > 0` for this
 table only**. An agent with nothing assigned in the current date scope would otherwise render a
@@ -387,6 +389,24 @@ specifically because it can now be true while `visibleTableAgentMetrics` itself 
   sub-day precision through a date-only param.
 - **Prepaid/COD split** filters `t.paymentMethod`, which `parseRows` already normalizes to
   exactly one of those two strings — no third value to handle.
+- **Six percentage columns, each a plain `formatPct(count, total)` at render time** — no new
+  base metrics, just a ratio of two counts `computeTableAgentMetrics` already returns:
+  - `Connected %` = Total Connected / Total Disposed (matches the KPI tiles' own pre-existing
+    `connectRate` convention - `connected.length / disposed.length` - so "connect rate" means
+    the same thing everywhere in this file).
+  - `Total Prepaid Assigned %` / `Total COD Assigned %` = that count / Total Leads Assigned -
+    composition of an agent's assigned portfolio; the two sum to ~100%.
+  - `Total Prepaid Connected %` = Total Prepaid Connected / Total Prepaid Assigned - a
+    prepaid-specific connect rate, deliberately relative to prepaid's OWN assigned count, not to
+    Total Connected (which would answer a different question - "what share of all connects were
+    prepaid" - not asked for).
+  - `Total Prepaid Converted %` / `Total COD Converted %` = that count / that same payment
+    type's Assigned count (not Connected) - "of the leads of this type I received, what
+    fraction did I ultimately convert," an outcome-per-opportunity rate rather than a
+    close-rate-of-those-reached.
+  - `formatPct` returns `'—'` for a zero denominator (no assigned leads of that type this
+    range) rather than `NaN%`/`Infinity%` - same fail-open-to-dash convention every other
+    empty-state in this table already uses.
 - **"Converted" reuses `agentPerf`'s existing `reordersConverted` definition** (a replacement
   order was recorded, or the disposition itself was `Customer Agreed to Accept` /
   `Product Issue / Exchange`), just split by payment method instead of scoped to one
@@ -398,26 +418,43 @@ specifically because it can now be true while `visibleTableAgentMetrics` itself 
   (which only ever holds an agent's *current* status, not when a session started or how long its
   breaks added up to). `getAgentPresenceLogSummary(dateFrom, dateTo)` (`api/_lib/db.js`) resolves
   `dateFrom`/`dateTo` via the same shared `dateBounds()` helper `getCallingOverviewStats` etc.
-  already use, for consistency:
-  - **"Logged in at"** is the FIRST `'Online'` transition logged **within the range**
-    (chronologically earliest - "first login of the range" for a multi-day scope, not "most
-    recent"). An agent with no status change logged in the range at all has none, so this reads
-    `—` rather than guessing at a time outside the range - the log only records real transitions
-    (`upsertAgentPresence` skips a repeated heartbeat), so there's nothing more precise to point
-    to.
-  - **"Total break time"** sums every interval whose *starting* status was `'Busy'` **and whose
-    starting transition was logged within the range** - walking a per-agent timeline seeded with
-    the single most recent transition strictly before the range starts (needed to know what an
-    agent's status *was* at that boundary; skipped entirely for an unbounded start, e.g.
-    `ALL_TIME`, since there's no "before the range" left), but that seed entry is only ever used
-    to know what came next; it is NEVER itself counted as a break interval, even when its status
-    is `'Busy'`. An interval still open at the end of the query window is closed against the
-    range's own end - `now` for an open-ended/ongoing range (`Today`, `All Time`), or the
-    range's explicit end for a fully-past one (`Yesterday`, an earlier `Custom` range) - **capped
-    at `now` either way**, since a range's nominal end (`dateBounds`' `23:59:59.999`) can be a
-    future instant while today is still in progress; closing against that instead of `now` was a
-    real bug caught by testing before it shipped (an "ongoing" break under `Today` came out as
-    several hours too long, closed against tonight's midnight instead of the actual current time).
+  already use, for consistency. **Both figures are AVERAGES PER ACTIVE DAY once the range spans
+  more than one calendar day** — not a sum, and not a single day's snapshot repeated. "Active
+  day" = an IST calendar day with at least one REAL (non-synthetic) `agent_presence_log` entry
+  anywhere in it; a day the agent never touched at all (a day off, or before they existed in the
+  log) doesn't count toward the denominator, so it can't drag either average down for simply not
+  having happened. For a single-day range (`Today`, `Yesterday`, a one-day `Custom` range) this
+  reduces to exactly the plain single-day numbers, since there's at most one active day to
+  average over — verified as an explicit regression guard in the test suite.
+  - **`loggedInMinutes`** (renamed from `loggedInAt` — an averaged value can't be a specific ISO
+    instant, so the field itself had to change shape, not just its computation) is the average,
+    across every active day that has a real `'Online'` entry, of that
+    day's FIRST such entry expressed as **minutes-since-IST-midnight**, via
+    `istMinutesSinceMidnight`/`istDayKey` (`api/_lib/db.js`) — e.g. logging in at 9:00, 10:00 and
+    11:00 IST on three different days averages to 10:00 (600). This is deliberately NOT an
+    average of raw timestamps: two different calendar days' instants can't be meaningfully
+    averaged as epoch numbers (the result would land on neither day, at an arbitrary point that
+    isn't even a real time of day) — each day's login is reduced to its time-of-day first, then
+    those are averaged. `null` if no active day has a real `'Online'` entry at all — the log has
+    no event to point to, so this reads `—` rather than guessing.
+  - **`breakMinutes`** is (total break time across the WHOLE range, summed exactly as documented
+    below — every interval whose starting status is `'Busy'` AND started with a real transition
+    within the range) divided by the number of active days — "how many break minutes per day
+    they actually worked," not per calendar day in the range (which would understate it whenever
+    the range includes a day off).
+  - The underlying interval-summing walk (unchanged by the averaging): a per-agent timeline
+    seeded with the single most recent transition strictly before the range starts (needed to
+    know what an agent's status *was* at that boundary; skipped entirely for an unbounded start,
+    e.g. `ALL_TIME`, since there's no "before the range" left), but that seed entry is only ever
+    used to know what came next — it is NEVER itself counted as a break interval, an active day,
+    or a login, even when its status is `'Busy'`/`'Online'`. An interval still open at the end of
+    the query window is closed against the range's own end - `now` for an open-ended/ongoing
+    range (`Today`, `All Time`), or the range's explicit end for a fully-past one (`Yesterday`,
+    an earlier `Custom` range) - **capped at `now` either way**, since a range's nominal end
+    (`dateBounds`' `23:59:59.999`) can be a future instant while today is still in progress;
+    closing against that instead of `now` was a real bug caught by testing before it shipped (an
+    "ongoing" break under `Today` came out as several hours too long, closed against tonight's
+    midnight instead of the actual current time).
 
     The underlying overnight-carryover bug this was generalized from: the first version counted
     the boundary-seed interval too, so an agent whose *last known status before the range*
@@ -428,10 +465,28 @@ specifically because it can now be true while `visibleTableAgentMetrics` itself 
     (for the "today" case) as an agent logging in at 10:14am showing `11h 0m` of break before
     they'd even arrived. Fixed by excluding index 0 of the timeline from the break sum whenever
     it's the synthetic seed; a genuine break that starts from a REAL transition within the range
-    (even one immediately following a stale prior status) still counts correctly.
+    (even one immediately following a stale prior status) still counts correctly. Independently
+    verified against real production `agent_presence_log` rows for one agent's single day (two
+    genuine breaks summing to ~45 minutes) matching the code's own computed output exactly.
+- **`First Called At` is the same average-time-of-day pattern as `loggedInMinutes` above, but a
+  wholly different data source and computed entirely client-side.** It's "when did they first
+  action a lead," not "when did they sign in," so it's derived from `disposedByDate`'s own
+  `leadDates`-sourced `disposedAt` timestamps (already fetched for the Assigned/Disposed date
+  scoping above — no new backend endpoint needed) rather than `agent_presence_log`.
+  `computeTableAgentMetrics` (`RtoCrmClient.js`) walks `disposedByDate`, groups by IST calendar
+  day via `istDayKeyClient`/`istMinutesSinceMidnightClient` (client-side equivalents of
+  `db.js`'s `istDayKey`/`istMinutesSinceMidnight`), keeps each day's EARLIEST disposition
+  time-of-day, then averages across days that have at least one — "active day" here means a day
+  with a disposed ticket that has a resolvable `disposedAt`, independent of the presence-log
+  active-day set the other two columns use, since it's tracking a genuinely different kind of
+  event. A ticket whose `leadDates` lookup misses entirely (no Postgres record) is skipped, not
+  treated as a phantom day. Renders through the same shared `formatTimeOfDay` as Logged In At
+  (renamed from `formatLoggedInMinutes` once it needed to serve both columns) — reduces to
+  exactly "the first disposition of that day" for a single-day scope, the literal ask this
+  column was added for.
 - **`/api/auth/presence`'s GET widened, carefully.** It used to be admin-only outright (nobody
   but the Team Roster table called it). It now also serves a **self-only** response to any
-  signed-in caller — just their own `loggedInAt`/`breakMinutes`, looked up by their own
+  signed-in caller — just their own `loggedInMinutes`/`breakMinutes`, looked up by their own
   session email, nothing else — so a plain Agent can see their own two new columns without the
   endpoint turning into a general everyone's-presence leak. The admin branch is unchanged
   (all agents, all fields).

@@ -570,7 +570,7 @@ async function getAllAgentPresence() {
   return out;
 }
 
-// Per-agent {loggedInAt, breakMinutes} derived from agent_presence_log, for the RTO-CRM
+// Per-agent {loggedInMinutes, breakMinutes} derived from agent_presence_log, for the RTO-CRM
 // Overview tab's per-agent summary table (see RtoCrmClient.js) - agent_presence itself
 // (getAllAgentPresence, above) only ever holds the CURRENT status, not when a session started
 // or how long its breaks added up to.
@@ -583,22 +583,48 @@ async function getAllAgentPresence() {
 // lower bound (All Time) - there's no "before the range" to seed a synthetic snapshot from in
 // that case, since the range already starts at the beginning of the log.
 //
-// loggedInAt is the FIRST 'Online' transition LOGGED WITHIN THE RANGE (chronologically
-// earliest - "first login of the range" for a multi-day scope, not "most recent"). An agent
-// with no status change logged in the range at all has none - the log has no event to point
-// to, so this reads null rather than guessing at some time outside the range. That's a real
-// limitation of a change-log, not a bug: only actual transitions are recorded (see
-// upsertAgentPresence's comment on why a repeated heartbeat isn't logged).
+// Both results are AVERAGES PER ACTIVE DAY when the range spans more than one calendar day -
+// not a single-day snapshot repeated, and not a raw sum across the whole range either. "Active
+// day" means an IST calendar day with at least one REAL (non-synthetic) presence_log entry
+// anywhere in it - a day the agent never touched at all (a day off, or before they ever
+// existed in the log) doesn't count toward the denominator, so it can't drag the average down
+// for having simply not happened. For a single-day range (Today, Yesterday, a one-day Custom
+// range) this reduces to exactly the plain single-day numbers, since there's at most one active
+// day to average over.
 //
-// breakMinutes sums every interval whose STARTING status was 'Busy', walking a per-agent
-// timeline built from two queries: the single most recent transition strictly BEFORE the
-// range starts (so a break already running when the range begins is picked up from the start
-// of the range, not invisible just because it didn't start within it), then every transition
-// logged within the range. An interval still open at the end of the query window (Busy with
-// no later transition) is closed against the range's own end - `now` for an open-ended range,
-// or the range's explicit end for a fully-past one (e.g. Yesterday, or a Custom range that
-// ended before today) - never against `now` for a range that's already over, or a still-open
-// break logged last week would silently absorb everything up to this instant.
+// loggedInMinutes is the average, across every active day that has a real 'Online' entry, of
+// that day's FIRST such entry expressed as minutes-since-IST-midnight (istMinutesSinceMidnight)
+// - e.g. logging in at 9:00, 10:00 and 11:00 IST on three different days averages to 10:00.
+// This is deliberately NOT an average of raw timestamps: two different calendar days' instants
+// can't be meaningfully averaged as epoch numbers (the result would land on neither day, at an
+// arbitrary point that isn't even a real "time of day"), so each day's login is reduced to its
+// time-of-day first, then those are averaged. null if no active day has a real Online entry at
+// all - the log has no event to point to, so this reads null rather than guessing.
+//
+// breakMinutes is (total break time across the WHOLE range, summed exactly as before - every
+// interval whose starting status is 'Busy' AND started with a real transition within the
+// range) divided by the number of active days - "how many break minutes per day they actually
+// worked", not per calendar day in the range (which would understate it whenever the range
+// includes a day off). The single-day case is unaffected: dividing by exactly one active day
+// changes nothing.
+//
+// Both figures still walk one per-agent timeline seeded with the single most recent transition
+// strictly BEFORE the range starts (so a break/status already running when the range begins is
+// picked up from the start of the range, not invisible just because it didn't start within it -
+// but this seed entry is NEVER itself counted as an active day, a login, or a break interval,
+// for the same overnight-carryover reason documented at the break-sum loop below), then every
+// transition logged within the range. An interval still open at the end of the query window is
+// closed against the range's own end - `now` for an open-ended range, or the range's explicit
+// end for a fully-past one (e.g. Yesterday, or a Custom range that ended before today) - never
+// against `now` for a range that's already over, or a still-open break logged last week would
+// silently absorb everything up to this instant.
+const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
+function istMinutesSinceMidnight(date) {
+  return Math.floor((date.getTime() + IST_OFFSET_MS) / 60000) % (24 * 60);
+}
+function istDayKey(date) {
+  return Math.floor((date.getTime() + IST_OFFSET_MS) / 86400000);
+}
 async function getAgentPresenceLogSummary(dateFrom, dateTo) {
   await ensurePgSchema();
   const { from, to } = dateBounds(dateFrom, dateTo);
@@ -646,7 +672,33 @@ async function getAgentPresenceLogSummary(dateFrom, dateTo) {
 
   const out = {};
   for (const [email, timeline] of timelines) {
-    const loggedInAtEntry = timeline.find((e) => !e.synthetic && e.status === 'Online');
+    const realEntries = timeline.filter((e) => !e.synthetic);
+    // "Active day" = an IST calendar day with at least one REAL entry - the denominator for
+    // both averages below. The synthetic seed is never a real entry, so a range that opens
+    // mid-status but sees no actual transition until later still counts its active days
+    // correctly from the first real entry onward, not from the seed's (possibly much earlier)
+    // boundary timestamp.
+    const activeDayKeys = new Set(realEntries.map((e) => istDayKey(e.at)));
+    const numActiveDays = activeDayKeys.size;
+
+    // loggedInMinutes: average, across days that have a real 'Online' entry, of that day's
+    // FIRST such entry's time-of-day (see istMinutesSinceMidnight) - not every active day
+    // necessarily has one (a day where the agent was only ever seen 'Busy'/'Offline' in-range
+    // doesn't contribute a login time, though it still counts toward numActiveDays above).
+    const firstLoginMinutesByDay = new Map(); // dayKey -> earliest minutes-since-midnight that day
+    for (const e of realEntries) {
+      if (e.status !== 'Online') continue;
+      const dayKey = istDayKey(e.at);
+      const mins = istMinutesSinceMidnight(e.at);
+      if (!firstLoginMinutesByDay.has(dayKey) || mins < firstLoginMinutesByDay.get(dayKey)) {
+        firstLoginMinutesByDay.set(dayKey, mins);
+      }
+    }
+    const loginMinutesList = [...firstLoginMinutesByDay.values()];
+    const loggedInMinutes = loginMinutesList.length
+      ? Math.round(loginMinutesList.reduce((s, m) => s + m, 0) / loginMinutesList.length)
+      : null;
+
     let breakMs = 0;
     for (let i = 0; i < timeline.length; i++) {
       if (timeline[i].status !== 'Busy') continue;
@@ -667,8 +719,8 @@ async function getAgentPresenceLogSummary(dateFrom, dateTo) {
       breakMs += Math.max(0, end.getTime() - timeline[i].at.getTime());
     }
     out[email] = {
-      loggedInAt: loggedInAtEntry ? loggedInAtEntry.at.toISOString() : null,
-      breakMinutes: Math.round(breakMs / 60000),
+      loggedInMinutes,
+      breakMinutes: numActiveDays > 0 ? Math.round((breakMs / 60000) / numActiveDays) : 0,
     };
   }
   return out;

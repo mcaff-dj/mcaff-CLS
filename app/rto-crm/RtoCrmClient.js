@@ -357,24 +357,50 @@ const localStorage = typeof window !== 'undefined'
       return isDateInScope(new Date(dateIso), scope, customFrom, customTo);
     }
 
-    // Formats the /api/auth/presence-derived loggedInAt ISO string for the Agent Performance
-    // Summary table (Overview tab) - IST wall-clock, since that's the convention the rest of
-    // this app's calling-hours/scheduling already uses (see assign_leads.py's
-    // within_business_hours). '—' when there's no login event logged within the current
-    // date-scope filter (see getAgentPresenceLogSummary's own comment for why that can
-    // legitimately happen - it's the first login of the range, per scopeToDateBounds).
-    function formatLoggedInAt(iso) {
-      if (!iso) return '—';
-      const d = new Date(iso);
-      if (isNaN(d.getTime())) return '—';
-      return d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
+    // Same fixed UTC+5:30 offset convention used throughout this app (assign_leads.py's
+    // within_business_hours, api/_lib/db.js's istMinutesSinceMidnight/istDayKey) - client-side
+    // equivalents, since firstCalledAtMinutes (see computeTableAgentMetrics below) is computed
+    // in the browser from leadDates' disposedAt timestamps, not by the backend.
+    const IST_OFFSET_MS_CLIENT = (5 * 60 + 30) * 60 * 1000;
+    function istMinutesSinceMidnightClient(date) {
+      return Math.floor((date.getTime() + IST_OFFSET_MS_CLIENT) / 60000) % (24 * 60);
+    }
+    function istDayKeyClient(date) {
+      return Math.floor((date.getTime() + IST_OFFSET_MS_CLIENT) / 86400000);
     }
 
-    // breakMinutes (a plain integer from the same endpoint) -> "1h 12m" / "45m" / "0m".
+    // Formats a "minutes since IST midnight" integer as a wall-clock time - shared by every
+    // time-of-day column in the Agent Performance Summary table (Logged In At, First Called At):
+    // NOT an ISO timestamp, because for a multi-day date-scope each is an AVERAGE across days
+    // (see getAgentPresenceLogSummary's own comment, and computeTableAgentMetrics below for
+    // firstCalledAtMinutes' identical averaging), which can only be expressed as a time-of-day,
+    // not a specific instant on any one calendar day. No timezone conversion needed here - the
+    // value is already in IST minutes by the time it reaches this function. '—' when nothing was
+    // logged within the current date-scope filter at all (see the two callers' own comments for
+    // why that can legitimately happen).
+    function formatTimeOfDay(mins) {
+      if (mins === null || mins === undefined) return '—';
+      const m = ((Math.round(mins) % (24 * 60)) + 24 * 60) % (24 * 60);
+      const h24 = Math.floor(m / 60), rem = m % 60;
+      const ampm = h24 < 12 ? 'am' : 'pm';
+      const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+      return `${h12}:${String(rem).padStart(2, '0')} ${ampm}`;
+    }
+
+    // breakMinutes (a plain integer from the same endpoint - already averaged per active day
+    // for a multi-day scope) -> "1h 12m" / "45m" / "0m".
     function formatBreakMinutes(mins) {
       const m = Math.max(0, Math.round(mins || 0));
       const h = Math.floor(m / 60), rem = m % 60;
       return h > 0 ? `${h}h ${rem}m` : `${rem}m`;
+    }
+
+    // count/total*100, rounded, as "N%" - '—' when the denominator is 0 (nothing to divide),
+    // same fail-open-to-dash convention `formatTimeOfDay`'s '—' already uses. Shared by
+    // every percentage column in the Agent Performance Summary table.
+    function formatPct(count, total) {
+      if (!total) return '—';
+      return `${Math.round((count / total) * 100)}%`;
     }
 
     /* ── Non-blocking parser ─────────────────────────── */
@@ -643,7 +669,7 @@ const localStorage = typeof window !== 'undefined'
       // roster table just falls back to each agent's local/mock status as before.
       // fetchServerPresence itself is defined further down (after dateScope/customDateFrom/
       // customDateTo exist to close over - it now sends them as dateFrom/dateTo query params
-      // so loggedInAt/breakMinutes follow the same filter every other Overview column does).
+      // so loggedInMinutes/breakMinutes follow the same filter every other Overview column does).
       const [serverPresence, setServerPresence] = useState({});
 
       // {order_id: {assignedAt, disposedAt}} for every lead ever assigned (GET
@@ -1079,7 +1105,7 @@ const localStorage = typeof window !== 'undefined'
       const [customDateTo, setCustomDateTo] = useState(()=>localStorage.getItem('rto_custom_date_to')||'');
 
       // GET /api/auth/presence, now with dateFrom/dateTo (see scopeToDateBounds above) so
-      // loggedInAt/breakMinutes follow the Overview tab's own date-scope filter instead of
+      // loggedInMinutes/breakMinutes follow the Overview tab's own date-scope filter instead of
       // always meaning "today" - re-fetches immediately when the filter changes (not just on
       // the 30s poll), so switching to Yesterday/a Custom range doesn't sit on stale numbers
       // for up to 30 seconds.
@@ -2818,6 +2844,35 @@ const localStorage = typeof window !== 'undefined'
                     const prepaidConverted = disposedByDate.filter(t => t.paymentMethod === 'Prepaid' && isConverted(t));
                     const codConverted = disposedByDate.filter(t => t.paymentMethod === 'COD' && isConverted(t));
 
+                    // First Called At: same "average time-of-day across active days" pattern as
+                    // Logged In At/Total Break Time (see getAgentPresenceLogSummary's own
+                    // comment in db.js for why - an average across different calendar days can
+                    // only be expressed as a time-of-day, not one specific instant), but computed
+                    // here client-side from disposedByDate's own disposedAt timestamps (leadDates,
+                    // already fetched for the Assigned/Disposed scoping above) rather than from
+                    // agent_presence_log - a wholly different data source (this is "when did they
+                    // first action a lead", not "when did they sign in"). "Active day" here means
+                    // an IST calendar day with at least one disposed ticket that has a resolvable
+                    // disposedAt - independent of the presence-log active-day set Logged In
+                    // At/Total Break Time use, since it's tracking a different kind of event.
+                    // Reduces to exactly "the first disposition of that day" for a single-day
+                    // scope, matching the literal ask this column was added for.
+                    const firstCallMinutesByDay = new Map(); // dayKey -> earliest minutes-since-midnight that day
+                    for (const t of disposedByDate) {
+                      const disposedAtIso = leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt;
+                      if (!disposedAtIso) continue;
+                      const at = new Date(disposedAtIso);
+                      const dayKey = istDayKeyClient(at);
+                      const mins = istMinutesSinceMidnightClient(at);
+                      if (!firstCallMinutesByDay.has(dayKey) || mins < firstCallMinutesByDay.get(dayKey)) {
+                        firstCallMinutesByDay.set(dayKey, mins);
+                      }
+                    }
+                    const firstCallMinutesList = [...firstCallMinutesByDay.values()];
+                    const firstCalledAtMinutes = firstCallMinutesList.length
+                      ? Math.round(firstCallMinutesList.reduce((s, m) => s + m, 0) / firstCallMinutesList.length)
+                      : null;
+
                     return {
                       ...ag,
                       assigned: assignedByDate.length,
@@ -2828,6 +2883,7 @@ const localStorage = typeof window !== 'undefined'
                       prepaidConnected: prepaidConnected.length,
                       prepaidConverted: prepaidConverted.length,
                       codConverted: codConverted.length,
+                      firstCalledAtMinutes,
                     };
                   };
                   const tableAgentMetrics = effectiveAgentRoster.map(computeTableAgentMetrics);
@@ -2960,10 +3016,13 @@ const localStorage = typeof window !== 'undefined'
                             Date, unlike the KPI tiles above): Assigned columns use when the lead was actually handed to the
                             agent; Disposed/Connected/Converted columns use when the agent actually resolved it - a lead
                             assigned yesterday and disposed today counts toward today's Disposed/Connected/Converted numbers
-                            even though it doesn't count toward today's Assigned ones. Hover a header for which. Logged In At
-                            is the first login within the range; Total Break Time is summed across it - both now follow the
-                            same filter (an approximate calendar-day window for 7 Days/30 Days, not the exact rolling hours the
-                            lead columns use).
+                            even though it doesn't count toward today's Assigned ones. Hover a header for which, and for what
+                            each % is of. Logged In At is the average time-of-day of first login across the range's active
+                            days (days with any real status change); First Called At is the same average, but of the first
+                            disposition each active day (days with any resolved lead); Total Break Time is the average break
+                            minutes per active day - all three follow the same filter (an approximate calendar-day window for
+                            7 Days/30 Days, not the exact rolling hours the lead columns use), and reduce to the plain
+                            single-day numbers for Today/Yesterday/a one-day Custom range.
                           </p>
                         </div>
                         <div className="overflow-x-auto custom-scroll">
@@ -2973,14 +3032,21 @@ const localStorage = typeof window !== 'undefined'
                                 <th className="py-2 pr-3 font-bold">Agent Name</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Leads Assigned</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Disposed</th>
+                                <th className="py-2 px-3 font-bold" title="Average time-of-day of the first disposition across the range's active days">First Called At</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Connected</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Total Connected / Total Disposed">Connected %</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Prepaid Assigned</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Total Prepaid Assigned / Total Leads Assigned">Total Prepaid Assigned %</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Prepaid Connected</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Total Prepaid Connected / Total Prepaid Assigned">Total Prepaid Connected %</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total COD Assigned</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Total COD Assigned / Total Leads Assigned">Total COD Assigned %</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Prepaid Converted</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Total Prepaid Converted / Total Prepaid Assigned">Total Prepaid Converted %</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total COD Converted</th>
-                                <th className="py-2 px-3 font-bold" title="First 'Online' transition within the date range">Logged In At</th>
-                                <th className="py-2 pl-3 font-bold" title="Summed break time within the date range">Total Break Time</th>
+                                <th className="py-2 px-3 font-bold text-right" title="Total COD Converted / Total COD Assigned">Total COD Converted %</th>
+                                <th className="py-2 px-3 font-bold" title="Average first-login time-of-day across the range's active days">Logged In At</th>
+                                <th className="py-2 pl-3 font-bold" title="Average break minutes per active day in the range">Total Break Time</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -2998,19 +3064,26 @@ const localStorage = typeof window !== 'undefined'
                                     <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap">{am.name}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.assigned}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.disposed}</td>
+                                    <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(am.firstCalledAtMinutes)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{am.connected}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{formatPct(am.connected, am.disposed)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.prepaidAssigned}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-zinc-400">{formatPct(am.prepaidAssigned, am.assigned)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.prepaidConnected}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-zinc-400">{formatPct(am.prepaidConnected, am.prepaidAssigned)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.codAssigned}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-zinc-400">{formatPct(am.codAssigned, am.assigned)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-indigo-400">{am.prepaidConverted}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-indigo-300">{formatPct(am.prepaidConverted, am.prepaidAssigned)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-indigo-400">{am.codConverted}</td>
-                                    <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatLoggedInAt(presence?.loggedInAt)}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-indigo-300">{formatPct(am.codConverted, am.codAssigned)}</td>
+                                    <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(presence?.loggedInMinutes)}</td>
                                     <td className="py-2.5 pl-3 text-amber-400 font-mono whitespace-nowrap">{formatBreakMinutes(presence?.breakMinutes)}</td>
                                   </tr>
                                 );
                               })}
                               {visibleTableAgentMetrics.filter(am => am.assigned > 0).length === 0 && (
-                                <tr><td colSpan={11} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
+                                <tr><td colSpan={18} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
                               )}
                             </tbody>
                           </table>

@@ -221,14 +221,18 @@ async function handlePresence(req, res) {
   // reading (see the Team Roster panel in rto-crm.html).
   if (req.method === 'GET') {
     // Optional 'YYYY-MM-DD' bounds - same convention as every other date-ranged endpoint in
-    // this file (see dateBounds in db.js). Lets loggedInAt/breakMinutes follow the Overview
-    // tab's own date-scope filter (Today/Yesterday/7 Days/Custom/All Time) instead of always
-    // meaning "today" - omit either/both for an open-ended range.
+    // this file (see dateBounds in db.js). Lets loggedInMinutes/breakMinutes follow the
+    // Overview tab's own date-scope filter (Today/Yesterday/7 Days/Custom/All Time) instead of
+    // always meaning "today" - omit either/both for an open-ended range. Both figures are
+    // averaged per active day once the range spans more than one calendar day (see
+    // getAgentPresenceLogSummary's own comment) - loggedInMinutes is minutes-since-IST-midnight
+    // (a time-of-day, not a specific instant), not an ISO timestamp, precisely because an
+    // average across several different calendar days can't be expressed as one.
     const dateFrom = (req.query && req.query.dateFrom) || undefined;
     const dateTo = (req.query && req.query.dateTo) || undefined;
     if (!session.isAdmin) {
       // Not admin-only past this point: a signed-in agent may still read their OWN
-      // loggedInAt/breakMinutes - the Overview tab's per-agent summary table (see
+      // loggedInMinutes/breakMinutes - the Overview tab's per-agent summary table (see
       // RtoCrmClient.js) needs these for every visible row, including a plain Agent's own
       // (their view is already scoped to just themselves there). Everyone else's presence
       // stays out of reach; only the caller's own email is ever looked up or returned.
@@ -237,7 +241,7 @@ async function handlePresence(req, res) {
       res.status(200).json({
         agents: {
           [email]: {
-            loggedInAt: summary.loggedInAt || null,
+            loggedInMinutes: summary.loggedInMinutes ?? null,
             breakMinutes: summary.breakMinutes || 0,
           },
         },
@@ -247,7 +251,7 @@ async function handlePresence(req, res) {
     const [agents, presenceSummary] = await Promise.all([getAllAgentPresence(), getAgentPresenceLogSummary(dateFrom, dateTo)]);
     for (const email of Object.keys(agents)) {
       const summary = presenceSummary[email];
-      agents[email].loggedInAt = summary?.loggedInAt || null;
+      agents[email].loggedInMinutes = summary?.loggedInMinutes ?? null;
       agents[email].breakMinutes = summary?.breakMinutes || 0;
     }
     res.status(200).json({ agents });
