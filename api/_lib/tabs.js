@@ -52,8 +52,11 @@ const CARD_TABS = {
     { key: 'overview', label: 'Overview' },
     ...require('./callingProcesses.json').processes.map(p => ({ key: p.key, label: p.label })),
   ],
+  // Mirrors app/deepdive/DeepdiveClient.js's own TABS array (a React page, not a
+  // gen_panels.py-generated tab bar) - keep those two in sync by hand.
   deepdive: [
     { key: 'csat', label: 'CSAT Deep Dive' },
+    { key: 'nps', label: 'NPS' },
     { key: 'agent', label: 'Agent wise analysis' },
     { key: 'agentactivity', label: 'Agent Activity Analysis' },
   ],

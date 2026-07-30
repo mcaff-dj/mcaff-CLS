@@ -72,6 +72,7 @@ function ddTriggerRefresh() {
 
 const TABS = [
   { key: 'csat', label: 'CSAT Deep Dive' },
+  { key: 'nps', label: 'NPS' },
   { key: 'agent', label: 'Agent wise analysis' },
   { key: 'agentactivity', label: 'Agent Activity Analysis' },
 ];
@@ -81,6 +82,19 @@ function NotYetMigrated({ label }) {
     <p className="card-sub dd-not-migrated">
       {label} hasn&apos;t been moved to the new dashboard yet - it&apos;s being worked on in a
       follow-up pass. Nothing is broken; this tab is simply not built here yet.
+    </p>
+  );
+}
+
+// NPS mapping review - the tab shell is wired up (nav entry, panel, and a 'nps' entry in
+// api/_lib/tabs.js so it can be granted per-user) but the mapping table itself isn't built
+// yet; which mapping this reviews is still being pinned down. Replace this component's body
+// once that's settled - nothing else here needs to change.
+function NpsMappingReview() {
+  return (
+    <p className="card-sub dd-not-migrated">
+      NPS mapping review is coming soon - this tab is wired up but the mapping table isn&apos;t
+      built yet.
     </p>
   );
 }
@@ -132,6 +146,10 @@ export default function DeepdiveClient() {
 
         <div className={'tab-panel' + (activeTab === 'csat' ? ' active' : '')} id="panel-csat">
           {activeTab === 'csat' && <NotYetMigrated label="CSAT Deep Dive" />}
+        </div>
+
+        <div className={'tab-panel' + (activeTab === 'nps' ? ' active' : '')} id="panel-nps">
+          {activeTab === 'nps' && <NpsMappingReview />}
         </div>
 
         <div className={'tab-panel' + (activeTab === 'agent' ? ' active' : '')} id="panel-agent">
