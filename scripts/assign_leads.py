@@ -41,7 +41,10 @@ shipped, not a rolling window, so the large pre-existing backlog of already-Conn
 is left exactly as it was, while every lead called from that date onward is eligible
 indefinitely. A reassigned lead gets Q and R:U wiped back to blank so it looks like a fresh,
 never-called lead to its new agent - the previous attempt's history survives only in Postgres,
-not on the row itself.
+not on the row itself. Before any of that, a prepaid Connected=No lead is checked against
+GoKwik the same as a fresh one (see the next paragraph) - it can have been refunded through a
+channel other than this agent's own disposition, and reassigning it would just have a second
+agent call a customer who's already been made whole.
 
 Before a still-unassigned PREPAID lead enters the pool, its refund status is checked live
 against GoKwik (see is_already_refunded_via_gokwik) - a customer who's already been refunded
@@ -480,12 +483,24 @@ def main():
         # already has a real agent (someone was actually called and didn't pick up) - a
         # fresh/unassigned lead can't have a Connected value at all.
         if agent_raw and agent_raw != "unassigned" and connected.strip().lower() == "no":
+            payment_method = cell(row, COL_PAYMENT_METHOD)
+
+            # Same GoKwik refund check as the fresh-lead path further below (prepaid only -
+            # COD has nothing paid upfront to refund) - a Connected=No lead can ALSO already
+            # be refunded through a channel other than this agent's own disposition (e.g.
+            # support processed it directly outside the CRM). This branch has its own
+            # `continue`s below and would otherwise never reach that other check at all -
+            # confirmed for real on HYP39615010, which got reassigned despite GoKwik already
+            # showing it refunded, before this was added.
+            if is_prepaid(payment_method) and is_already_refunded_via_gokwik(order_id):
+                already_refunded_rows.append(i)
+                continue
+
             calling_date = parse_calling_date(cell(row, COL_CALLING_DATE))
             if calling_date and calling_date >= REASSIGN_BACKLOG_CUTOFF:
                 prior_agents = attempts_by_order.get(order_id, set()) | {agent_raw}
                 if len(prior_agents) < REASSIGN_RETRY_CAP:
                     rto_initiated_date = parse_rto_initiated_date(cell(row, COL_RTO_INITIATED_DATE))
-                    payment_method = cell(row, COL_PAYMENT_METHOD)
                     tier = priority_tier(payment_method, cell(row, COL_RTO_REASON))
                     unassigned_pending.append((i, rto_initiated_date, order_id, tier))
                     awb_code_by_row[i] = cell(row, COL_AWB_CODE)

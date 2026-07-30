@@ -637,6 +637,16 @@ genuinely nothing fresh left to hand out this run.
 unsuccessful call doesn't stay on the row — it's kept safely elsewhere so the same agent-history
 can't be handed out twice, but the agent picking it up next sees a clean, fresh lead to work.
 
+**A refund check runs before any of this, same as for a brand-new lead.** A prepaid customer
+who never picked up can still have been refunded through some other channel entirely — support
+processing it directly, for instance — with nothing in this CRM ever recording it. So before
+handing a Connected=No prepaid lead to a new agent, the Robot asks GoKwik the same "already
+refunded?" question a fresh lead gets (see 10d above). Confirmed refunded → stamped and left
+alone, same as any other refund; never reassigned to have a second agent call someone who's
+already been made whole. This was missing at first — order HYP39615010 was reassigned despite
+already being refunded, because the reassignment path had its own shortcut around the refund
+check — and was fixed once found.
+
 ---
 
 ## 11. Who's allowed to see what?

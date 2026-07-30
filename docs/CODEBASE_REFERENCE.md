@@ -357,6 +357,12 @@ Connected column reads "No" is eligible to go to a *different* agent, up to
 - **Checked before `is_disposed`, not after.** A non-empty Connected value would otherwise
   make `is_disposed` treat the row as permanently worked, same as any real disposition — this
   branch intercepts Connected=No first and either re-queues it or falls through unchanged.
+- **Runs the same GoKwik refund check as the fresh-lead path, for prepaid only.** This branch
+  has its own early `continue`s, so it never reaches the fresh-lead path's
+  `is_already_refunded_via_gokwik` call further down the loop - a real bug, not hypothetical:
+  order `HYP39615010` was reassigned despite GoKwik already confirming it refunded, before this
+  was added. A confirmed refund here stamps S/T/U and skips reassignment entirely, same outcome
+  as the fresh-lead check.
 - **`lead_reassignment_attempts`** (new Postgres table, append-only — unlike `lead_assignments`,
   which upserts and only ever holds the *current* agent) is how every prior agent stays
   permanently excluded, not just the most recent one. Fetched once per run
