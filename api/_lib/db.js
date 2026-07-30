@@ -426,6 +426,79 @@ async function getAllAgentPresence() {
   return out;
 }
 
+// Same fixed UTC+5:30 offset convention scripts/assign_leads.py's within_business_hours
+// already uses (IST has no DST, so a fixed offset needs no tz database) - returns the UTC
+// instant of the most recent IST midnight.
+const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
+function istDayStartUtc(now = new Date()) {
+  const ist = new Date(now.getTime() + IST_OFFSET_MS);
+  const istMidnight = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate());
+  return new Date(istMidnight - IST_OFFSET_MS);
+}
+
+// Per-agent {loggedInAt, breakMinutesToday} derived from agent_presence_log, for the
+// RTO-CRM Overview tab's per-agent summary table (see RtoCrmClient.js) - agent_presence
+// itself (getAllAgentPresence, above) only ever holds the CURRENT status, not when today's
+// session started or how long today's breaks added up to.
+//
+// loggedInAt is the first 'Online' transition LOGGED TODAY (IST day). An agent who signed
+// on yesterday and has had no status change since has none - the log has no event to point
+// to, so this reads null ("no login recorded today") rather than guessing at yesterday's
+// time. That's a real limitation of a change-log, not a bug: only actual transitions are
+// recorded (see upsertAgentPresence's comment on why a repeated heartbeat isn't logged).
+//
+// breakMinutesToday sums every interval whose STARTING status was 'Busy', walking a
+// per-agent timeline built from two queries: the single most recent transition strictly
+// BEFORE today's IST midnight (so a break already running at midnight is picked up from
+// midnight, not invisible just because it didn't start today), then every transition logged
+// today. An interval still open (Busy with no later transition) is closed against `now`.
+async function getAgentPresenceLogSummary() {
+  await ensurePgSchema();
+  const dayStart = istDayStartUtc();
+
+  const { rows: priorRows } = await pgSql`
+    SELECT DISTINCT ON (email) email, status
+    FROM agent_presence_log
+    WHERE changed_at < ${dayStart}
+    ORDER BY email, changed_at DESC
+  `;
+  const { rows: todayRows } = await pgSql`
+    SELECT email, status, changed_at
+    FROM agent_presence_log
+    WHERE changed_at >= ${dayStart}
+    ORDER BY email ASC, changed_at ASC
+  `;
+
+  // `synthetic: true` marks the carried-forward midnight snapshot so it can count toward
+  // breakMs (an ongoing Busy period didn't start today, but is still real) without also
+  // being mistaken for a real "logged in today" event below (its status is just whatever
+  // was true AT midnight, e.g. carried-over Online, not a fresh sign-in).
+  const timelines = new Map(); // email -> [{status, at: Date, synthetic?: bool}]
+  for (const r of priorRows) timelines.set(r.email.toLowerCase(), [{ status: r.status, at: dayStart, synthetic: true }]);
+  for (const r of todayRows) {
+    const email = r.email.toLowerCase();
+    if (!timelines.has(email)) timelines.set(email, []);
+    timelines.get(email).push({ status: r.status, at: r.changed_at });
+  }
+
+  const now = new Date();
+  const out = {};
+  for (const [email, timeline] of timelines) {
+    const loggedInAtEntry = timeline.find((e) => !e.synthetic && e.status === 'Online');
+    let breakMs = 0;
+    for (let i = 0; i < timeline.length; i++) {
+      if (timeline[i].status !== 'Busy') continue;
+      const end = i + 1 < timeline.length ? timeline[i + 1].at : now;
+      breakMs += Math.max(0, end.getTime() - timeline[i].at.getTime());
+    }
+    out[email] = {
+      loggedInAt: loggedInAtEntry ? loggedInAtEntry.at.toISOString() : null,
+      breakMinutesToday: Math.round(breakMs / 60000),
+    };
+  }
+  return out;
+}
+
 // Returns { orderId: assignedAtIso } for assignments newer than sinceHours - the
 // reset button only needs "was this assigned recently", so callers keep the payload
 // small by asking for a window just past their own grace period, not the whole table.
@@ -847,7 +920,7 @@ module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
-  getAllAgentPresence, getRecentLeadAssignments, recordLeadDisposition,
+  getAllAgentPresence, getAgentPresenceLogSummary, getRecentLeadAssignments, recordLeadDisposition,
   getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,

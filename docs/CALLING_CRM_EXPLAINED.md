@@ -266,6 +266,15 @@ Now **only you** can set yourself Offline. Nothing else can.
 **C) You can't claim leads while Offline.** If you try, you get a polite message:
 *"Switch status to Online first."* Fair is fair.
 
+**D) Today's login time and break time show up automatically.** The Overview tab's Agent
+Performance Summary table (replacing what used to be a live scrolling call log) shows, per
+agent: how many leads they've been given, how many they've disposed and connected on, a
+Prepaid/COD split of the same, and — read straight from the same Online/Break/Offline register
+above — what time they first logged in **today** and how many minutes they've spent On Break
+today. Nobody has to fill either of those two in; they're just a readout of the status changes
+already happening. An agent viewing their own Overview only ever sees their own row, same as
+everywhere else in this tab.
+
 ---
 
 ## 8. What an agent actually does all day
@@ -911,10 +920,14 @@ There are two such rulebooks now, and the same reasoning applies to both:
 
 ### 🔐 Locks belong on the server, not in the browser
 Anything the browser stores, the person using the browser can edit. So the browser holds
-*preferences* (which theme, which process you were last on) while the **server** holds
-*permissions* (which processes you may work at all) — and the server re-checks them on every
-page load rather than trusting what the page tells it.
+*preferences* (which process you were last on) while the **server** holds *permissions*
+(which processes you may work at all) — and the server re-checks them on every page load
+rather than trusting what the page tells it.
+
+> There used to be a Dark/Light/Royal Purple theme switcher too, stored the same way. It was
+> removed — every agent now sees the exact same look, and there's no setting left that could
+> ever show anyone a different one.
 
 ---
 
-*Last updated: 29 July 2026*
+*Last updated: 30 July 2026*

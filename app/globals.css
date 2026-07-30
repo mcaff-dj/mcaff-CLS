@@ -6,8 +6,6 @@
 
 * { box-sizing: border-box; margin: 0; }
 
-html.dark body { background: #09090b; color: #fafafa; }
-
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 9999px; }
@@ -27,8 +25,13 @@ html.dark body { background: #09090b; color: #fafafa; }
 .custom-scroll::-webkit-scrollbar { width: 4px; }
 .custom-scroll::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 4px; }
 
-/* ── Multi-Theme System (Dark, Light, Royal Purple) ── */
-html.dark body, body.theme-dark { background: #09090b; color: #fafafa; }
+/* ── One theme, always ──────────────────────────────────────────────────
+ * There used to be a Dark/Light/Royal Purple switcher (RtoCrmClient.js's rto_theme,
+ * localStorage-backed), each with its own override block below - so two agents could see
+ * completely different colors, and a fresh session defaulted to Dark. The switcher and the
+ * Dark/Purple override blocks are gone; body always carries theme-light now (set once,
+ * unconditionally, by RtoCrmClient.js), and only the Light overrides remain, so there is no
+ * class combination left that renders anything else. ── */
 
 /* Light Theme Overrides */
 body.theme-light { background: #f8fafc !important; color: #0f172a !important; }
@@ -189,50 +192,6 @@ body.theme-light .shadow-indigo-950\/50,
 body.theme-light .shadow-emerald-950\/40,
 body.theme-light .shadow-emerald-950\/50,
 body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08) !important; }
-
-/* Royal Purple Theme Overrides */
-body.theme-purple { background: #0c0714 !important; color: #faf5ff !important; }
-body.theme-purple header { background-color: rgba(15, 8, 26, 0.95) !important; border-color: #3b1b63 !important; }
-body.theme-purple main { background-color: #0c0714 !important; }
-
-body.theme-purple .bg-zinc-900\/90,
-body.theme-purple .bg-zinc-900\/80,
-body.theme-purple .bg-zinc-900\/70,
-body.theme-purple .bg-zinc-900\/60,
-body.theme-purple .bg-zinc-900\/50,
-body.theme-purple .bg-zinc-900\/40,
-body.theme-purple .bg-zinc-900\/30,
-body.theme-purple .bg-zinc-900\/20,
-body.theme-purple .bg-zinc-900 { background-color: #190c2e !important; border-color: #3b1b63 !important; color: #faf5ff !important; }
-
-body.theme-purple .bg-zinc-800\/80,
-body.theme-purple .bg-zinc-800\/70,
-body.theme-purple .bg-zinc-800\/60,
-body.theme-purple .bg-zinc-800\/50,
-body.theme-purple .bg-zinc-800\/25,
-body.theme-purple .bg-zinc-800 { background-color: #231240 !important; border-color: #4c1d95 !important; color: #f3e8ff !important; }
-
-body.theme-purple table { background-color: #190c2e !important; color: #faf5ff !important; }
-body.theme-purple thead tr { background-color: #231240 !important; border-color: #3b1b63 !important; }
-body.theme-purple thead th { color: #d8b4fe !important; font-weight: 700 !important; }
-body.theme-purple tbody tr { border-color: #2a144c !important; }
-body.theme-purple tbody tr:hover { background-color: #281347 !important; }
-body.theme-purple .divide-zinc-800\/40 > :not([hidden]) ~ :not([hidden]) { border-color: #2a144c !important; }
-
-body.theme-purple .bg-zinc-950 { background-color: #120724 !important; border-color: #4c1d95 !important; color: #faf5ff !important; }
-body.theme-purple .border-zinc-800\/80,
-body.theme-purple .border-zinc-800\/90,
-body.theme-purple .border-zinc-800,
-body.theme-purple .border-zinc-700\/80,
-body.theme-purple .border-zinc-700 { border-color: #3b1b63 !important; }
-
-body.theme-purple .text-zinc-100,
-body.theme-purple .text-zinc-200 { color: #faf5ff !important; }
-body.theme-purple .text-zinc-300,
-body.theme-purple .text-zinc-400 { color: #e9d5ff !important; }
-body.theme-purple .text-zinc-500 { color: #c084fc !important; }
-body.theme-purple input, body.theme-purple select, body.theme-purple textarea { background-color: #120724 !important; color: #faf5ff !important; border-color: #4c1d95 !important; }
-body.theme-purple input::placeholder, body.theme-purple textarea::placeholder { color: #a855f7 !important; }
 
 @media print {
   body * { visibility: hidden; }

@@ -1,7 +1,7 @@
 // Consolidated auth routes (login/logout/callback/me/presence) into one dynamic-route
 // file to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells
 // us which logical route was hit; URLs are unchanged.
-const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getRecentLeadAssignments, recordLeadDisposition,
+const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getAgentPresenceLogSummary, getRecentLeadAssignments, recordLeadDisposition,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent } = require('../_lib/db');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
@@ -216,14 +216,34 @@ async function handlePresence(req, res) {
     return;
   }
   // GET: the roster table's live Status column reads straight from Postgres here,
-  // instead of trusting each browser's own localStorage mock state - admin-only since
-  // it's the only caller (see the Team Roster panel in rto-crm.html).
+  // instead of trusting each browser's own localStorage mock state - admin-only, since a
+  // full roster of everyone's presence is the only thing a non-admin has no business
+  // reading (see the Team Roster panel in rto-crm.html).
   if (req.method === 'GET') {
     if (!session.isAdmin) {
-      res.status(403).json({ error: 'Admin only' });
+      // Not admin-only past this point: a signed-in agent may still read their OWN
+      // loggedInAt/breakMinutesToday - the Overview tab's per-agent summary table (see
+      // RtoCrmClient.js) needs these for every visible row, including a plain Agent's own
+      // (their view is already scoped to just themselves there). Everyone else's presence
+      // stays out of reach; only the caller's own email is ever looked up or returned.
+      const email = session.email.toLowerCase();
+      const summary = (await getAgentPresenceLogSummary())[email] || {};
+      res.status(200).json({
+        agents: {
+          [email]: {
+            loggedInAt: summary.loggedInAt || null,
+            breakMinutesToday: summary.breakMinutesToday || 0,
+          },
+        },
+      });
       return;
     }
-    const agents = await getAllAgentPresence();
+    const [agents, presenceSummary] = await Promise.all([getAllAgentPresence(), getAgentPresenceLogSummary()]);
+    for (const email of Object.keys(agents)) {
+      const summary = presenceSummary[email];
+      agents[email].loggedInAt = summary?.loggedInAt || null;
+      agents[email].breakMinutesToday = summary?.breakMinutesToday || 0;
+    }
     res.status(200).json({ agents });
     return;
   }
