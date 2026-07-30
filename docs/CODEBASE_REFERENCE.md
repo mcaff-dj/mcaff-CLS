@@ -538,12 +538,25 @@ Connected column reads "No" is eligible to go to a *different* agent, up to
   tests and a lead either of them rejects is left alone for good, so there is nothing to learn
   from GoKwik about it. See *Why it's deferred, batched and parallel* above - this ordering was
   originally the other way round and was most of an 8-13 minute run.
-- **`lead_reassignment_attempts`** (new Postgres table, append-only — unlike `lead_assignments`,
-  which upserts and only ever holds the *current* agent) is how every prior agent stays
+- **`lead_assignments` keeps one row per assignment *cycle*** — reassigning stamps the outgoing
+  agent's row `reassigned_away_at` rather than overwriting it, so every prior agent stays
   permanently excluded, not just the most recent one. Fetched once per run
-  (`fetch_reassignment_attempts`), written once per actual reassignment
-  (`record_reassignment_attempt`, logging the agent being displaced, right after the sheet
-  write that displaces them).
+  (`fetch_reassignment_attempts`, reading the `reassigned_away_at IS NOT NULL` rows) and written
+  by `record_lead_assignments` right after the sheet write, which retires the outgoing cycle and
+  records the incoming one **in a single transaction** — separating them risks a lead with no
+  live cycle at all (invisible to `recentAssignments`/KPIs while the sheet says it's assigned),
+  and the partial unique indexes require the outgoing cycle to leave before the incoming one can
+  enter. This replaces a separate `lead_reassignment_attempts` table that held just
+  `(order_id, email)` per failed attempt; keeping the real row instead of a bare marker means each
+  past attempt retains its own disposition/connected/disposed_at — which also fixed a lead keeping
+  its *previous* agent's stale disposition in Postgres after being reassigned.
+- **`lead_assignments_current`** (view: `reassigned_away_at IS NULL`) is the live cycle of each
+  lead — one row per `order_id`, enforced by `lead_assignments_order_id_current_key`, i.e. exactly
+  what the table held when `order_id` was its primary key. Readers asking about a lead's current
+  state use the view; readers counting *call outcomes* (disposed, connect rate, refunds, the
+  hourly dial series, the partner breakdown) read the base table, so an earlier agent's real
+  attempt on a reassigned lead still counts. See `getCallingOverviewStats` in `api/_lib/db.js`,
+  which applies both grains in one pass.
 - **`build_assignment_queue` gained `excluded_by_row: {row_index: {emails}}`.** The old
   shrinking-`agent_cycle`-list loop couldn't express "skip this agent for this lead only," so
   the core loop was rewritten to a per-lead cursor over a fixed `agent_order` array — verified
@@ -566,7 +579,7 @@ Connected column reads "No" is eligible to go to a *different* agent, up to
   genuinely fresh lead, not the previous agent's Connected/Attempt/Disposition/remarks.
 - **The JS preview (`predictedAssignments`) is a deliberate approximation**, not a full port:
   it excludes the *current* agent for a Connected=No ticket, but has no client-side visibility
-  into `lead_reassignment_attempts` (Postgres-only, read by the Python cron directly), so it
+  into `lead_assignments`' retired cycles (Postgres-only, read by the Python cron directly), so it
   cannot enforce the retry cap across older attempts. A `row.isReassignment` flag drives a
   "🔁 Reassign" badge in the Admin "Next to Assign" table. Known, accepted drift — see
   `REASSIGN_BACKLOG_CUTOFF_DATE`'s comment in `RtoCrmClient.js`.

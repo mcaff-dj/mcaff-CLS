@@ -39,6 +39,30 @@ async function pgSql(strings, ...values) {
   return { rows };
 }
 
+// Runs `work` against ONE dedicated connection wrapped in BEGIN/COMMIT (ROLLBACK on
+// error) - unlike pgSql above, which checks out a fresh pooled connection per call, so
+// a session-scoped guarantee (a multi-statement transaction, an advisory lock held
+// across statements) needs this instead. work receives the raw `pg` client - use
+// client.query(text, params) with plain $1/$2 placeholders, not the pgSql tagged
+// template (which would grab a DIFFERENT connection and defeat the point).
+async function withPgTransaction(work) {
+  const client = await getPgPool().connect();
+  try {
+    await client.query('BEGIN');
+    const result = await work(client);
+    await client.query('COMMIT');
+    client.release();
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    // Pass the error to release() so node-postgres discards this connection instead of
+    // returning a possibly-poisoned one (mid-transaction failure, connection reset mid-
+    // query, etc.) to the pool for the next caller to inherit.
+    client.release(err);
+    throw err;
+  }
+}
+
 // Fetched once per warm Lambda instance, then reused - same "do it once, cache it"
 // idea as ensureSchema()'s schemaReady flag below.
 async function getPool() {
@@ -162,13 +186,122 @@ async function ensurePgSchema() {
   // table lets the reset button tell the two apart. Written by assign_leads.py
   // directly (its own psycopg connection), read by rto-crm.html via a new
   // /api/auth/[action].js?action=recentAssignments endpoint.
+  //
+  // One row per ASSIGNMENT CYCLE (surrogate `id` PK), not one per order_id: a lead handed
+  // to a second agent after a Connected=No gets a brand new row, and the first agent's row
+  // is kept - stamped reassigned_away_at - instead of being overwritten. That's what lets
+  // this one table replace what used to be two (this, plus a lead_reassignment_attempts
+  // side-table holding just (order_id, email) per failed attempt): they were always the
+  // same fact - "which agent held this lead, when, and how it turned out" - and keeping the
+  // real row rather than a bare marker means each past attempt retains its own
+  // disposition/connected/disposed_at instead of throwing that away on reassignment (the
+  // old upsert did throw it away, which is also why a reassigned lead used to keep its
+  // previous agent's stale disposition in Postgres - fixed as a side effect here).
+  //
+  // reassigned_away_at IS NULL means "this is the cycle that is live right now", and the
+  // partial unique index below enforces at most one such row per order_id - so this table
+  // still has a single, well-defined current row per lead, exactly like the old
+  // order_id PRIMARY KEY guaranteed. lead_assignments_current (further down) is that set.
   await pgSql`
     CREATE TABLE IF NOT EXISTS lead_assignments (
-      order_id TEXT PRIMARY KEY,
+      id BIGSERIAL PRIMARY KEY,
+      order_id TEXT NOT NULL,
       email TEXT NOT NULL,
       assigned_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `;
+  // When this lead was taken away from the agent in this row (NULL = still theirs). A
+  // timestamp rather than a boolean because it strictly supersedes what the old
+  // lead_reassignment_attempts row recorded: that table's own assigned_at was stamped
+  // now() at reassignment time, i.e. it was really "when the attempt ended". Keeping both
+  // means a row now carries the true original assigned_at AND when it was handed on.
+  await pgSql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS reassigned_away_at TIMESTAMPTZ`;
+  // Plain (non-unique) index for whole-history lookups by lead - assign_leads.py's
+  // fetch_reassignment_attempts scans every reassigned_away_at row to build its
+  // "who has already failed on this lead" exclusion set.
+  await pgSql`CREATE INDEX IF NOT EXISTS lead_assignments_order_id_idx ON lead_assignments (order_id)`;
+  // One-time migration from the pre-merge shape (PRIMARY KEY(order_id), one row per lead)
+  // to the per-cycle shape above. The cheap pre-check here is only an optimization so the
+  // overwhelmingly common case - already migrated - never even opens a dedicated
+  // connection; the authoritative guard is the re-check under the lock inside.
+  //
+  // Right after this ships, several Lambda instances can cold-start at once and all reach
+  // this line before any has migrated. So the whole thing runs as ONE transaction that
+  // takes an advisory lock FIRST and only then re-checks and issues DDL: losers block on
+  // the lock, then see `id` already present and return having changed nothing. Taking the
+  // lock before any DDL is the important part - an earlier draft of this ran DROP
+  // CONSTRAINT IF EXISTS lead_assignments_pkey before re-checking, which on the losing
+  // instance would have dropped the NEW primary key (ADD COLUMN id BIGSERIAL PRIMARY KEY
+  // names its constraint lead_assignments_pkey too) and then committed that. Being one
+  // transaction also means a mid-way failure rolls back whole, rather than leaving a
+  // half-migrated table no retry could cleanly finish.
+  //
+  // THIS BLOCK IS A FALLBACK, not the intended path. The migration is meant to be applied by
+  // hand before deploying, via
+  // scripts/migrations/2026-07-30_merge_reassignment_attempts_into_lead_assignments.sql -
+  // which does exactly what this does, with preflight checks and verification queries. Two
+  // reasons that ordering matters:
+  //   - ADD COLUMN id BIGSERIAL PRIMARY KEY rewrites the whole table. On a request-path cold
+  //     start that can be slow enough to threaten the triggering request's own timeout.
+  //   - scripts/assign_leads.py and scripts/sync_lead_assignments_to_mysql.py reach Postgres
+  //     directly and never call this function, so between the Python shipping and the first
+  //     Lambda cold start they would reference reassigned_away_at / lead_assignments_current
+  //     before either exists. The assign-leads cron runs every 5 minutes, so that window is
+  //     narrow but real.
+  // Migrating first closes both: this block then finds `id` present and skips.
+  const { rows: idColRows } = await pgSql`
+    SELECT 1 FROM information_schema.columns WHERE table_name = 'lead_assignments' AND column_name = 'id'
+  `;
+  if (idColRows.length === 0) {
+    await withPgTransaction(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('lead_assignments_cycle_migration'))");
+      const { rows: recheck } = await client.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_name = 'lead_assignments' AND column_name = 'id'"
+      );
+      if (recheck.length > 0) return; // another instance migrated while we waited for the lock
+      // Look the existing PK's name up rather than assuming Postgres's default
+      // 'lead_assignments_pkey', same as the hand-run migration does.
+      const { rows: pkRows } = await client.query(
+        `SELECT conname FROM pg_constraint WHERE conrelid = 'lead_assignments'::regclass AND contype = 'p'`
+      );
+      if (pkRows.length === 0) throw new Error('lead_assignments has no primary key - unexpected shape, refusing to migrate');
+      await client.query(`ALTER TABLE lead_assignments DROP CONSTRAINT "${pkRows[0].conname}"`);
+      await client.query('ALTER TABLE lead_assignments ADD COLUMN id BIGSERIAL PRIMARY KEY');
+      // awb_code's unique index is becoming PARTIAL (see its own comment below). Recreating
+      // it needs the old table-wide one gone first, and CREATE UNIQUE INDEX IF NOT EXISTS
+      // matches on index NAME alone - it would happily leave the old, now-wrong definition
+      // in place - so drop it here and let the create further down rebuild it correctly.
+      await client.query('DROP INDEX IF EXISTS lead_assignments_awb_code_key');
+      // Fold the retired side-table in. Each of its rows is one past failed attempt, and
+      // all it knew was (order_id, email, when it was logged) - so assigned_at and
+      // reassigned_away_at both take that single timestamp: the honest statement that this
+      // attempt is over, without inventing a start time it never recorded.
+      //
+      // RENAMED, not dropped - identical to what the hand-run migration does (see
+      // scripts/migrations/2026-07-30_merge_reassignment_attempts_into_lead_assignments.sql),
+      // so neither path can destroy the only copy of this history if the fold turns out to
+      // have been wrong. Drop the leftover by hand once you're satisfied.
+      const { rows: oldTableRows } = await client.query(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'lead_reassignment_attempts'"
+      );
+      if (oldTableRows.length > 0) {
+        await client.query(
+          `INSERT INTO lead_assignments (order_id, email, assigned_at, reassigned_away_at)
+           SELECT order_id, email, assigned_at, assigned_at FROM lead_reassignment_attempts`
+        );
+        await client.query(
+          'ALTER TABLE lead_reassignment_attempts RENAME TO lead_reassignment_attempts_premerge_20260730'
+        );
+      }
+    });
+  }
+  // At most one live cycle per lead - the invariant the old order_id PRIMARY KEY provided,
+  // re-expressed so past cycles can coexist. Both write paths (assign_leads.py's
+  // record_lead_assignments and recordLeadDisposition below) target this index with ON
+  // CONFLICT, so each still gets a single atomic upsert against "the current row for this
+  // lead", with no read-then-write race to guard - the same guarantee they had when
+  // order_id was the primary key.
+  await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS lead_assignments_order_id_current_key ON lead_assignments (order_id) WHERE reassigned_away_at IS NULL`;
   // Per-process, per-weekday calling hours, editable by an admin from the CRM's own admin
   // panel. Lives here rather than in api/_lib/callingProcesses.json because it has to be
   // changeable at runtime - that file now only supplies the DEFAULTS used to seed a process
@@ -238,8 +371,15 @@ async function ensurePgSchema() {
   // creates the row. A unique index (not a plain UNIQUE constraint, so this stays
   // idempotent via IF NOT EXISTS) - Postgres already treats multiple NULLs as
   // distinct, so leads created before this column existed don't block real ones.
+  //
+  // Partial (WHERE reassigned_away_at IS NULL), matching the order_id index above: a
+  // reassignment leaves the old cycle's row in place carrying the SAME awb_code (one
+  // physical shipment, successive agents), so a table-wide unique index would reject the
+  // new cycle outright. Restricting it to live cycles lets a lead's own history repeat its
+  // AWB while still enforcing what this index is actually for - one AWB never belonging to
+  // two different live leads at once.
   await pgSql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS awb_code TEXT`;
-  await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS lead_assignments_awb_code_key ON lead_assignments (awb_code)`;
+  await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS lead_assignments_awb_code_key ON lead_assignments (awb_code) WHERE reassigned_away_at IS NULL`;
   await pgSql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS rto_reason TEXT`;
   // Replacement order ID (sheet column V) - lets "reordered" be computed the same way
   // the RTO-CRM UI itself already defines it (see reordersConverted in
@@ -255,20 +395,23 @@ async function ensurePgSchema() {
   // column - both writers already know the AWB when they write, so there's no reason
   // to make Postgres re-derive it on every read.
   await pgSql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS delivery_partner TEXT`;
-  // Append-only log of every agent a lead was reassigned AWAY from after a Connected=No
-  // outcome - unlike lead_assignments above (one row per order, upserted, so it only ever
-  // shows the CURRENT agent), this keeps every prior agent so scripts/assign_leads.py can
-  // permanently exclude all of them, not just the most recent one, and enforce a retry cap
-  // across the full history. Written only by assign_leads.py's own psycopg connection, at
-  // the moment a lead is actually reassigned - nothing in the Node app writes to this table.
+  // The live cycle of every lead - i.e. exactly what lead_assignments itself held back when
+  // order_id was its primary key. Every reader whose question is about a lead's CURRENT
+  // state (is it assigned, to whom, still pending?) selects from this rather than the base
+  // table; readers counting CALL OUTCOMES stay on the base table so earlier attempts on
+  // reassigned leads keep counting (see getCallingOverviewStats for which is which).
+  //
+  // No DISTINCT ON / ORDER BY needed to pick a winner: lead_assignments_order_id_current_key
+  // already guarantees at most one row per order_id here.
+  //
+  // CREATE OR REPLACE (not DROP + CREATE) so this swaps atomically under live readers.
+  // Deliberately placed after every ALTER TABLE ADD COLUMN above, so `*` picks up the full
+  // column set - Postgres permits CREATE OR REPLACE VIEW to append columns, which is what
+  // makes re-running this after a future column is added a no-op rather than an error.
   await pgSql`
-    CREATE TABLE IF NOT EXISTS lead_reassignment_attempts (
-      order_id TEXT NOT NULL,
-      email TEXT NOT NULL,
-      assigned_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
+    CREATE OR REPLACE VIEW lead_assignments_current AS
+    SELECT * FROM lead_assignments WHERE reassigned_away_at IS NULL
   `;
-  await pgSql`CREATE INDEX IF NOT EXISTS lead_reassignment_attempts_order_id_idx ON lead_reassignment_attempts (order_id)`;
   // Append-only history of every status transition an agent has ever had (Online /
   // Busy / Offline), so agent_presence above can stay a single row per agent while this
   // one answers "when did each change happen" - e.g. for a future audit trail or
@@ -519,7 +662,7 @@ async function getAgentPresenceLogSummary() {
 async function getRecentLeadAssignments(sinceHours) {
   await ensurePgSchema();
   const { rows } = await pgSql`
-    SELECT order_id, assigned_at FROM lead_assignments
+    SELECT order_id, assigned_at FROM lead_assignments_current
     WHERE assigned_at >= now() - make_interval(hours => ${sinceHours})
   `;
   const out = {};
@@ -539,11 +682,33 @@ function resolvePartnerFromAwb(awbCode) {
   return match ? match[1] : null;
 }
 
-// Upserts the disposal side of a lead's lifecycle. If assign_leads.py never recorded
-// this order_id (assigned before lead_assignments existed, or assigned manually
-// straight in the sheet), the INSERT branch creates the row now with the disposing
-// agent's own email as assigned_at's best-available attribution, rather than dropping
-// the disposal details on the floor.
+// Upserts the disposal side of a lead's lifecycle onto its LIVE cycle - the row whose
+// reassigned_away_at IS NULL - which is why the conflict target names that partial index's
+// predicate (see lead_assignments_order_id_current_key in ensurePgSchema). Still one atomic
+// statement, exactly as when order_id was the primary key: Postgres resolves
+// insert-or-update under the index itself, so concurrent disposals of the same lead (a
+// double-submit, say) serialize on their own rather than needing a lock around a
+// read-then-write.
+//
+// Naming the live cycle is what keeps this an in-place update of the row the agent is
+// actually working, rather than appending a second live row per disposal - which would
+// collide with lead_assignments_awb_code_key, since a lead's successive rows carry the same
+// AWB.
+//
+// Note it updates whichever row is live for this order_id, not specifically the calling
+// agent's. So a disposal arriving from an agent the lead has ALREADY been reassigned away
+// from writes onto the new agent's cycle. That is pre-existing behavior (when order_id was
+// the primary key there was only ever one row to upsert onto, with the same outcome) and is
+// left alone deliberately: the fix would be to condition DO UPDATE on the stored email
+// matching the caller's, and any drift between the sheet's Column Q and the session email -
+// case, whitespace, an alias address - would then silently discard legitimate disposals,
+// which is far worse than the narrow case it guards. Reaching it needs a stale tab: once
+// reassigned, the sheet no longer lists the lead under the old agent.
+//
+// If assign_leads.py never recorded this order_id (assigned before lead_assignments
+// existed, or assigned manually straight in the sheet), the INSERT branch creates the row
+// now with the disposing agent's own email as assigned_at's best-available attribution,
+// rather than dropping the disposal details on the floor.
 //
 // awbCode/delivery_partner use COALESCE on conflict rather than overwriting, so a
 // disposal call without an AWB (e.g. an older cached client) never clobbers what
@@ -564,7 +729,7 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
   await pgSql`
     INSERT INTO lead_assignments (order_id, email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount, awb_code, new_order_id, rto_reason, delivery_partner)
     VALUES (${orderId}, ${email}, now(), now(), ${disposition || null}, ${agentRemarks || null}, ${connected || null}, ${attempt || null}, ${refundAmount || null}, ${awbCode || null}, ${newOrderId || null}, ${rtoReason || null}, ${deliveryPartner})
-    ON CONFLICT (order_id) DO UPDATE SET
+    ON CONFLICT (order_id) WHERE reassigned_away_at IS NULL DO UPDATE SET
       disposed_at = now(),
       disposition = EXCLUDED.disposition,
       agent_remarks = EXCLUDED.agent_remarks,
@@ -598,19 +763,31 @@ function dateBounds(dateFrom, dateTo) {
 // pipeline. "Connect rate" mirrors rto-crm's own definition: disposed leads where
 // connected = 'Yes', over all disposed leads (blank/other values excluded from the
 // denominator the same way rto-crm's own KPI row treats them).
+//
+// Reads the BASE table, with `reassigned_away_at IS NULL` added to the two metrics that
+// count LEADS rather than CALLS - because the two grains genuinely differ now that a
+// reassigned lead keeps a row per agent who tried it:
+//   - assigned / pending answer "how many leads", so they must count each lead once, i.e.
+//     its live cycle only. Without the predicate a lead reassigned three times would read
+//     as three assigned leads.
+//   - disposed / connected / unreachable / refunded answer "how many CALLS were made and
+//     how did they go", so every cycle counts: the first agent really did dial and fail to
+//     connect, and that attempt stays in the denominator of connect rate where it belongs.
+//     This also keeps these numbers matching what they reported before this table was
+//     re-grained, when a reassignment overwrote the row and left its old disposition behind.
 async function getCallingOverviewStats(dateFrom, dateTo) {
   await ensurePgSchema();
   const { from, to } = dateBounds(dateFrom, dateTo);
   const { rows } = await pgSql`
     SELECT
       count(*) FILTER (
-        WHERE (${from}::timestamptz IS NULL OR assigned_at >= ${from}) AND (${to}::timestamptz IS NULL OR assigned_at <= ${to})
+        WHERE reassigned_away_at IS NULL AND (${from}::timestamptz IS NULL OR assigned_at >= ${from}) AND (${to}::timestamptz IS NULL OR assigned_at <= ${to})
       )::int AS total_assigned,
       count(*) FILTER (
         WHERE disposed_at IS NOT NULL AND (${from}::timestamptz IS NULL OR disposed_at >= ${from}) AND (${to}::timestamptz IS NULL OR disposed_at <= ${to})
       )::int AS total_disposed,
       count(*) FILTER (
-        WHERE disposed_at IS NULL AND (${from}::timestamptz IS NULL OR assigned_at >= ${from}) AND (${to}::timestamptz IS NULL OR assigned_at <= ${to})
+        WHERE reassigned_away_at IS NULL AND disposed_at IS NULL AND (${from}::timestamptz IS NULL OR assigned_at >= ${from}) AND (${to}::timestamptz IS NULL OR assigned_at <= ${to})
       )::int AS total_pending,
       count(*) FILTER (
         WHERE connected = 'Yes' AND disposed_at IS NOT NULL AND (${from}::timestamptz IS NULL OR disposed_at >= ${from}) AND (${to}::timestamptz IS NULL OR disposed_at <= ${to})
@@ -646,13 +823,17 @@ async function getCallingOverviewStats(dateFrom, dateTo) {
 // disposal time), summed across all history rather than a specific day. "Reordered"
 // mirrors RtoCrmClient.js's own reordersConverted definition exactly (disposition value
 // OR a replacement order ID), now that new_order_id is captured in Postgres too.
+//
+// Same grain split as getCallingOverviewStats: "assigned" counts leads, so it reads the
+// live-cycle view; the four disposal series count calls, so they read the base table and
+// every attempt on a reassigned lead lands in the hour it was actually dialled.
 async function getCallingHourlyStats(dateFrom, dateTo) {
   await ensurePgSchema();
   const { from, to } = dateBounds(dateFrom, dateTo);
   const [assignedRows, disposedRows] = await Promise.all([
     pgSql`
       SELECT extract(hour FROM assigned_at AT TIME ZONE 'Asia/Kolkata')::int AS hour, count(*)::int AS n
-      FROM lead_assignments
+      FROM lead_assignments_current
       WHERE (${from}::timestamptz IS NULL OR assigned_at >= ${from}) AND (${to}::timestamptz IS NULL OR assigned_at <= ${to})
       GROUP BY 1
     `,
@@ -877,6 +1058,9 @@ async function getAdministeredProcesses(email) {
 // ensurePgSchema). Surfaces "Customer Agreed to Accept" specifically alongside the total,
 // so it directly answers "which partner is most of our Customer Agreed to Accept coming
 // from" rather than just a generic disposed count - sorted by that count descending.
+//
+// Base table (every disposed cycle), since these are call-outcome counts - see
+// getCallingOverviewStats for why that grain and not the live-cycle view.
 async function getCallingPartnerBreakdown(dateFrom, dateTo) {
   await ensurePgSchema();
   const { from, to } = dateBounds(dateFrom, dateTo);
@@ -909,7 +1093,7 @@ async function getCallingRtoReasonBreakdown(dateFrom, dateTo) {
     SELECT
       coalesce(rto_reason, 'Unknown') AS rto_reason,
       count(*)::int AS total
-    FROM lead_assignments
+    FROM lead_assignments_current
     WHERE (${from}::timestamptz IS NULL OR assigned_at >= ${from}) AND (${to}::timestamptz IS NULL OR assigned_at <= ${to})
     GROUP BY 1
     ORDER BY total DESC

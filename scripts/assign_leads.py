@@ -33,9 +33,10 @@ Connected=No).
 The one exception: a lead whose Connected column reads "No" - the agent actually called and
 didn't reach the customer - is eligible to be handed to a DIFFERENT agent, up to
 REASSIGN_RETRY_CAP distinct agents total ever trying the same lead. Every agent who already
-failed to connect is excluded from receiving it again (lead_reassignment_attempts in Postgres
-tracks this permanently, since lead_assignments itself only ever holds the current agent, not
-history) - "old owner never gets the same lead back." Only leads whose own Calling Date is on
+failed to connect is excluded from receiving it again (lead_assignments in Postgres keeps one
+row per agent who has held the lead - reassigning stamps the outgoing agent's row
+reassigned_away_at instead of overwriting it, so that history is never lost) - "old owner
+never gets the same lead back." Only leads whose own Calling Date is on
 or after REASSIGN_BACKLOG_CUTOFF are eligible - a fixed, one-time boundary chosen when this
 shipped, not a rolling window, so the large pre-existing backlog of already-Connected=No leads
 is left exactly as it was, while every lead called from that date onward is eligible
@@ -417,47 +418,28 @@ def flush_gokwik_refund_cache(dirty):
 
 
 def fetch_reassignment_attempts():
-    """{order_id: {emails}} of every agent a lead has ever been reassigned AWAY from, per
-    lead_reassignment_attempts (see api/_lib/db.js's ensurePgSchema - append-only, unlike
-    lead_assignments which only ever holds the current agent). Returns {} (never raises) if
-    POSTGRES_URL isn't configured or the query fails - a lookup failure here should fail open
-    (treat every lead as having no reassignment history yet, exactly the pre-this-feature
-    behavior) rather than block the whole run."""
+    """{order_id: {emails}} of every agent a lead has ever been reassigned AWAY from - the
+    rows lead_assignments keeps with reassigned_away_at set (see api/_lib/db.js's
+    ensurePgSchema: reassigning stamps the old agent's row rather than overwriting it, so
+    that table holds one row per agent who ever tried a lead, not just its current one).
+    Returns {} (never raises) if POSTGRES_URL isn't configured or the query fails - a lookup
+    failure here should fail open (treat every lead as having no reassignment history yet,
+    exactly the pre-this-feature behavior) rather than block the whole run."""
     conn_str = os.environ.get("POSTGRES_URL")
     if not conn_str:
         return {}
     try:
         with psycopg.connect(conn_str) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT order_id, email FROM lead_reassignment_attempts")
+                cur.execute("SELECT order_id, email FROM lead_assignments WHERE reassigned_away_at IS NOT NULL")
                 rows = cur.fetchall()
     except Exception as e:
-        print(f"  (lead_reassignment_attempts fetch failed: {e} - treating as no prior attempts)")
+        print(f"  (lead_assignments reassignment-history fetch failed: {e} - treating as no prior attempts)")
         return {}
     attempts_by_order = {}
     for order_id, email in rows:
         attempts_by_order.setdefault(order_id, set()).add((email or "").lower())
     return attempts_by_order
-
-
-def record_reassignment_attempt(order_id, email):
-    """Logs the agent a lead is being reassigned AWAY from, permanently - called exactly once
-    per actual reassignment (never for a fresh, never-before-assigned lead), right before its
-    Column Q is overwritten with a new agent. Best-effort: a failure here is printed but never
-    raised, since refusing to reassign the lead over an audit-log write failing would be worse
-    than the audit log being briefly incomplete."""
-    conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str:
-        return
-    try:
-        with psycopg.connect(conn_str) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO lead_reassignment_attempts (order_id, email, assigned_at) VALUES (%s, %s, now())",
-                    (order_id, email),
-                )
-    except Exception as e:
-        print(f"    (failed to log reassignment-away for {order_id}/{email}: {e})")
 
 
 def fetch_online_agents(process_key=None):
@@ -526,24 +508,47 @@ def fetch_online_agents(process_key=None):
     return eligible, quotas
 
 
-def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row):
-    """Stamps assigned_at=now() for every lead just assigned, keyed by the sheet's
-    own Order ID, so rto-crm.html's resetStalePendingLeads() can tell a
-    fresh assignment apart from a genuinely stale one (the lead's own Calling
-    Date can't do this - the backlog this script distributes is old by
-    definition). Best-effort: if POSTGRES_URL isn't configured, silently
-    skips (fetch_online_agents() would already have returned [] in that case,
-    so in practice this only runs when the DB is reachable anyway).
+def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
+                            reassign_info_by_row):
+    """Stamps assigned_at=now() for every lead just assigned, keyed by the sheet's own Order
+    ID, so rto-crm.html's resetStalePendingLeads() can tell a fresh assignment apart from a
+    genuinely stale one (the lead's own Calling Date can't do this - the backlog this script
+    distributes is old by definition). Best-effort: if POSTGRES_URL isn't configured,
+    silently skips (fetch_online_agents() would already have returned [] in that case, so in
+    practice this only runs when the DB is reachable anyway).
 
-    Also stamps awb_code (unique per lead_assignments row - see the UNIQUE
-    index in api/_lib/db.js's ensureSchema), rto_reason (the sheet's own Column D -
-    see lead_priority.COL_RTO_REASON), and delivery_partner (derived from awb_code via
-    lead_priority.prefix_rule_partner - the same rule api/_lib/db.js's JS mirror uses
-    for leads recorded via the disposal path instead) so downstream reporting
-    (scripts/sync_lead_assignments_to_mysql.py) can key on any of them without a
-    separate sheet lookup. All three use COALESCE on conflict rather than blindly
-    overwriting, so a re-run never clobbers a value already recorded by the disposal
-    write path (api/_lib/db.js's recordLeadDisposition) with a blank one."""
+    Handles BOTH halves of a reassignment, in ONE transaction, because they are only correct
+    together: first stamp reassigned_away_at on the outgoing agent's row (retiring their
+    cycle and preserving how it went), then write the incoming agent's row. Splitting these
+    across two connections - as an earlier version did - risks landing the retire without
+    the insert, leaving a lead with no live cycle at all: invisible to
+    recentAssignments/KPIs, even though the sheet says it is assigned. Postgres either takes
+    both or neither.
+
+    That order also matters within the transaction: lead_assignments_order_id_current_key and
+    lead_assignments_awb_code_key (see api/_lib/db.js's ensurePgSchema) each permit only one
+    live row per lead / per AWB, and a reassigned lead's successive cycles share both values,
+    so the outgoing cycle has to leave those indexes before the incoming one can enter.
+
+    The retire matches on order_id alone - never on the outgoing agent's email. At most one
+    live row exists per order_id, so it is already unambiguous, and matching email too would
+    make any case/whitespace drift between the sheet's Column Q and the stored value silently
+    fail to retire the row - which would then collide on the unique index and abort every
+    assignment in this batch.
+
+    The insert stays an upsert on the live-cycle index, exactly as before this table was
+    re-grained: a genuinely new assignment inserts, while a lead that somehow already has a
+    live row (the same Order ID appearing on two sheet rows, most plausibly) updates it
+    rather than raising a unique violation and losing the whole batch. COALESCE on
+    awb_code/rto_reason/delivery_partner so a re-run never clobbers a value already recorded
+    by the disposal write path (api/_lib/db.js's recordLeadDisposition) with a blank one.
+
+    Also stamps awb_code, rto_reason (the sheet's own Column D - see
+    lead_priority.COL_RTO_REASON), and delivery_partner (derived from awb_code via
+    lead_priority.prefix_rule_partner - the same rule api/_lib/db.js's JS mirror uses for
+    leads recorded via the disposal path instead) so downstream reporting
+    (scripts/sync_lead_assignments_to_mysql.py) can key on any of them without a separate
+    sheet lookup."""
     conn_str = os.environ.get("POSTGRES_URL")
     if not conn_str or not assignments:
         return
@@ -559,13 +564,29 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
     ]
     if not rows:
         return
+    # Only for rows actually being assigned this run - reassign_info_by_row can still hold a
+    # row whose assignment got dropped (over quota, no eligible agent), and retiring that
+    # lead's live cycle when nobody is taking it over would strand it with no current row.
+    retiring = [
+        (order_id,)
+        for row_index, (_old_agent, order_id) in reassign_info_by_row.items()
+        if row_index in assignments
+    ]
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
+            if retiring:
+                cur.executemany(
+                    """
+                    UPDATE lead_assignments SET reassigned_away_at = now()
+                    WHERE order_id = %s AND reassigned_away_at IS NULL
+                    """,
+                    retiring,
+                )
             cur.executemany(
                 """
                 INSERT INTO lead_assignments (order_id, email, assigned_at, awb_code, rto_reason, delivery_partner)
                 VALUES (%s, %s, now(), %s, %s, %s)
-                ON CONFLICT (order_id) DO UPDATE SET
+                ON CONFLICT (order_id) WHERE reassigned_away_at IS NULL DO UPDATE SET
                     email = EXCLUDED.email,
                     assigned_at = now(),
                     awb_code = COALESCE(EXCLUDED.awb_code, lead_assignments.awb_code),
@@ -894,14 +915,13 @@ def main():
     reassigned_count = sum(1 for row_index in assignments if row_index in reassign_info_by_row)
     print(f"Writing {len(assignments)} assignment(s) ({reassigned_count} of them Connected=No reassignments)...")
     lib.set_sheet_values_batch(SPREADSHEET_ID, value_ranges)
-    record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row)
 
-    # Logged AFTER the sheet write succeeds, not before - a reassignment that never actually
-    # reached the sheet has no old agent to permanently exclude yet.
-    for row_index in assignments:
-        if row_index in reassign_info_by_row:
-            old_agent, order_id = reassign_info_by_row[row_index]
-            record_reassignment_attempt(order_id, old_agent)
+    # Recorded AFTER the sheet write succeeds, not before - a reassignment that never actually
+    # reached the sheet has no old agent to permanently exclude yet. Both halves of each
+    # reassignment (retire the old agent's cycle, record the new one) happen inside this one
+    # call, in one transaction - see its docstring for why they can't be separated.
+    record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
+                            reassign_info_by_row)
 
     per_agent = {}
     for email in assignments.values():

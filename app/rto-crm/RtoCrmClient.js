@@ -49,8 +49,8 @@ const localStorage = typeof window !== 'undefined'
     // Connected=No reassignment preview - see leadAssignmentRules.json's _reassignNote and
     // assign_leads.py's REASSIGN_BACKLOG_CUTOFF/REASSIGN_RETRY_CAP. This preview can only
     // exclude the CURRENT agent (the one who just failed to connect) - it has no client-side
-    // visibility into lead_reassignment_attempts (that history lives only in Postgres, read
-    // directly by the Python cron), so it can't enforce the retry cap across older attempts
+    // visibility into lead_assignments' retired cycles (that history lives only in Postgres,
+    // read directly by the Python cron), so it can't enforce the retry cap across older attempts
     // the way the real writer does. A lead the real cron would already treat as cap-reached
     // may still show one more predicted reassignment here.
     const REASSIGN_BACKLOG_CUTOFF_DATE = new Date(leadAssignmentRules.reassignBacklogCutoff);
