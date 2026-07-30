@@ -595,6 +595,16 @@ disposition/attempt columns get marked "Already Refunded," which is the same sig
 (and the CRM) already use to mean "this lead has been worked" — so it stays out of the pool for
 good, not just this one run.
 
+**The answer is remembered for 2 hours, not asked fresh every single time.** Asking GoKwik
+this question is a real phone call to another company's system, and with hundreds of leads
+needing it every 5-minute run, always asking live turned into a real incident: a run that used
+to finish in seconds started taking 8-13 minutes, so runs began queuing up behind each other —
+meaning agents who came online had to wait far longer than usual to actually receive anything,
+through no fault of their own. Now the Robot only asks GoKwik fresh once every 2 hours per
+lead, and just reuses that answer for every run in between. A lead that gets refunded mid-way
+through that 2-hour window might get one extra call before the Robot catches up — a small,
+deliberate tradeoff against every single run taking minutes.
+
 ---
 
 ## 10e. Nobody picked up — try someone else

@@ -344,6 +344,23 @@ disposition — COD is never checked, since nothing was paid upfront to refund p
    one extra call to an already-refunded customer beats silently stalling a genuinely-pending
    lead over infrastructure flakiness.
 
+**`gokwik_refund_checks` (Postgres) caches the result per `order_id` for `GOKWIK_CACHE_TTL`
+(2 hours)** — checking every eligible lead live, every 5-minute run, was a real incident: with
+hundreds of eligible prepaid leads combined with the reassignment check below, a run took
+8-13 minutes (was seconds before), so runs started queuing behind each other
+(`concurrency: cancel-in-progress: false`), delaying assignment for every agent, not just on
+prepaid leads. `fetch_gokwik_refund_cache()` bulk-reads the whole table once per run (same
+pattern as `fetch_reassignment_attempts`) and creates it itself (idempotent) rather than
+depending on `api/_lib/db.js`'s `ensurePgSchema` - Python-only, no reason to wait on a Lambda
+deploy. `is_already_refunded_via_gokwik(order_id, cache, dirty)` checks the in-memory dict
+first and only falls through to the live network call (`_check_gokwik_refund_status_live`) on
+a miss or a stale (>2h) entry; every live result goes into `dirty` and gets written back in
+ONE batched `executemany` at the end of the run (`flush_gokwik_refund_cache`), not one write
+per lead - a per-lead Postgres round-trip on every cache HIT would just move the bottleneck
+from GoKwik onto Postgres instead of removing it. Flushed before the
+`if not unassigned_pending: return` early-exit, same reasoning as the refund stamps above - a
+run that found nothing assignable still did real work worth keeping.
+
 Secrets (`MYSQL_*`, `GOKWIK_*_APPID/APPSECRET`) are wired into
 [assign-leads.yml](../.github/workflows/assign-leads.yml)'s job env — this cron had no MySQL or
 GoKwik access at all before this check existed.

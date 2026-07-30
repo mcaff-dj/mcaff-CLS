@@ -95,6 +95,15 @@ ITEM_LEVEL_SCHEMA = "mcaff_prod"
 GOKWIK_REFUND_STATUS_URL = "https://gkx.gokwik.co/v1/payments/refunds"
 GOKWIK_TIMEOUT_SEC = 8
 
+# A live GoKwik/MySQL check is a real network round-trip, and with hundreds of eligible
+# prepaid leads (fresh + Connected=No reassignment candidates combined) checking every one on
+# every 5-minute run took 8-13 minutes per run in practice - runs started queuing behind each
+# other, delaying assignment for everyone, not just prepaid leads. gokwik_refund_checks caches
+# the result per order_id for this long before it's live-checked again; "not yet refunded"
+# going stale after 2 hours (rather than being checked instantly) is a far better tradeoff
+# than every run taking minutes.
+GOKWIK_CACHE_TTL = timedelta(hours=2)
+
 # Same order-number-prefix -> vendor rule as api/refund/gokwik-initiate.js (kept in that
 # order - Fien and Hyphen are prefix-distinguishable, mcaffeine is the plain-numeric
 # catch-all and must stay last).
@@ -150,12 +159,14 @@ def lookup_platform_order_id(order_id):
     return platform_order_id
 
 
-def is_already_refunded_via_gokwik(order_id):
-    """True only on a confirmed GoKwik refund (success + a Completed entry). Every other
-    outcome - no platform order ID found, missing credentials for this order's vendor, a
-    network error, a non-200, an unparseable body - returns False, per the same fail-open
-    philosophy as lookup_platform_order_id: never block a real pending lead over infrastructure
-    flakiness, only ever skip one that's positively confirmed refunded."""
+def _check_gokwik_refund_status_live(order_id):
+    """The actual network check - True only on a confirmed GoKwik refund (success + a
+    Completed entry). Every other outcome - no platform order ID found, missing credentials
+    for this order's vendor, a network error, a non-200, an unparseable body - returns False,
+    per the same fail-open philosophy as lookup_platform_order_id: never block a real pending
+    lead over infrastructure flakiness, only ever skip one that's positively confirmed
+    refunded. Callers should go through is_already_refunded_via_gokwik's cache instead of
+    calling this directly - see GOKWIK_CACHE_TTL's comment for why."""
     platform_order_id = lookup_platform_order_id(order_id)
     if not platform_order_id:
         return False
@@ -188,6 +199,79 @@ def is_already_refunded_via_gokwik(order_id):
         return False
     refunds = body.get("data") or []
     return any(r.get("status") == "Completed" for r in refunds)
+
+
+def is_already_refunded_via_gokwik(order_id, cache, dirty):
+    """Cache-first wrapper around _check_gokwik_refund_status_live. cache is
+    {order_id: (refunded, checked_at)} from fetch_gokwik_refund_cache (one bulk read at the
+    start of the run); dirty is the {order_id: refunded} dict of newly-checked results this
+    run, flushed once at the end via flush_gokwik_refund_cache - NOT written per-lead, which
+    would just move the per-lead network-call cost from GoKwik onto Postgres instead of
+    actually removing it."""
+    cached = cache.get(order_id)
+    if cached is not None:
+        refunded, checked_at = cached
+        if checked_at is not None and (datetime.now(timezone.utc) - checked_at) < GOKWIK_CACHE_TTL:
+            return refunded
+    result = _check_gokwik_refund_status_live(order_id)
+    dirty[order_id] = result
+    return result
+
+
+def fetch_gokwik_refund_cache():
+    """{order_id: (refunded, checked_at)} for every lead ever checked - one bulk read per run,
+    same pattern as fetch_reassignment_attempts, so consulting it per-lead in the main loop is
+    a dict lookup, not a network call. Creates the table itself (idempotent) rather than
+    depending on api/_lib/db.js's ensurePgSchema, since this is Python-only and the whole
+    point is not to wait on anything else to take effect. Returns {} (never raises) if
+    POSTGRES_URL isn't configured or the query fails - every lead just gets live-checked this
+    run, same as before this cache existed."""
+    conn_str = os.environ.get("POSTGRES_URL")
+    if not conn_str:
+        return {}
+    try:
+        with psycopg.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS gokwik_refund_checks (
+                        order_id TEXT PRIMARY KEY,
+                        refunded BOOLEAN NOT NULL,
+                        checked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                    """
+                )
+                cur.execute("SELECT order_id, refunded, checked_at FROM gokwik_refund_checks")
+                rows = cur.fetchall()
+    except Exception as e:
+        print(f"  (gokwik_refund_checks fetch failed: {e} - every lead will be live-checked this run)")
+        return {}
+    return {order_id: (refunded, checked_at) for order_id, refunded, checked_at in rows}
+
+
+def flush_gokwik_refund_cache(dirty):
+    """One batched upsert for every result computed this run - not one write per lead, which
+    would defeat the point of caching by adding back a per-lead network round-trip. Best
+    effort: a failure here just means those results get live-checked again next run."""
+    if not dirty:
+        return
+    conn_str = os.environ.get("POSTGRES_URL")
+    if not conn_str:
+        return
+    try:
+        with psycopg.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO gokwik_refund_checks (order_id, refunded, checked_at)
+                    VALUES (%s, %s, now())
+                    ON CONFLICT (order_id) DO UPDATE SET
+                        refunded = EXCLUDED.refunded, checked_at = now()
+                    """,
+                    list(dirty.items()),
+                )
+    except Exception as e:
+        print(f"  (failed to save {len(dirty)} gokwik_refund_checks entries: {e})")
 
 
 def fetch_reassignment_attempts():
@@ -456,6 +540,10 @@ def main():
     print("Fetching prior Connected=No reassignment history from Postgres...")
     attempts_by_order = fetch_reassignment_attempts()
 
+    print("Fetching cached GoKwik refund-check results from Postgres...")
+    gokwik_cache = fetch_gokwik_refund_cache()
+    gokwik_dirty = {}  # order_id -> refunded, for every result computed live this run
+
     # current_load: how many pending (undisposed) leads each eligible agent already holds -
     # still needed so an agent already at or over quota doesn't get handed more, but a lead
     # counted here is NEVER unassigned or reassigned by this script, no matter how high the
@@ -492,7 +580,7 @@ def main():
             # `continue`s below and would otherwise never reach that other check at all -
             # confirmed for real on HYP39615010, which got reassigned despite GoKwik already
             # showing it refunded, before this was added.
-            if is_prepaid(payment_method) and is_already_refunded_via_gokwik(order_id):
+            if is_prepaid(payment_method) and is_already_refunded_via_gokwik(order_id, gokwik_cache, gokwik_dirty):
                 already_refunded_rows.append(i)
                 continue
 
@@ -536,7 +624,7 @@ def main():
         # nothing for GoKwik to have already refunded. Checked only for a lead that would
         # otherwise enter the assignment pool this run; an already-assigned pending lead is
         # left alone regardless; a genuinely disposed one was already skipped above.
-        if is_unassigned and is_prepaid(payment_method) and is_already_refunded_via_gokwik(order_id):
+        if is_unassigned and is_prepaid(payment_method) and is_already_refunded_via_gokwik(order_id, gokwik_cache, gokwik_dirty):
             already_refunded_rows.append(i)
             continue  # never enters the unassigned pool - no agent ever sees it
 
@@ -569,6 +657,14 @@ def main():
             for row_index in already_refunded_rows
         ]
         lib.set_sheet_values_batch(SPREADSHEET_ID, refund_value_ranges)
+
+    # Flushed before the early-return below too, for the same reason as the refund stamps
+    # above - a run that found nothing assignable still did real GoKwik/MySQL work this run,
+    # and throwing that away would mean re-checking the exact same leads live again next run,
+    # defeating the entire point of the cache.
+    if gokwik_dirty:
+        print(f"  Caching {len(gokwik_dirty)} GoKwik refund-check result(s) for the next {GOKWIK_CACHE_TTL}...")
+        flush_gokwik_refund_cache(gokwik_dirty)
 
     if not unassigned_pending:
         print("No unassigned pending leads found - nothing to assign.")
