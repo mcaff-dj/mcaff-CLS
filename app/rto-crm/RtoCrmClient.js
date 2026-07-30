@@ -302,6 +302,25 @@ const localStorage = typeof window !== 'undefined'
       return true;
     }
 
+    // Formats the /api/auth/presence-derived loggedInAt ISO string for the Agent Performance
+    // Summary table (Overview tab) - IST wall-clock, since that's the convention the rest of
+    // this app's calling-hours/scheduling already uses (see assign_leads.py's
+    // within_business_hours). '—' when there's no login event logged today (see
+    // getAgentPresenceLogSummary's own comment for why that can legitimately happen).
+    function formatLoggedInAt(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return '—';
+      return d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
+    }
+
+    // breakMinutesToday (a plain integer from the same endpoint) -> "1h 12m" / "45m" / "0m".
+    function formatBreakMinutes(mins) {
+      const m = Math.max(0, Math.round(mins || 0));
+      const h = Math.floor(m / 60), rem = m % 60;
+      return h > 0 ? `${h}h ${rem}m` : `${rem}m`;
+    }
+
     /* ── Non-blocking parser ─────────────────────────── */
     async function parseRows(vals, user=null, role='Admin'){
       if(!vals||vals.length<2)return[];
@@ -470,15 +489,15 @@ const localStorage = typeof window !== 'undefined'
         return 'Admin';
       });
 
-      const [theme, setTheme] = useState(() => {
-        try { return localStorage.getItem('rto_theme') || 'dark'; } catch { return 'dark'; }
-      });
-
+      // One theme, always - there used to be a Dark/Light/Purple switcher (rto_theme in
+      // localStorage), so every agent could end up looking at a different-colored CRM
+      // depending on what they'd previously picked, and a brand-new session defaulted to
+      // Dark. Removed entirely rather than just defaulting to light, so there is no code
+      // path left that can ever render dark or purple again.
       useEffect(() => {
-        document.documentElement.className = theme === 'light' ? 'light' : 'dark';
-        document.body.className = `font-sans antialiased min-h-screen theme-${theme}`;
-        try { localStorage.setItem('rto_theme', theme); } catch {}
-      }, [theme]);
+        document.documentElement.className = 'light';
+        document.body.className = 'font-sans antialiased min-h-screen theme-light';
+      }, []);
 
       // Which calling process this page is showing. Only 'rto' has an interface today - the
       // rest are declared in PROCESSES (further down, next to the other CustomSelect option
@@ -1846,12 +1865,6 @@ const localStorage = typeof window !== 'undefined'
         { value: 'Agent', label: 'Role: Agent', icon: '👤' },
       ];
 
-      const themeOptions = [
-        { value: 'dark', label: 'Theme: Dark', icon: '🌙' },
-        { value: 'light', label: 'Theme: Light', icon: '☀️' },
-        { value: 'purple', label: 'Theme: Purple', icon: '🔮' },
-      ];
-
       // Every process the CRM knows about, from the shared registry - the same file
       // api/_lib/tabs.js builds the grantable 'calling' tabs from, so a process can never be
       // offered here without also being grantable, or vice versa. Only 'rto' is built:
@@ -2441,14 +2454,6 @@ const localStorage = typeof window !== 'undefined'
                   />
                 )}
 
-                {/* Theme Selector (Dark / Light / Purple) */}
-                <CustomSelect
-                  value={theme}
-                  onChange={setTheme}
-                  options={themeOptions}
-                  className="shrink-0"
-                />
-
                 {/* Custom Status Dropdown */}
                 <CustomSelect
                   value={agentStatus}
@@ -2608,6 +2613,23 @@ const localStorage = typeof window !== 'undefined'
                     const refunded = assigned.filter(t => t.status === 'Refunded');
                     const totalRefundAmt = refunded.reduce((s, t) => s + (t.orderAmount || 0), 0);
 
+                    // Prepaid/COD split for the Agent Performance Summary table below. Same
+                    // isPrepaid test as the rest of this file (t.paymentMethod, normalised to
+                    // exactly 'Prepaid'/'COD' back in the sheet parser - see parseRows).
+                    const prepaidAssigned = assigned.filter(t => t.paymentMethod === 'Prepaid');
+                    const codAssigned = assigned.filter(t => t.paymentMethod === 'COD');
+                    const prepaidConnected = connected.filter(t => t.paymentMethod === 'Prepaid');
+                    // "Converted" mirrors reordersConverted's own definition elsewhere in this
+                    // file (agentPerf, above) - a replacement order was recorded, or the agent's
+                    // disposition itself was one of these two - just split by payment method
+                    // instead of scoped to one agent/date-range selection. t.disposition and
+                    // t.newOrderId already carry any local override merged in (see allTickets'
+                    // useMemo), so no separate overrides[t.id] lookup is needed here, same as
+                    // t.connected above.
+                    const isConverted = t => !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
+                    const prepaidConverted = disposed.filter(t => t.paymentMethod === 'Prepaid' && isConverted(t));
+                    const codConverted = disposed.filter(t => t.paymentMethod === 'COD' && isConverted(t));
+
                     const dispBreakdown = {};
                     disposed.forEach(t => {
                       const ov = overrides[t.id];
@@ -2628,10 +2650,14 @@ const localStorage = typeof window !== 'undefined'
                       refunded: refunded.length,
                       totalRefundAmt,
                       connectRate: disposed.length > 0 ? Math.round((connected.length / disposed.length) * 100) : 0,
+                      prepaidAssigned: prepaidAssigned.length,
+                      codAssigned: codAssigned.length,
+                      prepaidConnected: prepaidConnected.length,
+                      prepaidConverted: prepaidConverted.length,
+                      codConverted: codConverted.length,
                       dispBreakdown,
                       agentLogs,
-                      ticketLogs,
-                      disposedTickets: disposed
+                      ticketLogs
                     };
                   });
 
@@ -2761,53 +2787,55 @@ const localStorage = typeof window !== 'undefined'
                         </div>
                       </div>
 
-                      {/* Lead Action Audit Trail */}
+                      {/* Agent Performance Summary */}
                       <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                              {userRole === 'Agent' && !isProcessAdmin ? '📋 My Action Stream' : '📋 Live Agent Action Stream (All Agents)'}
-                            </h3>
-                            <p className="text-[12px] text-zinc-500 mt-0.5">Real-time log of customer contacts, remarks, address updates & refunds.</p>
-                          </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">📋 Agent Performance Summary</h3>
+                          <p className="text-[12px] text-zinc-500 mt-0.5">
+                            Leads/conversion columns follow the date range above; Logged In At and Total Break Time always reflect today.
+                          </p>
                         </div>
-                        <div className="max-h-72 overflow-y-auto custom-scroll space-y-2">
-                          {visibleAgentMetrics.flatMap(am =>
-                            // t.disposedAt/t.connected/t.disposition/t.agentRemarks already come from
-                            // allTickets' merge of the local override with the sheet's own synced value
-                            // (see the allTickets useMemo above) - reading overrides[t.id] directly here
-                            // would miss tickets disposed outside this browser's local cache, same bug
-                            // as the connect-rate KPI fix above.
-                            am.disposedTickets.map(t => ({ agent: am, ticket: t, time: t.disposedAt || '' }))
-                          ).sort((a, b) => (b.time || '').localeCompare(a.time || '')).slice(0, 40).map((item, idx) => {
-                            const { agent: am, ticket: t } = item;
-                            const connected = t.connected === 'Yes';
-                            return (
-                              <div key={idx} className="flex items-start gap-3 p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/70 hover:border-zinc-700/60 transition-colors">
-                                <div className="w-6 h-6 rounded-full bg-gradient-to-br from-indigo-600 to-violet-700 flex items-center justify-center text-white font-bold text-[8px] shrink-0 mt-0.5">
-                                  {am.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
-                                </div>
-                                <div className="flex-1 min-w-0 space-y-1">
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <span className="text-[12px] font-bold text-zinc-200">{am.name}</span>
-                                    <span className="text-[10px] text-zinc-500 font-mono">→</span>
-                                    <span className="text-[12px] font-mono font-bold text-zinc-300">{t.orderNumber}</span>
-                                    <span className="text-[11px] text-zinc-500">({t.customerName})</span>
-                                    {t.disposedAt && <span className="text-[10px] text-zinc-600 font-mono ml-auto">{t.disposedAt}</span>}
-                                  </div>
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <Badge color={connected ? 'green' : 'red'}>{connected ? '📞 Connected' : '📵 Unreachable'}</Badge>
-                                    {t.disposition && <Badge color="indigo">{t.disposition}</Badge>}
-                                  </div>
-                                  {t.agentRemarks && (
-                                    <p className="text-[11px] text-indigo-300 bg-indigo-950/40 border border-indigo-900/40 px-2.5 py-1 rounded-md font-sans">
-                                      💬 "{t.agentRemarks}"
-                                    </p>
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })}
+                        <div className="overflow-x-auto custom-scroll">
+                          <table className="w-full min-w-[1080px] text-[12.5px] border-collapse">
+                            <thead>
+                              <tr className="text-left text-zinc-500 uppercase text-[10px] tracking-wider border-b border-zinc-800">
+                                <th className="py-2 pr-3 font-bold">Agent Name</th>
+                                <th className="py-2 px-3 font-bold text-right">Total Leads Assigned</th>
+                                <th className="py-2 px-3 font-bold text-right">Total Disposed</th>
+                                <th className="py-2 px-3 font-bold text-right">Total Connected</th>
+                                <th className="py-2 px-3 font-bold text-right">Total Prepaid Assigned</th>
+                                <th className="py-2 px-3 font-bold text-right">Total Prepaid Connected</th>
+                                <th className="py-2 px-3 font-bold text-right">Total COD Assigned</th>
+                                <th className="py-2 px-3 font-bold text-right">Total Prepaid Converted</th>
+                                <th className="py-2 px-3 font-bold text-right">Total COD Converted</th>
+                                <th className="py-2 px-3 font-bold">Logged In At</th>
+                                <th className="py-2 pl-3 font-bold">Total Break Time</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {visibleAgentMetrics.map(am => {
+                                const presence = serverPresence[am.email.toLowerCase()];
+                                return (
+                                  <tr key={am.email} className="border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
+                                    <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap">{am.name}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.assigned}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.disposed}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{am.connected}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.prepaidAssigned}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.prepaidConnected}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.codAssigned}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-indigo-400">{am.prepaidConverted}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums text-indigo-400">{am.codConverted}</td>
+                                    <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatLoggedInAt(presence?.loggedInAt)}</td>
+                                    <td className="py-2.5 pl-3 text-amber-400 font-mono whitespace-nowrap">{formatBreakMinutes(presence?.breakMinutesToday)}</td>
+                                  </tr>
+                                );
+                              })}
+                              {visibleAgentMetrics.length === 0 && (
+                                <tr><td colSpan={11} className="py-6 text-center text-zinc-500">No agents in scope.</td></tr>
+                              )}
+                            </tbody>
+                          </table>
                         </div>
                       </div>
                     </>

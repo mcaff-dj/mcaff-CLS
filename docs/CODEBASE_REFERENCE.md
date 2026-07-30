@@ -116,6 +116,11 @@ Two different credential paths reach MySQL:
 idempotently by [db.js `ensurePgSchema()`](../api/_lib/db.js#L143). Reached three ways:
 the Lambda via `pg`, the cron scripts via `psycopg`, both using `POSTGRES_URL`.
 
+`agent_presence_log` has two readers now, not just the archival sync to MySQL (above):
+`getAgentPresenceLogSummary` ([db.js](../api/_lib/db.js), see *Overview tab — Agent Performance
+Summary* below) reads it live, per request, to derive each agent's today's login time and
+break-time total for the RTO CRM Overview tab.
+
 **Why Postgres at all** when everything else is MySQL: it predates the MySQL app schema
 and was never migrated. The `pgSql` tagged-template shim exists purely so call sites look
 identical to the MySQL `sql` ones.
@@ -288,6 +293,14 @@ engineering essentials:
 | Shared rules | [lead_priority.py](../scripts/lead_priority.py) + [leadAssignmentRules.json](../api/_lib/leadAssignmentRules.json) | |
 | Manager dashboard | [CallingOverviewClient.js](../app/calling-overview/CallingOverviewClient.js) | Aggregates from `lead_assignments` |
 
+**One theme only.** [globals.css](../app/globals.css) still carries a `body.theme-light`-gated
+override block (ported from the original inline `<style>`), but there is no longer any code
+path that sets `body` to anything else — `RtoCrmClient.js` used to have a Dark/Light/Purple
+switcher (`rto_theme` in `localStorage`) with its own Dark and Royal Purple CSS blocks; both
+the switcher and those blocks were deleted, and the effect that sets `document.body.className`
+now hardcodes `theme-light` unconditionally. Scoped to this page only — no other route shares
+the `bg-zinc-900`/`theme-*` class convention, so nothing else was touched.
+
 ### Sheet column contract
 
 Defined twice — `lead_priority.py` constants (Python) and `mapTkt`'s `c{n}` accessors
@@ -310,6 +323,48 @@ The tier logic and round-robin exist twice: `lead_priority.py` (the real writer)
 can't execute the JS, so this duplication is unavoidable — but **all values** come from
 the shared JSON. They had already drifted once: quota 10 in JS vs 20 in Python, so the
 preview forecast half the real volume.
+
+### Overview tab — Agent Performance Summary
+
+A per-agent table on the Overview tab (`RtoCrmClient.js`, inside the `tab==='overview'` block),
+below the KPI tiles: Agent Name, Total Leads Assigned, Total Disposed, Total Connected, Total
+Prepaid Assigned, Total Prepaid Connected, Total COD Assigned, Total Prepaid Converted, Total
+COD Converted, Logged In At, Total Break Time. Rows come from `visibleAgentMetrics` — same
+scoping as every other Overview number (a plain Agent sees only their own row; Admin/Team
+Lead/`isProcessAdmin` see everyone).
+
+- **The lead/conversion columns follow the page's date-scope filter**; **Logged In At** and
+  **Total Break Time** deliberately do NOT — they always mean "today," since attendance isn't a
+  thing you filter by an arbitrary historical range the way ticket counts are.
+- **Prepaid/COD split** filters `t.paymentMethod`, which `parseRows` already normalizes to
+  exactly one of those two strings — no third value to handle.
+- **"Converted" reuses `agentPerf`'s existing `reordersConverted` definition** (a replacement
+  order was recorded, or the disposition itself was `Customer Agreed to Accept` /
+  `Product Issue / Exchange`), just split by payment method instead of scoped to one
+  agent/date-range selection — so "converted" doesn't mean two different things in two places on
+  the same tab. Reads `t.disposition`/`t.newOrderId` directly (already override-merged by
+  `allTickets`'s own `useMemo`), the same shortcut the surrounding `connected` calculation
+  already takes and documents.
+- **Logged In At / Total Break Time come from `agent_presence_log`**, not `agent_presence`
+  (which only ever holds an agent's *current* status, not when today's session started or how
+  long today's breaks added up to). `getAgentPresenceLogSummary` (`api/_lib/db.js`) is new:
+  - **"Logged in at"** is the first `'Online'` transition **logged today** (IST day, fixed
+    UTC+5:30 boundary — same convention as `assign_leads.py`'s `within_business_hours`). An
+    agent who signed on yesterday and has had no status change since has no such event, so this
+    reads `—`, not a guess at yesterday's time — the log only records real transitions
+    (`upsertAgentPresence` skips a repeated heartbeat), so there's nothing more precise to point
+    to.
+  - **"Total break time"** sums every interval whose *starting* status was `'Busy'`, walking a
+    per-agent timeline: the single most recent transition strictly before today's IST midnight
+    (so a break already running at midnight is counted from midnight, not lost just because it
+    didn't start today), then every transition logged today. An interval still open (`'Busy'`
+    with no later transition) is closed against `now`, not dropped.
+- **`/api/auth/presence`'s GET widened, carefully.** It used to be admin-only outright (nobody
+  but the Team Roster table called it). It now also serves a **self-only** response to any
+  signed-in caller — just their own `loggedInAt`/`breakMinutesToday`, looked up by their own
+  session email, nothing else — so a plain Agent can see their own two new columns without the
+  endpoint turning into a general everyone's-presence leak. The admin branch is unchanged
+  (all agents, all fields).
 
 ### Refund-status pre-check (GoKwik)
 
