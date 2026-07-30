@@ -360,11 +360,24 @@ the generic "No agents in scope") specifically because it can now be true while
     reads `—`, not a guess at yesterday's time — the log only records real transitions
     (`upsertAgentPresence` skips a repeated heartbeat), so there's nothing more precise to point
     to.
-  - **"Total break time"** sums every interval whose *starting* status was `'Busy'`, walking a
-    per-agent timeline: the single most recent transition strictly before today's IST midnight
-    (so a break already running at midnight is counted from midnight, not lost just because it
-    didn't start today), then every transition logged today. An interval still open (`'Busy'`
-    with no later transition) is closed against `now`, not dropped.
+  - **"Total break time"** sums every interval whose *starting* status was `'Busy'` **and whose
+    starting transition was logged today** - walking a per-agent timeline seeded with the single
+    most recent transition strictly before today's IST midnight (needed to know what an agent's
+    status *was* at midnight) plus every transition logged today, but that seed entry is only
+    ever used to know what came next; it is NEVER itself counted as a break interval, even when
+    its status is `'Busy'`. An interval still open (`'Busy'` with no later transition) is closed
+    against `now`, not dropped.
+
+    This was a real, shipped bug: the first version counted the midnight-seed interval too, so
+    an agent whose *last known status before today* happened to be `'Busy'` - overwhelmingly a
+    stale status from having simply gone home with the tab closed, not an hours-long break
+    straight through midnight, since `agent_presence_log` only records a real transition (a
+    repeated heartbeat is never logged - see `upsertAgentPresence`) - had the entire overnight
+    gap added to "today's" break time. Observed live as an agent logging in at 10:14am showing
+    `11h 0m` of break before they'd even arrived. Fixed by excluding index 0 of the timeline from
+    the break sum whenever it's the synthetic seed; a genuine break that starts from a REAL
+    transition today (even one immediately following a stale overnight status) still counts
+    correctly.
 - **`/api/auth/presence`'s GET widened, carefully.** It used to be admin-only outright (nobody
   but the Team Roster table called it). It now also serves a **self-only** response to any
   signed-in caller — just their own `loggedInAt`/`breakMinutesToday`, looked up by their own

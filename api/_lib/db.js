@@ -469,10 +469,11 @@ async function getAgentPresenceLogSummary() {
     ORDER BY email ASC, changed_at ASC
   `;
 
-  // `synthetic: true` marks the carried-forward midnight snapshot so it can count toward
-  // breakMs (an ongoing Busy period didn't start today, but is still real) without also
-  // being mistaken for a real "logged in today" event below (its status is just whatever
-  // was true AT midnight, e.g. carried-over Online, not a fresh sign-in).
+  // `synthetic: true` marks the carried-forward midnight snapshot - used to know what an
+  // agent's status WAS at midnight (needed as the starting point for the timeline walk below),
+  // but never itself counted as a break interval (see the `i === 0` skip below) and never
+  // mistaken for a real "logged in today" event (its status is just whatever was true AT
+  // midnight, e.g. carried-over Online, not a fresh sign-in).
   const timelines = new Map(); // email -> [{status, at: Date, synthetic?: bool}]
   for (const r of priorRows) timelines.set(r.email.toLowerCase(), [{ status: r.status, at: dayStart, synthetic: true }]);
   for (const r of todayRows) {
@@ -488,6 +489,19 @@ async function getAgentPresenceLogSummary() {
     let breakMs = 0;
     for (let i = 0; i < timeline.length; i++) {
       if (timeline[i].status !== 'Busy') continue;
+      // The synthetic midnight snapshot only says what an agent's LAST reported status was,
+      // possibly hours or days before today - not that they were continuously, actively on
+      // break every minute since. agent_presence_log only records a real transition (see
+      // upsertAgentPresence's comment - a repeated heartbeat is never logged), so a 'Busy'
+      // status sitting unchanged since yesterday is far more often someone who simply closed
+      // their laptop for the night than someone on an hours-long break straight through
+      // midnight. Counting it produced exactly this bug: an agent whose last known status
+      // before today happened to be Busy got the ENTIRE overnight gap (potentially many
+      // hours) added to "today's" break time, well before they'd even logged in. Only an
+      // interval that STARTS with a real transition logged today counts - the carried-over
+      // status is used solely to seed the timeline (so a later transition away from it still
+      // resolves correctly), never as a break interval of its own.
+      if (i === 0 && timeline[i].synthetic) continue;
       const end = i + 1 < timeline.length ? timeline[i + 1].at : now;
       breakMs += Math.max(0, end.getTime() - timeline[i].at.getTime());
     }
