@@ -340,7 +340,20 @@ sum `visibleAgentMetrics` (a *different* computation — see below) **unfiltered
 0-this-scope agent still belongs in the team-wide totals. The empty-state message reads "No
 agents with assigned leads in this date range" (not the generic "No agents in scope")
 specifically because it can now be true while `visibleTableAgentMetrics` itself is non-empty.
+`summaryRows` names this exact filtered set (used by the row render, the `Team Total` row below,
+and nowhere else needs re-deriving it).
 
+- **A bottom `Team Total` row aggregates `summaryRows` — deliberately a row only, no Total
+  column.** Unlike the Time-of-Day Distribution table below (all-count columns, where a
+  row-wise sum is meaningful), this table's columns mix counts, percentages and times - adding
+  "Total Disposed" + "Connected %" + "Logged In At" together into one row-total number would be
+  meaningless, so there's nothing to put in a rightmost Total column here. Within the row itself:
+  count columns sum plainly; **percentage columns aggregate as `sum(numerator) /
+  sum(denominator)`, NOT an average of each agent's own already-rounded percentage** - the latter
+  is a real statistical error once agents' denominators differ (two agents at 20% of 10 and 90%
+  of 20 average to a misleading 55% naively; the correct combined rate is 20/30 = 67%). Logged In
+  At/Total Break Time average only across agents that have a real (non-null) value that range -
+  an agent excluded from the averages entirely, not counted as a zero, if they logged nothing.
 - **Two separate per-agent computations — not because the table needed a second date field, but
   because it needs TWO independent ones on the SAME agent's tickets at once.**
   `computeAgentMetrics(ag, ticketInScope)` (drives the KPI tiles + every other Overview number)
@@ -532,11 +545,34 @@ dials/connects/conversions happen, not just how many. Columns are time-of-day bu
   (`bucketCounts.size > 0`), same "hide pure noise" convention as the `assigned > 0` filter on
   the table above — switching the metric filter can change which agents appear, not just the
   numbers.
-- Verified with 13 tests covering: an entirely-inactive agent excluded from rows; the
-  contiguous-range gap-filling behavior explicitly; per-metric filtering (`dialled` vs
-  `connected` vs `converted`) each landing in the right bucket; interval-width changes
-  correctly collapsing/expanding bucket boundaries; and the fully-empty (no activity at all for
-  the chosen metric) case rendering zero columns and zero rows rather than erroring.
+- **A `Total` column (right) and a `Team Total` row (bottom)** — since every column here is the
+  same unit (a count of the chosen metric), unlike the table above, a row-wise/column-wise sum
+  is meaningful in both directions. Row `Total` = that agent's sum across every visible bucket;
+  the bottom row sums each bucket down its column (team total for that time slot); the
+  bottom-right corner is the grand total, and — as a sanity invariant — equals both the sum of
+  every row `Total` and the sum of every column total. Both totals are computed straight from
+  `bucketCounts`/`heatmapBucketIndexes` at render time, not stored as separate state.
+- **Cell shading is a whole-table heatmap: `heatmapMin`/`heatmapMax` are computed across every
+  rendered cell** (deliberately excluding the `Total` row/column, which would otherwise dwarf
+  every real cell and flatten the scale) **, then `heatmapCellStyle` tints LOWER values more
+  strongly** — the opposite of the usual "hot = high" convention, because this table exists to
+  flag under-activity, not celebrate peaks. Alpha runs from `0` at the highest value currently in
+  view (no tint at all) up to `0.4` at the lowest (visible but still text-legible) over a single
+  amber hue (`rgb(245, 158, 11)`, matching this table's existing amber accents elsewhere), a
+  `undefined` style (no gradient at all) when every visible cell is equal — avoiding a
+  divide-by-zero rather than rendering a NaN color. **Deliberately a WHOLE-TABLE scale, not
+  per-agent-row**: comparing a lead-heavy agent's `2` against a quiet agent's `13` on the same
+  scale surfaces genuine cross-agent volume differences, which was the explicit call over a
+  per-row alternative (each agent normalized only against their own other hours) that would have
+  made a generally low-volume agent's entire row highlight almost uniformly regardless of their
+  own actual pattern.
+- Verified with 13 tests on the bucketing/range logic (an entirely-inactive agent excluded from
+  rows; the contiguous-range gap-filling behavior explicitly; per-metric filtering landing in
+  the right bucket; interval-width changes correctly collapsing/expanding boundaries; the
+  fully-empty case rendering zero columns and zero rows rather than erroring) plus a further 15
+  on the Total rows/columns and `heatmapCellStyle` (highest-value-in-view gets zero tint,
+  lowest gets the strongest, an all-equal table gets no styling at all, row/column/grand totals
+  agree with each other, and the Team Total row's aggregates - see below).
 
 ### Refund-status pre-check (GoKwik)
 

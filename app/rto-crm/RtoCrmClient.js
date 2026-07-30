@@ -2960,6 +2960,55 @@ const localStorage = typeof window !== 'undefined'
                     for (let i = minBucket; i <= maxBucket; i++) heatmapBucketIndexes.push(i);
                   }
 
+                  // Global min/max across every rendered heatmap cell (Total row/column
+                  // deliberately excluded below, once they exist - a grand total would dwarf
+                  // every real cell and flatten the whole scale) - drives heatmapCellStyle's
+                  // "lower = more highlighted" tint, confirmed as a whole-table scale (not
+                  // per-agent-row) so the color also reflects cross-agent volume, not just each
+                  // agent's own pattern.
+                  const allHeatmapValues = visibleHeatmapAgentData.flatMap(a => heatmapBucketIndexes.map(idx => a.bucketCounts.get(idx) || 0));
+                  const heatmapMin = allHeatmapValues.length ? Math.min(...allHeatmapValues) : 0;
+                  const heatmapMax = allHeatmapValues.length ? Math.max(...allHeatmapValues) : 0;
+                  // amber-500 (rgb(245,158,11)) - matches this table's existing amber accents
+                  // (Total Break Time) for "needs attention." Alpha 0 at the highest value in
+                  // view (no tint at all) up to 0.4 at the lowest (a visible but still
+                  // text-legible highlight) - never applied to Total cells, which sit outside
+                  // this scale entirely.
+                  function heatmapCellStyle(value) {
+                    if (heatmapMax <= heatmapMin) return undefined;
+                    const t = (heatmapMax - value) / (heatmapMax - heatmapMin);
+                    return { backgroundColor: `rgba(245, 158, 11, ${(t * 0.4).toFixed(2)})` };
+                  }
+
+                  // Total row for the Agent Performance Summary table - team aggregates per
+                  // column, NOT a per-agent row total (this table's columns mix counts,
+                  // percentages and times - "Total Disposed" + "Connected %" + "Logged In At"
+                  // can't be meaningfully added together into one row-total number the way the
+                  // Time-of-Day table's homogeneous count columns can). Percentage columns
+                  // aggregate as sum-of-numerators / sum-of-denominators (the statistically
+                  // correct way to combine rates across agents with different denominators),
+                  // NOT an average of each agent's own already-rounded percentage. Logged In
+                  // At/Total Break Time average across agents that have a real value (loggedInMinutes
+                  // null is excluded, not treated as 0).
+                  const summaryRows = visibleTableAgentMetrics.filter(am => am.assigned > 0);
+                  const summaryTotals = summaryRows.reduce((acc, am) => {
+                    acc.assigned += am.assigned; acc.disposed += am.disposed; acc.connected += am.connected;
+                    acc.prepaidAssigned += am.prepaidAssigned; acc.prepaidConnected += am.prepaidConnected;
+                    acc.codAssigned += am.codAssigned; acc.prepaidConverted += am.prepaidConverted;
+                    acc.codConverted += am.codConverted;
+                    return acc;
+                  }, { assigned: 0, disposed: 0, connected: 0, prepaidAssigned: 0, prepaidConnected: 0, codAssigned: 0, prepaidConverted: 0, codConverted: 0 });
+                  const summaryLoggedInList = summaryRows
+                    .map(am => serverPresence[am.email.toLowerCase()]?.loggedInMinutes)
+                    .filter(m => m !== null && m !== undefined);
+                  const summaryBreakList = summaryRows
+                    .map(am => serverPresence[am.email.toLowerCase()]?.breakMinutes)
+                    .filter(m => m !== null && m !== undefined);
+                  const summaryAvgLoggedIn = summaryLoggedInList.length
+                    ? Math.round(summaryLoggedInList.reduce((s, m) => s + m, 0) / summaryLoggedInList.length) : null;
+                  const summaryAvgBreak = summaryBreakList.length
+                    ? Math.round(summaryBreakList.reduce((s, m) => s + m, 0) / summaryBreakList.length) : 0;
+
                   const totalAssigned = visibleAgentMetrics.reduce((s, a) => s + a.assigned, 0);
                   const totalDisposed = visibleAgentMetrics.reduce((s, a) => s + a.disposed, 0);
                   const totalPending = visibleAgentMetrics.reduce((s, a) => s + a.pending, 0);
@@ -3120,14 +3169,14 @@ const localStorage = typeof window !== 'undefined'
                               </tr>
                             </thead>
                             <tbody>
-                              {/* visibleTableAgentMetrics, NOT visibleAgentMetrics - this table
-                                  is scoped by real assignment date (see assignedDateInScope
-                                  above), the KPI tiles above stay on Calling Date/Order Date.
-                                  Rows with nothing assigned in the current date scope are pure
-                                  noise here (every other column is 0/dash too) - filtered out of
-                                  just this table's render, not out of visibleTableAgentMetrics
-                                  itself. */}
-                              {visibleTableAgentMetrics.filter(am => am.assigned > 0).map(am => {
+                              {/* summaryRows (visibleTableAgentMetrics filtered to assigned > 0)
+                                  - this table is scoped by real assignment date (see
+                                  assignedDateInScope above), the KPI tiles above stay on Calling
+                                  Date/Order Date. Rows with nothing assigned in the current date
+                                  scope are pure noise here (every other column is 0/dash too) -
+                                  filtered out of just this table's render, not out of
+                                  visibleTableAgentMetrics itself. */}
+                              {summaryRows.map(am => {
                                 const presence = serverPresence[am.email.toLowerCase()];
                                 return (
                                   <tr key={am.email} className="border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
@@ -3152,6 +3201,28 @@ const localStorage = typeof window !== 'undefined'
                                   </tr>
                                 );
                               })}
+                              {summaryRows.length > 0 && (
+                                <tr className="border-t-2 border-zinc-700 bg-zinc-900/80 font-bold">
+                                  <td className="py-2.5 pr-3 text-zinc-100 whitespace-nowrap">Team Total</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.assigned}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.disposed}</td>
+                                  <td className="py-2.5 px-3 text-zinc-500">—</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{summaryTotals.connected}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{formatPct(summaryTotals.connected, summaryTotals.disposed)}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.prepaidAssigned}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{formatPct(summaryTotals.prepaidAssigned, summaryTotals.assigned)}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.prepaidConnected}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{formatPct(summaryTotals.prepaidConnected, summaryTotals.prepaidAssigned)}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.codAssigned}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{formatPct(summaryTotals.codAssigned, summaryTotals.assigned)}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-indigo-300">{summaryTotals.prepaidConverted}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-indigo-200">{formatPct(summaryTotals.prepaidConverted, summaryTotals.prepaidAssigned)}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-indigo-300">{summaryTotals.codConverted}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-indigo-200">{formatPct(summaryTotals.codConverted, summaryTotals.codAssigned)}</td>
+                                  <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Average across agents with a real value">{formatTimeOfDay(summaryAvgLoggedIn)}</td>
+                                  <td className="py-2.5 pl-3 text-amber-300 font-mono whitespace-nowrap" title="Average across agents with a real value">{formatBreakMinutes(summaryAvgBreak)}</td>
+                                </tr>
+                              )}
                               {visibleTableAgentMetrics.filter(am => am.assigned > 0).length === 0 && (
                                 <tr><td colSpan={18} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
                               )}
@@ -3168,7 +3239,9 @@ const localStorage = typeof window !== 'undefined'
                             <p className="text-[12px] text-zinc-500 mt-0.5">
                               Same date range as above, bucketed by time of day - columns span only the buckets with any
                               activity (not a fixed full-day grid). A multi-day range sums every matching day into the same
-                              time-of-day bucket.
+                              time-of-day bucket. Cell shading is a whole-table scale - the darker the highlight, the lower
+                              that count is relative to every other cell currently shown (Total row/column excluded from the
+                              scale itself).
                             </p>
                           </div>
                           <div className="flex items-center gap-2">
@@ -3194,22 +3267,44 @@ const localStorage = typeof window !== 'undefined'
                                     {formatTimeOfDay(idx * heatmapIntervalMinutes)}
                                   </th>
                                 ))}
+                                <th className="py-2 pl-3 font-bold text-right whitespace-nowrap border-l border-zinc-800">Total</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {visibleHeatmapAgentData.map(a => (
-                                <tr key={a.email} className="border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
-                                  <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap">{a.name}</td>
-                                  {heatmapBucketIndexes.map(idx => (
-                                    <td key={idx} className="py-2.5 px-3 text-right tabular-nums text-zinc-300">
-                                      {a.bucketCounts.get(idx) || 0}
-                                    </td>
-                                  ))}
+                              {visibleHeatmapAgentData.map(a => {
+                                const rowTotal = heatmapBucketIndexes.reduce((s, idx) => s + (a.bucketCounts.get(idx) || 0), 0);
+                                return (
+                                  <tr key={a.email} className="border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
+                                    <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap">{a.name}</td>
+                                    {heatmapBucketIndexes.map(idx => {
+                                      const value = a.bucketCounts.get(idx) || 0;
+                                      return (
+                                        <td key={idx} className="py-2.5 px-3 text-right tabular-nums text-zinc-200" style={heatmapCellStyle(value)}>
+                                          {value}
+                                        </td>
+                                      );
+                                    })}
+                                    <td className="py-2.5 pl-3 text-right tabular-nums text-zinc-100 font-bold border-l border-zinc-800">{rowTotal}</td>
+                                  </tr>
+                                );
+                              })}
+                              {visibleHeatmapAgentData.length > 0 && (
+                                <tr className="border-t-2 border-zinc-700 bg-zinc-900/80 font-bold">
+                                  <td className="py-2.5 pr-3 text-zinc-100 whitespace-nowrap">Team Total</td>
+                                  {heatmapBucketIndexes.map(idx => {
+                                    const columnTotal = visibleHeatmapAgentData.reduce((s, a) => s + (a.bucketCounts.get(idx) || 0), 0);
+                                    return (
+                                      <td key={idx} className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{columnTotal}</td>
+                                    );
+                                  })}
+                                  <td className="py-2.5 pl-3 text-right tabular-nums text-zinc-100 border-l border-zinc-800">
+                                    {visibleHeatmapAgentData.reduce((s, a) => s + heatmapBucketIndexes.reduce((s2, idx) => s2 + (a.bucketCounts.get(idx) || 0), 0), 0)}
+                                  </td>
                                 </tr>
-                              ))}
+                              )}
                               {visibleHeatmapAgentData.length === 0 && (
                                 <tr>
-                                  <td colSpan={heatmapBucketIndexes.length + 1} className="py-6 text-center text-zinc-500">
+                                  <td colSpan={heatmapBucketIndexes.length + 2} className="py-6 text-center text-zinc-500">
                                     No {heatmapMetricOptions.find(o => o.value === heatmapMetric)?.label.toLowerCase()} activity in this date range.
                                   </td>
                                 </tr>
