@@ -302,6 +302,36 @@ const localStorage = typeof window !== 'undefined'
       return true;
     }
 
+    // 'YYYY-MM-DD' -> a plain YYYY-MM-DD string, local calendar day (no timezone conversion -
+    // toISOString() would shift the date across midnight for anyone not at UTC+0).
+    function toDateStr(d) {
+      const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+
+    // Translates the page's own dateScope selector into concrete {dateFrom, dateTo} 'YYYY-MM-DD'
+    // bounds (or undefined for an open end), for /api/auth/presence's dateFrom/dateTo query
+    // params - so Logged In At / Total Break Time follow the SAME filter every other Overview
+    // column does, instead of always meaning "today". 7_DAYS/30_DAYS are approximated as
+    // calendar-day windows here (today minus N days, through today) rather than isDateInScope's
+    // own rolling now-minus-N-hours math - close enough for an attendance summary, and a lot
+    // simpler than threading sub-day precision through a date-only API param.
+    function scopeToDateBounds(scope, customFrom, customTo) {
+      const today = new Date();
+      if (scope === 'ALL_TIME') return { dateFrom: undefined, dateTo: undefined };
+      if (scope === 'TODAY') return { dateFrom: toDateStr(today), dateTo: toDateStr(today) };
+      if (scope === 'YESTERDAY') {
+        const y = new Date(today); y.setDate(y.getDate() - 1);
+        return { dateFrom: toDateStr(y), dateTo: toDateStr(y) };
+      }
+      if (scope === '7_DAYS' || scope === '30_DAYS') {
+        const back = new Date(today); back.setDate(back.getDate() - (scope === '7_DAYS' ? 7 : 30));
+        return { dateFrom: toDateStr(back), dateTo: toDateStr(today) };
+      }
+      if (scope === 'CUSTOM') return { dateFrom: customFrom || undefined, dateTo: customTo || undefined };
+      return { dateFrom: undefined, dateTo: undefined };
+    }
+
     // Same key normalization already used at the reassignment-map lookup further down this
     // file (fetchLiveOrderRowMap's callers) - trim + uppercase, so a stray space or case
     // difference between the sheet's Order Number and Postgres's order_id (assign_leads.py
@@ -330,8 +360,9 @@ const localStorage = typeof window !== 'undefined'
     // Formats the /api/auth/presence-derived loggedInAt ISO string for the Agent Performance
     // Summary table (Overview tab) - IST wall-clock, since that's the convention the rest of
     // this app's calling-hours/scheduling already uses (see assign_leads.py's
-    // within_business_hours). '—' when there's no login event logged today (see
-    // getAgentPresenceLogSummary's own comment for why that can legitimately happen).
+    // within_business_hours). '—' when there's no login event logged within the current
+    // date-scope filter (see getAgentPresenceLogSummary's own comment for why that can
+    // legitimately happen - it's the first login of the range, per scopeToDateBounds).
     function formatLoggedInAt(iso) {
       if (!iso) return '—';
       const d = new Date(iso);
@@ -339,7 +370,7 @@ const localStorage = typeof window !== 'undefined'
       return d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
     }
 
-    // breakMinutesToday (a plain integer from the same endpoint) -> "1h 12m" / "45m" / "0m".
+    // breakMinutes (a plain integer from the same endpoint) -> "1h 12m" / "45m" / "0m".
     function formatBreakMinutes(mins) {
       const m = Math.max(0, Math.round(mins || 0));
       const h = Math.floor(m / 60), rem = m % 60;
@@ -610,18 +641,10 @@ const localStorage = typeof window !== 'undefined'
       // Real presence from Postgres (agent_presence table), keyed by lowercase email -
       // {}'d out for non-admin sessions (the GET is admin-only), in which case the
       // roster table just falls back to each agent's local/mock status as before.
+      // fetchServerPresence itself is defined further down (after dateScope/customDateFrom/
+      // customDateTo exist to close over - it now sends them as dateFrom/dateTo query params
+      // so loggedInAt/breakMinutes follow the same filter every other Overview column does).
       const [serverPresence, setServerPresence] = useState({});
-      const fetchServerPresence = useCallback(() => {
-        fetch('/api/auth/presence')
-          .then(r => r.ok ? r.json() : null)
-          .then(d => { if (d && d.agents) setServerPresence(d.agents); })
-          .catch(() => {});
-      }, []);
-      useEffect(() => {
-        fetchServerPresence();
-        const t = setInterval(fetchServerPresence, 30000);
-        return () => clearInterval(t);
-      }, [fetchServerPresence]);
 
       // {order_id: {assignedAt, disposedAt}} for every lead ever assigned (GET
       // /api/auth/leadDates - see getAllLeadDates in db.js) - the real dates a lead was handed
@@ -1054,6 +1077,29 @@ const localStorage = typeof window !== 'undefined'
       const [dateScope, setDateScope] = useState(()=>localStorage.getItem('rto_date_scope')||'ALL_TIME');
       const [customDateFrom, setCustomDateFrom] = useState(()=>localStorage.getItem('rto_custom_date_from')||'');
       const [customDateTo, setCustomDateTo] = useState(()=>localStorage.getItem('rto_custom_date_to')||'');
+
+      // GET /api/auth/presence, now with dateFrom/dateTo (see scopeToDateBounds above) so
+      // loggedInAt/breakMinutes follow the Overview tab's own date-scope filter instead of
+      // always meaning "today" - re-fetches immediately when the filter changes (not just on
+      // the 30s poll), so switching to Yesterday/a Custom range doesn't sit on stale numbers
+      // for up to 30 seconds.
+      const fetchServerPresence = useCallback(() => {
+        const { dateFrom, dateTo } = scopeToDateBounds(dateScope, customDateFrom, customDateTo);
+        const params = new URLSearchParams();
+        if (dateFrom) params.set('dateFrom', dateFrom);
+        if (dateTo) params.set('dateTo', dateTo);
+        const qs = params.toString();
+        fetch(`/api/auth/presence${qs ? `?${qs}` : ''}`)
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { if (d && d.agents) setServerPresence(d.agents); })
+          .catch(() => {});
+      }, [dateScope, customDateFrom, customDateTo]);
+      useEffect(() => {
+        fetchServerPresence();
+        const t = setInterval(fetchServerPresence, 30000);
+        return () => clearInterval(t);
+      }, [fetchServerPresence]);
+
       const [payFilter, setPayFilter] = useState('ALL');
       const [page, setPage] = useState(1);
       const [perPage, setPerPage] = useState(50);
@@ -2915,7 +2961,9 @@ const localStorage = typeof window !== 'undefined'
                             agent; Disposed/Connected/Converted columns use when the agent actually resolved it - a lead
                             assigned yesterday and disposed today counts toward today's Disposed/Connected/Converted numbers
                             even though it doesn't count toward today's Assigned ones. Hover a header for which. Logged In At
-                            and Total Break Time always reflect today.
+                            is the first login within the range; Total Break Time is summed across it - both now follow the
+                            same filter (an approximate calendar-day window for 7 Days/30 Days, not the exact rolling hours the
+                            lead columns use).
                           </p>
                         </div>
                         <div className="overflow-x-auto custom-scroll">
@@ -2931,8 +2979,8 @@ const localStorage = typeof window !== 'undefined'
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total COD Assigned</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Prepaid Converted</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total COD Converted</th>
-                                <th className="py-2 px-3 font-bold">Logged In At</th>
-                                <th className="py-2 pl-3 font-bold">Total Break Time</th>
+                                <th className="py-2 px-3 font-bold" title="First 'Online' transition within the date range">Logged In At</th>
+                                <th className="py-2 pl-3 font-bold" title="Summed break time within the date range">Total Break Time</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -2957,7 +3005,7 @@ const localStorage = typeof window !== 'undefined'
                                     <td className="py-2.5 px-3 text-right tabular-nums text-indigo-400">{am.prepaidConverted}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-indigo-400">{am.codConverted}</td>
                                     <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatLoggedInAt(presence?.loggedInAt)}</td>
-                                    <td className="py-2.5 pl-3 text-amber-400 font-mono whitespace-nowrap">{formatBreakMinutes(presence?.breakMinutesToday)}</td>
+                                    <td className="py-2.5 pl-3 text-amber-400 font-mono whitespace-nowrap">{formatBreakMinutes(presence?.breakMinutes)}</td>
                                   </tr>
                                 );
                               })}

@@ -220,29 +220,35 @@ async function handlePresence(req, res) {
   // full roster of everyone's presence is the only thing a non-admin has no business
   // reading (see the Team Roster panel in rto-crm.html).
   if (req.method === 'GET') {
+    // Optional 'YYYY-MM-DD' bounds - same convention as every other date-ranged endpoint in
+    // this file (see dateBounds in db.js). Lets loggedInAt/breakMinutes follow the Overview
+    // tab's own date-scope filter (Today/Yesterday/7 Days/Custom/All Time) instead of always
+    // meaning "today" - omit either/both for an open-ended range.
+    const dateFrom = (req.query && req.query.dateFrom) || undefined;
+    const dateTo = (req.query && req.query.dateTo) || undefined;
     if (!session.isAdmin) {
       // Not admin-only past this point: a signed-in agent may still read their OWN
-      // loggedInAt/breakMinutesToday - the Overview tab's per-agent summary table (see
+      // loggedInAt/breakMinutes - the Overview tab's per-agent summary table (see
       // RtoCrmClient.js) needs these for every visible row, including a plain Agent's own
       // (their view is already scoped to just themselves there). Everyone else's presence
       // stays out of reach; only the caller's own email is ever looked up or returned.
       const email = session.email.toLowerCase();
-      const summary = (await getAgentPresenceLogSummary())[email] || {};
+      const summary = (await getAgentPresenceLogSummary(dateFrom, dateTo))[email] || {};
       res.status(200).json({
         agents: {
           [email]: {
             loggedInAt: summary.loggedInAt || null,
-            breakMinutesToday: summary.breakMinutesToday || 0,
+            breakMinutes: summary.breakMinutes || 0,
           },
         },
       });
       return;
     }
-    const [agents, presenceSummary] = await Promise.all([getAllAgentPresence(), getAgentPresenceLogSummary()]);
+    const [agents, presenceSummary] = await Promise.all([getAllAgentPresence(), getAgentPresenceLogSummary(dateFrom, dateTo)]);
     for (const email of Object.keys(agents)) {
       const summary = presenceSummary[email];
       agents[email].loggedInAt = summary?.loggedInAt || null;
-      agents[email].breakMinutesToday = summary?.breakMinutesToday || 0;
+      agents[email].breakMinutes = summary?.breakMinutes || 0;
     }
     res.status(200).json({ agents });
     return;

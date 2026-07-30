@@ -355,13 +355,18 @@ specifically because it can now be true while `visibleTableAgentMetrics` itself 
   two different subsets of one agent's tickets. This is why the table's "Total Leads Assigned"
   and the KPI row's "Total Assigned" tile can legitimately disagree — the KPI tiles stayed on
   Calling Date/Order Date, so the two are now answering genuinely different questions.
-- **Both dates come from `lead_assignments`** (Postgres, written by `assign_leads.py`/this CRM's
-  own disposal call — see the *Refund-status pre-check* section below for the rest of that
-  script), via a new unbounded read: `getAllLeadDates()` (`api/_lib/db.js`, returns
-  `{order_id: {assignedAt, disposedAt}}`) → `GET /api/auth/leadDates` (same auth level as the
-  pre-existing, previously-unused-by-this-page `recentAssignments` action — authenticated, not
-  admin-only) → `leadDates` client state (`{normalizeOrderKey(order_id): {assignedAt,
-  disposedAt}}`, fetched on mount and every 5 minutes — these barely change minute to minute).
+- **Both dates come from `lead_assignments_current`** (the live-cycle view — see the
+  Connected=No reassignment notes below for what "cycle" means; a reassigned lead's PAST cycles
+  are deliberately excluded here, unlike `getCallingOverviewStats`' disposed/connected/refunded
+  metrics, which read every cycle for call-volume KPIs. This function instead answers "which
+  scope does the cycle the sheet is currently showing fall into", and the sheet only ever shows
+  the live cycle, so matching that grain is what keeps a lead's date attribution from
+  accidentally landing on a retired cycle's numbers), via a new unbounded read: `getAllLeadDates()`
+  (`api/_lib/db.js`, returns `{order_id: {assignedAt, disposedAt}}`) → `GET /api/auth/leadDates`
+  (same auth level as the pre-existing, previously-unused-by-this-page `recentAssignments`
+  action — authenticated, not admin-only) → `leadDates` client state
+  (`{normalizeOrderKey(order_id): {assignedAt, disposedAt}}`, fetched on mount and every 5
+  minutes — these barely change minute to minute).
   `isLeadDateInScope(dateIso, scope, customFrom, customTo)` works for either field and is
   deliberately its own function, not a branch inside `isDateInScope`: the two kinds of date
   disagree on what a missing value means. `isDateInScope` treats a missing Calling Date as
@@ -370,9 +375,16 @@ specifically because it can now be true while `visibleTableAgentMetrics` itself 
   the sheet rather than through `assign_leads.py`/this CRM — is the opposite: **excluded from
   every date-scoped view** (nothing real to filter by), except `ALL_TIME`, which by definition
   applies no date filter to anything.
-- **The lead/conversion columns follow the page's date-scope filter**; **Logged In At** and
-  **Total Break Time** deliberately do NOT — they always mean "today," since attendance isn't a
-  thing you filter by an arbitrary historical range the way ticket counts are.
+- **Every column, including Logged In At / Total Break Time, follows the page's date-scope
+  filter.** Originally the last two were hardcoded to "today" regardless of the filter - changed
+  because an agent asked why picking a different range didn't move them. `scopeToDateBounds`
+  (`RtoCrmClient.js`) translates the page's `dateScope`/`customDateFrom`/`customDateTo` into
+  concrete `{dateFrom, dateTo}` `'YYYY-MM-DD'` strings (or `undefined` for an open end),
+  `fetch`ed as query params on `GET /api/auth/presence` and re-fetched immediately on a filter
+  change (not just the 30s poll). `7_DAYS`/`30_DAYS` are approximated as calendar-day windows
+  here (today minus N days, through today) rather than `isDateInScope`'s own rolling
+  now-minus-N-hours math - close enough for an attendance summary, far simpler than threading
+  sub-day precision through a date-only param.
 - **Prepaid/COD split** filters `t.paymentMethod`, which `parseRows` already normalizes to
   exactly one of those two strings — no third value to handle.
 - **"Converted" reuses `agentPerf`'s existing `reordersConverted` definition** (a replacement
@@ -383,35 +395,43 @@ specifically because it can now be true while `visibleTableAgentMetrics` itself 
   `allTickets`'s own `useMemo`), the same shortcut the surrounding `connected` calculation
   already takes and documents.
 - **Logged In At / Total Break Time come from `agent_presence_log`**, not `agent_presence`
-  (which only ever holds an agent's *current* status, not when today's session started or how
-  long today's breaks added up to). `getAgentPresenceLogSummary` (`api/_lib/db.js`) is new:
-  - **"Logged in at"** is the first `'Online'` transition **logged today** (IST day, fixed
-    UTC+5:30 boundary — same convention as `assign_leads.py`'s `within_business_hours`). An
-    agent who signed on yesterday and has had no status change since has no such event, so this
-    reads `—`, not a guess at yesterday's time — the log only records real transitions
+  (which only ever holds an agent's *current* status, not when a session started or how long its
+  breaks added up to). `getAgentPresenceLogSummary(dateFrom, dateTo)` (`api/_lib/db.js`) resolves
+  `dateFrom`/`dateTo` via the same shared `dateBounds()` helper `getCallingOverviewStats` etc.
+  already use, for consistency:
+  - **"Logged in at"** is the FIRST `'Online'` transition logged **within the range**
+    (chronologically earliest - "first login of the range" for a multi-day scope, not "most
+    recent"). An agent with no status change logged in the range at all has none, so this reads
+    `—` rather than guessing at a time outside the range - the log only records real transitions
     (`upsertAgentPresence` skips a repeated heartbeat), so there's nothing more precise to point
     to.
   - **"Total break time"** sums every interval whose *starting* status was `'Busy'` **and whose
-    starting transition was logged today** - walking a per-agent timeline seeded with the single
-    most recent transition strictly before today's IST midnight (needed to know what an agent's
-    status *was* at midnight) plus every transition logged today, but that seed entry is only
-    ever used to know what came next; it is NEVER itself counted as a break interval, even when
-    its status is `'Busy'`. An interval still open (`'Busy'` with no later transition) is closed
-    against `now`, not dropped.
+    starting transition was logged within the range** - walking a per-agent timeline seeded with
+    the single most recent transition strictly before the range starts (needed to know what an
+    agent's status *was* at that boundary; skipped entirely for an unbounded start, e.g.
+    `ALL_TIME`, since there's no "before the range" left), but that seed entry is only ever used
+    to know what came next; it is NEVER itself counted as a break interval, even when its status
+    is `'Busy'`. An interval still open at the end of the query window is closed against the
+    range's own end - `now` for an open-ended/ongoing range (`Today`, `All Time`), or the
+    range's explicit end for a fully-past one (`Yesterday`, an earlier `Custom` range) - **capped
+    at `now` either way**, since a range's nominal end (`dateBounds`' `23:59:59.999`) can be a
+    future instant while today is still in progress; closing against that instead of `now` was a
+    real bug caught by testing before it shipped (an "ongoing" break under `Today` came out as
+    several hours too long, closed against tonight's midnight instead of the actual current time).
 
-    This was a real, shipped bug: the first version counted the midnight-seed interval too, so
-    an agent whose *last known status before today* happened to be `'Busy'` - overwhelmingly a
-    stale status from having simply gone home with the tab closed, not an hours-long break
-    straight through midnight, since `agent_presence_log` only records a real transition (a
-    repeated heartbeat is never logged - see `upsertAgentPresence`) - had the entire overnight
-    gap added to "today's" break time. Observed live as an agent logging in at 10:14am showing
-    `11h 0m` of break before they'd even arrived. Fixed by excluding index 0 of the timeline from
-    the break sum whenever it's the synthetic seed; a genuine break that starts from a REAL
-    transition today (even one immediately following a stale overnight status) still counts
-    correctly.
+    The underlying overnight-carryover bug this was generalized from: the first version counted
+    the boundary-seed interval too, so an agent whose *last known status before the range*
+    happened to be `'Busy'` - overwhelmingly a stale status from having simply gone home with
+    the tab closed, not an hours-long break spanning the whole gap, since `agent_presence_log`
+    only records a real transition (a repeated heartbeat is never logged - see
+    `upsertAgentPresence`) - had the entire gap added to the range's break time. Observed live
+    (for the "today" case) as an agent logging in at 10:14am showing `11h 0m` of break before
+    they'd even arrived. Fixed by excluding index 0 of the timeline from the break sum whenever
+    it's the synthetic seed; a genuine break that starts from a REAL transition within the range
+    (even one immediately following a stale prior status) still counts correctly.
 - **`/api/auth/presence`'s GET widened, carefully.** It used to be admin-only outright (nobody
   but the Team Roster table called it). It now also serves a **self-only** response to any
-  signed-in caller — just their own `loggedInAt`/`breakMinutesToday`, looked up by their own
+  signed-in caller — just their own `loggedInAt`/`breakMinutes`, looked up by their own
   session email, nothing else — so a plain Agent can see their own two new columns without the
   endpoint turning into a general everyone's-presence leak. The admin branch is unchanged
   (all agents, all fields).

@@ -570,88 +570,105 @@ async function getAllAgentPresence() {
   return out;
 }
 
-// Same fixed UTC+5:30 offset convention scripts/assign_leads.py's within_business_hours
-// already uses (IST has no DST, so a fixed offset needs no tz database) - returns the UTC
-// instant of the most recent IST midnight.
-const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
-function istDayStartUtc(now = new Date()) {
-  const ist = new Date(now.getTime() + IST_OFFSET_MS);
-  const istMidnight = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate());
-  return new Date(istMidnight - IST_OFFSET_MS);
-}
-
-// Per-agent {loggedInAt, breakMinutesToday} derived from agent_presence_log, for the
-// RTO-CRM Overview tab's per-agent summary table (see RtoCrmClient.js) - agent_presence
-// itself (getAllAgentPresence, above) only ever holds the CURRENT status, not when today's
-// session started or how long today's breaks added up to.
+// Per-agent {loggedInAt, breakMinutes} derived from agent_presence_log, for the RTO-CRM
+// Overview tab's per-agent summary table (see RtoCrmClient.js) - agent_presence itself
+// (getAllAgentPresence, above) only ever holds the CURRENT status, not when a session started
+// or how long its breaks added up to.
 //
-// loggedInAt is the first 'Online' transition LOGGED TODAY (IST day). An agent who signed
-// on yesterday and has had no status change since has none - the log has no event to point
-// to, so this reads null ("no login recorded today") rather than guessing at yesterday's
-// time. That's a real limitation of a change-log, not a bug: only actual transitions are
-// recorded (see upsertAgentPresence's comment on why a repeated heartbeat isn't logged).
+// dateFrom/dateTo are the same 'YYYY-MM-DD' strings (or omitted) every other date-ranged
+// function in this file takes - resolved via the shared dateBounds() helper (below), so this
+// follows the Overview tab's own date-scope filter (Today/Yesterday/7 Days/Custom/All Time)
+// exactly the way getCallingOverviewStats etc. already do. `to` defaults to `now` when
+// omitted (an open-ended/ongoing range, e.g. Today or All Time); `from` being null means no
+// lower bound (All Time) - there's no "before the range" to seed a synthetic snapshot from in
+// that case, since the range already starts at the beginning of the log.
 //
-// breakMinutesToday sums every interval whose STARTING status was 'Busy', walking a
-// per-agent timeline built from two queries: the single most recent transition strictly
-// BEFORE today's IST midnight (so a break already running at midnight is picked up from
-// midnight, not invisible just because it didn't start today), then every transition logged
-// today. An interval still open (Busy with no later transition) is closed against `now`.
-async function getAgentPresenceLogSummary() {
+// loggedInAt is the FIRST 'Online' transition LOGGED WITHIN THE RANGE (chronologically
+// earliest - "first login of the range" for a multi-day scope, not "most recent"). An agent
+// with no status change logged in the range at all has none - the log has no event to point
+// to, so this reads null rather than guessing at some time outside the range. That's a real
+// limitation of a change-log, not a bug: only actual transitions are recorded (see
+// upsertAgentPresence's comment on why a repeated heartbeat isn't logged).
+//
+// breakMinutes sums every interval whose STARTING status was 'Busy', walking a per-agent
+// timeline built from two queries: the single most recent transition strictly BEFORE the
+// range starts (so a break already running when the range begins is picked up from the start
+// of the range, not invisible just because it didn't start within it), then every transition
+// logged within the range. An interval still open at the end of the query window (Busy with
+// no later transition) is closed against the range's own end - `now` for an open-ended range,
+// or the range's explicit end for a fully-past one (e.g. Yesterday, or a Custom range that
+// ended before today) - never against `now` for a range that's already over, or a still-open
+// break logged last week would silently absorb everything up to this instant.
+async function getAgentPresenceLogSummary(dateFrom, dateTo) {
   await ensurePgSchema();
-  const dayStart = istDayStartUtc();
+  const { from, to } = dateBounds(dateFrom, dateTo);
+  const now = new Date();
+  // `to` for a range like "Today" is end-of-day (dateBounds' 23:59:59.999) - a point still in
+  // the FUTURE relative to `now` while today is still in progress. Capping at `now` is what
+  // makes an open-ended/ongoing range close a still-open interval against the actual current
+  // instant rather than a timestamp that hasn't happened yet (which would silently credit
+  // hours that haven't elapsed). A fully-past range (Yesterday, an earlier Custom range) has
+  // `to` already before `now`, so this is a no-op there - `to` wins as intended.
+  const rangeEnd = to && to.getTime() < now.getTime() ? to : now;
 
-  const { rows: priorRows } = await pgSql`
-    SELECT DISTINCT ON (email) email, status
-    FROM agent_presence_log
-    WHERE changed_at < ${dayStart}
-    ORDER BY email, changed_at DESC
-  `;
-  const { rows: todayRows } = await pgSql`
+  // No seed needed when the range is unbounded at the start (All Time) - there's no "before
+  // the range" left to carry a status in FROM.
+  let priorRows = [];
+  if (from) {
+    ({ rows: priorRows } = await pgSql`
+      SELECT DISTINCT ON (email) email, status
+      FROM agent_presence_log
+      WHERE changed_at < ${from}
+      ORDER BY email, changed_at DESC
+    `);
+  }
+  const { rows: rangeRows } = await pgSql`
     SELECT email, status, changed_at
     FROM agent_presence_log
-    WHERE changed_at >= ${dayStart}
+    WHERE (${from}::timestamptz IS NULL OR changed_at >= ${from}) AND changed_at <= ${rangeEnd}
     ORDER BY email ASC, changed_at ASC
   `;
 
-  // `synthetic: true` marks the carried-forward midnight snapshot - used to know what an
-  // agent's status WAS at midnight (needed as the starting point for the timeline walk below),
-  // but never itself counted as a break interval (see the `i === 0` skip below) and never
-  // mistaken for a real "logged in today" event (its status is just whatever was true AT
-  // midnight, e.g. carried-over Online, not a fresh sign-in).
+  // `synthetic: true` marks the carried-forward pre-range snapshot - used to know what an
+  // agent's status WAS at the start of the range (needed as the starting point for the
+  // timeline walk below), but never itself counted as a break interval (see the `i === 0`
+  // skip below) and never mistaken for a real "logged in within the range" event (its status
+  // is just whatever was true AT the boundary, e.g. carried-over Online, not a fresh sign-in).
   const timelines = new Map(); // email -> [{status, at: Date, synthetic?: bool}]
-  for (const r of priorRows) timelines.set(r.email.toLowerCase(), [{ status: r.status, at: dayStart, synthetic: true }]);
-  for (const r of todayRows) {
+  if (from) {
+    for (const r of priorRows) timelines.set(r.email.toLowerCase(), [{ status: r.status, at: from, synthetic: true }]);
+  }
+  for (const r of rangeRows) {
     const email = r.email.toLowerCase();
     if (!timelines.has(email)) timelines.set(email, []);
     timelines.get(email).push({ status: r.status, at: r.changed_at });
   }
 
-  const now = new Date();
   const out = {};
   for (const [email, timeline] of timelines) {
     const loggedInAtEntry = timeline.find((e) => !e.synthetic && e.status === 'Online');
     let breakMs = 0;
     for (let i = 0; i < timeline.length; i++) {
       if (timeline[i].status !== 'Busy') continue;
-      // The synthetic midnight snapshot only says what an agent's LAST reported status was,
-      // possibly hours or days before today - not that they were continuously, actively on
-      // break every minute since. agent_presence_log only records a real transition (see
+      // The synthetic pre-range snapshot only says what an agent's LAST reported status was,
+      // possibly long before the range started - not that they were continuously, actively on
+      // break the whole time since. agent_presence_log only records a real transition (see
       // upsertAgentPresence's comment - a repeated heartbeat is never logged), so a 'Busy'
-      // status sitting unchanged since yesterday is far more often someone who simply closed
-      // their laptop for the night than someone on an hours-long break straight through
-      // midnight. Counting it produced exactly this bug: an agent whose last known status
-      // before today happened to be Busy got the ENTIRE overnight gap (potentially many
-      // hours) added to "today's" break time, well before they'd even logged in. Only an
-      // interval that STARTS with a real transition logged today counts - the carried-over
-      // status is used solely to seed the timeline (so a later transition away from it still
-      // resolves correctly), never as a break interval of its own.
+      // status sitting unchanged since before the range is far more often someone who simply
+      // closed their laptop than someone on a break spanning the whole gap. Counting it
+      // produced exactly this bug (fixed here for good): an agent whose last known status
+      // before the range happened to be Busy got the ENTIRE gap added to the range's break
+      // time, well before they'd even logged in. Only an interval that STARTS with a real
+      // transition logged WITHIN the range counts - the carried-over status is used solely to
+      // seed the timeline (so a later transition away from it still resolves correctly),
+      // never as a break interval of its own.
       if (i === 0 && timeline[i].synthetic) continue;
-      const end = i + 1 < timeline.length ? timeline[i + 1].at : now;
+      const end = i + 1 < timeline.length ? timeline[i + 1].at : rangeEnd;
       breakMs += Math.max(0, end.getTime() - timeline[i].at.getTime());
     }
     out[email] = {
       loggedInAt: loggedInAtEntry ? loggedInAtEntry.at.toISOString() : null,
-      breakMinutesToday: Math.round(breakMs / 60000),
+      breakMinutes: Math.round(breakMs / 60000),
     };
   }
   return out;
@@ -1134,15 +1151,20 @@ async function getCallingOverviewData(query) {
 // An unbounded read is fine here: this table is bounded by the sheet's own row count (a few
 // thousand), the same order of magnitude assign_leads.py already reads whole every 5 minutes.
 //
-// Deliberately reads the plain lead_assignments table (one upserted row per order_id in the
-// currently-deployed schema), NOT lead_assignments_current - that view belongs to a separate,
-// still-uncommitted append-only migration for this same table. Depending on it here would
-// make this endpoint 500 the moment it's called on the schema that's actually deployed today.
-// If/when that migration ships, this call site needs revisiting (see its own notes on what
-// "current" means once a lead can have more than one row).
+// Reads lead_assignments_current (the live-cycle view), NOT the base lead_assignments table -
+// deliberately the OPPOSITE grain from getCallingOverviewStats' disposed/connected/refunded
+// metrics, which read the base table so a lead's every past attempt still counts toward
+// company-wide call-volume KPIs. This function exists purely to decide, for a lead the CLIENT
+// is already looking at (allTickets, sourced from the live sheet - which only ever shows the
+// CURRENT cycle's state, since a reassignment wipes Q:U for the new agent), which date scope
+// that SAME cycle falls into. The base table now holds one row per cycle (a reassigned lead
+// gets a new row rather than an overwrite - see ensurePgSchema's lead_assignments comment), so
+// reading it unfiltered here would risk matching an order_id to a RETIRED cycle's dates
+// (whichever row Postgres happens to return last), not the live one the sheet and this
+// function's caller both mean.
 async function getAllLeadDates() {
   await ensurePgSchema();
-  const { rows } = await pgSql`SELECT order_id, assigned_at, disposed_at FROM lead_assignments`;
+  const { rows } = await pgSql`SELECT order_id, assigned_at, disposed_at FROM lead_assignments_current`;
   const out = {};
   for (const r of rows) out[r.order_id] = { assignedAt: r.assigned_at, disposedAt: r.disposed_at };
   return out;
