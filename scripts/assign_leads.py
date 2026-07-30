@@ -41,26 +41,41 @@ shipped, not a rolling window, so the large pre-existing backlog of already-Conn
 is left exactly as it was, while every lead called from that date onward is eligible
 indefinitely. A reassigned lead gets Q and R:U wiped back to blank so it looks like a fresh,
 never-called lead to its new agent - the previous attempt's history survives only in Postgres,
-not on the row itself. Before any of that, a prepaid Connected=No lead is checked against
-GoKwik the same as a fresh one (see the next paragraph) - it can have been refunded through a
-channel other than this agent's own disposition, and reassigning it would just have a second
-agent call a customer who's already been made whole.
+not on the row itself. A prepaid Connected=No lead that clears both of those tests is then
+checked against GoKwik the same as a fresh one (see the next paragraph) - it can have been
+refunded through a channel other than this agent's own disposition, and reassigning it would
+just have a second agent call a customer who's already been made whole. That check deliberately
+comes AFTER the cutoff and the retry cap, not before: those two are free local tests and a lead
+they reject is left alone for good, so paying a MySQL+HTTP round-trip for it (as this did
+originally) bought nothing - and worse, stamping S/T/U on such a row would have overwritten the
+agent's real Attempt/Disposition/remarks, rather than a row that's about to be wiped blank for
+its new agent anyway.
 
-Before a still-unassigned PREPAID lead enters the pool, its refund status is checked live
-against GoKwik (see is_already_refunded_via_gokwik) - a customer who's already been refunded
-should never be called about their order again. GoKwik doesn't recognise the sheet's own Order
-ID, so the check first resolves it to GoKwik's numeric platformOrderId via Item_level_data (see
-lookup_platform_order_id). A confirmed refund gets S/T/U stamped "Already Refunded" on the
+Before a still-unassigned PREPAID lead enters the pool, its refund status is checked against
+GoKwik (see resolve_refund_statuses) - a customer who's already been refunded should never be
+called about their order again. GoKwik doesn't recognise the sheet's own Order ID, so the check
+first resolves it to GoKwik's numeric platformOrderId via Item_level_data (see
+lookup_platform_order_ids). A confirmed refund gets S/T/U stamped "Already Refunded" on the
 sheet - permanently marking the row worked to every other reader, not just skipped this once -
 and never reaches the assignment pool. COD is never checked: nothing was paid upfront to
 refund before delivery. Every failure mode here - no platform order ID match, missing
 credentials, a network error, a non-200 - fails OPEN (assigns normally): one extra call to an
 already-refunded customer is preferred over silently stalling a genuinely-pending lead because
 of a flaky request.
+
+That check is the only network-bound work in this whole script, so it is deliberately NOT done
+inline per lead. The main loop just records which rows still need one (every already-cached
+answer is a dict lookup), and all deferred checks are then resolved TOGETHER - one bulk
+Item_level_data query covering all of them, then GOKWIK_MAX_CONCURRENCY GoKwik calls in
+parallel - before the pool is finalised. Doing it one lead at a time, sequentially, is what
+made this script take 8-13 minutes on a 5-minute schedule.
 """
 import json
 import os
 import sys
+import threading
+import zlib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -89,20 +104,44 @@ STALE_MINUTES = 10  # must match the CRM's own heartbeat cadence assumptions
 # imported from lead_priority so the JS "Next to Assign" preview can't drift from these values.
 
 # Item-level DWH schema the GoKwik refund-status lookup resolves a sheet Order ID against -
-# see lookup_platform_order_id.
+# see lookup_platform_order_ids.
 ITEM_LEVEL_SCHEMA = "mcaff_prod"
 
 GOKWIK_REFUND_STATUS_URL = "https://gkx.gokwik.co/v1/payments/refunds"
 GOKWIK_TIMEOUT_SEC = 8
 
+# Written to S and T on a confirmed refund, and read back out of S to tell an already-marked row
+# from one that still needs the write - so this string is load-bearing in both directions.
+ALREADY_REFUNDED = "Already Refunded"
+
 # A live GoKwik/MySQL check is a real network round-trip, and with hundreds of eligible
 # prepaid leads (fresh + Connected=No reassignment candidates combined) checking every one on
 # every 5-minute run took 8-13 minutes per run in practice - runs started queuing behind each
 # other, delaying assignment for everyone, not just prepaid leads. gokwik_refund_checks caches
-# the result per order_id for this long before it's live-checked again; "not yet refunded"
-# going stale after 2 hours (rather than being checked instantly) is a far better tradeoff
-# than every run taking minutes.
+# the result per order_id for this long before it's checked again; "not yet refunded" going
+# stale after ~2 hours (rather than being checked instantly) is a far better tradeoff than
+# every run taking minutes.
+#
+# A CONFIRMED refund never expires at all, regardless of this TTL - a refund does not
+# un-refund, so re-asking GoKwik about it forever is pure cost (see _cached_refund_status).
 GOKWIK_CACHE_TTL = timedelta(hours=2)
+
+# Every entry a run writes is stamped with that run's own timestamp, so a flat TTL means they
+# all fall due again in the SAME later run - recreating in one 2-hourly spike the exact
+# minutes-long stall the cache exists to prevent. Each order's TTL therefore carries up to this
+# much extra, derived from a hash of the order_id: deterministic (the same lead always gets the
+# same offset, so nothing flaps between runs) but spread across the window.
+GOKWIK_CACHE_JITTER = timedelta(hours=1)
+
+# Deferred checks are resolved this many at a time (see resolve_refund_statuses). The MySQL side
+# is already one bulk query by then, so this only bounds concurrent HTTPS calls to GoKwik -
+# enough to make a cold cache cost seconds instead of minutes, small enough to stay a polite
+# neighbour to a payments API we don't own.
+GOKWIK_MAX_CONCURRENCY = 8
+
+# Order IDs per Item_level_data IN (...) batch - a few hundred keeps the statement well inside
+# any max_allowed_packet while still collapsing what used to be one query per lead.
+PLATFORM_ID_BATCH_SIZE = 400
 
 # Same order-number-prefix -> vendor rule as api/refund/gokwik-initiate.js (kept in that
 # order - Fien and Hyphen are prefix-distinguishable, mcaffeine is the plain-numeric
@@ -122,65 +161,93 @@ def resolve_gokwik_vendor(order_id):
     return None  # unreachable - the catch-all always matches
 
 
-def lookup_platform_order_id(order_id):
-    """The sheet's own Order ID (Display_Order_Code) isn't what GoKwik knows an order by -
-    GoKwik expects its own numeric platformOrderId. Item_level_data carries the mapping, but
-    NOT reliably: a Display_Order_Code can have a row per sync channel, and only the
-    '*SHOPIFY' channel's Sale_Order_Code is the real GoKwik-recognizable numeric ID - a
-    'HYPHEN_D2C' row for the same order was observed carrying Sale_Order_Code equal to the
-    Display_Order_Code itself (a placeholder, not a real platform ID). Oldest-by-Created among
-    the Shopify-channel rows picks the original order over any later re-sync. A stray leading
-    backtick (a spreadsheet-import artifact seen even in plain numeric IDs, e.g. mCaffeine
-    order 21494) is stripped before the numeric check.
+def lookup_platform_order_ids(order_ids):
+    """{order_id: platform_order_id} for as many of order_ids as Item_level_data can resolve.
 
-    Returns None (never raises) on no match OR a lookup error - lookup failures fail OPEN
-    (assign as normal) rather than blocking a genuinely-pending lead over a flaky DB call."""
+    The sheet's own Order ID (Display_Order_Code) isn't what GoKwik knows an order by - GoKwik
+    expects its own numeric platformOrderId. Item_level_data carries the mapping, but NOT
+    reliably: a Display_Order_Code can have a row per sync channel, and only the '*SHOPIFY'
+    channel's Sale_Order_Code is the real GoKwik-recognizable numeric ID - a 'HYPHEN_D2C' row
+    for the same order was observed carrying Sale_Order_Code equal to the Display_Order_Code
+    itself (a placeholder, not a real platform ID). Oldest-by-Created among the Shopify-channel
+    rows picks the original order over any later re-sync. A stray leading backtick (a
+    spreadsheet-import artifact seen even in plain numeric IDs, e.g. mCaffeine order 21494) is
+    stripped before the numeric check.
+
+    Batched over IN (...) rather than one query per order: each mysql_lib.query is a round-trip
+    to RDS, and doing several hundred of them sequentially was half of why a run took minutes.
+    ORDER BY Created ASC plus "first row seen for an order wins" reproduces the old per-order
+    `LIMIT 1` exactly, without needing a window function this MySQL may not have.
+
+    Returns (resolved, failed), where failed is the set of order_ids whose lookup didn't actually
+    run - a batch that errored, or MYSQL_* not configured at all. Never raises: those orders fail
+    OPEN downstream (assign as normal) rather than blocking genuinely-pending leads over a flaky
+    DB call. They're reported separately from a clean "no such mapping" because only the latter is
+    a durable fact about the data and therefore safe to cache - batching makes one dropped
+    connection speak for hundreds of orders at once, and caching that as "not refunded" would
+    silence real refunds for hours."""
+    resolved = {}
+    failed = set()
+    order_ids = list(order_ids)
+    for start in range(0, len(order_ids), PLATFORM_ID_BATCH_SIZE):
+        batch = order_ids[start:start + PLATFORM_ID_BATCH_SIZE]
+        placeholders = ",".join(["%s"] * len(batch))
+        try:
+            rows = mysql_lib.query(
+                f"""
+                SELECT Display_Order_Code, Sale_Order_Code
+                FROM Item_level_data
+                WHERE Display_Order_Code IN ({placeholders})
+                  AND Channel_Name LIKE '%%SHOPIFY%%'
+                ORDER BY Created ASC
+                """,
+                tuple(batch),
+                database=ITEM_LEVEL_SCHEMA,
+            )
+        except Exception as e:
+            print(f"    (Item_level_data lookup for {len(batch)} order(s) failed: {e} - "
+                  f"treating them as not-refunded)")
+            failed.update(batch)
+            continue
+        if rows is None:  # MYSQL_* not configured - not a statement about these orders
+            failed.update(batch)
+            continue
+        for display_code, sale_order_code in rows:
+            if display_code in resolved or not sale_order_code:
+                continue  # oldest Shopify row per order wins - later ones are re-syncs
+            platform_order_id = str(sale_order_code).strip().lstrip("`")
+            if platform_order_id.isdigit():
+                resolved[display_code] = platform_order_id
+    return resolved, failed
+
+
+_thread_local = threading.local()
+
+
+def _gokwik_session():
+    """One requests.Session per worker thread. Two reasons: Session isn't documented
+    thread-safe, so sharing one across the pool would be a gamble; and keeping a session per
+    thread means the pool's calls reuse their TLS connection to gkx.gokwik.co instead of
+    re-handshaking per order, which is most of the remaining cost once the per-lead MySQL
+    queries are gone."""
+    session = getattr(_thread_local, "gokwik_session", None)
+    if session is None:
+        session = requests.Session()
+        _thread_local.gokwik_session = session
+    return session
+
+
+def _check_gokwik_refund_status_live(order_id, platform_order_id, credentials):
+    """The actual network check for ONE order, given an already-resolved platform_order_id and
+    (app_id, app_secret) - True only on a confirmed GoKwik refund (success + a Completed
+    entry). Every other outcome - a network error, a non-200, an unparseable body - returns
+    False, per the same fail-open philosophy as lookup_platform_order_ids: never block a real
+    pending lead over infrastructure flakiness, only ever skip one that's positively confirmed
+    refunded. Runs on a pool thread; go through resolve_refund_statuses rather than calling
+    this directly."""
+    app_id, app_secret = credentials
     try:
-        rows = mysql_lib.query(
-            """
-            SELECT Sale_Order_Code
-            FROM Item_level_data
-            WHERE Display_Order_Code = %s
-              AND Channel_Name LIKE '%%SHOPIFY%%'
-            ORDER BY Created ASC
-            LIMIT 1
-            """,
-            (order_id,),
-            database=ITEM_LEVEL_SCHEMA,
-        )
-    except Exception as e:
-        print(f"    (Item_level_data lookup for {order_id} failed: {e} - treating as not-refunded)")
-        return None
-    if not rows or not rows[0][0]:
-        return None
-    platform_order_id = rows[0][0].strip().lstrip("`")
-    if not platform_order_id.isdigit():
-        return None
-    return platform_order_id
-
-
-def _check_gokwik_refund_status_live(order_id):
-    """The actual network check - True only on a confirmed GoKwik refund (success + a
-    Completed entry). Every other outcome - no platform order ID found, missing credentials
-    for this order's vendor, a network error, a non-200, an unparseable body - returns False,
-    per the same fail-open philosophy as lookup_platform_order_id: never block a real pending
-    lead over infrastructure flakiness, only ever skip one that's positively confirmed
-    refunded. Callers should go through is_already_refunded_via_gokwik's cache instead of
-    calling this directly - see GOKWIK_CACHE_TTL's comment for why."""
-    platform_order_id = lookup_platform_order_id(order_id)
-    if not platform_order_id:
-        return False
-
-    vendor = resolve_gokwik_vendor(order_id)
-    if vendor is None:
-        return False
-    app_id = os.environ.get(f"{vendor['env_prefix']}_APPID")
-    app_secret = os.environ.get(f"{vendor['env_prefix']}_APPSECRET")
-    if not app_id or not app_secret:
-        return False
-
-    try:
-        resp = requests.get(
+        resp = _gokwik_session().get(
             GOKWIK_REFUND_STATUS_URL,
             params={"platformOrderId": platform_order_id},
             headers={"gk-app-id": app_id, "gk-app-secret": app_secret},
@@ -201,21 +268,96 @@ def _check_gokwik_refund_status_live(order_id):
     return any(r.get("status") == "Completed" for r in refunds)
 
 
-def is_already_refunded_via_gokwik(order_id, cache, dirty):
-    """Cache-first wrapper around _check_gokwik_refund_status_live. cache is
-    {order_id: (refunded, checked_at)} from fetch_gokwik_refund_cache (one bulk read at the
-    start of the run); dirty is the {order_id: refunded} dict of newly-checked results this
-    run, flushed once at the end via flush_gokwik_refund_cache - NOT written per-lead, which
-    would just move the per-lead network-call cost from GoKwik onto Postgres instead of
-    actually removing it."""
+def _gokwik_credentials(order_id):
+    """(app_id, app_secret) for whichever vendor owns this order, or None if either is
+    unconfigured - which fails open, same as every other miss here."""
+    vendor = resolve_gokwik_vendor(order_id)
+    if vendor is None:
+        return None
+    app_id = os.environ.get(f"{vendor['env_prefix']}_APPID")
+    app_secret = os.environ.get(f"{vendor['env_prefix']}_APPSECRET")
+    if not app_id or not app_secret:
+        return None
+    return app_id, app_secret
+
+
+def _cached_refund_status(order_id, cache):
+    """True/False from the gokwik_refund_checks cache, or None if this order still needs a live
+    check. cache is {order_id: (refunded, checked_at)} from fetch_gokwik_refund_cache - one bulk
+    read at the start of the run, so this is a dict lookup, not a network call.
+
+    A True entry is TERMINAL and never expires (see GOKWIK_CACHE_TTL's comment); only "not yet
+    refunded" ages out, after GOKWIK_CACHE_TTL plus its own deterministic share of
+    GOKWIK_CACHE_JITTER so a whole run's worth of entries doesn't fall due together."""
     cached = cache.get(order_id)
-    if cached is not None:
-        refunded, checked_at = cached
-        if checked_at is not None and (datetime.now(timezone.utc) - checked_at) < GOKWIK_CACHE_TTL:
-            return refunded
-    result = _check_gokwik_refund_status_live(order_id)
-    dirty[order_id] = result
-    return result
+    if cached is None:
+        return None
+    refunded, checked_at = cached
+    if refunded:
+        return True
+    if checked_at is None:
+        return None
+    jitter = GOKWIK_CACHE_JITTER * (zlib.crc32(order_id.encode("utf-8")) % 1000 / 1000)
+    if (datetime.now(timezone.utc) - checked_at) < GOKWIK_CACHE_TTL + jitter:
+        return False
+    return None
+
+
+def resolve_refund_statuses(order_ids, dirty):
+    """{order_id: refunded} for every order whose check the main loop deferred - resolved all
+    together, which is the entire point: one batched Item_level_data lookup for the whole set
+    (instead of a query per lead) and then GOKWIK_MAX_CONCURRENCY calls to GoKwik in flight at
+    once (instead of strictly one at a time). Same per-order verdict as before, just not
+    serialised.
+
+    Results reached on evidence - a live verdict, or a successful lookup that found this order has
+    no Shopify platform ID at all - go into dirty, the {order_id: refunded} dict
+    flush_gokwik_refund_cache writes back in ONE batched upsert at the end of the run. Caching the
+    no-mapping ones matters as much as the verdicts: that's a durable fact about the row, so
+    re-deriving it every run would keep the bulk lookup as big as it was on day one. Results that
+    are merely the absence of infrastructure - the lookup itself failed, or this vendor's
+    GOKWIK_* secrets aren't set - still fail open for THIS run but are deliberately NOT cached, so
+    a blip doesn't get frozen in as "not refunded" for hours."""
+    order_ids = sorted(order_ids)
+    if not order_ids:
+        return {}
+    print(f"  resolving {len(order_ids)} deferred GoKwik refund check(s)...")
+    platform_ids, lookup_failed = lookup_platform_order_ids(order_ids)
+
+    results = {}
+    cacheable = {}
+    checkable = []  # (order_id, platform_order_id, credentials)
+    no_mapping = no_credentials = 0
+    for order_id in order_ids:
+        platform_order_id = platform_ids.get(order_id)
+        if not platform_order_id:
+            results[order_id] = False  # fails open
+            if order_id not in lookup_failed:
+                no_mapping += 1
+                cacheable[order_id] = False  # durable: this order has no Shopify platform ID
+            continue
+        credentials = _gokwik_credentials(order_id)
+        if not credentials:
+            results[order_id] = False  # fails open, uncached - a missing secret isn't evidence
+            no_credentials += 1
+            continue
+        checkable.append((order_id, platform_order_id, credentials))
+
+    if no_mapping or no_credentials or lookup_failed:
+        print(f"    ({no_mapping} with no Shopify platform order ID, {len(lookup_failed)} whose "
+              f"lookup failed, {no_credentials} with no vendor credentials - all not-refunded, "
+              f"per fail-open)")
+    if checkable:
+        workers = min(GOKWIK_MAX_CONCURRENCY, len(checkable))
+        print(f"    asking GoKwik about {len(checkable)} order(s), {workers} at a time...")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            verdicts = pool.map(lambda args: _check_gokwik_refund_status_live(*args), checkable)
+            for (order_id, _platform_order_id, _credentials), refunded in zip(checkable, verdicts):
+                results[order_id] = refunded
+                cacheable[order_id] = refunded
+
+    dirty.update(cacheable)
+    return results
 
 
 def fetch_gokwik_refund_cache():
@@ -552,10 +694,25 @@ def main():
     unassigned_pending = []  # (row_index, rto_initiated_date, order_id, tier)
     awb_code_by_row = {}
     rto_reason_by_row = {}
-    tier_counts = {0: 0, 1: 0, 2: 0, 3: 0}
     already_refunded_rows = []  # row indices confirmed refunded via GoKwik this run
     excluded_by_row = {}  # row_index -> {emails} who must not receive this lead (see below)
     reassign_info_by_row = {}  # row_index -> (old_agent, order_id), for rows being reassigned
+    refund_check_by_row = {}  # row_index -> order_id whose GoKwik check is deferred (see below)
+
+    def refund_known_already(row_index, order_id):
+        """True only if the cache ALREADY says this prepaid lead was refunded, in which case the
+        caller skips it right here. A cache miss instead defers the check to
+        resolve_refund_statuses after this loop (returning False, i.e. "queue it for now") - the
+        row is provisionally admitted to the pool and dropped again below if the check comes back
+        refunded. Nothing in this loop may block on the network: doing so, one lead at a time, is
+        what made this script overrun its own 5-minute schedule."""
+        cached = _cached_refund_status(order_id, gokwik_cache)
+        if cached:
+            already_refunded_rows.append(row_index)
+            return True
+        if cached is None:
+            refund_check_by_row[row_index] = order_id
+        return False
 
     for i, row in enumerate(rows):
         order_id = cell(row, COL_ORDER_ID)
@@ -571,37 +728,42 @@ def main():
         # already has a real agent (someone was actually called and didn't pick up) - a
         # fresh/unassigned lead can't have a Connected value at all.
         if agent_raw and agent_raw != "unassigned" and connected.strip().lower() == "no":
-            payment_method = cell(row, COL_PAYMENT_METHOD)
-
-            # Same GoKwik refund check as the fresh-lead path further below (prepaid only -
-            # COD has nothing paid upfront to refund) - a Connected=No lead can ALSO already
-            # be refunded through a channel other than this agent's own disposition (e.g.
-            # support processed it directly outside the CRM). This branch has its own
-            # `continue`s below and would otherwise never reach that other check at all -
-            # confirmed for real on HYP39615010, which got reassigned despite GoKwik already
-            # showing it refunded, before this was added.
-            if is_prepaid(payment_method) and is_already_refunded_via_gokwik(order_id, gokwik_cache, gokwik_dirty):
-                already_refunded_rows.append(i)
-                continue
-
+            # Backlog cutoff and retry cap FIRST - they're free local tests, and a lead either
+            # rejects is left alone for good, so there's nothing to learn from GoKwik about it.
+            # (The reverse order shipped first and cost a MySQL+HTTP round-trip for every
+            # Connected=No prepaid lead in the sheet, most of them pre-cutoff backlog that was
+            # then discarded anyway - and it could stamp S/T/U "Already Refunded" over a real
+            # agent's Attempt/Disposition/remarks on a row that was NOT about to be wiped for a
+            # new agent. Both gone with this ordering.)
             calling_date = parse_calling_date(cell(row, COL_CALLING_DATE))
-            if calling_date and calling_date >= REASSIGN_BACKLOG_CUTOFF:
-                prior_agents = attempts_by_order.get(order_id, set()) | {agent_raw}
-                if len(prior_agents) < REASSIGN_RETRY_CAP:
-                    rto_initiated_date = parse_rto_initiated_date(cell(row, COL_RTO_INITIATED_DATE))
-                    tier = priority_tier(payment_method, cell(row, COL_RTO_REASON))
-                    unassigned_pending.append((i, rto_initiated_date, order_id, tier))
-                    awb_code_by_row[i] = cell(row, COL_AWB_CODE)
-                    rto_reason_by_row[i] = cell(row, COL_RTO_REASON)
-                    tier_counts[tier] += 1
-                    excluded_by_row[i] = prior_agents
-                    reassign_info_by_row[i] = (agent_raw, order_id)
+            prior_agents = attempts_by_order.get(order_id, set()) | {agent_raw}
+            if (calling_date and calling_date >= REASSIGN_BACKLOG_CUTOFF
+                    and len(prior_agents) < REASSIGN_RETRY_CAP):
+                payment_method = cell(row, COL_PAYMENT_METHOD)
+
+                # Same GoKwik refund check as the fresh-lead path further below (prepaid only -
+                # COD has nothing paid upfront to refund) - a Connected=No lead can ALSO already
+                # be refunded through a channel other than this agent's own disposition (e.g.
+                # support processed it directly outside the CRM). This branch has its own
+                # `continue`s below and would otherwise never reach that other check at all -
+                # confirmed for real on HYP39615010, which got reassigned despite GoKwik already
+                # showing it refunded, before this was added.
+                if is_prepaid(payment_method) and refund_known_already(i, order_id):
                     continue
-                # else: retry cap reached (this many distinct agents have all failed to
-                # connect) - fall through to is_disposed below, left alone for good.
-            # else: Calling Date before the backlog cutoff (or unparseable) - fall through,
-            # left alone for good. This is the one-time migration boundary: the large
-            # pre-existing backlog of already-Connected=No leads is never touched by this.
+
+                rto_initiated_date = parse_rto_initiated_date(cell(row, COL_RTO_INITIATED_DATE))
+                tier = priority_tier(payment_method, cell(row, COL_RTO_REASON))
+                unassigned_pending.append((i, rto_initiated_date, order_id, tier))
+                awb_code_by_row[i] = cell(row, COL_AWB_CODE)
+                rto_reason_by_row[i] = cell(row, COL_RTO_REASON)
+                excluded_by_row[i] = prior_agents
+                reassign_info_by_row[i] = (agent_raw, order_id)
+                continue
+            # else: retry cap reached (this many distinct agents have all failed to connect), or
+            # Calling Date before the backlog cutoff (or unparseable) - fall through to
+            # is_disposed below, left alone for good. The cutoff is the one-time migration
+            # boundary: the large pre-existing backlog of already-Connected=No leads is never
+            # touched by this.
 
         # COL_REMARKS_LEGACY_U as well as COL_REMARKS: remarks were written to U for a long
         # time before that was corrected to Z, so a lead whose only evidence of having been
@@ -624,19 +786,38 @@ def main():
         # nothing for GoKwik to have already refunded. Checked only for a lead that would
         # otherwise enter the assignment pool this run; an already-assigned pending lead is
         # left alone regardless; a genuinely disposed one was already skipped above.
-        if is_unassigned and is_prepaid(payment_method) and is_already_refunded_via_gokwik(order_id, gokwik_cache, gokwik_dirty):
-            already_refunded_rows.append(i)
+        if is_unassigned and is_prepaid(payment_method) and refund_known_already(i, order_id):
             continue  # never enters the unassigned pool - no agent ever sees it
 
         if is_unassigned:
             unassigned_pending.append((i, rto_initiated_date, order_id, tier))
             awb_code_by_row[i] = cell(row, COL_AWB_CODE)
             rto_reason_by_row[i] = cell(row, COL_RTO_REASON)
-            tier_counts[tier] += 1
         elif agent_raw in current_load:
             current_load[agent_raw] += 1
         # else: pending lead already held by someone (eligible or not) - left alone either
         # way. Column Q having any value at all is enough to exempt a lead permanently.
+
+    # Every refund check the loop deferred, settled in one go now that the full candidate set is
+    # known - see resolve_refund_statuses. A lead that comes back refunded is retracted from the
+    # pool it was provisionally added to, exactly as if the loop had skipped it inline.
+    if refund_check_by_row:
+        statuses = resolve_refund_statuses(set(refund_check_by_row.values()), gokwik_dirty)
+        refunded_rows = {i for i, order_id in refund_check_by_row.items() if statuses.get(order_id)}
+        if refunded_rows:
+            already_refunded_rows.extend(sorted(refunded_rows))
+            unassigned_pending = [e for e in unassigned_pending if e[0] not in refunded_rows]
+            for i in refunded_rows:
+                awb_code_by_row.pop(i, None)
+                rto_reason_by_row.pop(i, None)
+                excluded_by_row.pop(i, None)
+                reassign_info_by_row.pop(i, None)
+
+    # Counted from the final pool rather than tallied during the loop, so retracted refunds can't
+    # leave the printed breakdown disagreeing with what actually gets assigned.
+    tier_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+    for _row_index, _rto_initiated_date, _order_id, tier in unassigned_pending:
+        tier_counts[tier] += 1
 
     if reassign_info_by_row:
         print(f"  {len(reassign_info_by_row)} Connected=No lead(s) eligible for reassignment (under the {REASSIGN_RETRY_CAP}-attempt cap).")
@@ -647,23 +828,35 @@ def main():
     # S/T/U are exactly what is_disposed (above) checks, so this permanently marks the row
     # worked for every future run too, not just skipped once.
     if already_refunded_rows:
-        print(f"  {len(already_refunded_rows)} prepaid lead(s) confirmed already refunded via GoKwik - stamping, not assigning.")
-        refund_value_ranges = [
-            {
-                "range": f"'{SHEET_TAB}'!S{row_index + 2}:U{row_index + 2}",
-                "values": [["Already Refunded", "Already Refunded",
-                            "Auto-detected via GoKwik refund status check - not assigned."]],
-            }
-            for row_index in already_refunded_rows
-        ]
-        lib.set_sheet_values_batch(SPREADSHEET_ID, refund_value_ranges)
+        # Only rows not already carrying the mark are written. A Connected=No row keeps its "No"
+        # forever, so it re-enters the reassignment branch on every single run - and since a
+        # confirmed refund is now cached permanently, it would otherwise re-stamp the same three
+        # cells with the same three values every 5 minutes indefinitely, growing this batch write
+        # without ever changing anything.
+        to_stamp = [i for i in already_refunded_rows
+                    if cell(rows[i], COL_ATTEMPT).strip() != ALREADY_REFUNDED]
+        print(f"  {len(already_refunded_rows)} prepaid lead(s) confirmed already refunded via "
+              f"GoKwik - not assigning ({len(to_stamp)} newly stamped).")
+        if to_stamp:
+            refund_value_ranges = [
+                {
+                    "range": f"'{SHEET_TAB}'!S{row_index + 2}:U{row_index + 2}",
+                    "values": [[ALREADY_REFUNDED, ALREADY_REFUNDED,
+                                "Auto-detected via GoKwik refund status check - not assigned."]],
+                }
+                for row_index in to_stamp
+            ]
+            lib.set_sheet_values_batch(SPREADSHEET_ID, refund_value_ranges)
 
     # Flushed before the early-return below too, for the same reason as the refund stamps
     # above - a run that found nothing assignable still did real GoKwik/MySQL work this run,
     # and throwing that away would mean re-checking the exact same leads live again next run,
     # defeating the entire point of the cache.
     if gokwik_dirty:
-        print(f"  Caching {len(gokwik_dirty)} GoKwik refund-check result(s) for the next {GOKWIK_CACHE_TTL}...")
+        confirmed = sum(1 for refunded in gokwik_dirty.values() if refunded)
+        print(f"  Caching {len(gokwik_dirty)} GoKwik refund-check result(s) - {confirmed} refunded "
+              f"(kept permanently), {len(gokwik_dirty) - confirmed} not (re-checked after "
+              f"{GOKWIK_CACHE_TTL} + jitter)...")
         flush_gokwik_refund_cache(gokwik_dirty)
 
     if not unassigned_pending:

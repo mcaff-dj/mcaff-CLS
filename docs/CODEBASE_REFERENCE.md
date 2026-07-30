@@ -322,8 +322,8 @@ disposition — COD is never checked, since nothing was paid upfront to refund p
    else → mcaffeine (catch-all, checked last). Picks which `GOKWIK_*_APPID/APPSECRET` pair to
    use.
 2. **Resolve the sheet's Order ID to GoKwik's numeric `platformOrderId`** via `mcaff_prod`'s
-   `Item_level_data` (`lookup_platform_order_id`). Two real data-quality landmines here,
-   found by direct inspection rather than assumed:
+   `Item_level_data` (`lookup_platform_order_ids`, batched `IN (…)` — see *Why it's deferred*
+   below). Two real data-quality landmines here, found by direct inspection rather than assumed:
    - A `Display_Order_Code` can carry more than one `Sale_Order_Code` across sync channels —
      only the `*SHOPIFY`-channel row's value is GoKwik's real numeric ID; a `HYPHEN_D2C` row
      for the same order carried a placeholder equal to the Display code itself. Filtered to
@@ -337,29 +337,79 @@ disposition — COD is never checked, since nothing was paid upfront to refund p
 4. **Confirmed refunded** → stamp `S:U` = `"Already Refunded", "Already Refunded", "<note>"` in
    one batched `set_sheet_values_batch` call (S/T are exactly what the `is_disposed` check
    elsewhere in this file treats as "already worked," so this is a permanent mark, not a
-   one-run skip) and `continue` — the row never reaches `unassigned_pending`, never gets a
-   Column Q write, never reaches `lead_assignments`.
+   one-run skip) — the row never reaches `unassigned_pending`, never gets a Column Q write,
+   never reaches `lead_assignments`. Rows whose S **already** reads `ALREADY_REFUNDED` are
+   excluded from the write: a Connected=No row keeps its "No" forever, so it re-enters the
+   reassignment branch on every run, and with a permanently-cached refund it would otherwise
+   rewrite the same three cells with the same three values every 5 minutes forever.
 5. **Every other outcome fails OPEN** (assign normally): no platform-order-ID match, missing
    credentials, a MySQL error, a GoKwik network error/non-200/unparseable body. Deliberate —
    one extra call to an already-refunded customer beats silently stalling a genuinely-pending
    lead over infrastructure flakiness.
 
-**`gokwik_refund_checks` (Postgres) caches the result per `order_id` for `GOKWIK_CACHE_TTL`
-(2 hours)** — checking every eligible lead live, every 5-minute run, was a real incident: with
-hundreds of eligible prepaid leads combined with the reassignment check below, a run took
-8-13 minutes (was seconds before), so runs started queuing behind each other
-(`concurrency: cancel-in-progress: false`), delaying assignment for every agent, not just on
-prepaid leads. `fetch_gokwik_refund_cache()` bulk-reads the whole table once per run (same
-pattern as `fetch_reassignment_attempts`) and creates it itself (idempotent) rather than
-depending on `api/_lib/db.js`'s `ensurePgSchema` - Python-only, no reason to wait on a Lambda
-deploy. `is_already_refunded_via_gokwik(order_id, cache, dirty)` checks the in-memory dict
-first and only falls through to the live network call (`_check_gokwik_refund_status_live`) on
-a miss or a stale (>2h) entry; every live result goes into `dirty` and gets written back in
-ONE batched `executemany` at the end of the run (`flush_gokwik_refund_cache`), not one write
-per lead - a per-lead Postgres round-trip on every cache HIT would just move the bottleneck
-from GoKwik onto Postgres instead of removing it. Flushed before the
-`if not unassigned_pending: return` early-exit, same reasoning as the refund stamps above - a
-run that found nothing assignable still did real work worth keeping.
+#### Why it's deferred, batched and parallel
+
+This check is the only network-bound work in the whole script, and doing it inline, one lead at
+a time, was a real incident: with hundreds of eligible prepaid leads (fresh + the reassignment
+candidates below), a run took **8–13 minutes** on a **5-minute** schedule — was seconds before —
+so runs queued behind each other (`concurrency: cancel-in-progress: false`), some scheduled ticks
+were cancelled outright, and assignment was delayed for every agent, not just on prepaid leads.
+One observed run spent 8m08s to assign **one** lead. Three separate things were wrong:
+
+- **Ordering.** The Connected=No branch checked GoKwik *before* the backlog cutoff and retry cap,
+  so every Connected=No prepaid lead in the sheet paid a MySQL + HTTP round-trip — most of them
+  pre-cutoff backlog that was then discarded anyway. The cheap local tests now come first. This
+  also closed a latent data-loss path: those discarded rows could get `S:U` stamped
+  `"Already Refunded"` **over a real agent's Attempt/Disposition/remarks**, unlike a row about to
+  be wiped blank for a new agent.
+- **One query per lead.** `lookup_platform_order_ids` now takes the whole candidate set and
+  batches it over `IN (…)` (`PLATFORM_ID_BATCH_SIZE`, 400). `ORDER BY Created ASC` plus
+  "first row seen per order wins" reproduces the old per-order `LIMIT 1` exactly, with no window
+  function.
+- **Strictly serial HTTP.** `GOKWIK_MAX_CONCURRENCY` (8) calls are now in flight at once via a
+  `ThreadPoolExecutor`, each thread holding its own `requests.Session` (`_gokwik_session`) so the
+  TLS connection to `gkx.gokwik.co` is reused rather than re-handshaken per order — `Session`
+  also isn't documented thread-safe, so sharing one would be a gamble.
+
+Making that work means the main loop **cannot block on the network**: it only records
+`refund_check_by_row[row_index] = order_id` for a cache miss and provisionally admits the lead to
+the pool. `resolve_refund_statuses` then settles every deferred check at once after the loop, and
+any lead that comes back refunded is *retracted* from `unassigned_pending` (and from
+`awb_code_by_row` / `rto_reason_by_row` / `excluded_by_row` / `reassign_info_by_row`) exactly as
+if the loop had skipped it inline. `tier_counts` is consequently counted from the final pool
+rather than tallied during the loop, so the printed breakdown can't disagree with what gets
+assigned. Measured on 500 leads at 60ms MySQL + 120ms HTTP: **90s → 7.8s**, and that's the
+*cold-cache* path.
+
+**`gokwik_refund_checks` (Postgres) caches the verdict per `order_id`.**
+`fetch_gokwik_refund_cache()` bulk-reads the whole table once per run (same pattern as
+`fetch_reassignment_attempts`) and creates it itself (idempotent) rather than depending on
+`api/_lib/db.js`'s `ensurePgSchema` — Python-only, no reason to wait on a Lambda deploy.
+`_cached_refund_status(order_id, cache)` returns `True`/`False`/`None`, where `None` means "still
+needs a live check", and expiry is deliberately asymmetric:
+
+- **A confirmed refund never expires.** A refund does not un-refund, so re-asking GoKwik about it
+  forever is pure cost.
+- **"Not yet refunded" expires after `GOKWIK_CACHE_TTL` (2h) plus its own share of
+  `GOKWIK_CACHE_JITTER` (up to 1h),** derived from `crc32(order_id)`. Deterministic, so a lead
+  never flaps between runs — but without it every entry a run writes falls due again in the *same*
+  later run, which would recreate the whole minutes-long stall as a 2-hourly spike instead of
+  removing it.
+
+Every verdict goes into `dirty` and is written back in ONE batched `executemany` at the end of the
+run (`flush_gokwik_refund_cache`), not one write per lead — a per-lead Postgres round-trip on
+every cache HIT would just move the bottleneck from GoKwik onto Postgres. What is **not** cached
+matters too: a result that's merely the absence of infrastructure (the `Item_level_data` lookup
+itself errored, or `MYSQL_*`/this vendor's `GOKWIK_*` secrets aren't set) still fails open for
+that run but is deliberately left uncached, so a blip isn't frozen in as "not refunded" for hours.
+Batching raised the stakes here — one dropped connection now speaks for up to 400 orders at once.
+A *successful* lookup that found no Shopify mapping **is** cached: that's a durable fact about the
+row. Flushed before the `if not unassigned_pending: return` early-exit, same reasoning as the
+refund stamps above — a run that found nothing assignable still did real work worth keeping.
+
+The workflow runs `python -u`: without it Python block-buffers stdout when it isn't a terminal, so
+every progress line flushed at once on exit and carried the same timestamp — which is why a slow
+run gave no clue as to *which* phase was slow.
 
 Secrets (`MYSQL_*`, `GOKWIK_*_APPID/APPSECRET`) are wired into
 [assign-leads.yml](../.github/workflows/assign-leads.yml)'s job env — this cron had no MySQL or
@@ -375,11 +425,14 @@ Connected column reads "No" is eligible to go to a *different* agent, up to
   make `is_disposed` treat the row as permanently worked, same as any real disposition — this
   branch intercepts Connected=No first and either re-queues it or falls through unchanged.
 - **Runs the same GoKwik refund check as the fresh-lead path, for prepaid only.** This branch
-  has its own early `continue`s, so it never reaches the fresh-lead path's
-  `is_already_refunded_via_gokwik` call further down the loop - a real bug, not hypothetical:
-  order `HYP39615010` was reassigned despite GoKwik already confirming it refunded, before this
-  was added. A confirmed refund here stamps S/T/U and skips reassignment entirely, same outcome
-  as the fresh-lead check.
+  has its own early `continue`s, so it never reaches the fresh-lead path's own refund check
+  further down the loop - a real bug, not hypothetical: order `HYP39615010` was reassigned
+  despite GoKwik already confirming it refunded, before this was added. A confirmed refund here
+  stamps S/T/U and skips reassignment entirely, same outcome as the fresh-lead check.
+- **The refund check runs AFTER the cutoff and the cap, not before.** Those two are free local
+  tests and a lead either of them rejects is left alone for good, so there is nothing to learn
+  from GoKwik about it. See *Why it's deferred, batched and parallel* above - this ordering was
+  originally the other way round and was most of an 8-13 minute run.
 - **`lead_reassignment_attempts`** (new Postgres table, append-only — unlike `lead_assignments`,
   which upserts and only ever holds the *current* agent) is how every prior agent stays
   permanently excluded, not just the most recent one. Fetched once per run

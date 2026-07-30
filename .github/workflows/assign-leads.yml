@@ -31,9 +31,9 @@ jobs:
         env:
           GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
-          # For the GoKwik already-refunded check: MySQL resolves a sheet Order ID to
-          # GoKwik's platformOrderId (Item_level_data), then these per-vendor credentials
-          # call GoKwik itself. See is_already_refunded_via_gokwik in assign_leads.py.
+          # For the GoKwik already-refunded check: MySQL resolves sheet Order IDs to
+          # GoKwik's platformOrderIds (Item_level_data), then these per-vendor credentials
+          # call GoKwik itself. See resolve_refund_statuses in assign_leads.py.
           MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
           MYSQL_USER: ${{ secrets.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
@@ -45,4 +45,8 @@ jobs:
           GOKWIK_FIEN_APPSECRET: ${{ secrets.GOKWIK_FIEN_APPSECRET }}
           GOKWIK_MCAFFEINE_APPID: ${{ secrets.GOKWIK_MCAFFEINE_APPID }}
           GOKWIK_MCAFFEINE_APPSECRET: ${{ secrets.GOKWIK_MCAFFEINE_APPSECRET }}
-        run: python scripts/assign_leads.py
+        # -u (unbuffered): without it Python block-buffers stdout when it isn't a terminal, so
+        # every line of this script's progress output flushed at once when the process exited -
+        # giving every log line the same timestamp and making it impossible to tell from a slow
+        # run WHICH phase was slow. That cost real time diagnosing the 8-13 minute runs.
+        run: python -u scripts/assign_leads.py
