@@ -589,6 +589,42 @@ good, not just this one run.
 
 ---
 
+## 10e. Nobody picked up — try someone else
+
+Normally, once a lead has an agent and a disposition, the Robot leaves it alone forever — that's
+the whole point of "write-once." But there's one deliberate exception: if an agent genuinely
+called and the customer just didn't pick up, that's not the same as the lead being *worked* —
+it's the same as never having reached them at all. So a "Connected: No" outcome gets one more
+chance, with a different agent.
+
+```mermaid
+flowchart LR
+    A["📵 Agent called,<br/>Connected: No"] --> B{"Already tried by<br/>3 different agents?"}
+    B -->|"Yes"| C["🛑 Leave it — no<br/>more attempts"]
+    B -->|"No"| D["📤 Hand to a<br/>DIFFERENT agent"]
+
+    style C fill:#e5e7eb,stroke:#6b7280,color:#000
+    style D fill:#bbf7d0,stroke:#15803d,color:#000
+```
+
+**The same agent never gets it back.** Every agent who's already tried a lead is permanently
+remembered and skipped when it's handed out again — chasing an unreachable number with the same
+person who already couldn't reach them wouldn't help.
+
+**Only up to 3 different agents, ever, per lead.** After that, it's left alone for good, the same
+as any other worked lead — a genuinely unreachable number shouldn't bounce between agents
+forever.
+
+**Only applies going forward from 19 July 2026.** The large backlog of leads that were already
+"Connected: No" before this existed is left exactly as it was — this only affects leads called
+from that date onward, so nothing already-settled gets stirred up by a new rule appearing.
+
+**The reassigned lead looks brand new to its next agent.** The record of the earlier,
+unsuccessful call doesn't stay on the row — it's kept safely elsewhere so the same agent-history
+can't be handed out twice, but the agent picking it up next sees a clean, fresh lead to work.
+
+---
+
 ## 11. Who's allowed to see what?
 
 ```mermaid

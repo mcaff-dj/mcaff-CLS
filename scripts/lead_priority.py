@@ -128,6 +128,13 @@ LOW_PRIORITY_COD_RTO_REASONS = _RULES["lowPriorityCodRtoReasons"]
 
 DEFAULT_QUOTA = _RULES["assignmentQuota"]
 
+# Connected=No reassignment - shared with the JS "Next to Assign" preview so the cutoff/cap
+# can't drift between them the way DEFAULT_QUOTA once did. See leadAssignmentRules.json's
+# _reassignNote for what these mean.
+from datetime import datetime as _datetime
+REASSIGN_BACKLOG_CUTOFF = _datetime.strptime(_RULES["reassignBacklogCutoff"], "%Y-%m-%d")
+REASSIGN_RETRY_CAP = _RULES["reassignRetryCap"]
+
 
 def is_prepaid(payment_raw):
     """Same rule as rto-crm.html's mapTkt: explicit prepaid-like keywords, OR - since payment
@@ -153,7 +160,8 @@ def priority_tier(payment_raw, rto_reason_raw):
     return 2
 
 
-def build_assignment_queue(unassigned_pending, online_agents, current_load, quota=DEFAULT_QUOTA):
+def build_assignment_queue(unassigned_pending, online_agents, current_load, quota=DEFAULT_QUOTA,
+                            excluded_by_row=None):
     """Round-robins a pool of unassigned pending leads across online agents up to
     `quota` each, based on each agent's current load. Pure/side-effect-free -
     callers decide whether to actually write the result (assign_leads.py) or
@@ -171,10 +179,16 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     single number can't express "20 leads on RTO, 5 on NDR". An agent missing from the dict
     falls back to DEFAULT_QUOTA rather than to zero: a missing quota means "unset", and
     treating it as no capacity would silently make that agent ineligible for every lead.
+    excluded_by_row: optional {row_index: set(emails)} - agents who must never receive THIS
+    particular lead, e.g. assign_leads.py's Connected=No reassignment excludes everyone who
+    already failed to reach this same customer. Absent/empty for a lead means every online
+    agent is a candidate, same as before this parameter existed.
 
     Returns {row_index: agent_email}.
     """
     from datetime import datetime
+
+    excluded_by_row = excluded_by_row or {}
 
     # Seconds since epoch via timedelta subtraction (not .timestamp() - that calls into
     # the platform's C time functions and raises on Windows for extreme/pre-epoch values,
@@ -195,23 +209,28 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
 
     needed = {email: max(0, _quota_for(email) - current_load.get(email, 0)) for email in online_agents}
     assignments = {}
-    queue_pos = 0
-    agent_cycle = [e for e in online_agents if needed[e] > 0]
-    while queue_pos < len(sorted_pool) and agent_cycle:
-        progressed = False
-        for email in list(agent_cycle):
-            if queue_pos >= len(sorted_pool):
-                break
-            if needed[email] <= 0:
-                agent_cycle.remove(email)
+
+    # Per-lead cursor-based round-robin, not a shrinking agent_cycle list - needed so a lead
+    # can skip past an excluded-for-this-lead agent without disturbing anyone else's turn.
+    # Equivalent to the old shrinking-list approach when excluded_by_row is empty (verified:
+    # both visit online_agents in the same fixed relative order, skipping only agents already
+    # at needed<=0) - this refactor changes HOW capacity/exclusion are checked per lead, not
+    # the resulting assignment order for the case every existing caller already relies on.
+    agent_order = [e for e in online_agents if needed[e] > 0]
+    if not agent_order:
+        return assignments
+    cursor = 0
+    for row_index, _rto_initiated_date, _order_id, _tier in sorted_pool:
+        excluded = excluded_by_row.get(row_index) or ()
+        for _ in range(len(agent_order)):
+            email = agent_order[cursor % len(agent_order)]
+            cursor += 1
+            if needed[email] <= 0 or email in excluded:
                 continue
-            row_index, _, _order_id, _tier = sorted_pool[queue_pos]
             assignments[row_index] = email
             needed[email] -= 1
-            queue_pos += 1
-            progressed = True
-            if needed[email] <= 0:
-                agent_cycle.remove(email)
-        if not progressed:
             break
+        # else (loop exhausted with no eligible agent - all excluded or all at capacity):
+        # this lead is left unassigned this round, same as running out of agent capacity did
+        # before this parameter existed.
     return assignments

@@ -46,6 +46,14 @@ const localStorage = typeof window !== 'undefined'
     const HIGH_PRIORITY_COD_RTO_REASONS = leadAssignmentRules.highPriorityCodRtoReasons;
     const LOW_PRIORITY_COD_RTO_REASONS = leadAssignmentRules.lowPriorityCodRtoReasons;
     const ASSIGNMENT_QUOTA = leadAssignmentRules.assignmentQuota;
+    // Connected=No reassignment preview - see leadAssignmentRules.json's _reassignNote and
+    // assign_leads.py's REASSIGN_BACKLOG_CUTOFF/REASSIGN_RETRY_CAP. This preview can only
+    // exclude the CURRENT agent (the one who just failed to connect) - it has no client-side
+    // visibility into lead_reassignment_attempts (that history lives only in Postgres, read
+    // directly by the Python cron), so it can't enforce the retry cap across older attempts
+    // the way the real writer does. A lead the real cron would already treat as cap-reached
+    // may still show one more predicted reassignment here.
+    const REASSIGN_BACKLOG_CUTOFF_DATE = new Date(leadAssignmentRules.reassignBacklogCutoff);
 
     function getPriorityTier(t) {
       if (t.paymentMethod === 'Prepaid') return 0;
@@ -1676,14 +1684,29 @@ const localStorage = typeof window !== 'undefined'
         const currentLoad = {};
         onlineAgents.forEach(e => { currentLoad[e] = 0; });
 
-        const pool = []; // { ticket, tier }
+        const pool = []; // { ticket, tier, excludedAgent? }
 
         allTickets.forEach(t => {
           if (!t.orderNumber) return;
+
+          const agt = (t.assignedAgent || '').trim().toLowerCase();
+          const connectedNo = (t.connected || '').trim().toLowerCase() === 'no';
+
+          // Connected=No reassignment preview - checked before the general isDisposed skip
+          // below, same ordering as assign_leads.py, since Connected=No would otherwise look
+          // like any other worked disposition. Only for a lead that already has a real agent;
+          // see REASSIGN_BACKLOG_CUTOFF_DATE's comment for why this can preview one extra
+          // reassignment the real cron would actually leave disposed (cap-reached, invisible
+          // client-side).
+          if (agt && agt !== 'unassigned' && connectedNo &&
+              t.rowDate && t.rowDate.getTime() >= REASSIGN_BACKLOG_CUTOFF_DATE.getTime()) {
+            pool.push({ ticket: t, tier: getPriorityTier(t), excludedAgent: agt });
+            return;
+          }
+
           const isDisposed = !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
           if (isDisposed) return;
 
-          const agt = (t.assignedAgent || '').trim().toLowerCase();
           const isUnassigned = !agt || agt === 'unassigned';
           const tier = getPriorityTier(t);
 
@@ -1707,22 +1730,32 @@ const localStorage = typeof window !== 'undefined'
         const needed = {};
         onlineAgents.forEach(e => { needed[e] = Math.max(0, ASSIGNMENT_QUOTA - currentLoad[e]); });
 
+        // Per-lead cursor-based round-robin (mirrors build_assignment_queue in
+        // scripts/lead_priority.py exactly, including the exclusion check) rather than the
+        // old shrinking-agentCycle-list version - needed so a lead can skip its excludedAgent
+        // without disturbing anyone else's turn. Produces identical results to the old loop
+        // when nothing is excluded.
         const rows = [];
-        let queuePos = 0;
-        let agentCycle = onlineAgents.filter(e => needed[e] > 0);
-        while (queuePos < pool.length && agentCycle.length > 0) {
-          let progressed = false;
-          for (const email of [...agentCycle]) {
-            if (queuePos >= pool.length) break;
-            if (needed[email] <= 0) { agentCycle = agentCycle.filter(e => e !== email); continue; }
-            const item = pool[queuePos];
-            rows.push({ ticket: item.ticket, tier: item.tier, predictedAgent: email, rank: rows.length + 1 });
-            needed[email] -= 1;
-            queuePos += 1;
-            progressed = true;
-            if (needed[email] <= 0) { agentCycle = agentCycle.filter(e => e !== email); }
+        const agentOrder = onlineAgents.filter(e => needed[e] > 0);
+        let cursor = 0;
+        if (agentOrder.length > 0) {
+          for (const item of pool) {
+            let assignedEmail = null;
+            for (let tries = 0; tries < agentOrder.length; tries++) {
+              const email = agentOrder[cursor % agentOrder.length];
+              cursor += 1;
+              if (needed[email] <= 0 || email === item.excludedAgent) continue;
+              assignedEmail = email;
+              needed[email] -= 1;
+              break;
+            }
+            if (assignedEmail) {
+              rows.push({
+                ticket: item.ticket, tier: item.tier, predictedAgent: assignedEmail,
+                isReassignment: !!item.excludedAgent, rank: rows.length + 1,
+              });
+            }
           }
-          if (!progressed) break;
         }
 
         return { onlineAgents, rows, leftover: pool.length - rows.length };
@@ -3023,7 +3056,14 @@ const localStorage = typeof window !== 'undefined'
                                 <td className="py-3 px-4 max-w-[220px]"><span className="truncate block text-zinc-300">{row.ticket.rtoReason}</span></td>
                                 <td className="py-3 px-4 text-zinc-200 font-semibold font-mono tabular-nums">{row.ticket.callingDate}</td>
                                 <td className="py-3 px-4 text-right font-semibold text-zinc-200 tabular-nums">₹{row.ticket.orderAmount.toLocaleString('en-IN')}</td>
-                                <td className="py-3 px-4"><span className="font-mono text-indigo-300">{row.predictedAgent}</span></td>
+                                <td className="py-3 px-4">
+                                  <span className="font-mono text-indigo-300">{row.predictedAgent}</span>
+                                  {row.isReassignment && (
+                                    <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide text-amber-300 bg-amber-950/70 border border-amber-800/60" title="Connected=No on its current agent - being reassigned to a different agent">
+                                      🔁 Reassign
+                                    </span>
+                                  )}
+                                </td>
                               </tr>
                             ))}
                           </tbody>

@@ -251,6 +251,20 @@ async function ensurePgSchema() {
   // column - both writers already know the AWB when they write, so there's no reason
   // to make Postgres re-derive it on every read.
   await pgSql`ALTER TABLE lead_assignments ADD COLUMN IF NOT EXISTS delivery_partner TEXT`;
+  // Append-only log of every agent a lead was reassigned AWAY from after a Connected=No
+  // outcome - unlike lead_assignments above (one row per order, upserted, so it only ever
+  // shows the CURRENT agent), this keeps every prior agent so scripts/assign_leads.py can
+  // permanently exclude all of them, not just the most recent one, and enforce a retry cap
+  // across the full history. Written only by assign_leads.py's own psycopg connection, at
+  // the moment a lead is actually reassigned - nothing in the Node app writes to this table.
+  await pgSql`
+    CREATE TABLE IF NOT EXISTS lead_reassignment_attempts (
+      order_id TEXT NOT NULL,
+      email TEXT NOT NULL,
+      assigned_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await pgSql`CREATE INDEX IF NOT EXISTS lead_reassignment_attempts_order_id_idx ON lead_reassignment_attempts (order_id)`;
   // Append-only history of every status transition an agent has ever had (Online /
   // Busy / Offline), so agent_presence above can stay a single row per agent while this
   // one answers "when did each change happen" - e.g. for a future audit trail or

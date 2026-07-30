@@ -21,12 +21,27 @@ ever report their own status.
 
 A lead with ANY value already in Column Q - whether written by this script, a
 manual claim, an admin reassign, or typed directly into the sheet - is never
-touched again. It still counts toward that agent's load (so they don't get
-handed more than quota), but it is never unassigned or reassigned by this
-script, regardless of quota, regardless of whether that agent is online. An
-earlier version trimmed over-quota agents' oldest excess back to unassigned;
-that silently cleared a manually-assigned lead and was removed for exactly
-that reason - only touch what is genuinely blank.
+touched again, WITH ONE DELIBERATE EXCEPTION (see the next paragraph): it
+still counts toward that agent's load (so they don't get handed more than
+quota), but it is never unassigned or reassigned by this script otherwise,
+regardless of quota, regardless of whether that agent is online. An earlier
+version trimmed over-quota agents' oldest excess back to unassigned; that
+silently cleared a manually-assigned lead and was removed for exactly that
+reason - only touch what is genuinely blank (or, now, genuinely
+Connected=No).
+
+The one exception: a lead whose Connected column reads "No" - the agent actually called and
+didn't reach the customer - is eligible to be handed to a DIFFERENT agent, up to
+REASSIGN_RETRY_CAP distinct agents total ever trying the same lead. Every agent who already
+failed to connect is excluded from receiving it again (lead_reassignment_attempts in Postgres
+tracks this permanently, since lead_assignments itself only ever holds the current agent, not
+history) - "old owner never gets the same lead back." Only leads whose own Calling Date is on
+or after REASSIGN_BACKLOG_CUTOFF are eligible - a fixed, one-time boundary chosen when this
+shipped, not a rolling window, so the large pre-existing backlog of already-Connected=No leads
+is left exactly as it was, while every lead called from that date onward is eligible
+indefinitely. A reassigned lead gets Q and R:U wiped back to blank so it looks like a fresh,
+never-called lead to its new agent - the previous attempt's history survives only in Postgres,
+not on the row itself.
 
 Before a still-unassigned PREPAID lead enters the pool, its refund status is checked live
 against GoKwik (see is_already_refunded_via_gokwik) - a customer who's already been refunded
@@ -54,17 +69,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 import lib
 import mysql_lib
 from lead_priority import (
-    COL_AGENT, COL_ATTEMPT, COL_AWB_CODE, COL_CONNECTED, COL_DISPOSITION,
+    COL_AGENT, COL_ATTEMPT, COL_AWB_CODE, COL_CALLING_DATE, COL_CONNECTED, COL_DISPOSITION,
     COL_ORDER_ID, COL_PAYMENT_METHOD, COL_REMARKS, COL_REMARKS_LEGACY_U,
     COL_RTO_INITIATED_DATE, COL_RTO_REASON,
-    DEFAULT_QUOTA, build_assignment_queue, cell, is_prepaid, parse_rto_initiated_date,
-    prefix_rule_partner, priority_tier,
+    DEFAULT_QUOTA, REASSIGN_BACKLOG_CUTOFF, REASSIGN_RETRY_CAP,
+    build_assignment_queue, cell, is_prepaid, parse_calling_date,
+    parse_rto_initiated_date, prefix_rule_partner, priority_tier,
 )
 
 SPREADSHEET_ID = "1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI"
 SHEET_TAB = "Data"
 
 STALE_MINUTES = 10  # must match the CRM's own heartbeat cadence assumptions
+
+# REASSIGN_BACKLOG_CUTOFF, REASSIGN_RETRY_CAP: see leadAssignmentRules.json's _reassignNote -
+# imported from lead_priority so the JS "Next to Assign" preview can't drift from these values.
 
 # Item-level DWH schema the GoKwik refund-status lookup resolves a sheet Order ID against -
 # see lookup_platform_order_id.
@@ -166,6 +185,50 @@ def is_already_refunded_via_gokwik(order_id):
         return False
     refunds = body.get("data") or []
     return any(r.get("status") == "Completed" for r in refunds)
+
+
+def fetch_reassignment_attempts():
+    """{order_id: {emails}} of every agent a lead has ever been reassigned AWAY from, per
+    lead_reassignment_attempts (see api/_lib/db.js's ensurePgSchema - append-only, unlike
+    lead_assignments which only ever holds the current agent). Returns {} (never raises) if
+    POSTGRES_URL isn't configured or the query fails - a lookup failure here should fail open
+    (treat every lead as having no reassignment history yet, exactly the pre-this-feature
+    behavior) rather than block the whole run."""
+    conn_str = os.environ.get("POSTGRES_URL")
+    if not conn_str:
+        return {}
+    try:
+        with psycopg.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT order_id, email FROM lead_reassignment_attempts")
+                rows = cur.fetchall()
+    except Exception as e:
+        print(f"  (lead_reassignment_attempts fetch failed: {e} - treating as no prior attempts)")
+        return {}
+    attempts_by_order = {}
+    for order_id, email in rows:
+        attempts_by_order.setdefault(order_id, set()).add((email or "").lower())
+    return attempts_by_order
+
+
+def record_reassignment_attempt(order_id, email):
+    """Logs the agent a lead is being reassigned AWAY from, permanently - called exactly once
+    per actual reassignment (never for a fresh, never-before-assigned lead), right before its
+    Column Q is overwritten with a new agent. Best-effort: a failure here is printed but never
+    raised, since refusing to reassign the lead over an audit-log write failing would be worse
+    than the audit log being briefly incomplete."""
+    conn_str = os.environ.get("POSTGRES_URL")
+    if not conn_str:
+        return
+    try:
+        with psycopg.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO lead_reassignment_attempts (order_id, email, assigned_at) VALUES (%s, %s, now())",
+                    (order_id, email),
+                )
+    except Exception as e:
+        print(f"    (failed to log reassignment-away for {order_id}/{email}: {e})")
 
 
 def fetch_online_agents(process_key=None):
@@ -387,6 +450,9 @@ def main():
     rows = values[1:]  # skip header
     print(f"  {len(rows)} data rows")
 
+    print("Fetching prior Connected=No reassignment history from Postgres...")
+    attempts_by_order = fetch_reassignment_attempts()
+
     # current_load: how many pending (undisposed) leads each eligible agent already holds -
     # still needed so an agent already at or over quota doesn't get handed more, but a lead
     # counted here is NEVER unassigned or reassigned by this script, no matter how high the
@@ -397,25 +463,55 @@ def main():
     rto_reason_by_row = {}
     tier_counts = {0: 0, 1: 0, 2: 0, 3: 0}
     already_refunded_rows = []  # row indices confirmed refunded via GoKwik this run
+    excluded_by_row = {}  # row_index -> {emails} who must not receive this lead (see below)
+    reassign_info_by_row = {}  # row_index -> (old_agent, order_id), for rows being reassigned
 
     for i, row in enumerate(rows):
         order_id = cell(row, COL_ORDER_ID)
         if not order_id:
             continue
 
+        connected = cell(row, COL_CONNECTED)
+        agent_raw = cell(row, COL_AGENT).lower()
+
+        # Connected=No reassignment - deliberately checked BEFORE the general is_disposed
+        # test below, since a non-empty Connected value would otherwise make this row look
+        # permanently worked forever, same as any other disposition. Only for a lead that
+        # already has a real agent (someone was actually called and didn't pick up) - a
+        # fresh/unassigned lead can't have a Connected value at all.
+        if agent_raw and agent_raw != "unassigned" and connected.strip().lower() == "no":
+            calling_date = parse_calling_date(cell(row, COL_CALLING_DATE))
+            if calling_date and calling_date >= REASSIGN_BACKLOG_CUTOFF:
+                prior_agents = attempts_by_order.get(order_id, set()) | {agent_raw}
+                if len(prior_agents) < REASSIGN_RETRY_CAP:
+                    rto_initiated_date = parse_rto_initiated_date(cell(row, COL_RTO_INITIATED_DATE))
+                    payment_method = cell(row, COL_PAYMENT_METHOD)
+                    tier = priority_tier(payment_method, cell(row, COL_RTO_REASON))
+                    unassigned_pending.append((i, rto_initiated_date, order_id, tier))
+                    awb_code_by_row[i] = cell(row, COL_AWB_CODE)
+                    rto_reason_by_row[i] = cell(row, COL_RTO_REASON)
+                    tier_counts[tier] += 1
+                    excluded_by_row[i] = prior_agents
+                    reassign_info_by_row[i] = (agent_raw, order_id)
+                    continue
+                # else: retry cap reached (this many distinct agents have all failed to
+                # connect) - fall through to is_disposed below, left alone for good.
+            # else: Calling Date before the backlog cutoff (or unparseable) - fall through,
+            # left alone for good. This is the one-time migration boundary: the large
+            # pre-existing backlog of already-Connected=No leads is never touched by this.
+
         # COL_REMARKS_LEGACY_U as well as COL_REMARKS: remarks were written to U for a long
         # time before that was corrected to Z, so a lead whose only evidence of having been
         # worked is a remark in U must still count as disposed - otherwise this would queue
         # already-called customers for another round of calls.
         is_disposed = bool(
-            cell(row, COL_CONNECTED) or cell(row, COL_ATTEMPT) or
+            connected or cell(row, COL_ATTEMPT) or
             cell(row, COL_DISPOSITION) or cell(row, COL_REMARKS) or
             cell(row, COL_REMARKS_LEGACY_U)
         )
         if is_disposed:
             continue  # already worked - not part of either load or the unassigned queue
 
-        agent_raw = cell(row, COL_AGENT).lower()
         is_unassigned = (not agent_raw) or agent_raw == "unassigned"
         rto_initiated_date = parse_rto_initiated_date(cell(row, COL_RTO_INITIATED_DATE))
         payment_method = cell(row, COL_PAYMENT_METHOD)
@@ -439,6 +535,8 @@ def main():
         # else: pending lead already held by someone (eligible or not) - left alone either
         # way. Column Q having any value at all is enough to exempt a lead permanently.
 
+    if reassign_info_by_row:
+        print(f"  {len(reassign_info_by_row)} Connected=No lead(s) eligible for reassignment (under the {REASSIGN_RETRY_CAP}-attempt cap).")
     print(f"  unassigned pool by priority: Prepaid={tier_counts[0]}, COD+high-priority reason={tier_counts[1]}, other COD={tier_counts[2]}, COD+low-priority reason={tier_counts[3]}")
 
     # Stamped even if nothing else is assignable this run, and BEFORE the early-return below -
@@ -462,21 +560,44 @@ def main():
         return
 
     # Per-agent quotas where set for this process (calling_agent_process.max_quota); anyone
-    # without one falls back to DEFAULT_QUOTA inside build_assignment_queue.
+    # without one falls back to DEFAULT_QUOTA inside build_assignment_queue. excluded_by_row
+    # keeps a Connected=No reassignment away from every agent who already failed to reach
+    # that customer - empty/absent for every genuinely fresh lead, so their assignment is
+    # unaffected.
     assignments = build_assignment_queue(unassigned_pending, online_agents, current_load,
-                                         quota=agent_quotas or DEFAULT_QUOTA)
+                                         quota=agent_quotas or DEFAULT_QUOTA,
+                                         excluded_by_row=excluded_by_row)
 
     if not assignments:
-        print(f"{len(unassigned_pending)} unassigned lead(s) found, but every eligible agent is already at quota ({DEFAULT_QUOTA}). Nothing to assign.")
+        print(f"{len(unassigned_pending)} unassigned lead(s) found, but every eligible agent is already at quota (or excluded) for each. Nothing to assign.")
         return
 
-    value_ranges = [
-        {"range": f"'{SHEET_TAB}'!Q{row_index + 2}", "values": [[email]]}
-        for row_index, email in assignments.items()
-    ]
-    print(f"Writing {len(value_ranges)} Column Q assignment(s)...")
+    # A reassigned row gets Q (new agent) AND R:U wiped back to blank in one write - it must
+    # look exactly like a fresh, never-called lead to the new agent, not carry the previous
+    # agent's Connected/Attempt/Disposition/legacy-remarks forward. Z (remarks) is a separate
+    # range since it isn't contiguous with Q:U. A fresh (non-reassigned) lead is untouched
+    # beyond its own Column Q write, exactly as before this feature existed.
+    value_ranges = []
+    for row_index, email in assignments.items():
+        if row_index in reassign_info_by_row:
+            value_ranges.append({
+                "range": f"'{SHEET_TAB}'!Q{row_index + 2}:U{row_index + 2}",
+                "values": [[email, "", "", "", ""]],
+            })
+            value_ranges.append({"range": f"'{SHEET_TAB}'!Z{row_index + 2}", "values": [[""]]})
+        else:
+            value_ranges.append({"range": f"'{SHEET_TAB}'!Q{row_index + 2}", "values": [[email]]})
+    reassigned_count = sum(1 for row_index in assignments if row_index in reassign_info_by_row)
+    print(f"Writing {len(assignments)} assignment(s) ({reassigned_count} of them Connected=No reassignments)...")
     lib.set_sheet_values_batch(SPREADSHEET_ID, value_ranges)
     record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row)
+
+    # Logged AFTER the sheet write succeeds, not before - a reassignment that never actually
+    # reached the sheet has no old agent to permanently exclude yet.
+    for row_index in assignments:
+        if row_index in reassign_info_by_row:
+            old_agent, order_id = reassign_info_by_row[row_index]
+            record_reassignment_attempt(order_id, old_agent)
 
     per_agent = {}
     for email in assignments.values():
@@ -486,7 +607,7 @@ def main():
         print(f"  {email}: +{count}")
     skipped = len(unassigned_pending) - len(assignments)
     if skipped > 0:
-        print(f"  ({skipped} unassigned lead(s) left over - all eligible agents at quota)")
+        print(f"  ({skipped} unassigned lead(s) left over - all eligible agents at quota or excluded for that specific lead)")
 
 
 if __name__ == "__main__":

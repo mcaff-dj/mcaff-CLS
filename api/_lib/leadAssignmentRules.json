@@ -16,6 +16,10 @@
 
   "assignmentQuota": 20,
 
+  "_reassignNote": "Connected=No reassignment (scripts/assign_leads.py) and its 'Next to Assign' JS preview both read these two, so the cutoff/cap can't drift between them the way assignmentQuota once did. reassignBacklogCutoff is a ONE-TIME migration boundary (a fixed date, not a rolling window) - a lead's own Calling Date must be on or after this for it to be eligible; chosen as 10 days before this feature shipped so the pre-existing backlog of already-Connected=No leads is left alone. reassignRetryCap is the total number of distinct agents ever allowed to try one lead (original assignment + reassignments) before it's left disposed for good.",
+  "reassignBacklogCutoff": "2026-07-19",
+  "reassignRetryCap": 3,
+
   "_highPriorityNote": "Tier 1 - COD whose ORIGINAL system/courier RTO reason contains one of these (case-insensitive substring). The consignee has already refused or OTP-verified the cancellation, so the outcome is effectively known and worth acting on quickly. Prepaid is tier 0 and wins outright regardless of reason.",
   "highPriorityCodRtoReasons": [
     "consignee opened the package and refused to accept",

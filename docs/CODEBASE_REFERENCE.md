@@ -348,11 +348,49 @@ Secrets (`MYSQL_*`, `GOKWIK_*_APPID/APPSECRET`) are wired into
 [assign-leads.yml](../.github/workflows/assign-leads.yml)'s job env — this cron had no MySQL or
 GoKwik access at all before this check existed.
 
+### Connected=No reassignment
+
+The ONE deliberate exception to Column Q being write-once (see Invariants below): a lead whose
+Connected column reads "No" is eligible to go to a *different* agent, up to
+`REASSIGN_RETRY_CAP` (3) distinct agents total ever trying it.
+
+- **Checked before `is_disposed`, not after.** A non-empty Connected value would otherwise
+  make `is_disposed` treat the row as permanently worked, same as any real disposition — this
+  branch intercepts Connected=No first and either re-queues it or falls through unchanged.
+- **`lead_reassignment_attempts`** (new Postgres table, append-only — unlike `lead_assignments`,
+  which upserts and only ever holds the *current* agent) is how every prior agent stays
+  permanently excluded, not just the most recent one. Fetched once per run
+  (`fetch_reassignment_attempts`), written once per actual reassignment
+  (`record_reassignment_attempt`, logging the agent being displaced, right after the sheet
+  write that displaces them).
+- **`build_assignment_queue` gained `excluded_by_row: {row_index: {emails}}`.** The old
+  shrinking-`agent_cycle`-list loop couldn't express "skip this agent for this lead only," so
+  the core loop was rewritten to a per-lead cursor over a fixed `agent_order` array — verified
+  behavior-identical to the old loop via 500 randomized trials before shipping (no exclusions
+  case). `RtoCrmClient.js`'s `predictedAssignments` mirrors the same cursor-based loop.
+- **`REASSIGN_BACKLOG_CUTOFF` (2026-07-19) / `REASSIGN_RETRY_CAP` (3)** live in
+  `leadAssignmentRules.json` (`_reassignNote`), not hardcoded per-language — `lead_priority.py`
+  parses the cutoff into a `datetime` once at import time; `RtoCrmClient.js` reads it as a JS
+  `Date`. The cutoff is a **fixed one-time boundary**, not a rolling "last N days" window — a
+  lead's own Calling Date must be on/after it, so the pre-existing backlog is untouched but
+  every future lead stays eligible no matter how old it gets.
+- **A reassigned row's sheet write clears Q:U and Z**, not just Q — `["email", "", "", "", ""]`
+  for `Q:U` plus a separate `[""]` for `Z` (not contiguous with `U`) — so the new agent sees a
+  genuinely fresh lead, not the previous agent's Connected/Attempt/Disposition/remarks.
+- **The JS preview (`predictedAssignments`) is a deliberate approximation**, not a full port:
+  it excludes the *current* agent for a Connected=No ticket, but has no client-side visibility
+  into `lead_reassignment_attempts` (Postgres-only, read by the Python cron directly), so it
+  cannot enforce the retry cap across older attempts. A `row.isReassignment` flag drives a
+  "🔁 Reassign" badge in the Admin "Next to Assign" table. Known, accepted drift — see
+  `REASSIGN_BACKLOG_CUTOFF_DATE`'s comment in `RtoCrmClient.js`.
+
 ### Invariants
 
-- **Column Q is write-once.** `assign_leads.py` only ever writes a genuinely blank/`Unassigned`
-  cell. An earlier version trimmed over-quota agents back to unassigned and silently wiped
-  manual assignments.
+- **Column Q is write-once, with one deliberate exception.** `assign_leads.py` only ever
+  writes a genuinely blank/`Unassigned` cell, OR a Connected=No cell under the reassignment
+  cap above. An earlier version trimmed over-quota agents back to unassigned and silently
+  wiped manual assignments — the current exception is scoped far narrower than that removed
+  behavior specifically to avoid repeating it.
 - **Row numbers are re-resolved before every write.** `fetchLiveOrderRowMap` /
   `fetchLiveOrderAndAgentMap` scan live column E; a cached `rawIndex` can drift and
   corrupt an unrelated order.
