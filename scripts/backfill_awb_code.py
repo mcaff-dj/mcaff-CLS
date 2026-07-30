@@ -9,6 +9,16 @@ in the sheet - an order_id no longer present in the sheet (e.g. archived) is lef
 NULL rather than guessed at. Each UPDATE is wrapped so a unique-constraint hit
 (two order_ids resolving to the same AWB) is reported and skipped instead of
 aborting the whole backfill.
+
+LIVE CYCLES ONLY. lead_assignments now holds one row per assignment cycle rather
+than one per lead (see api/_lib/db.js's ensurePgSchema), so both the SELECT and
+the UPDATE below are scoped to reassigned_away_at IS NULL. Without that, this
+would also stamp an AWB onto retired cycles - and in particular onto the rows
+folded in from the old lead_reassignment_attempts table, whose entire content is
+"this agent lost this lead" and which never had an AWB of their own. Those are
+history, not shipments awaiting a backfill; an unscoped run picked up 148 rows
+where only 30 were real targets. The unscoped UPDATE would also have written
+every matching cycle at once while counting it as a single row.
 """
 import sys
 from pathlib import Path
@@ -37,7 +47,10 @@ def build_awb_by_order_id():
 def fetch_missing(conn_str):
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT order_id FROM lead_assignments WHERE awb_code IS NULL")
+            cur.execute(
+                "SELECT order_id FROM lead_assignments "
+                "WHERE awb_code IS NULL AND reassigned_away_at IS NULL"
+            )
             return [row[0] for row in cur.fetchall()]
 
 
@@ -69,7 +82,9 @@ def main(conn_str):
                     try:
                         with conn.cursor() as cur:
                             cur.execute(
-                                "UPDATE lead_assignments SET awb_code = %s WHERE order_id = %s AND awb_code IS NULL",
+                                "UPDATE lead_assignments SET awb_code = %s "
+                                "WHERE order_id = %s AND awb_code IS NULL "
+                                "AND reassigned_away_at IS NULL",
                                 (awb_code, order_id),
                             )
                         conn.commit()
