@@ -296,7 +296,10 @@ async function handleCallingAgents(req, res, session) {
     try {
       const agents = await setCallingProcessAgent(
         body.processKey, body.email,
-        { status: body.status, maxQuota: body.maxQuota, isProcessAdmin: body.isProcessAdmin },
+        {
+          status: body.status, maxQuota: body.maxQuota, isProcessAdmin: body.isProcessAdmin,
+          prepaidPct: body.prepaidPct, priorityRtoReasons: body.priorityRtoReasons,
+        },
         session.email,
       );
       await logEvent(session.uid, session.email, 'calling', 'process-agent',

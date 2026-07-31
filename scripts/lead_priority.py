@@ -161,7 +161,8 @@ def priority_tier(payment_raw, rto_reason_raw):
 
 
 def build_assignment_queue(unassigned_pending, online_agents, current_load, quota=DEFAULT_QUOTA,
-                            excluded_by_row=None):
+                            excluded_by_row=None, rto_reason_by_row=None,
+                            agent_specializations=None, agent_prepaid_target=None):
     """Round-robins a pool of unassigned pending leads across online agents up to
     `quota` each, based on each agent's current load. Pure/side-effect-free -
     callers decide whether to actually write the result (assign_leads.py) or
@@ -187,12 +188,36 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     already failed to reach this same customer. Absent/empty for a lead means every online
     agent is a candidate, same as before this parameter existed. Its presence also marks that
     row as a reassignment for the fresh-first ordering above - see that note.
+    rto_reason_by_row: optional {row_index: str} - the lead's ORIGINAL system/courier RTO
+    reason, needed only for agent_specializations matching below. Absent/blank for a row means
+    it can never match any specialization (falls straight to the general round-robin, same as
+    before this parameter existed).
+    agent_specializations: optional {email: [reason_substr, ...]} (lowercase substrings, same
+    case-insensitive-substring convention as leadAssignmentRules.json's own reason lists) - an
+    agent with a non-empty list gets FIRST REFUSAL on any lead whose rto_reason_by_row entry
+    contains one of their substrings, ahead of the general round-robin for that lead (still
+    subject to quota/exclusion/prepaid-target below). If more than one online specialist
+    matches the same lead, whichever is next in the round-robin rotation gets it - a lead is
+    never handed to more than one agent. Absent/empty means no specialization at all, i.e.
+    identical behaviour to before this parameter existed.
+    agent_prepaid_target: optional {email: int 0-100} - a soft cap on what share of THIS RUN's
+    new assignments to that agent may be prepaid. It never leaves a lead unassigned to enforce
+    the ratio: an agent already at/over their target is skipped in favour of another eligible
+    agent for a prepaid lead, but if every eligible agent is at/over target the lead is still
+    assigned (falls back to ignoring the ratio) rather than left in the queue. Steers the mix
+    over time rather than guaranteeing an exact percentage - "soft" is the whole point, since a
+    hard cap could strand prepaid leads unassigned purely because everyone online happened to
+    be tuned low. Absent/unset for an agent means no target, i.e. unrestricted exactly as
+    before this parameter existed.
 
     Returns {row_index: agent_email}.
     """
     from datetime import datetime
 
     excluded_by_row = excluded_by_row or {}
+    rto_reason_by_row = rto_reason_by_row or {}
+    agent_specializations = agent_specializations or {}
+    agent_prepaid_target = agent_prepaid_target or {}
 
     # Seconds since epoch via timedelta subtraction (not .timestamp() - that calls into
     # the platform's C time functions and raises on Windows for extreme/pre-epoch values,
@@ -233,17 +258,62 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     if not agent_order:
         return assignments
     cursor = 0
-    for row_index, _rto_initiated_date, _order_id, _tier in sorted_pool:
-        excluded = excluded_by_row.get(row_index) or ()
+    # This run's own tally, NOT current_load (which has no payment-type breakdown) - a soft
+    # target steers the incoming distribution for this batch, it doesn't need perfect knowledge
+    # of an agent's full historical mix to do that.
+    prepaid_assigned_this_run = {email: 0 for email in agent_order}
+    total_assigned_this_run = {email: 0 for email in agent_order}
+
+    def _matches_specialist(email, row_index):
+        reasons = agent_specializations.get(email)
+        if not reasons:
+            return False
+        reason_text = (rto_reason_by_row.get(row_index) or '').lower()
+        return any(r in reason_text for r in reasons)
+
+    def _within_prepaid_target(email, is_prepaid_lead):
+        if not is_prepaid_lead:
+            return True
+        target = agent_prepaid_target.get(email)
+        if target is None:
+            return True
+        prospective_prepaid = prepaid_assigned_this_run[email] + 1
+        prospective_total = total_assigned_this_run[email] + 1
+        return (prospective_prepaid / prospective_total) * 100 <= target
+
+    def _try_assign(candidate_ok):
+        nonlocal cursor
         for _ in range(len(agent_order)):
             email = agent_order[cursor % len(agent_order)]
             cursor += 1
-            if needed[email] <= 0 or email in excluded:
-                continue
-            assignments[row_index] = email
-            needed[email] -= 1
-            break
-        # else (loop exhausted with no eligible agent - all excluded or all at capacity):
-        # this lead is left unassigned this round, same as running out of agent capacity did
-        # before this parameter existed.
+            if candidate_ok(email):
+                return email
+        return None
+
+    for row_index, _rto_initiated_date, _order_id, tier in sorted_pool:
+        excluded = excluded_by_row.get(row_index) or ()
+        is_prepaid_lead = (tier == 0)
+
+        # Pass 1: a specialist for this lead's RTO reason gets first refusal, still subject to
+        # quota/exclusion/prepaid-target - "first refusal" means ahead of the general pool, not
+        # an unconditional override of everything else.
+        chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0
+                              and _matches_specialist(e, row_index) and _within_prepaid_target(e, is_prepaid_lead))
+        # Pass 2: general round-robin, still respecting each agent's soft prepaid target.
+        if chosen is None:
+            chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0
+                                  and _within_prepaid_target(e, is_prepaid_lead))
+        # Pass 3: every eligible agent is at/over their prepaid target - assign anyway rather
+        # than leave the lead unassigned purely to protect a soft ratio.
+        if chosen is None:
+            chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0)
+
+        if chosen is not None:
+            assignments[row_index] = chosen
+            needed[chosen] -= 1
+            total_assigned_this_run[chosen] += 1
+            if is_prepaid_lead:
+                prepaid_assigned_this_run[chosen] += 1
+        # else (every agent excluded or at capacity): this lead is left unassigned this round,
+        # same as running out of agent capacity did before this parameter existed.
     return assignments

@@ -355,6 +355,15 @@ async function ensurePgSchema() {
   // Grants no data access on its own: the agent still needs the 'calling' card and that
   // process's invitation row to see the process at all.
   await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS is_process_admin BOOLEAN NOT NULL DEFAULT false`;
+  // Soft prepaid-mix target for this agent's assignment round-robin (0-100, NULL = no target,
+  // i.e. unrestricted like every agent before this existed). Steers, never blocks outright -
+  // see build_assignment_queue's agent_prepaid_target parameter.
+  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS prepaid_pct INTEGER`;
+  // Comma-separated RTO-reason substrings (case-insensitive, same substring-match convention
+  // as leadAssignmentRules.json's own reason lists) this agent specializes in - a matching
+  // lead gets first refusal to them before the general round-robin, same as
+  // build_assignment_queue's agent_specializations parameter. NULL/empty = no specialization.
+  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS priority_rto_reasons TEXT`;
   // Disposal side of the same lead lifecycle - written by rto-crm.html's submitDisp()
   // in real time (via a new recordDisposition auth action) alongside its existing
   // direct-to-Sheet write, so this history survives independent of the Google Sheet
@@ -1044,7 +1053,7 @@ async function getCallingProcessAgents(processKey) {
     ORDER BY u.is_admin DESC, u.name ASC
   `;
   const { rows: state } = await pgSql`
-    SELECT email, status, max_quota, is_process_admin, updated_at, updated_by
+    SELECT email, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, updated_at, updated_by
     FROM calling_agent_process WHERE process_key = ${processKey}
   `;
   const byEmail = {};
@@ -1058,6 +1067,8 @@ async function getCallingProcessAgents(processKey) {
       status: (s && s.status) || 'Offline',
       maxQuota: s && s.max_quota != null ? s.max_quota : null,
       isProcessAdmin: !!(s && s.is_process_admin),
+      prepaidPct: s && s.prepaid_pct != null ? s.prepaid_pct : null,
+      priorityRtoReasons: (s && s.priority_rto_reasons) || '',
       updatedAt: (s && s.updated_at) || null,
       updatedBy: (s && s.updated_by) || null,
     };
@@ -1066,7 +1077,7 @@ async function getCallingProcessAgents(processKey) {
 
 // Upserts one agent's status and/or quota for one process. Either field may be omitted, so an
 // agent flipping their own status can't accidentally reset a quota an admin set.
-async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin } = {}, updatedBy) {
+async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons } = {}, updatedBy) {
   await ensurePgSchema();
   const key = String(email || '').trim().toLowerCase();
   if (!processKey || !key) throw new Error('processKey and email are required');
@@ -1078,19 +1089,35 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
     quota = parseInt(maxQuota, 10);
     if (!Number.isFinite(quota) || quota < 0) throw new Error('maxQuota must be a non-negative whole number');
   }
+  // Same "unset means leave it alone" contract as maxQuota above - a missing prepaidPct here
+  // (an agent flipping status, or the JS Team Total row simply not being touched) must not
+  // reset a target an admin already set.
+  let prepaidTarget = null;
+  if (prepaidPct !== undefined && prepaidPct !== null && prepaidPct !== '') {
+    prepaidTarget = parseInt(prepaidPct, 10);
+    if (!Number.isFinite(prepaidTarget) || prepaidTarget < 0 || prepaidTarget > 100) {
+      throw new Error('prepaidPct must be a whole number between 0 and 100');
+    }
+  }
   // COALESCE(EXCLUDED.x, table.x) so an omitted field keeps its stored value instead of being
   // overwritten with null.
   // isProcessAdmin is a real tri-state here: undefined means "leave it alone", true/false mean
   // set it. A plain COALESCE would make `false` indistinguishable from "not supplied" and so
   // make revoking impossible.
   const adminFlag = (isProcessAdmin === undefined || isProcessAdmin === null) ? null : !!isProcessAdmin;
+  // priorityRtoReasons is text, not numeric, so '' (explicitly clearing every specialization)
+  // is a real, distinct-from-NULL value that COALESCE will apply rather than skip - only an
+  // omitted field (undefined, mapped to NULL here) leaves the stored value untouched.
+  const reasonsText = priorityRtoReasons === undefined ? null : String(priorityRtoReasons || '').trim();
   await pgSql`
-    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, updated_at, updated_by)
-    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, now(), ${updatedBy || null})
+    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, updated_at, updated_by)
+    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, now(), ${updatedBy || null})
     ON CONFLICT (email, process_key) DO UPDATE
       SET status = COALESCE(${status || null}, calling_agent_process.status),
           max_quota = COALESCE(${quota}, calling_agent_process.max_quota),
           is_process_admin = COALESCE(${adminFlag}, calling_agent_process.is_process_admin),
+          prepaid_pct = COALESCE(${prepaidTarget}, calling_agent_process.prepaid_pct),
+          priority_rto_reasons = COALESCE(${reasonsText}, calling_agent_process.priority_rto_reasons),
           updated_at = now(),
           updated_by = ${updatedBy || null}
   `;

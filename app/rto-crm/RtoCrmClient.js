@@ -1740,6 +1740,9 @@ const localStorage = typeof window !== 'undefined'
             a.status = perProcess[email].status;
             // null quota means "unset" -> the process default, never 0.
             if (perProcess[email].maxQuota != null) a.maxQuota = perProcess[email].maxQuota;
+            // Same "unset -> no target/no specialization" convention as maxQuota above.
+            if (perProcess[email].prepaidPct != null) a.prepaidPct = perProcess[email].prepaidPct;
+            if (perProcess[email].priorityRtoReasons) a.priorityRtoReasons = perProcess[email].priorityRtoReasons;
             a.inProcess = true;
             // isAdmin/isProcessAdmin were previously never copied here, only onto the
             // separate roster card's own objects - so the Team Roster's "Process admin"
@@ -1896,6 +1899,23 @@ const localStorage = typeof window !== 'undefined'
         const needed = {};
         onlineAgents.forEach(e => { needed[e] = Math.max(0, ASSIGNMENT_QUOTA - currentLoad[e]); });
 
+        // Per-agent specialization (priorityRtoReasons, comma-separated substrings) and soft
+        // prepaid target (prepaidPct) - mirrors build_assignment_queue's agent_specializations/
+        // agent_prepaid_target in scripts/lead_priority.py exactly (see that function's
+        // docstring for the full contract). Read off effectiveAgentRoster, which already
+        // merges in the server-side calling_agent_process values for the active process.
+        const agentByEmail = {};
+        effectiveAgentRoster.forEach(a => { agentByEmail[(a.email || '').toLowerCase()] = a; });
+        const specializations = {};
+        const prepaidTargets = {};
+        onlineAgents.forEach(e => {
+          const a = agentByEmail[e];
+          if (!a) return;
+          const reasons = (a.priorityRtoReasons || '').split(',').map(r => r.trim().toLowerCase()).filter(Boolean);
+          if (reasons.length > 0) specializations[e] = reasons;
+          if (a.prepaidPct != null) prepaidTargets[e] = a.prepaidPct;
+        });
+
         // Per-lead cursor-based round-robin (mirrors build_assignment_queue in
         // scripts/lead_priority.py exactly, including the exclusion check) rather than the
         // old shrinking-agentCycle-list version - needed so a lead can skip its excludedAgent
@@ -1904,18 +1924,56 @@ const localStorage = typeof window !== 'undefined'
         const rows = [];
         const agentOrder = onlineAgents.filter(e => needed[e] > 0);
         let cursor = 0;
+        // This run's own tally, not currentLoad (which has no payment-type breakdown) - same
+        // rationale as lead_priority.py's prepaid_assigned_this_run/total_assigned_this_run.
+        const prepaidAssignedThisRun = {};
+        const totalAssignedThisRun = {};
+        agentOrder.forEach(e => { prepaidAssignedThisRun[e] = 0; totalAssignedThisRun[e] = 0; });
+
+        const matchesSpecialist = (email, ticket) => {
+          const reasons = specializations[email];
+          if (!reasons) return false;
+          const reasonText = (ticket.rtoReason || '').toLowerCase();
+          return reasons.some(r => reasonText.includes(r));
+        };
+        const withinPrepaidTarget = (email, isPrepaidLead) => {
+          if (!isPrepaidLead) return true;
+          const target = prepaidTargets[email];
+          if (target == null) return true;
+          const prospectivePrepaid = prepaidAssignedThisRun[email] + 1;
+          const prospectiveTotal = totalAssignedThisRun[email] + 1;
+          return (prospectivePrepaid / prospectiveTotal) * 100 <= target;
+        };
+        const tryAssign = (candidateOk) => {
+          for (let tries = 0; tries < agentOrder.length; tries++) {
+            const email = agentOrder[cursor % agentOrder.length];
+            cursor += 1;
+            if (candidateOk(email)) return email;
+          }
+          return null;
+        };
+
         if (agentOrder.length > 0) {
           for (const item of pool) {
-            let assignedEmail = null;
-            for (let tries = 0; tries < agentOrder.length; tries++) {
-              const email = agentOrder[cursor % agentOrder.length];
-              cursor += 1;
-              if (needed[email] <= 0 || email === item.excludedAgent) continue;
-              assignedEmail = email;
-              needed[email] -= 1;
-              break;
+            const isPrepaidLead = item.tier === 0;
+            // Pass 1: a specialist for this lead's RTO reason gets first refusal, still
+            // subject to quota/exclusion/prepaid-target.
+            let assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent
+              && matchesSpecialist(email, item.ticket) && withinPrepaidTarget(email, isPrepaidLead));
+            // Pass 2: general round-robin, still respecting each agent's soft prepaid target.
+            if (assignedEmail == null) {
+              assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent
+                && withinPrepaidTarget(email, isPrepaidLead));
+            }
+            // Pass 3: every eligible agent is at/over their prepaid target - assign anyway
+            // rather than leave the lead unassigned purely to protect a soft ratio.
+            if (assignedEmail == null) {
+              assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent);
             }
             if (assignedEmail) {
+              needed[assignedEmail] -= 1;
+              totalAssignedThisRun[assignedEmail] += 1;
+              if (isPrepaidLead) prepaidAssignedThisRun[assignedEmail] += 1;
               rows.push({
                 ticket: item.ticket, tier: item.tier, predictedAgent: assignedEmail,
                 isReassignment: !!item.excludedAgent, rank: rows.length + 1,
@@ -2291,6 +2349,8 @@ const localStorage = typeof window !== 'undefined'
                   <th className="py-3 px-4 text-center font-medium">Disposed</th>
                   <th className="py-3 px-4 text-center font-medium">Connect %</th>
                   <th className="py-3 px-4 text-left font-medium">Quota</th>
+                  <th className="py-3 px-4 text-left font-medium" title="Soft target: this agent's share of assignments from a run that may be Prepaid. Steers the round-robin toward it, but never leaves a lead unassigned just to hit it exactly.">Prepaid Target</th>
+                  <th className="py-3 px-4 text-left font-medium" title="Comma-separated RTO-reason keywords (case-insensitive, e.g. 'refused to accept, otp verified') - a lead whose reason matches gets offered to this agent before the general round-robin.">Priority Reasons</th>
                   {/* Runs THIS process (roster + its calling hours) without being a
                       company-wide admin. Only a full admin can set it - the API
                       refuses it from a process admin, so it is read-only for them. */}
@@ -2366,6 +2426,50 @@ const localStorage = typeof window !== 'undefined'
                             { value: 20, label: '20 leads' },
                             { value: 30, label: '30 leads' }
                           ]}
+                        />
+                      </td>
+                      <td className="py-3 px-4">
+                        {/* Writes prepaid_pct server-side, same round-trip as Quota beside it -
+                            a soft target for build_assignment_queue/lead_priority.py's round-robin,
+                            never a hard block (see that column header's tooltip). '' = unset,
+                            meaning no steering for this agent at all, same "unset, not zero"
+                            convention as Quota. */}
+                        <CustomSelect
+                          value={a.prepaidPct ?? ''}
+                          onChange={(val) => saveProcessAgent(a.email, { prepaidPct: val === '' ? null : +val })}
+                          options={[
+                            { value: '', label: 'No target' },
+                            { value: 0, label: '0%' },
+                            { value: 10, label: '10%' },
+                            { value: 20, label: '20%' },
+                            { value: 30, label: '30%' },
+                            { value: 40, label: '40%' },
+                            { value: 50, label: '50%' },
+                            { value: 60, label: '60%' },
+                            { value: 70, label: '70%' },
+                            { value: 80, label: '80%' },
+                            { value: 90, label: '90%' },
+                            { value: 100, label: '100%' },
+                          ]}
+                        />
+                      </td>
+                      <td className="py-3 px-4">
+                        {/* Uncontrolled (defaultValue, not value+onChange) so typing doesn't
+                            fire a save per keystroke - saves once on blur, same round-trip as
+                            every other per-process field in this row. Key'd by email so this
+                            DOM node (and its in-progress edit) is never confused with another
+                            agent's row if the roster re-sorts. */}
+                        <input
+                          key={a.email}
+                          type="text"
+                          defaultValue={a.priorityRtoReasons || ''}
+                          onBlur={(e) => {
+                            const val = e.target.value.trim();
+                            if (val !== (a.priorityRtoReasons || '')) saveProcessAgent(a.email, { priorityRtoReasons: val });
+                          }}
+                          placeholder="e.g. refused to accept"
+                          title="Comma-separated, case-insensitive substrings of the RTO reason"
+                          className="w-40 bg-zinc-900/80 border border-zinc-700/80 rounded-lg px-2 py-1 text-[12px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-indigo-600"
                         />
                       </td>
                       <td className="py-3 px-4 text-center">

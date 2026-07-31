@@ -443,7 +443,8 @@ def fetch_reassignment_attempts():
 
 
 def fetch_online_agents(process_key=None):
-    """(emails, quotas) of the agents eligible for this process's leads right now.
+    """(emails, quotas, prepaid_targets, specializations) of the agents eligible for this
+    process's leads right now.
 
     Two things have to be true, and they answer different questions:
 
@@ -459,15 +460,19 @@ def fetch_online_agents(process_key=None):
     until someone actually sets per-process availability.
 
     quotas is {email: max_quota} for whatever has been set per process; agents absent from it
-    fall back to DEFAULT_QUOTA in build_assignment_queue.
+    fall back to DEFAULT_QUOTA in build_assignment_queue. prepaid_targets/specializations are
+    the same idea for build_assignment_queue's agent_prepaid_target/agent_specializations -
+    agents absent from either dict get no steering/specialization at all, same as before those
+    columns existed. specializations values are already lowercased, comma-split, and blank-
+    filtered here so build_assignment_queue's matching stays a plain substring test.
 
-    Returns ([], {}) (not an error) if POSTGRES_URL isn't configured, so a missing secret fails
-    safe - no assignment - rather than crashing the whole run.
+    Returns ([], {}, {}, {}) (not an error) if POSTGRES_URL isn't configured, so a missing
+    secret fails safe - no assignment - rather than crashing the whole run.
     """
     conn_str = os.environ.get("POSTGRES_URL")
     if not conn_str:
         print("POSTGRES_URL not configured - cannot determine online agents.")
-        return [], {}
+        return [], {}, {}, {}
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -481,11 +486,12 @@ def fetch_online_agents(process_key=None):
             present = [row[0].lower() for row in cur.fetchall()]
 
             if not process_key:
-                return present, {}
+                return present, {}, {}, {}
 
             try:
                 cur.execute(
-                    "SELECT email, status, max_quota FROM calling_agent_process WHERE process_key = %s",
+                    "SELECT email, status, max_quota, prepaid_pct, priority_rto_reasons "
+                    "FROM calling_agent_process WHERE process_key = %s",
                     (process_key,),
                 )
                 per_process = cur.fetchall()
@@ -493,19 +499,25 @@ def fetch_online_agents(process_key=None):
                 # Table not created yet (no admin has opened the panel) - fall back rather than
                 # refuse to assign, which would stop the queue over a missing config table.
                 print(f"  (calling_agent_process unavailable: {e} - using global presence)")
-                return present, {}
+                return present, {}, {}, {}
 
     if not per_process:
         print(f"  no per-process availability set for '{process_key}' - using global presence")
-        return present, {}
+        return present, {}, {}, {}
 
-    online_for_process = {e.lower() for e, status, _ in per_process if status == "Online"}
-    quotas = {e.lower(): q for e, _, q in per_process if q is not None}
+    online_for_process = {e.lower() for e, status, _, _, _ in per_process if status == "Online"}
+    quotas = {e.lower(): q for e, _, q, _, _ in per_process if q is not None}
+    prepaid_targets = {e.lower(): pct for e, _, _, pct, _ in per_process if pct is not None}
+    specializations = {}
+    for e, _, _, _, reasons in per_process:
+        parsed = [r.strip().lower() for r in (reasons or "").split(",") if r.strip()]
+        if parsed:
+            specializations[e.lower()] = parsed
     eligible = sorted(online_for_process & set(present))
     if online_for_process and not eligible:
         print(f"  {len(online_for_process)} agent(s) marked Online for '{process_key}', but none are "
               f"heartbeat-fresh (within {STALE_MINUTES}m) - nobody is actually at their desk.")
-    return eligible, quotas
+    return eligible, quotas, prepaid_targets, specializations
 
 
 def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
@@ -686,7 +698,7 @@ def main():
         return
 
     print(f"Fetching agents available for '{PROCESS_KEY}' from Postgres...")
-    online_agents, agent_quotas = fetch_online_agents(PROCESS_KEY)
+    online_agents, agent_quotas, agent_prepaid_targets, agent_specializations = fetch_online_agents(PROCESS_KEY)
     if not online_agents:
         print("No agents currently online - nothing to assign. Exiting.")
         return
@@ -891,7 +903,10 @@ def main():
     # unaffected.
     assignments = build_assignment_queue(unassigned_pending, online_agents, current_load,
                                          quota=agent_quotas or DEFAULT_QUOTA,
-                                         excluded_by_row=excluded_by_row)
+                                         excluded_by_row=excluded_by_row,
+                                         rto_reason_by_row=rto_reason_by_row,
+                                         agent_specializations=agent_specializations,
+                                         agent_prepaid_target=agent_prepaid_targets)
 
     if not assignments:
         print(f"{len(unassigned_pending)} unassigned lead(s) found, but every eligible agent is already at quota (or excluded) for each. Nothing to assign.")
