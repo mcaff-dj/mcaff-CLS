@@ -1126,12 +1126,16 @@ const localStorage = typeof window !== 'undefined'
         const params = new URLSearchParams();
         if (dateFrom) params.set('dateFrom', dateFrom);
         if (dateTo) params.set('dateTo', dateTo);
+        // Lets the server recognize a process admin (not company-wide) and scope them to their
+        // OWN process's roster instead of self-only - see handlePresence's own comment. Harmless
+        // for a plain agent or a full admin, who ignore it (self-only / everyone respectively).
+        if (activeProcess) params.set('process', activeProcess);
         const qs = params.toString();
         fetch(`/api/auth/presence${qs ? `?${qs}` : ''}`)
           .then(r => r.ok ? r.json() : null)
           .then(d => { if (d && d.agents) setServerPresence(d.agents); })
           .catch(() => {});
-      }, [dateScope, customDateFrom, customDateTo]);
+      }, [dateScope, customDateFrom, customDateTo, activeProcess]);
       useEffect(() => {
         fetchServerPresence();
         const t = setInterval(fetchServerPresence, 30000);

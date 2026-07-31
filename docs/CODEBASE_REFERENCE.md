@@ -766,9 +766,9 @@ Connected column reads "No" is eligible to go to a *different* agent, up to
   one process without being a company-wide admin doesn't personally work leads, so the
   Agent-only personal-scope view showed them nothing.
 - **The same bug class runs the other direction too, on the ADMIN side**: a bare
-  `userRole === 'Admin'` check (rather than `userRole === 'Admin' || isProcessAdmin`) wrongly
-  excludes a process admin from something they should see, exactly mirroring the Agent-side bug
-  above. Found in two places so far:
+  `userRole === 'Admin'` (or, server-side, a bare `session.isAdmin`) check wrongly excludes a
+  process admin from something they should see, exactly mirroring the Agent-side bug above.
+  Found in three places so far:
   - **`Next to Assign`** (the `tabs` array's `predicted` entry, and its own
     `tab==='predicted'` render gate) - both checked `userRole === 'Admin'` alone, unlike the
     `Admin Panel & Roster` tab right above it in the same array, which already correctly reads
@@ -785,10 +785,26 @@ Connected column reads "No" is eligible to go to a *different* agent, up to
     this effect's first run), so without it in the deps the effect would never re-fire once the
     real value arrived, same staleness trap `agentMetrics`' hook dependencies elsewhere in this
     file already have to account for.
+  - **`GET /api/auth/presence` itself** (`api/auth/[action].js`) - the SAME bug, server-side:
+    `if (!session.isAdmin)` fell straight to a self-only response with no `isProcessAdmin`
+    branch at all, unlike every OTHER process-admin-aware endpoint in this file. A process admin
+    viewing the Overview tab's Agent Performance Summary (which correctly shows the WHOLE
+    process's roster for them) got back only their OWN presence row - and since a process admin
+    typically isn't themselves a working agent with a row in that table, every OTHER agent's
+    Logged In At/Total Break Time silently rendered blank for them, team-wide, not just for one
+    row. Fixed by accepting an optional `?process=` query param (sent by `fetchServerPresence`
+    as `activeProcess`) and, when `isCallingProcessAdmin(session.email, process)`, returning
+    presence scoped to `getCallingProcessAgents(process)` - that process's own roster - rather
+    than either self-only OR the full-admin branch's entire company. Deliberately NOT reusing
+    the full-admin branch's "everyone in `agent_presence`" shape unscoped: that would hand a
+    process admin of one narrow process the whole company's live status/presence over the wire,
+    a bigger blast radius than the endpoint needs to grant, and inconsistent with how
+    `/api/admin/business-hours`/`/calling-agents` already scope a process admin strictly to what
+    they administer.
 
-  Same lesson as the Agent-side note: a bare `userRole === 'Admin'` check anywhere in this file
-  is worth double-checking for a missing `isProcessAdmin` - both of these were found by grepping
-  `userRole *=== *'Admin'` for every occurrence once the first instance was reported, not by
+  Same lesson as the Agent-side note: a bare `userRole === 'Admin'`/`session.isAdmin` check
+  anywhere in this app is worth double-checking for a missing `isProcessAdmin` - all three of
+  these were found by grepping every occurrence once the first instance was reported, not by
   inspection alone.
 
 ### Timings

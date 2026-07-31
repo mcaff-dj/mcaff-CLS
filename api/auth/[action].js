@@ -2,7 +2,7 @@
 // file to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells
 // us which logical route was hit; URLs are unchanged.
 const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getRecentLeadAssignments, recordLeadDisposition,
-  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent } = require('../_lib/db');
+  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent, isCallingProcessAdmin } = require('../_lib/db');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
 
@@ -230,7 +230,34 @@ async function handlePresence(req, res) {
     // average across several different calendar days can't be expressed as one.
     const dateFrom = (req.query && req.query.dateFrom) || undefined;
     const dateTo = (req.query && req.query.dateTo) || undefined;
+    const processKey = (req.query && req.query.process) || '';
     if (!session.isAdmin) {
+      // A process admin (isProcessAdmin - not company-wide) is NOT self-only past this point
+      // either: they run this one process without being a full admin, same reasoning as the
+      // Admin Panel/Next to Assign/business-hours exemptions elsewhere in this app (see
+      // RtoCrmClient.js's own Invariants notes on this bug class - this was the same bare
+      // `!session.isAdmin` omission, just server-side instead of a client-side tab gate). Scoped
+      // to getCallingProcessAgents(processKey) - THIS process's roster - rather than everyone
+      // company-wide, consistent with how /api/admin/business-hours and /calling-agents already
+      // scope a process admin to only what they administer, not the full company's presence.
+      if (processKey && await isCallingProcessAdmin(session.email, processKey)) {
+        const [roster, allAgents, presenceSummary] = await Promise.all([
+          getCallingProcessAgents(processKey), getAllAgentPresence(), getAgentPresenceLogSummary(dateFrom, dateTo),
+        ]);
+        const agents = {};
+        for (const member of roster) {
+          const email = member.email.toLowerCase();
+          const summary = presenceSummary[email];
+          agents[email] = {
+            status: allAgents[email]?.status,
+            updatedAt: allAgents[email]?.updatedAt,
+            loggedInMinutes: summary?.loggedInMinutes ?? null,
+            breakMinutes: summary?.breakMinutes || 0,
+          };
+        }
+        res.status(200).json({ agents });
+        return;
+      }
       // Not admin-only past this point: a signed-in agent may still read their OWN
       // loggedInMinutes/breakMinutes - the Overview tab's per-agent summary table (see
       // RtoCrmClient.js) needs these for every visible row, including a plain Agent's own
