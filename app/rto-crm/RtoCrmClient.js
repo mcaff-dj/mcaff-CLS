@@ -46,6 +46,11 @@ const localStorage = typeof window !== 'undefined'
     const HIGH_PRIORITY_COD_RTO_REASONS = leadAssignmentRules.highPriorityCodRtoReasons;
     const LOW_PRIORITY_COD_RTO_REASONS = leadAssignmentRules.lowPriorityCodRtoReasons;
     const ASSIGNMENT_QUOTA = leadAssignmentRules.assignmentQuota;
+    // Team Roster's "Priority Reasons" picker draws from the same known reason substrings the
+    // tier system already uses - an agent can only ever specialize in a reason the assignment
+    // queue itself recognizes, so there's no free-text drift between what's typed and what
+    // build_assignment_queue actually matches against.
+    const PRIORITY_REASON_OPTIONS = [...new Set([...HIGH_PRIORITY_COD_RTO_REASONS, ...LOW_PRIORITY_COD_RTO_REASONS])].sort();
     // Connected=No reassignment preview - see leadAssignmentRules.json's _reassignNote and
     // assign_leads.py's REASSIGN_BACKLOG_CUTOFF/REASSIGN_RETRY_CAP. This preview can only
     // exclude the CURRENT agent (the one who just failed to connect) - it has no client-side
@@ -530,6 +535,63 @@ const localStorage = typeof window !== 'undefined'
                       {opt.label}
                     </span>
                     {isSelected && <CheckIcon className="text-indigo-400 shrink-0" />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // Multi-select dropdown for Team Roster's "Priority Reasons" column - CustomSelect above is
+    // single-value only, but an agent can specialize in more than one reason at once (the
+    // stored value is a comma-separated string, matched as independent substrings by
+    // build_assignment_queue). value/onChange work in terms of a string[]; the caller owns
+    // joining/splitting against the comma-separated string actually persisted.
+    function MultiSelectDropdown({ value, onChange, options, placeholder = 'None' }) {
+      const [isOpen, setIsOpen] = useState(false);
+      const ref = useRef(null);
+
+      useEffect(() => {
+        const handleClickOutside = (e) => { if (ref.current && !ref.current.contains(e.target)) setIsOpen(false); };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+      }, []);
+
+      const selected = value || [];
+      const label = selected.length === 0 ? placeholder : selected.length === 1 ? selected[0] : `${selected.length} reasons`;
+      const toggle = (opt) => {
+        onChange(selected.includes(opt) ? selected.filter(o => o !== opt) : [...selected, opt]);
+      };
+
+      return (
+        <div className="relative inline-block w-44" ref={ref}>
+          <button
+            type="button"
+            onClick={() => setIsOpen(!isOpen)}
+            title={selected.join(', ')}
+            className="w-full h-8 px-3 py-1 bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 rounded-lg text-[13px] font-medium text-zinc-200 flex items-center justify-between gap-2 transition-all shadow-xs focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+          >
+            <span className="truncate">{label}</span>
+            <ChevronDown className={`text-zinc-500 shrink-0 transition-transform duration-200 ${isOpen ? 'rotate-180 text-indigo-400' : ''}`} />
+          </button>
+
+          {isOpen && (
+            <div className="absolute left-0 mt-1.5 min-w-[240px] bg-[#141417] border border-zinc-800/90 rounded-xl shadow-2xl z-50 overflow-hidden animate-fadeIn py-1 custom-scroll max-h-60 overflow-y-auto">
+              {options.map((opt) => {
+                const isSelected = selected.includes(opt);
+                return (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => toggle(opt)}
+                    className={`w-full text-left px-3 py-2 text-[12.5px] flex items-center gap-2 hover:bg-zinc-800/70 transition-colors ${isSelected ? 'text-indigo-300 font-semibold' : 'text-zinc-300'}`}
+                  >
+                    <span className={`h-3.5 w-3.5 shrink-0 rounded border flex items-center justify-center ${isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-zinc-600'}`}>
+                      {isSelected && <CheckIcon className="text-white" style={{ width: 10, height: 10 }} />}
+                    </span>
+                    <span className="truncate">{opt}</span>
                   </button>
                 );
               })}
@@ -2340,6 +2402,11 @@ const localStorage = typeof window !== 'undefined'
 
             {/* Agent Roster & Reassignment Table */}
             <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 overflow-hidden">
+              {/* overflow-x-auto here, not overflow-hidden on the outer card above - Prepaid
+                  Target/Priority Reasons pushed this table wider than the card, and
+                  overflow-hidden was silently CLIPPING Process admin/Actions off the right edge
+                  rather than making them reachable by scrolling. */}
+              <div className="overflow-x-auto custom-scroll">
               <table className="w-full text-[13px]">
                 <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
                   <th className="py-3 px-4 text-left font-medium">Agent</th>
@@ -2454,22 +2521,14 @@ const localStorage = typeof window !== 'undefined'
                         />
                       </td>
                       <td className="py-3 px-4">
-                        {/* Uncontrolled (defaultValue, not value+onChange) so typing doesn't
-                            fire a save per keystroke - saves once on blur, same round-trip as
-                            every other per-process field in this row. Key'd by email so this
-                            DOM node (and its in-progress edit) is never confused with another
-                            agent's row if the roster re-sorts. */}
-                        <input
-                          key={a.email}
-                          type="text"
-                          defaultValue={a.priorityRtoReasons || ''}
-                          onBlur={(e) => {
-                            const val = e.target.value.trim();
-                            if (val !== (a.priorityRtoReasons || '')) saveProcessAgent(a.email, { priorityRtoReasons: val });
-                          }}
-                          placeholder="e.g. refused to accept"
-                          title="Comma-separated, case-insensitive substrings of the RTO reason"
-                          className="w-40 bg-zinc-900/80 border border-zinc-700/80 rounded-lg px-2 py-1 text-[12px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-indigo-600"
+                        {/* Options are the same known reason substrings the tier system already
+                            recognizes (PRIORITY_REASON_OPTIONS) - picking from that list rather
+                            than free text means there's no way to type a substring
+                            build_assignment_queue would never actually match against. */}
+                        <MultiSelectDropdown
+                          value={(a.priorityRtoReasons || '').split(',').map(r => r.trim()).filter(Boolean)}
+                          onChange={(next) => saveProcessAgent(a.email, { priorityRtoReasons: next.join(', ') })}
+                          options={PRIORITY_REASON_OPTIONS}
                         />
                       </td>
                       <td className="py-3 px-4 text-center">
@@ -2517,6 +2576,7 @@ const localStorage = typeof window !== 'undefined'
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
           </>
         );
