@@ -3214,7 +3214,7 @@ const localStorage = typeof window !== 'undefined'
                           <table className="w-full min-w-[1080px] text-[12.5px] border-collapse">
                             <thead>
                               <tr className="text-left text-zinc-500 uppercase text-[10px] tracking-wider border-b border-zinc-800">
-                                <th className="py-2 pr-3 font-bold">Agent Name</th>
+                                <th className="py-2 pr-3 font-bold sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Agent Name</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Leads Assigned</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Disposed</th>
                                 <th className="py-2 px-3 font-bold" title="Average time-of-day of the first disposition across the range's active days">First Called At</th>
@@ -3245,8 +3245,8 @@ const localStorage = typeof window !== 'undefined'
                               {summaryRows.map(am => {
                                 const presence = serverPresence[am.email.toLowerCase()];
                                 return (
-                                  <tr key={am.email} className="border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
-                                    <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap">{am.name}</td>
+                                  <tr key={am.email} className="group border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
+                                    <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800 border-r border-zinc-800 transition-colors">{am.name}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.assigned}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.disposed}</td>
                                     <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(am.firstCalledAtMinutes)}</td>
@@ -3269,7 +3269,7 @@ const localStorage = typeof window !== 'undefined'
                               })}
                               {summaryRows.length > 0 && (
                                 <tr className="border-t-2 border-zinc-700 bg-zinc-900/80 font-bold">
-                                  <td className="py-2.5 pr-3 text-zinc-100 whitespace-nowrap">Team Total</td>
+                                  <td className="py-2.5 pr-3 text-zinc-100 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Team Total</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.assigned}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.disposed}</td>
                                   <td className="py-2.5 px-3 text-zinc-500">—</td>
@@ -3327,7 +3327,7 @@ const localStorage = typeof window !== 'undefined'
                           <table className="w-full text-[12.5px] border-collapse">
                             <thead>
                               <tr className="text-left text-zinc-500 uppercase text-[10px] tracking-wider border-b border-zinc-800">
-                                <th className="py-2 pr-3 font-bold whitespace-nowrap">Agent Name</th>
+                                <th className="py-2 pr-3 font-bold whitespace-nowrap sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Agent Name</th>
                                 {heatmapBucketIndexes.map(idx => (
                                   <th key={idx} className="py-2 px-3 font-bold text-right whitespace-nowrap">
                                     {formatTimeOfDay(idx * heatmapIntervalMinutes)}
@@ -3340,8 +3340,8 @@ const localStorage = typeof window !== 'undefined'
                               {visibleHeatmapAgentData.map(a => {
                                 const rowTotal = heatmapBucketIndexes.reduce((s, idx) => s + (a.bucketCounts.get(idx) || 0), 0);
                                 return (
-                                  <tr key={a.email} className="border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
-                                    <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap">{a.name}</td>
+                                  <tr key={a.email} className="group border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
+                                    <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800 border-r border-zinc-800 transition-colors">{a.name}</td>
                                     {heatmapBucketIndexes.map(idx => {
                                       const value = a.bucketCounts.get(idx) || 0;
                                       return (
@@ -3356,7 +3356,7 @@ const localStorage = typeof window !== 'undefined'
                               })}
                               {visibleHeatmapAgentData.length > 0 && (
                                 <tr className="border-t-2 border-zinc-700 bg-zinc-900/80 font-bold">
-                                  <td className="py-2.5 pr-3 text-zinc-100 whitespace-nowrap">Team Total</td>
+                                  <td className="py-2.5 pr-3 text-zinc-100 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Team Total</td>
                                   {heatmapBucketIndexes.map(idx => {
                                     const columnTotal = visibleHeatmapAgentData.reduce((s, a) => s + (a.bucketCounts.get(idx) || 0), 0);
                                     return (
