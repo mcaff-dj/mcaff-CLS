@@ -574,6 +574,34 @@ dials/connects/conversions happen, not just how many. Columns are time-of-day bu
   lowest gets the strongest, an all-equal table gets no styling at all, row/column/grand totals
   agree with each other, and the Team Total row's aggregates - see below).
 
+### Overview tab — Converted Orders (+ CSV export)
+
+A third table, directly below Time-of-Day Distribution — a flat, un-aggregated list of every
+converted order in the current date scope, one row per order, for spot-checking/audit rather
+than counting.
+
+- **`convertedOrdersList`** — for each agent in `convertedOrdersRoster` (same `isMyAgent`
+  restriction as everywhere else: a plain Agent only ever sees their own rows, an Admin/process
+  admin/Team Lead sees everyone's), filters `allTickets` down to `isMine && isWorked &&
+  disposedDateInScope && isConvertedForHeatmap` — the exact same "converted" test and date-scope
+  rule as the Converted option in the Time-of-Day table above, so the two are always consistent
+  with each other. Maps each surviving ticket to `{orderNumber, agentName, disposition}` — a
+  ticket converted purely via `newOrderId` with no disposition text of its own displays
+  `'Reorder'` rather than a blank cell. Sorted by agent name, then order number within an agent.
+- **Deliberately not memoized/deduped further** — a multi-day range shows one row per order per
+  qualifying day, matching the flat "every converted order" framing rather than a per-order
+  summary.
+- **`downloadConvertedOrdersCsv()`** — builds an RFC-4180-ish CSV client-side (no backend
+  endpoint; the list is already in the browser) via `Blob` + `URL.createObjectURL` + a throwaway
+  `<a>` click, filename `converted-orders-<today's ISO date>.csv`. Fields containing a comma,
+  double-quote, or newline are wrapped in quotes with inner quotes doubled; `null`/`undefined`
+  render as an empty string, never the literal text `"null"`. The button is disabled when the
+  list is empty (nothing to export) rather than downloading a header-only file silently.
+- Verified with 15 tests: filtering (`isMine`/`isWorked`/`disposedDateInScope`/converted-test all
+  independently enforced), the `'Reorder'` fallback, sort order (agent name then order number),
+  and CSV escaping (comma/quote/newline cases, null/undefined, full multi-row assembly, and the
+  empty-list header-only case).
+
 ### Refund-status pre-check (GoKwik)
 
 Before a still-unassigned **prepaid** row enters `unassigned_pending`, `assign_leads.py` asks

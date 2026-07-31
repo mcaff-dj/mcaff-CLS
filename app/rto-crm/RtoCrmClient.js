@@ -478,6 +478,7 @@ const localStorage = typeof window !== 'undefined'
     const PhoneIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.76.32 1.54.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c1.27.38 2.05.58 2.81.7A2 2 0 0 1 22 16.92z"/></svg>;
     const WhatsAppIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" {...p}><path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2.05 22l5.25-1.38a9.9 9.9 0 0 0 4.74 1.21h.01c5.46 0 9.9-4.45 9.9-9.91C21.96 6.45 17.5 2 12.04 2zm0 18.06h-.01a8.2 8.2 0 0 1-4.19-1.15l-.3-.18-3.12.82.83-3.04-.2-.31a8.16 8.16 0 0 1-1.26-4.38c0-4.52 3.68-8.2 8.21-8.2 2.19 0 4.25.86 5.8 2.4a8.15 8.15 0 0 1 2.4 5.8c0 4.53-3.68 8.24-8.16 8.24zm4.5-6.16c-.25-.12-1.46-.72-1.68-.8-.23-.08-.39-.12-.56.13-.16.24-.64.8-.78.96-.14.16-.29.18-.53.06-.25-.12-1.05-.39-2-1.23-.74-.66-1.24-1.47-1.38-1.72-.15-.24-.02-.38.11-.5.11-.11.25-.29.37-.43.13-.15.17-.25.25-.41.08-.16.04-.31-.02-.43-.06-.12-.56-1.36-.77-1.86-.2-.49-.41-.42-.56-.43h-.48c-.16 0-.43.06-.65.31-.23.24-.85.83-.85 2.04 0 1.2.87 2.36.99 2.52.12.16 1.71 2.6 4.14 3.65.58.25 1.03.4 1.38.51.58.18 1.11.16 1.53.1.47-.07 1.46-.6 1.66-1.17.21-.58.21-1.08.15-1.18-.06-.1-.22-.16-.47-.28z"/></svg>;
     const RefreshIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>;
+    const DownloadIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>;
     const ChevronDown = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="m6 9 6 6 6-6"/></svg>;
     const UserIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>;
     const CalendarIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></svg>;
@@ -2993,6 +2994,58 @@ const localStorage = typeof window !== 'undefined'
                     return { backgroundColor: `rgba(245, 158, 11, ${(t * 0.4).toFixed(2)})` };
                   }
 
+                  // Converted Orders - a flat, ungrouped list (one row per order, not aggregated
+                  // the way the two tables above are) for the CSV export below. Same "converted"
+                  // test as the Time-of-Day table's 'converted' metric option (Prepaid+COD
+                  // combined, not split by payment type) and the same disposedDateInScope date
+                  // scoping as every other Disposed/Connected/Converted number on this page.
+                  // Roster filtered by isMyAgent FIRST, then flat-mapped per agent - the same
+                  // order visibleHeatmapAgentData already does it in, so a plain Agent sees only
+                  // their own converted orders while Admin/Team Lead/isProcessAdmin see everyone's.
+                  const convertedOrdersRoster = userRole === 'Agent' && !isProcessAdmin
+                    ? effectiveAgentRoster.filter(isMyAgent) : effectiveAgentRoster;
+                  const convertedOrdersList = convertedOrdersRoster.flatMap(ag => {
+                    const email = ag.email.toLowerCase();
+                    const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
+                    const isWorked = t => !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
+                    return allTickets
+                      .filter(t => isMine(t.assignedAgent) && isWorked(t) && disposedDateInScope(t) && isConvertedForHeatmap(t))
+                      .map(t => ({
+                        orderNumber: t.orderNumber,
+                        agentName: ag.name,
+                        // A converted ticket can lack t.disposition itself if newOrderId alone is
+                        // what qualified it (see isConvertedForHeatmap) - "Reorder" names that
+                        // case rather than showing a blank cell for a genuinely converted order.
+                        disposition: t.disposition || (t.newOrderId ? 'Reorder' : '—'),
+                      }));
+                  }).sort((a, b) => a.agentName.localeCompare(b.agentName) || a.orderNumber.localeCompare(b.orderNumber));
+
+                  // Plain client-side CSV download (Blob + object URL + a throwaway anchor click)
+                  // - no backend endpoint needed, since convertedOrdersList is already exactly
+                  // what's on screen. Quotes/escapes any field containing a comma, quote, or
+                  // newline per RFC 4180, defensively - dispositions are a closed set of short
+                  // strings today, but agent names/order numbers are sheet data this script
+                  // doesn't control.
+                  function downloadConvertedOrdersCsv() {
+                    const escapeCsv = (v) => {
+                      const s = String(v ?? '');
+                      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+                    };
+                    const lines = [
+                      ['Order', 'Agent Name', 'Disposition'].join(','),
+                      ...convertedOrdersList.map(o => [o.orderNumber, o.agentName, o.disposition].map(escapeCsv).join(',')),
+                    ];
+                    const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `converted-orders-${new Date().toISOString().slice(0, 10)}.csv`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                  }
+
                   // Total row for the Agent Performance Summary table - team aggregates per
                   // column, NOT a per-agent row total (this table's columns mix counts,
                   // percentages and times - "Total Disposed" + "Connected %" + "Logged In At"
@@ -3321,6 +3374,51 @@ const localStorage = typeof window !== 'undefined'
                                     No {heatmapMetricOptions.find(o => o.value === heatmapMetric)?.label.toLowerCase()} activity in this date range.
                                   </td>
                                 </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {/* Converted Orders */}
+                      <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
+                        <div className="flex items-center justify-between flex-wrap gap-3">
+                          <div>
+                            <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">✅ Converted Orders</h3>
+                            <p className="text-[12px] text-zinc-500 mt-0.5">
+                              Every converted order in the date range above (Prepaid + COD combined, same test as the
+                              Time-of-Day table's Converted option) - one row per order, not aggregated.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={downloadConvertedOrdersCsv}
+                            disabled={convertedOrdersList.length === 0}
+                            className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-[13px] font-medium text-zinc-200 transition-all shadow-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <DownloadIcon />
+                            Export CSV
+                          </button>
+                        </div>
+                        <div className="max-h-96 overflow-y-auto overflow-x-auto custom-scroll">
+                          <table className="w-full text-[12.5px] border-collapse">
+                            <thead>
+                              <tr className="text-left text-zinc-500 uppercase text-[10px] tracking-wider border-b border-zinc-800">
+                                <th className="py-2 pr-3 font-bold">Order</th>
+                                <th className="py-2 px-3 font-bold">Agent Name</th>
+                                <th className="py-2 pl-3 font-bold">Disposition</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {convertedOrdersList.map((o, i) => (
+                                <tr key={`${o.orderNumber}-${i}`} className="border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
+                                  <td className="py-2.5 pr-3 font-mono text-zinc-300 whitespace-nowrap">{o.orderNumber}</td>
+                                  <td className="py-2.5 px-3 font-semibold text-zinc-200 whitespace-nowrap">{o.agentName}</td>
+                                  <td className="py-2.5 pl-3 text-indigo-300 whitespace-nowrap">{o.disposition}</td>
+                                </tr>
+                              ))}
+                              {convertedOrdersList.length === 0 && (
+                                <tr><td colSpan={3} className="py-6 text-center text-zinc-500">No converted orders in this date range.</td></tr>
                               )}
                             </tbody>
                           </table>
