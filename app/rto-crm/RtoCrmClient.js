@@ -793,11 +793,15 @@ const localStorage = typeof window !== 'undefined'
         // component, and naming it in this dependency array read it before initialization -
         // a temporal-dead-zone ReferenceError that broke the whole page on load, since
         // dependency arrays are evaluated during render rather than when the effect runs.
-        // Loading once per admin session is cheap enough not to need the gate.
-        if ((userRole === 'Admin' || userRole === 'Team Lead') && hoursByProcess === null) {
+        // Loading once per admin session is cheap enough not to need the gate. isProcessAdmin
+        // included too (was missing - same bug class the Invariants doc section calls out): the
+        // endpoint itself (/api/admin/business-hours) already scopes to whatever the caller
+        // actually administers server-side, so a process admin calling this just gets their own
+        // process's hours back, not an error - the client just never asked before.
+        if ((userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin) && hoursByProcess === null) {
           loadBusinessHours();
         }
-      }, [userRole, hoursByProcess, loadBusinessHours]);
+      }, [userRole, isProcessAdmin, hoursByProcess, loadBusinessHours]);
 
       // Editing starts from whatever the server returned for the process currently selected in
       // the header, so the card always shows the hours for the process being administered.
@@ -2519,7 +2523,12 @@ const localStorage = typeof window !== 'undefined'
       if (userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin) {
         tabs.push({ key: 'admin', label: 'Admin Panel & Roster', count: effectiveAgentRoster.length });
       }
-      if (userRole === 'Admin') {
+      // isProcessAdmin too, same reasoning as the Admin Panel tab above - a process admin
+      // who runs RTO without being a company-wide admin still needs to see what assign_leads.py
+      // would do next for THEIR process. Missing here before, unlike the Admin Panel tab, even
+      // though both are gated the same way in spirit - exactly the "bare userRole check forgot
+      // isProcessAdmin" bug class this file's own docs already flag as recurring.
+      if (userRole === 'Admin' || isProcessAdmin) {
         tabs.push({ key: 'predicted', label: '🔮 Next to Assign', count: predictedAssignments.rows.length });
       }
 
@@ -3506,7 +3515,7 @@ const localStorage = typeof window !== 'undefined'
                   );
                 })()}
               </div>
-            ):tab==='predicted'&&userRole==='Admin'?(
+            ):tab==='predicted'&&(userRole==='Admin'||isProcessAdmin)?(
               /* ══════════════════════════════════════════════════════════════════════
                  🔮 NEXT TO ASSIGN: read-only preview of scripts/assign_leads.py's next run
                  ══════════════════════════════════════════════════════════════════════ */

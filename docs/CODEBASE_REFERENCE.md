@@ -765,6 +765,31 @@ Connected column reads "No" is eligible to go to a *different* agent, up to
   this file is very likely a bug (it was, in 10 places, before this was fixed): someone running
   one process without being a company-wide admin doesn't personally work leads, so the
   Agent-only personal-scope view showed them nothing.
+- **The same bug class runs the other direction too, on the ADMIN side**: a bare
+  `userRole === 'Admin'` check (rather than `userRole === 'Admin' || isProcessAdmin`) wrongly
+  excludes a process admin from something they should see, exactly mirroring the Agent-side bug
+  above. Found in two places so far:
+  - **`Next to Assign`** (the `tabs` array's `predicted` entry, and its own
+    `tab==='predicted'` render gate) - both checked `userRole === 'Admin'` alone, unlike the
+    `Admin Panel & Roster` tab right above it in the same array, which already correctly reads
+    `userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin`. A process admin for
+    RTO who isn't a company-wide admin couldn't see the preview of what `assign_leads.py` would
+    do next for their own process.
+  - **The business-hours auto-load effect** (`if ((userRole === 'Admin' || userRole ===
+    'Team Lead') && hoursByProcess === null) loadBusinessHours()`) - same omission. Safe to
+    extend because `/api/admin/business-hours` already scopes server-side to whatever the
+    caller actually administers (`getAdministeredProcesses`), so a process admin hitting it
+    just gets their own process's hours back, never an error - the client simply never asked.
+    `isProcessAdmin` had to be added to this effect's OWN dependency array too, not just its
+    condition: it's set asynchronously (after `loadProcessAgents`'s fetch resolves, well after
+    this effect's first run), so without it in the deps the effect would never re-fire once the
+    real value arrived, same staleness trap `agentMetrics`' hook dependencies elsewhere in this
+    file already have to account for.
+
+  Same lesson as the Agent-side note: a bare `userRole === 'Admin'` check anywhere in this file
+  is worth double-checking for a missing `isProcessAdmin` - both of these were found by grepping
+  `userRole *=== *'Admin'` for every occurrence once the first instance was reported, not by
+  inspection alone.
 
 ### Timings
 
