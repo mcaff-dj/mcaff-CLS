@@ -59,6 +59,11 @@ const localStorage = typeof window !== 'undefined'
     // the way the real writer does. A lead the real cron would already treat as cap-reached
     // may still show one more predicted reassignment here.
     const REASSIGN_BACKLOG_CUTOFF_DATE = new Date(leadAssignmentRules.reassignBacklogCutoff);
+    // Rolling hold (unlike the fixed cutoff above): a Connected=No lead isn't previewed as a
+    // reassignment until this many hours have passed since its real assigned_at (leadDates,
+    // from Postgres's lead_assignments_current - NOT rowDate/Calling Date). Mirrors
+    // assign_leads.py's REASSIGN_MIN_HOLD_HOURS/fetch_current_assignment_times exactly.
+    const REASSIGN_MIN_HOLD_MS = (leadAssignmentRules.reassignMinHoldHours || 0) * 3600000;
 
     function getPriorityTier(t) {
       if (t.paymentMethod === 'Prepaid') return 0;
@@ -1805,6 +1810,9 @@ const localStorage = typeof window !== 'undefined'
             // Same "unset -> no target/no specialization" convention as maxQuota above.
             if (perProcess[email].prepaidPct != null) a.prepaidPct = perProcess[email].prepaidPct;
             if (perProcess[email].priorityRtoReasons) a.priorityRtoReasons = perProcess[email].priorityRtoReasons;
+            // Same "unset -> no restriction" convention as above; only applies to Connected=No
+            // reassignments, see predictedAssignments' matchesReassignPaymentMode.
+            if (perProcess[email].reassignPaymentMode) a.reassignPaymentMode = perProcess[email].reassignPaymentMode;
             a.inProcess = true;
             // isAdmin/isProcessAdmin were previously never copied here, only onto the
             // separate roster card's own objects - so the Team Roster's "Process admin"
@@ -1924,10 +1932,20 @@ const localStorage = typeof window !== 'undefined'
           // see REASSIGN_BACKLOG_CUTOFF_DATE's comment for why this can preview one extra
           // reassignment the real cron would actually leave disposed (cap-reached, invisible
           // client-side).
-          if (agt && agt !== 'unassigned' && connectedNo &&
-              t.rowDate && t.rowDate.getTime() >= REASSIGN_BACKLOG_CUTOFF_DATE.getTime()) {
-            pool.push({ ticket: t, tier: getPriorityTier(t), excludedAgent: agt });
-            return;
+          if (agt && agt !== 'unassigned' && connectedNo) {
+            // Held back the same REASSIGN_MIN_HOLD_MS as the real writer - assignedAt here is
+            // the lead's actual assignment timestamp (leadDates), not rowDate, which is only
+            // used for the separate one-time backlog cutoff below. Missing from leadDates (a
+            // lead assigned before this tracking existed) is treated as "no hold" rather than
+            // blocking the preview forever.
+            const assignedAt = leadDates[normalizeOrderKey(t.orderNumber)]?.assignedAt;
+            const recentlyAssigned = !!assignedAt &&
+              (Date.now() - new Date(assignedAt).getTime()) < REASSIGN_MIN_HOLD_MS;
+            if (!recentlyAssigned &&
+                t.rowDate && t.rowDate.getTime() >= REASSIGN_BACKLOG_CUTOFF_DATE.getTime()) {
+              pool.push({ ticket: t, tier: getPriorityTier(t), excludedAgent: agt });
+              return;
+            }
           }
 
           const isDisposed = !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
@@ -1970,12 +1988,18 @@ const localStorage = typeof window !== 'undefined'
         effectiveAgentRoster.forEach(a => { agentByEmail[(a.email || '').toLowerCase()] = a; });
         const specializations = {};
         const prepaidTargets = {};
+        // Hard per-agent filter on Connected=No reassignments only (reassignPaymentMode,
+        // 'Prepaid'/'COD') - mirrors build_assignment_queue's agent_reassign_payment_mode.
+        // Unlike prepaidTargets above this never relaxes on a later pass, so it's checked
+        // via matchesReassignPaymentMode below rather than a soft withinX helper.
+        const reassignPaymentModes = {};
         onlineAgents.forEach(e => {
           const a = agentByEmail[e];
           if (!a) return;
           const reasons = (a.priorityRtoReasons || '').split(',').map(r => r.trim().toLowerCase()).filter(Boolean);
           if (reasons.length > 0) specializations[e] = reasons;
           if (a.prepaidPct != null) prepaidTargets[e] = a.prepaidPct;
+          if (a.reassignPaymentMode) reassignPaymentModes[e] = a.reassignPaymentMode;
         });
 
         // Per-lead cursor-based round-robin (mirrors build_assignment_queue in
@@ -2006,6 +2030,16 @@ const localStorage = typeof window !== 'undefined'
           const prospectiveTotal = totalAssignedThisRun[email] + 1;
           return (prospectivePrepaid / prospectiveTotal) * 100 <= target;
         };
+        // Only gates Connected=No reassignments (item.excludedAgent set) - a fresh/never-
+        // touched lead is unaffected by this agent's restriction, same as this setting's
+        // column name/tooltip promise. Hard, not soft: never relaxed across passes, so a
+        // reassignment whose payment type no eligible agent accepts is left unassigned.
+        const matchesReassignPaymentMode = (email, item, isPrepaidLead) => {
+          if (!item.excludedAgent) return true;
+          const mode = reassignPaymentModes[email];
+          if (!mode) return true;
+          return mode === (isPrepaidLead ? 'Prepaid' : 'COD');
+        };
         const tryAssign = (candidateOk) => {
           for (let tries = 0; tries < agentOrder.length; tries++) {
             const email = agentOrder[cursor % agentOrder.length];
@@ -2019,18 +2053,22 @@ const localStorage = typeof window !== 'undefined'
           for (const item of pool) {
             const isPrepaidLead = item.tier === 0;
             // Pass 1: a specialist for this lead's RTO reason gets first refusal, still
-            // subject to quota/exclusion/prepaid-target.
+            // subject to quota/exclusion/prepaid-target/reassign-payment-mode.
             let assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent
+              && matchesReassignPaymentMode(email, item, isPrepaidLead)
               && matchesSpecialist(email, item.ticket) && withinPrepaidTarget(email, isPrepaidLead));
-            // Pass 2: general round-robin, still respecting each agent's soft prepaid target.
+            // Pass 2: general round-robin, still respecting each agent's soft prepaid target
+            // and hard reassign-payment-mode filter.
             if (assignedEmail == null) {
               assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent
-                && withinPrepaidTarget(email, isPrepaidLead));
+                && matchesReassignPaymentMode(email, item, isPrepaidLead) && withinPrepaidTarget(email, isPrepaidLead));
             }
             // Pass 3: every eligible agent is at/over their prepaid target - assign anyway
-            // rather than leave the lead unassigned purely to protect a soft ratio.
+            // rather than leave the lead unassigned purely to protect a soft ratio. The
+            // reassign-payment-mode filter stays hard even here - see its own comment.
             if (assignedEmail == null) {
-              assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent);
+              assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent
+                && matchesReassignPaymentMode(email, item, isPrepaidLead));
             }
             if (assignedEmail) {
               needed[assignedEmail] -= 1;
@@ -2045,7 +2083,7 @@ const localStorage = typeof window !== 'undefined'
         }
 
         return { onlineAgents, rows, leftover: pool.length - rows.length };
-      }, [allTickets, effectiveAgentRoster]);
+      }, [allTickets, effectiveAgentRoster, leadDates]);
 
       // Fresh Unassigned Leads Count in Sheet
       const freshUnassignedCount = useMemo(() => {
@@ -2418,6 +2456,7 @@ const localStorage = typeof window !== 'undefined'
                   <th className="py-3 px-4 text-left font-medium">Quota</th>
                   <th className="py-3 px-4 text-left font-medium" title="Soft target: this agent's share of assignments from a run that may be Prepaid. Steers the round-robin toward it, but never leaves a lead unassigned just to hit it exactly.">Prepaid Target</th>
                   <th className="py-3 px-4 text-left font-medium" title="Comma-separated RTO-reason keywords (case-insensitive, e.g. 'refused to accept, otp verified') - a lead whose reason matches gets offered to this agent before the general round-robin.">Priority Reasons</th>
+                  <th className="py-3 px-4 text-left font-medium" title="Hard filter on Connected=No reassignments only (never a fresh lead): restricts this agent to reassignments of one payment type. Unlike Prepaid Target, this never relaxes - a reassignment no eligible agent accepts for its type is left unassigned.">Reassign Only</th>
                   {/* Runs THIS process (roster + its calling hours) without being a
                       company-wide admin. Only a full admin can set it - the API
                       refuses it from a process admin, so it is read-only for them. */}
@@ -2529,6 +2568,21 @@ const localStorage = typeof window !== 'undefined'
                           value={(a.priorityRtoReasons || '').split(',').map(r => r.trim()).filter(Boolean)}
                           onChange={(next) => saveProcessAgent(a.email, { priorityRtoReasons: next.join(', ') })}
                           options={PRIORITY_REASON_OPTIONS}
+                        />
+                      </td>
+                      <td className="py-3 px-4">
+                        {/* Writes reassign_payment_mode server-side, same round-trip as the
+                            columns beside it. '' = no restriction, a real explicit value here
+                            (not "unset, leave alone" like Quota/Prepaid Target) - see
+                            setCallingProcessAgent's reassignModeText comment. */}
+                        <CustomSelect
+                          value={a.reassignPaymentMode || ''}
+                          onChange={(val) => saveProcessAgent(a.email, { reassignPaymentMode: val })}
+                          options={[
+                            { value: '', label: 'No restriction' },
+                            { value: 'Prepaid', label: 'Prepaid only' },
+                            { value: 'COD', label: 'COD only' },
+                          ]}
                         />
                       </td>
                       <td className="py-3 px-4 text-center">

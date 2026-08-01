@@ -16,9 +16,10 @@
 
   "assignmentQuota": 20,
 
-  "_reassignNote": "Connected=No reassignment (scripts/assign_leads.py) and its 'Next to Assign' JS preview both read these two, so the cutoff/cap can't drift between them the way assignmentQuota once did. reassignBacklogCutoff is a ONE-TIME migration boundary (a fixed date, not a rolling window) - a lead's own Calling Date must be on or after this for it to be eligible; chosen as 10 days before this feature shipped so the pre-existing backlog of already-Connected=No leads is left alone. reassignRetryCap is the total number of distinct agents ever allowed to try one lead (original assignment + reassignments) before it's left disposed for good.",
+  "_reassignNote": "Connected=No reassignment (scripts/assign_leads.py) and its 'Next to Assign' JS preview both read these three, so none of them can drift between the two the way assignmentQuota once did. reassignBacklogCutoff is a ONE-TIME migration boundary (a fixed date, not a rolling window) - a lead's own Calling Date must be on or after this for it to be eligible; chosen as 10 days before this feature shipped so the pre-existing backlog of already-Connected=No leads is left alone. reassignRetryCap is the total number of distinct agents ever allowed to try one lead (original assignment + reassignments) before it's left disposed for good. reassignMinHoldHours is a ROLLING window (unlike the cutoff above): a Connected=No lead is held with its current agent until this many hours have passed since it was actually assigned to them (lead_assignments.assigned_at, not Calling Date) - reassigning within minutes of the original assignment would strip a lead away before that agent had a fair shot at reaching the customer.",
   "reassignBacklogCutoff": "2026-07-19",
   "reassignRetryCap": 3,
+  "reassignMinHoldHours": 24,
 
   "_highPriorityNote": "Tier 1 - COD whose ORIGINAL system/courier RTO reason contains one of these (case-insensitive substring). The consignee has already refused or OTP-verified the cancellation, so the outcome is effectively known and worth acting on quickly. Prepaid is tier 0 and wins outright regardless of reason.",
   "highPriorityCodRtoReasons": [

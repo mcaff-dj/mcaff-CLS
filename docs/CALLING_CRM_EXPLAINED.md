@@ -423,7 +423,7 @@ developer and readable by the Robot:
 | Table | Holds | Changed from |
 |---|---|---|
 | `calling_business_hours` | Opening/closing time per process, per weekday | Admin Panel → Calling Hours |
-| `calling_agent_process` | Availability + lead cap + soft Prepaid Target % + Priority Reasons per agent, **per process** | Admin Panel → Roster, or the agent's own status dropdown |
+| `calling_agent_process` | Availability + lead cap + soft Prepaid Target % + Priority Reasons + hard Reassign Only payment-mode filter per agent, **per process** | Admin Panel → Roster, or the agent's own status dropdown |
 
 Both have deliberate fallbacks: a process nobody has configured behaves exactly as it did
 before the settings existed, rather than refusing to hand out any leads. A missing setting

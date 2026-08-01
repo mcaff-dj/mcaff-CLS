@@ -91,7 +91,7 @@ from lead_priority import (
     COL_AGENT, COL_ATTEMPT, COL_AWB_CODE, COL_CALLING_DATE, COL_CONNECTED, COL_DISPOSITION,
     COL_ORDER_ID, COL_PAYMENT_METHOD, COL_REMARKS, COL_REMARKS_LEGACY_U,
     COL_RTO_INITIATED_DATE, COL_RTO_REASON,
-    DEFAULT_QUOTA, REASSIGN_BACKLOG_CUTOFF, REASSIGN_RETRY_CAP,
+    DEFAULT_QUOTA, REASSIGN_BACKLOG_CUTOFF, REASSIGN_MIN_HOLD_HOURS, REASSIGN_RETRY_CAP,
     build_assignment_queue, cell, is_prepaid, parse_calling_date,
     parse_rto_initiated_date, prefix_rule_partner, priority_tier,
 )
@@ -442,9 +442,35 @@ def fetch_reassignment_attempts():
     return attempts_by_order
 
 
+def fetch_current_assignment_times():
+    """{order_id: assigned_at} (naive UTC datetime) for every lead's CURRENT live assignment
+    cycle - the lead_assignments row with reassigned_away_at IS NULL (see api/_lib/db.js's
+    ensurePgSchema: exactly one such row can exist per order_id at a time). Used only to hold a
+    Connected=No lead back from reassignment until its current agent has had a full
+    REASSIGN_MIN_HOLD_HOURS to actually reach the customer - without this, a lead could be
+    reassigned minutes after its original assignment, before the agent ever had a fair shot.
+    Same fail-open contract as fetch_reassignment_attempts: {} (never raises) if POSTGRES_URL
+    isn't configured or the query fails, so a lookup problem here never blocks the whole run -
+    it just means the hold can't be enforced this run, same as before this existed."""
+    conn_str = os.environ.get("POSTGRES_URL")
+    if not conn_str:
+        return {}
+    try:
+        with psycopg.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT order_id, assigned_at FROM lead_assignments WHERE reassigned_away_at IS NULL")
+                rows = cur.fetchall()
+    except Exception as e:
+        print(f"  (lead_assignments current-assignment-time fetch failed: {e} - treating as no hold)")
+        return {}
+    # assigned_at comes back tz-aware (TIMESTAMPTZ) - kept that way, same as checked_at in
+    # _cached_refund_status above, so it compares directly against datetime.now(timezone.utc).
+    return dict(rows)
+
+
 def fetch_online_agents(process_key=None):
-    """(emails, quotas, prepaid_targets, specializations) of the agents eligible for this
-    process's leads right now.
+    """(emails, quotas, prepaid_targets, specializations, reassign_payment_modes) of the agents
+    eligible for this process's leads right now.
 
     Two things have to be true, and they answer different questions:
 
@@ -465,14 +491,18 @@ def fetch_online_agents(process_key=None):
     agents absent from either dict get no steering/specialization at all, same as before those
     columns existed. specializations values are already lowercased, comma-split, and blank-
     filtered here so build_assignment_queue's matching stays a plain substring test.
+    reassign_payment_modes is {email: 'Prepaid' or 'COD'} for build_assignment_queue's
+    agent_reassign_payment_mode - a HARD filter, unlike the three above, but the same "absent
+    means unrestricted" contract: an agent with no row, or an empty/NULL value, is eligible for
+    a reassignment of either payment type, same as before this column existed.
 
-    Returns ([], {}, {}, {}) (not an error) if POSTGRES_URL isn't configured, so a missing
+    Returns ([], {}, {}, {}, {}) (not an error) if POSTGRES_URL isn't configured, so a missing
     secret fails safe - no assignment - rather than crashing the whole run.
     """
     conn_str = os.environ.get("POSTGRES_URL")
     if not conn_str:
         print("POSTGRES_URL not configured - cannot determine online agents.")
-        return [], {}, {}, {}
+        return [], {}, {}, {}, {}
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -486,12 +516,12 @@ def fetch_online_agents(process_key=None):
             present = [row[0].lower() for row in cur.fetchall()]
 
             if not process_key:
-                return present, {}, {}, {}
+                return present, {}, {}, {}, {}
 
             try:
                 cur.execute(
-                    "SELECT email, status, max_quota, prepaid_pct, priority_rto_reasons "
-                    "FROM calling_agent_process WHERE process_key = %s",
+                    "SELECT email, status, max_quota, prepaid_pct, priority_rto_reasons, "
+                    "reassign_payment_mode FROM calling_agent_process WHERE process_key = %s",
                     (process_key,),
                 )
                 per_process = cur.fetchall()
@@ -499,25 +529,26 @@ def fetch_online_agents(process_key=None):
                 # Table not created yet (no admin has opened the panel) - fall back rather than
                 # refuse to assign, which would stop the queue over a missing config table.
                 print(f"  (calling_agent_process unavailable: {e} - using global presence)")
-                return present, {}, {}, {}
+                return present, {}, {}, {}, {}
 
     if not per_process:
         print(f"  no per-process availability set for '{process_key}' - using global presence")
-        return present, {}, {}, {}
+        return present, {}, {}, {}, {}
 
-    online_for_process = {e.lower() for e, status, _, _, _ in per_process if status == "Online"}
-    quotas = {e.lower(): q for e, _, q, _, _ in per_process if q is not None}
-    prepaid_targets = {e.lower(): pct for e, _, _, pct, _ in per_process if pct is not None}
+    online_for_process = {e.lower() for e, status, _, _, _, _ in per_process if status == "Online"}
+    quotas = {e.lower(): q for e, _, q, _, _, _ in per_process if q is not None}
+    prepaid_targets = {e.lower(): pct for e, _, _, pct, _, _ in per_process if pct is not None}
     specializations = {}
-    for e, _, _, _, reasons in per_process:
+    for e, _, _, _, reasons, _ in per_process:
         parsed = [r.strip().lower() for r in (reasons or "").split(",") if r.strip()]
         if parsed:
             specializations[e.lower()] = parsed
+    reassign_payment_modes = {e.lower(): mode for e, _, _, _, _, mode in per_process if mode}
     eligible = sorted(online_for_process & set(present))
     if online_for_process and not eligible:
         print(f"  {len(online_for_process)} agent(s) marked Online for '{process_key}', but none are "
               f"heartbeat-fresh (within {STALE_MINUTES}m) - nobody is actually at their desk.")
-    return eligible, quotas, prepaid_targets, specializations
+    return eligible, quotas, prepaid_targets, specializations, reassign_payment_modes
 
 
 def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
@@ -698,7 +729,7 @@ def main():
         return
 
     print(f"Fetching agents available for '{PROCESS_KEY}' from Postgres...")
-    online_agents, agent_quotas, agent_prepaid_targets, agent_specializations = fetch_online_agents(PROCESS_KEY)
+    online_agents, agent_quotas, agent_prepaid_targets, agent_specializations, agent_reassign_payment_modes = fetch_online_agents(PROCESS_KEY)
     if not online_agents:
         print("No agents currently online - nothing to assign. Exiting.")
         return
@@ -714,6 +745,7 @@ def main():
 
     print("Fetching prior Connected=No reassignment history from Postgres...")
     attempts_by_order = fetch_reassignment_attempts()
+    current_assigned_at_by_order = fetch_current_assignment_times()
 
     print("Fetching cached GoKwik refund-check results from Postgres...")
     gokwik_cache = fetch_gokwik_refund_cache()
@@ -770,8 +802,20 @@ def main():
             # new agent. Both gone with this ordering.)
             calling_date = parse_calling_date(cell(row, COL_CALLING_DATE))
             prior_agents = attempts_by_order.get(order_id, set()) | {agent_raw}
+            # Held back from reassignment until the current agent has had a full
+            # REASSIGN_MIN_HOLD_HOURS since the real assigned_at (not Calling Date) - a
+            # temporary, rolling hold, unlike the cutoff/cap below: the lead isn't stamped
+            # anything here, so it simply re-enters this same check on the next run once the
+            # window has passed. current_assigned_at_by_order is missing/None for a lead
+            # assigned before this table was tracking assigned_at, which is treated as "no
+            # hold" (assign_at unknown) rather than blocking it forever.
+            assigned_at = current_assigned_at_by_order.get(order_id)
+            recently_assigned = bool(assigned_at) and (
+                datetime.now(timezone.utc) - assigned_at < timedelta(hours=REASSIGN_MIN_HOLD_HOURS)
+            )
             if (calling_date and calling_date >= REASSIGN_BACKLOG_CUTOFF
-                    and len(prior_agents) < REASSIGN_RETRY_CAP):
+                    and len(prior_agents) < REASSIGN_RETRY_CAP
+                    and not recently_assigned):
                 payment_method = cell(row, COL_PAYMENT_METHOD)
 
                 # Same GoKwik refund check as the fresh-lead path further below (prepaid only -
@@ -793,10 +837,12 @@ def main():
                 reassign_info_by_row[i] = (agent_raw, order_id)
                 continue
             # else: retry cap reached (this many distinct agents have all failed to connect), or
-            # Calling Date before the backlog cutoff (or unparseable) - fall through to
-            # is_disposed below, left alone for good. The cutoff is the one-time migration
-            # boundary: the large pre-existing backlog of already-Connected=No leads is never
-            # touched by this.
+            # Calling Date before the backlog cutoff (or unparseable), or still within its
+            # REASSIGN_MIN_HOLD_HOURS hold - fall through to is_disposed below. The first two are
+            # permanent (left alone for good); the hold is temporary and unstamped, so the lead
+            # simply re-enters this same check next run once the window passes. The cutoff is the
+            # one-time migration boundary: the large pre-existing backlog of already-Connected=No
+            # leads is never touched by this.
 
         # COL_REMARKS_LEGACY_U as well as COL_REMARKS: remarks were written to U for a long
         # time before that was corrected to Z, so a lead whose only evidence of having been
@@ -906,7 +952,8 @@ def main():
                                          excluded_by_row=excluded_by_row,
                                          rto_reason_by_row=rto_reason_by_row,
                                          agent_specializations=agent_specializations,
-                                         agent_prepaid_target=agent_prepaid_targets)
+                                         agent_prepaid_target=agent_prepaid_targets,
+                                         agent_reassign_payment_mode=agent_reassign_payment_modes)
 
     if not assignments:
         print(f"{len(unassigned_pending)} unassigned lead(s) found, but every eligible agent is already at quota (or excluded) for each. Nothing to assign.")

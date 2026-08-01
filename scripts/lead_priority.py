@@ -128,12 +128,13 @@ LOW_PRIORITY_COD_RTO_REASONS = _RULES["lowPriorityCodRtoReasons"]
 
 DEFAULT_QUOTA = _RULES["assignmentQuota"]
 
-# Connected=No reassignment - shared with the JS "Next to Assign" preview so the cutoff/cap
-# can't drift between them the way DEFAULT_QUOTA once did. See leadAssignmentRules.json's
+# Connected=No reassignment - shared with the JS "Next to Assign" preview so none of these can
+# drift between them the way DEFAULT_QUOTA once did. See leadAssignmentRules.json's
 # _reassignNote for what these mean.
 from datetime import datetime as _datetime
 REASSIGN_BACKLOG_CUTOFF = _datetime.strptime(_RULES["reassignBacklogCutoff"], "%Y-%m-%d")
 REASSIGN_RETRY_CAP = _RULES["reassignRetryCap"]
+REASSIGN_MIN_HOLD_HOURS = _RULES["reassignMinHoldHours"]
 
 
 def is_prepaid(payment_raw):
@@ -162,7 +163,8 @@ def priority_tier(payment_raw, rto_reason_raw):
 
 def build_assignment_queue(unassigned_pending, online_agents, current_load, quota=DEFAULT_QUOTA,
                             excluded_by_row=None, rto_reason_by_row=None,
-                            agent_specializations=None, agent_prepaid_target=None):
+                            agent_specializations=None, agent_prepaid_target=None,
+                            agent_reassign_payment_mode=None):
     """Round-robins a pool of unassigned pending leads across online agents up to
     `quota` each, based on each agent's current load. Pure/side-effect-free -
     callers decide whether to actually write the result (assign_leads.py) or
@@ -209,6 +211,14 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     hard cap could strand prepaid leads unassigned purely because everyone online happened to
     be tuned low. Absent/unset for an agent means no target, i.e. unrestricted exactly as
     before this parameter existed.
+    agent_reassign_payment_mode: optional {email: 'Prepaid' or 'COD'} - unlike
+    agent_prepaid_target, a HARD filter that only ever applies to a reassignment (a row_index
+    present in excluded_by_row); a fresh/never-touched lead ignores it entirely. An agent with
+    an entry here is ineligible for a reassignment whose payment type doesn't match, in every
+    pass, with no ratio-ignoring fallback - if every online agent's setting excludes a given
+    reassignment's type, that lead is left unassigned rather than forced onto someone who opted
+    out of it. Absent/unset for an agent means no restriction, exactly as before this parameter
+    existed.
 
     Returns {row_index: agent_email}.
     """
@@ -218,6 +228,7 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     rto_reason_by_row = rto_reason_by_row or {}
     agent_specializations = agent_specializations or {}
     agent_prepaid_target = agent_prepaid_target or {}
+    agent_reassign_payment_mode = agent_reassign_payment_mode or {}
 
     # Seconds since epoch via timedelta subtraction (not .timestamp() - that calls into
     # the platform's C time functions and raises on Windows for extreme/pre-epoch values,
@@ -281,6 +292,14 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
         prospective_total = total_assigned_this_run[email] + 1
         return (prospective_prepaid / prospective_total) * 100 <= target
 
+    def _matches_reassign_payment_mode(email, row_index, is_prepaid_lead):
+        if row_index not in excluded_by_row:
+            return True
+        mode = agent_reassign_payment_mode.get(email)
+        if not mode:
+            return True
+        return mode == ('Prepaid' if is_prepaid_lead else 'COD')
+
     def _try_assign(candidate_ok):
         nonlocal cursor
         for _ in range(len(agent_order)):
@@ -295,18 +314,23 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
         is_prepaid_lead = (tier == 0)
 
         # Pass 1: a specialist for this lead's RTO reason gets first refusal, still subject to
-        # quota/exclusion/prepaid-target - "first refusal" means ahead of the general pool, not
-        # an unconditional override of everything else.
+        # quota/exclusion/prepaid-target/reassign-payment-mode - "first refusal" means ahead of
+        # the general pool, not an unconditional override of everything else.
         chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0
+                              and _matches_reassign_payment_mode(e, row_index, is_prepaid_lead)
                               and _matches_specialist(e, row_index) and _within_prepaid_target(e, is_prepaid_lead))
-        # Pass 2: general round-robin, still respecting each agent's soft prepaid target.
+        # Pass 2: general round-robin, still respecting each agent's soft prepaid target and
+        # hard reassign-payment-mode filter.
         if chosen is None:
             chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0
+                                  and _matches_reassign_payment_mode(e, row_index, is_prepaid_lead)
                                   and _within_prepaid_target(e, is_prepaid_lead))
         # Pass 3: every eligible agent is at/over their prepaid target - assign anyway rather
-        # than leave the lead unassigned purely to protect a soft ratio.
+        # than leave the lead unassigned purely to protect a soft ratio. reassign-payment-mode
+        # stays hard even here - see its own docstring entry.
         if chosen is None:
-            chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0)
+            chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0
+                                  and _matches_reassign_payment_mode(e, row_index, is_prepaid_lead))
 
         if chosen is not None:
             assignments[row_index] = chosen

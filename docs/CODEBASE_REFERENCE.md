@@ -324,43 +324,70 @@ can't execute the JS, so this duplication is unavoidable — but **all values** 
 the shared JSON. They had already drifted once: quota 10 in JS vs 20 in Python, so the
 preview forecast half the real volume.
 
-### Per-agent routing controls — Prepaid Target % and Priority Reasons
+### Per-agent routing controls — Prepaid Target %, Priority Reasons, Reassign Only
 
-Two admin-configurable controls, per (agent, process), stored in `calling_agent_process`
-(`prepaid_pct` INTEGER, `priority_rto_reasons` TEXT) alongside `max_quota` — set from the
-Team Roster table's two new columns via the same `saveProcessAgent`/`POST
+Three admin-configurable controls, per (agent, process), stored in `calling_agent_process`
+(`prepaid_pct` INTEGER, `priority_rto_reasons` TEXT, `reassign_payment_mode` TEXT) alongside
+`max_quota` — set from the Team Roster table's columns via the same `saveProcessAgent`/`POST
 /api/admin/calling-agents` round-trip as Quota. `getCallingProcessAgents`/
-`setCallingProcessAgent` in `api/_lib/db.js` read/write both; `NULL`/`null` means "unset,"
-same "missing ≠ zero" convention as `max_quota` (an agent with no row must never be read as
-0% or as `disabled` by omission).
+`setCallingProcessAgent` in `api/_lib/db.js` read/write all three; `prepaid_pct`/
+`priority_rto_reasons` follow the "missing ≠ zero" convention `max_quota` already used (`NULL`/
+omitted means "unset," never read as 0% or disabled). `reassign_payment_mode` instead treats
+`''` as a real, distinct-from-omitted value (same idea as `priority_rto_reasons`'s own text
+convention) — the client sends `''` explicitly for "No restriction," which must actively clear a
+previously-set filter rather than being indistinguishable from the field being left out of the
+request entirely.
 
-`build_assignment_queue` (`scripts/lead_priority.py`) gained three new optional parameters —
-`rto_reason_by_row`, `agent_specializations`, `agent_prepaid_target` — implementing both
-controls as **three ordered passes per lead** inside the existing per-lead cursor round-robin
-(each pass is a full lap of `agent_order` via a shared `_try_assign` closure, cursor advancing
-on every attempt whether it succeeds or not):
+`build_assignment_queue` (`scripts/lead_priority.py`) gained four optional parameters —
+`rto_reason_by_row`, `agent_specializations`, `agent_prepaid_target`,
+`agent_reassign_payment_mode` — implementing the first three controls as **three ordered passes
+per lead** inside the existing per-lead cursor round-robin (each pass is a full lap of
+`agent_order` via a shared `_try_assign` closure, cursor advancing on every attempt whether it
+succeeds or not):
 
 1. **Specialist first refusal** — an agent with a non-empty `agent_specializations` entry
    (comma-separated, lowercase, case-insensitive-substring, same convention as
    `leadAssignmentRules.json`'s own `highPriorityCodRtoReasons`/`lowPriorityCodRtoReasons`)
    gets first look at any lead whose `rto_reason_by_row` text contains one of their substrings —
    ahead of the general round-robin for that one lead, still subject to quota/exclusion/prepaid-
-   target below. Two specialists matching the same lead never both receive it — whichever is
-   next in the round-robin rotation wins, exactly like any other tie today.
+   target/reassign-payment-mode below. Two specialists matching the same lead never both receive
+   it — whichever is next in the round-robin rotation wins, exactly like any other tie today.
 2. **General round-robin, prepaid-target-aware** — if no eligible specialist exists (or the only
-   one is over their prepaid target/at quota/excluded), falls to the normal rotation, except an
-   agent with `agent_prepaid_target` set is skipped for a **prepaid** lead once assigning it
-   would push their own *this-run* prepaid share (`prepaid_assigned_this_run / total_assigned_
-   this_run`, not lifetime load — there's no payment-type breakdown of `current_load`) over
-   their target. COD leads are never subject to this check at all.
+   one is over their prepaid target/at quota/excluded/reassign-filtered), falls to the normal
+   rotation, except an agent with `agent_prepaid_target` set is skipped for a **prepaid** lead
+   once assigning it would push their own *this-run* prepaid share (`prepaid_assigned_this_run /
+   total_assigned_this_run`, not lifetime load — there's no payment-type breakdown of
+   `current_load`) over their target. COD leads are never subject to this check at all.
 3. **Ratio-ignoring fallback** — if every remaining eligible agent is at/over their prepaid
    target, assigns anyway rather than leaving the lead unassigned; a **soft** target steers the
-   mix over time, it never strands a lead to protect a percentage.
+   mix over time, it never strands a lead to protect a percentage. `agent_reassign_payment_mode`
+   is checked in every one of the three passes above (like exclusion/quota, not like the soft
+   prepaid target) and is **never relaxed here** — a reassignment whose payment type no eligible
+   agent accepts is left unassigned rather than forced onto someone who opted out of it.
 
-`RtoCrmClient.js`'s `predictedAssignments` mirrors all three passes exactly (`matchesSpecialist`/
-`withinPrepaidTarget`/`tryAssign`, reading `prepaidPct`/`priorityRtoReasons` off
-`effectiveAgentRoster`, itself merged from `processAgents` the same way `maxQuota` already
-was) — same two-languages-one-rulebook caveat as the rest of this section applies.
+`agent_reassign_payment_mode` (`{email: 'Prepaid' | 'COD'}`) only ever applies to a
+**reassignment** — a `row_index` present in `excluded_by_row` (a Connected=No lead someone
+already failed to reach). A fresh/never-touched lead ignores it entirely, same as the column's
+name/tooltip promise ("Reassign Only"). Absent/unset for an agent means no restriction.
+
+**Reassignment hold** (`reassignMinHoldHours` in `leadAssignmentRules.json`, currently 24): a
+Connected=No lead isn't even offered to `build_assignment_queue` as a reassignment candidate
+until this many hours have passed since its real `assigned_at` (the live `lead_assignments` row,
+`reassigned_away_at IS NULL` — not Calling Date, which only gates the one-time
+`reassignBacklogCutoff` migration boundary). Unlike the cutoff/retry-cap, this is a **rolling**
+window and nothing is stamped when a lead fails it — it's simply left out of both the
+reassignment pool and `current_load` for this run, and re-enters the same check next run.
+`scripts/assign_leads.py`'s `fetch_current_assignment_times()` reads it fresh from Postgres each
+run; `RtoCrmClient.js`'s preview reads the same timestamp off `leadDates` (already fetched for
+the Overview tab's date-scoping, via `lead_assignments_current`).
+
+`RtoCrmClient.js`'s `predictedAssignments` mirrors all of the above (`matchesSpecialist`/
+`withinPrepaidTarget`/`matchesReassignPaymentMode`/`tryAssign`, reading `prepaidPct`/
+`priorityRtoReasons`/`reassignPaymentMode` off `effectiveAgentRoster`, itself merged from
+`processAgents` the same way `maxQuota` already was) — same two-languages-one-rulebook caveat as
+the rest of this section applies. One known preview gap remains Python-only: the retry-cap
+(`REASSIGN_RETRY_CAP`) still can't be enforced client-side, since the full cross-run reassignment
+history lives only in Postgres.
 
 ### Overview tab — Agent Performance Summary
 

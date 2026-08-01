@@ -364,6 +364,14 @@ async function ensurePgSchema() {
   // lead gets first refusal to them before the general round-robin, same as
   // build_assignment_queue's agent_specializations parameter. NULL/empty = no specialization.
   await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS priority_rto_reasons TEXT`;
+  // Hard filter on Connected=No REASSIGNMENTS only (never a fresh/never-touched lead): '' =
+  // no restriction (reassigned leads of either payment type may land on this agent, same as
+  // every agent before this existed), 'Prepaid'/'COD' = this agent only ever receives a
+  // reassignment of that one payment type - unlike prepaid_pct above, this never relaxes on a
+  // later pass, so a reassignment whose type no online agent accepts is left unassigned rather
+  // than forced onto someone. See build_assignment_queue's agent_reassign_payment_mode
+  // parameter.
+  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS reassign_payment_mode TEXT`;
   // Disposal side of the same lead lifecycle - written by rto-crm.html's submitDisp()
   // in real time (via a new recordDisposition auth action) alongside its existing
   // direct-to-Sheet write, so this history survives independent of the Google Sheet
@@ -1053,7 +1061,8 @@ async function getCallingProcessAgents(processKey) {
     ORDER BY u.is_admin DESC, u.name ASC
   `;
   const { rows: state } = await pgSql`
-    SELECT email, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, updated_at, updated_by
+    SELECT email, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons,
+           reassign_payment_mode, updated_at, updated_by
     FROM calling_agent_process WHERE process_key = ${processKey}
   `;
   const byEmail = {};
@@ -1069,6 +1078,7 @@ async function getCallingProcessAgents(processKey) {
       isProcessAdmin: !!(s && s.is_process_admin),
       prepaidPct: s && s.prepaid_pct != null ? s.prepaid_pct : null,
       priorityRtoReasons: (s && s.priority_rto_reasons) || '',
+      reassignPaymentMode: (s && s.reassign_payment_mode) || '',
       updatedAt: (s && s.updated_at) || null,
       updatedBy: (s && s.updated_by) || null,
     };
@@ -1077,7 +1087,7 @@ async function getCallingProcessAgents(processKey) {
 
 // Upserts one agent's status and/or quota for one process. Either field may be omitted, so an
 // agent flipping their own status can't accidentally reset a quota an admin set.
-async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons } = {}, updatedBy) {
+async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons, reassignPaymentMode } = {}, updatedBy) {
   await ensurePgSchema();
   const key = String(email || '').trim().toLowerCase();
   if (!processKey || !key) throw new Error('processKey and email are required');
@@ -1109,15 +1119,25 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
   // is a real, distinct-from-NULL value that COALESCE will apply rather than skip - only an
   // omitted field (undefined, mapped to NULL here) leaves the stored value untouched.
   const reasonsText = priorityRtoReasons === undefined ? null : String(priorityRtoReasons || '').trim();
+  // Same "'' is a real, distinct-from-NULL value" contract as priorityRtoReasons above (unlike
+  // prepaidPct/maxQuota, where '' from the client means null i.e. "leave alone") - the "No
+  // restriction" option must actively clear a previously-set filter, not just be indistinguishable
+  // from the field being omitted entirely.
+  if (reassignPaymentMode !== undefined && reassignPaymentMode !== '' &&
+      reassignPaymentMode !== 'Prepaid' && reassignPaymentMode !== 'COD') {
+    throw new Error("reassignPaymentMode must be '', 'Prepaid', or 'COD'");
+  }
+  const reassignModeText = reassignPaymentMode === undefined ? null : String(reassignPaymentMode || '').trim();
   await pgSql`
-    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, updated_at, updated_by)
-    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, now(), ${updatedBy || null})
+    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, reassign_payment_mode, updated_at, updated_by)
+    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, ${reassignModeText || ''}, now(), ${updatedBy || null})
     ON CONFLICT (email, process_key) DO UPDATE
       SET status = COALESCE(${status || null}, calling_agent_process.status),
           max_quota = COALESCE(${quota}, calling_agent_process.max_quota),
           is_process_admin = COALESCE(${adminFlag}, calling_agent_process.is_process_admin),
           prepaid_pct = COALESCE(${prepaidTarget}, calling_agent_process.prepaid_pct),
           priority_rto_reasons = COALESCE(${reasonsText}, calling_agent_process.priority_rto_reasons),
+          reassign_payment_mode = COALESCE(${reassignModeText}, calling_agent_process.reassign_payment_mode),
           updated_at = now(),
           updated_by = ${updatedBy || null}
   `;

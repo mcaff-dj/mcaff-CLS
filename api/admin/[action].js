@@ -12,7 +12,8 @@
 //   GET    /api/admin/business-hours  -> every calling process's week (saved, or defaults)
 //   POST   /api/admin/business-hours  -> save one process's week: { processKey, week: {mon:{open,close},...} }
 //   GET    /api/admin/calling-agents?process=rto -> that process's roster + per-process status/quota
-//   POST   /api/admin/calling-agents  -> { processKey, email, status?, maxQuota? }
+//   POST   /api/admin/calling-agents  -> { processKey, email, status?, maxQuota?, prepaidPct?,
+//                                          priorityRtoReasons?, reassignPaymentMode? }
 //   DELETE /api/admin/calling-agents  -> revoke ONE process's access for one agent, leaving
 //                                        every other process/card they hold untouched:
 //                                        { processKey, email }
@@ -299,6 +300,7 @@ async function handleCallingAgents(req, res, session) {
         {
           status: body.status, maxQuota: body.maxQuota, isProcessAdmin: body.isProcessAdmin,
           prepaidPct: body.prepaidPct, priorityRtoReasons: body.priorityRtoReasons,
+          reassignPaymentMode: body.reassignPaymentMode,
         },
         session.email,
       );
