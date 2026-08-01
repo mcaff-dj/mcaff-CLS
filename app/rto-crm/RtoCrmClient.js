@@ -3293,6 +3293,127 @@ const localStorage = typeof window !== 'undefined'
                   const summaryAvgBreak = summaryBreakList.length
                     ? Math.round(summaryBreakList.reduce((s, m) => s + m, 0) / summaryBreakList.length) : 0;
 
+                  // Same Blob/anchor download as downloadConvertedOrdersCsv below - exports
+                  // exactly what's on screen in the Agent Performance Summary table, one row per
+                  // agent plus the Team Total row, same column order and same formatPct/
+                  // formatTimeOfDay/formatBreakMinutes strings the table itself renders (so a
+                  // cell in the sheet always matches what an admin saw on screen, not a raw
+                  // recomputation that could drift from it).
+                  function downloadAgentSummaryCsv() {
+                    const escapeCsv = (v) => {
+                      const s = String(v ?? '');
+                      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+                    };
+                    const header = [
+                      'Agent Name', 'Total Leads Assigned', 'Total Disposed', 'First Called At',
+                      'Total Connected', 'Connected %', 'Total Prepaid Assigned', 'Total Prepaid Assigned %',
+                      'Total Prepaid Connected', 'Total Prepaid Connected %', 'Total COD Assigned', 'Total COD Assigned %',
+                      'Total Prepaid Converted', 'Total Prepaid Converted %', 'Total COD Converted', 'Total COD Converted %',
+                      'Logged In At', 'Total Break Time',
+                    ];
+                    const rowFor = (am) => {
+                      const presence = serverPresence[am.email.toLowerCase()];
+                      return [
+                        am.name, am.assigned, am.disposed, formatTimeOfDay(am.firstCalledAtMinutes),
+                        am.connected, formatPct(am.connected, am.disposed),
+                        am.prepaidAssigned, formatPct(am.prepaidAssigned, am.assigned),
+                        am.prepaidConnected, formatPct(am.prepaidConnected, am.prepaidAssigned),
+                        am.codAssigned, formatPct(am.codAssigned, am.assigned),
+                        am.prepaidConverted, formatPct(am.prepaidConverted, am.prepaidAssigned),
+                        am.codConverted, formatPct(am.codConverted, am.codAssigned),
+                        formatTimeOfDay(presence?.loggedInMinutes), formatBreakMinutes(presence?.breakMinutes),
+                      ];
+                    };
+                    const lines = [header.map(escapeCsv).join(',')];
+                    summaryRows.forEach(am => lines.push(rowFor(am).map(escapeCsv).join(',')));
+                    if (summaryRows.length > 0) {
+                      lines.push([
+                        'Team Total', summaryTotals.assigned, summaryTotals.disposed, '—',
+                        summaryTotals.connected, formatPct(summaryTotals.connected, summaryTotals.disposed),
+                        summaryTotals.prepaidAssigned, formatPct(summaryTotals.prepaidAssigned, summaryTotals.assigned),
+                        summaryTotals.prepaidConnected, formatPct(summaryTotals.prepaidConnected, summaryTotals.prepaidAssigned),
+                        summaryTotals.codAssigned, formatPct(summaryTotals.codAssigned, summaryTotals.assigned),
+                        summaryTotals.prepaidConverted, formatPct(summaryTotals.prepaidConverted, summaryTotals.prepaidAssigned),
+                        summaryTotals.codConverted, formatPct(summaryTotals.codConverted, summaryTotals.codAssigned),
+                        formatTimeOfDay(summaryAvgLoggedIn), formatBreakMinutes(summaryAvgBreak),
+                      ].map(escapeCsv).join(','));
+                    }
+                    const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `agent-performance-summary-${new Date().toISOString().slice(0, 10)}.csv`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                  }
+
+                  // Raw per-lead detail behind the summary table above - one row per ticket
+                  // rather than aggregated per agent, so an admin can audit/reconcile exactly
+                  // which orders make up a summary number. Union of assignedDateInScope OR
+                  // (worked AND disposedDateInScope) - the same two independent scopes
+                  // computeTableAgentMetrics applies, just not collapsed to counts - so a lead
+                  // assigned yesterday and disposed today appears once here (it isn't double
+                  // counted the way it would be if this were a plain concatenation of the two
+                  // scoped sets). Same isMyAgent roster scoping as the summary table: a plain
+                  // Agent only ever gets their own raw rows.
+                  const rawLeadDetailsRoster = userRole === 'Agent' && !isProcessAdmin
+                    ? effectiveAgentRoster.filter(isMyAgent) : effectiveAgentRoster;
+                  const isWorkedForRaw = t => !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
+                  const rawLeadDetailsList = rawLeadDetailsRoster.flatMap(ag => {
+                    const email = ag.email.toLowerCase();
+                    const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
+                    return allTickets
+                      .filter(t => isMine(t.assignedAgent)
+                        && (assignedDateInScope(t) || (isWorkedForRaw(t) && disposedDateInScope(t))))
+                      .map(t => {
+                        const dates = leadDates[normalizeOrderKey(t.orderNumber)] || {};
+                        const isConverted = !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
+                        return {
+                          orderNumber: t.orderNumber,
+                          agentName: ag.name,
+                          paymentMethod: t.paymentMethod || '',
+                          assignedAt: dates.assignedAt || '',
+                          disposedAt: dates.disposedAt || '',
+                          connected: t.connected || '',
+                          disposition: t.disposition || (t.newOrderId ? 'Reorder' : ''),
+                          converted: isConverted ? 'Yes' : 'No',
+                        };
+                      });
+                  }).sort((a, b) => a.agentName.localeCompare(b.agentName) || a.orderNumber.localeCompare(b.orderNumber));
+
+                  // Same Blob/anchor download pattern as downloadConvertedOrdersCsv/
+                  // downloadAgentSummaryCsv - assignedAt/disposedAt come back from Postgres as
+                  // ISO strings (leadDates); formatted to IST here, same "when did this really
+                  // happen" question the summary table's own date-scoping answers, rather than
+                  // exporting a raw UTC ISO string a spreadsheet user would have to convert.
+                  function downloadRawLeadDetailsCsv() {
+                    const escapeCsv = (v) => {
+                      const s = String(v ?? '');
+                      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+                    };
+                    const formatCsvDate = (iso) => iso
+                      ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })
+                      : '';
+                    const lines = [
+                      ['Order ID', 'Agent Name', 'Payment Method', 'Assigned Date', 'Disposed Date', 'Connected', 'Disposition', 'Converted'].join(','),
+                      ...rawLeadDetailsList.map(r => [
+                        r.orderNumber, r.agentName, r.paymentMethod, formatCsvDate(r.assignedAt), formatCsvDate(r.disposedAt),
+                        r.connected, r.disposition, r.converted,
+                      ].map(escapeCsv).join(',')),
+                    ];
+                    const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `agent-performance-raw-${new Date().toISOString().slice(0, 10)}.csv`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                  }
+
                   const totalAssigned = visibleAgentMetrics.reduce((s, a) => s + a.assigned, 0);
                   const totalDisposed = visibleAgentMetrics.reduce((s, a) => s + a.disposed, 0);
                   const totalPending = visibleAgentMetrics.reduce((s, a) => s + a.pending, 0);
@@ -3412,21 +3533,45 @@ const localStorage = typeof window !== 'undefined'
 
                       {/* Agent Performance Summary */}
                       <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
-                        <div>
-                          <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">📋 Agent Performance Summary</h3>
-                          <p className="text-[12px] text-zinc-500 mt-0.5">
-                            Follows the date range above, but each column uses its own REAL event date (not Calling Date/Order
-                            Date, unlike the KPI tiles above): Assigned columns use when the lead was actually handed to the
-                            agent; Disposed/Connected/Converted columns use when the agent actually resolved it - a lead
-                            assigned yesterday and disposed today counts toward today's Disposed/Connected/Converted numbers
-                            even though it doesn't count toward today's Assigned ones. Hover a header for which, and for what
-                            each % is of. Logged In At is the average time-of-day of first login across the range's active
-                            days (days with any real status change); First Called At is the same average, but of the first
-                            disposition each active day (days with any resolved lead); Total Break Time is the average break
-                            minutes per active day - all three follow the same filter (an approximate calendar-day window for
-                            7 Days/30 Days, not the exact rolling hours the lead columns use), and reduce to the plain
-                            single-day numbers for Today/Yesterday/a one-day Custom range.
-                          </p>
+                        <div className="flex items-start justify-between flex-wrap gap-3">
+                          <div>
+                            <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">📋 Agent Performance Summary</h3>
+                            <p className="text-[12px] text-zinc-500 mt-0.5">
+                              Follows the date range above, but each column uses its own REAL event date (not Calling Date/Order
+                              Date, unlike the KPI tiles above): Assigned columns use when the lead was actually handed to the
+                              agent; Disposed/Connected/Converted columns use when the agent actually resolved it - a lead
+                              assigned yesterday and disposed today counts toward today's Disposed/Connected/Converted numbers
+                              even though it doesn't count toward today's Assigned ones. Hover a header for which, and for what
+                              each % is of. Logged In At is the average time-of-day of first login across the range's active
+                              days (days with any real status change); First Called At is the same average, but of the first
+                              disposition each active day (days with any resolved lead); Total Break Time is the average break
+                              minutes per active day - all three follow the same filter (an approximate calendar-day window for
+                              7 Days/30 Days, not the exact rolling hours the lead columns use), and reduce to the plain
+                              single-day numbers for Today/Yesterday/a one-day Custom range.
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={downloadRawLeadDetailsCsv}
+                              disabled={rawLeadDetailsList.length === 0}
+                              title="One row per lead behind this table - Order ID, Agent Name, Payment Method, Assigned Date, Disposed Date, Connected, Disposition, Converted"
+                              className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-[13px] font-medium text-zinc-200 transition-all shadow-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              <DownloadIcon />
+                              Raw Lead Details
+                            </button>
+                            <button
+                              type="button"
+                              onClick={downloadAgentSummaryCsv}
+                              disabled={summaryRows.length === 0}
+                              title="This table exactly as shown, one row per agent plus Team Total"
+                              className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-[13px] font-medium text-zinc-200 transition-all shadow-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              <DownloadIcon />
+                              Export CSV
+                            </button>
+                          </div>
                         </div>
                         <div className="overflow-x-auto custom-scroll">
                           <table className="w-full min-w-[1080px] text-[12.5px] border-collapse">
