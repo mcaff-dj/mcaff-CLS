@@ -1668,6 +1668,10 @@ const localStorage = typeof window !== 'undefined'
       };
 
       // Sync
+      // syncFailCountRef (not state - a retry timer read doesn't need a re-render) tracks
+      // consecutive failures so the retry below can back off instead of hammering Google's
+      // Sheets API at a fixed cadence forever once it starts throttling.
+      const syncFailCountRef = useRef(0);
       const sync = useCallback(async(silent=false)=>{
         const sid=extractSheetId(DEFAULT_SHEET_URL);if(!sid)return;setIsSyncing(true);
         try{
@@ -1677,6 +1681,7 @@ const localStorage = typeof window !== 'undefined'
           try{localStorage.setItem('rto_cache_v4',JSON.stringify(mapped.slice(0,10000)));}catch{}
           setLastSync(new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));
           setSyncError(null);
+          syncFailCountRef.current = 0;
           if(!silent)showToast(`${mapped.length.toLocaleString('en-IN')} leads synced`);
         } catch(e) {
           // A background sync failure used to fail completely silently (silent=true suppressed
@@ -1688,7 +1693,17 @@ const localStorage = typeof window !== 'undefined'
           console.error('Sync failed:', e);
           setSyncError(e.message || 'Sync failed');
           if(!silent)showToast(e.message);
-          setTimeout(()=>sync(true), 15000);
+          // Exponential backoff + jitter, capped at 5 minutes, resetting to 0 on the next
+          // successful sync above. A single blip still retries in ~15s exactly as before; the
+          // difference is what happens when Google's Sheets API is actually throttling
+          // (429)/erroring (500) - a fixed 15s retry across every open tab just kept re-hitting
+          // an already-exhausted quota at 4x the normal poll rate forever, which never gives
+          // the quota window a chance to clear and turns one transient error into a sustained,
+          // team-wide outage (confirmed in prod: every tab stuck retrying every 15s straight).
+          syncFailCountRef.current = Math.min(syncFailCountRef.current + 1, 6);
+          const backoffMs = Math.min(15000 * (2 ** (syncFailCountRef.current - 1)), 300000);
+          const jitterMs = Math.random() * 3000;
+          setTimeout(()=>sync(true), backoffMs + jitterMs);
         } finally {
           setIsSyncing(false);
         }

@@ -166,6 +166,7 @@ let pgSchemaReady = false;
 // above), separate idempotent-once-per-warm-instance flag from the MySQL schema.
 async function ensurePgSchema() {
   if (pgSchemaReady) return;
+  try {
   // Agent online/offline state (replaces the removed Supabase agent_status table) -
   // one row per agent, upserted on every explicit status change and periodic
   // heartbeat. scripts/assign_leads.py reads this directly (via its own psycopg
@@ -444,6 +445,20 @@ async function ensurePgSchema() {
     )
   `;
   await pgSql`CREATE INDEX IF NOT EXISTS agent_presence_log_email_idx ON agent_presence_log (email, changed_at DESC)`;
+  } catch (e) {
+    // Postgres codes for "already exists" (duplicate_column/duplicate_table/duplicate_object)
+    // - a benign race, not a real failure: every statement above is its own ADD COLUMN IF NOT
+    // EXISTS/CREATE ... IF NOT EXISTS, but two concurrent cold Lambda starts can still both
+    // pass that check before either commits (a known Postgres race, most likely right after a
+    // deploy when a burst of containers all run this for the first time at once). The desired
+    // end state is already reached either way. Previously a hit here left pgSchemaReady false,
+    // so that same warm container re-ran this entire statement list - and could 500 again - on
+    // every subsequent request until it happened to win the race. Anything else (a real
+    // connectivity/permissions failure) still propagates - masking that would let callers query
+    // tables that were never actually created.
+    if (!['42701', '42P07', '42710'].includes(e.code)) throw e;
+    console.error('ensurePgSchema: benign already-exists race, continuing:', e.code, e.message);
+  }
   pgSchemaReady = true;
 }
 
