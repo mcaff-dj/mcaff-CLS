@@ -249,7 +249,14 @@ jobs:
             fi
             echo "Push rejected (attempt $i/5) - fetching and rebasing onto latest main..."
             git fetch origin main
-            if ! git rebase origin/main; then
+            # --autostash because the worktree is dirty at this point and plain `git rebase`
+            # aborts outright with "cannot rebase: You have unstaged changes": this job also
+            # writes the report HTML and raw CSVs (S3-bound, deliberately never staged into
+            # the commit above) plus data/fetch_progress.txt. Without it, every run that
+            # loses the push race - i.e. most scheduled runs, which overlap the
+            # export-resolved-tickets job - failed here and discarded its refreshed caches,
+            # so data/*_smalltabs_cache.json silently stopped advancing.
+            if ! git rebase --autostash origin/main; then
               echo "Rebase onto origin/main failed after a push rejection - needs manual resolution." >&2
               exit 1
             fi
