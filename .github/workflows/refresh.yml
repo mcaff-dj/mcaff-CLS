@@ -4,7 +4,16 @@ on:
   schedule:
     - cron: '30 8 * * *'    # 08:30 UTC = 2:00 PM IST, daily - reports only, NPS from cache
     - cron: '30 21 * * *'   # 21:30 UTC = 3:00 AM IST next day - the one run that re-queries NPS
-  workflow_dispatch: {}     # manual "Run workflow" button - never re-queries NPS
+  workflow_dispatch:        # manual "Run workflow" button - never re-queries NPS
+    inputs:
+      full_refresh:
+        # A manual run reuses data/*_smalltabs_cache.json by default (--quick), so a fresh
+        # Agent/AI CSAT row added to the sheet's AGENT/AI tabs is invisible until a cron
+        # fires. Tick this to refetch those tabs live instead of waiting for one. The
+        # site's own "Refresh Data" button doesn't set it, so that stays quick.
+        description: 'Refetch the Agent/AI CSAT and RTO-Conversion sheet tabs instead of reusing cache'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -63,6 +72,9 @@ jobs:
           # Which cron fired, for scheduled runs ('' for workflow_dispatch) - this is how the
           # 3 AM IST NPS run is told apart from the 2 PM IST reports-only one.
           SCHEDULE: ${{ github.event.schedule }}
+          # 'true' only when a manual run ticked the full_refresh input - '' on schedules
+          # (which are already full runs) and on the site's Refresh-Data button.
+          FULL_REFRESH: ${{ github.event.inputs.full_refresh }}
           MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
           MYSQL_USER: ${{ secrets.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
@@ -83,11 +95,14 @@ jobs:
           # ever pulls the last ~30 days live from the primary sheet (settled months come from
           # the CLS_KYC_mCaff/CLS_KYC_Hyphen MySQL mirrors instead, see kyc_source.py). --quick
           # only changes whether the small tabs / RTO-Conversion data get refetched live
-          # (schedule) or reused from cache (button).
+          # (schedule) or reused from cache (button) - unless a manual run ticks the
+          # full_refresh input, which opts that run into the live refetch too.
           QUICK=""
-          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ] && [ "${FULL_REFRESH:-}" != "true" ]; then
             echo "Manual trigger - running a quick refresh (reusing cached small tabs/RTO-Conversion data)."
             QUICK="--quick"
+          elif [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "Manual trigger with full_refresh - refetching small tabs/RTO-Conversion data live."
           fi
           # NPS (mcaff_dwh.nps_delivery / nps_product) is re-queried on exactly ONE run a day -
           # the 3 AM IST schedule - and read from data/<brand>_nps_cache.json on every other

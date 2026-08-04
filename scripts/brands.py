@@ -10,9 +10,17 @@ BRANDS = [
         "sheet_name": "mCaffeine",
         "last_col": "AG",
         "out_file": "api/_reports/mcaffeine.html",
+        # The LAST entry is special: generate_report.py treats it as the current,
+        # still-moving month - it's the only month pulled live from the sheet, and the one
+        # month excluded from the CLS_KYC_* MySQL mirror. So rolling the month over means
+        # appending here AND making sure the previous month is fully loaded into the mirror
+        # (see scripts/append_kyc_month_to_mysql.py), or it renders from nothing.
+        # Labels must match the sheet's own Month column byte-for-byte - note 2025 pads to
+        # two digits ("08_Aug'25") but 2026 does not ("8_Aug'26"); verified against
+        # SELECT DISTINCT `month` on CLS_KYC_mCaff.
         "months": ["01_Jan'25", "02_Feb'25", "03_Mar'25", "04_Apr'25", "07_Jul'25", "08_Aug'25",
                    "09_Sep'25", "10_Oct'25", "11_Nov'25", "12_Dec'25", "1_Jan'26", "2_Feb'26",
-                   "3_Mar'26", "4_Apr'26", "5_May'26", "6_Jun'26", "7_Jul'26"],
+                   "3_Mar'26", "4_Apr'26", "5_May'26", "6_Jun'26", "7_Jul'26", "8_Aug'26"],
         "classes": [
             {"key": "Delivery", "id": "delivery", "label": "Delivery", "color": "var(--s1)"},
             {"key": "Warehouse", "id": "warehouse", "label": "Warehouse", "color": "var(--s2)"},
@@ -61,8 +69,10 @@ BRANDS = [
         "sheet_name": "Hyphen",
         "last_col": "AO",
         "out_file": "api/_reports/hyphen.html",
+        # See the mcaffeine note above - last entry is the live/current month.
         "months": ["08_Aug'25", "09_Sep'25", "10_Oct'25", "11_Nov'25", "12_Dec'25", "1_Jan'26",
-                   "2_Feb'26", "3_Mar'26", "4_Apr'26", "5_May'26", "6_Jun'26", "7_Jul'26"],
+                   "2_Feb'26", "3_Mar'26", "4_Apr'26", "5_May'26", "6_Jun'26", "7_Jul'26",
+                   "8_Aug'26"],
         "classes": [
             {"key": "Delivery", "id": "delivery", "label": "Delivery", "color": "var(--s1)"},
             {"key": "Warehouse", "id": "warehouse", "label": "Warehouse", "color": "var(--s2)"},
