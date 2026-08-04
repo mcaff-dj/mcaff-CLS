@@ -81,6 +81,40 @@ def fetch_today_delivery_tickets(table):
     return rows
 
 
+def fetch_awb_by_order(parent_orders):
+    """Display_Order_Code -> Tracking_Number, for orders whose ticket-level AWB is blank.
+    Item_level_data has one row per order item/sync channel, so an order can map to more
+    than one Tracking_Number (split shipments, re-syncs) - ORDER BY Created DESC plus
+    "first row seen per order wins" below picks the latest one."""
+    if not parent_orders:
+        return {}
+    placeholders = ",".join(["%s"] * len(parent_orders))
+    rows = mysql_lib.query(
+        f"SELECT Display_Order_Code, Tracking_Number FROM Item_level_data "
+        f"WHERE Display_Order_Code IN ({placeholders}) AND Tracking_Number IS NOT NULL AND Tracking_Number != '' "
+        f"ORDER BY Created DESC",
+        tuple(parent_orders), database="mcaff_prod",
+    )
+    out = {}
+    for order_code, tracking in (rows or []):
+        out.setdefault(order_code, tracking)
+    return out
+
+
+def fill_missing_awb(rows):
+    missing_orders = sorted({r[3] for r in rows if not r[4] and r[3]})
+    if not missing_orders:
+        return
+    awb_by_order = fetch_awb_by_order(missing_orders)
+    filled = 0
+    for r in rows:
+        if not r[4] and r[3] in awb_by_order:
+            r[4] = awb_by_order[r[3]]
+            filled += 1
+    if filled:
+        print(f"  filled AWB from Item_level_data for {filled} row(s)")
+
+
 def build_sheet_row(row):
     (ticket_number, subcategory, order_name, disposition_order,
      awb, partner, order_date, created_at, resolved_at, warehouse) = row
@@ -117,6 +151,8 @@ def sync_tab(tab, dry_run):
 
     if not new_rows:
         return
+
+    fill_missing_awb(new_rows)
 
     if dry_run:
         for r in new_rows[:5]:
