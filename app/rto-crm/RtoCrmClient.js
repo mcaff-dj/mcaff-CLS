@@ -3872,12 +3872,20 @@ const localStorage = typeof window !== 'undefined'
                       .map(t => {
                         const dates = leadDates[normalizeOrderKey(t.orderNumber)] || {};
                         const isConverted = !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
+                        // Per-lead FRT (unlike the summary table's per-agent average): this
+                        // one ticket's own disposedAt - assignedAt, in minutes. null when
+                        // either timestamp is missing or disposed logged before assigned (bad
+                        // data) - same "drop, don't zero" rule as frtMinutes above.
+                        const frtMinutes = (dates.assignedAt && dates.disposedAt)
+                          ? (new Date(dates.disposedAt).getTime() - new Date(dates.assignedAt).getTime()) / 60000
+                          : null;
                         return {
                           orderNumber: t.orderNumber,
                           agentName: ag.name,
                           paymentMethod: t.paymentMethod || '',
                           assignedAt: dates.assignedAt || '',
                           disposedAt: dates.disposedAt || '',
+                          frtMinutes: (frtMinutes !== null && frtMinutes >= 0) ? Math.round(frtMinutes) : null,
                           connected: t.connected || '',
                           disposition: t.disposition || (t.newOrderId ? 'Reorder' : ''),
                           converted: isConverted ? 'Yes' : 'No',
@@ -3899,10 +3907,10 @@ const localStorage = typeof window !== 'undefined'
                       ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })
                       : '';
                     const lines = [
-                      ['Order ID', 'Agent Name', 'Payment Method', 'Assigned Date', 'Disposed Date', 'Connected', 'Disposition', 'Converted'].join(','),
+                      ['Order ID', 'Agent Name', 'Payment Method', 'Assigned Date', 'Disposed Date', 'FRT', 'Connected', 'Disposition', 'Converted'].join(','),
                       ...rawLeadDetailsList.map(r => [
                         r.orderNumber, r.agentName, r.paymentMethod, formatCsvDate(r.assignedAt), formatCsvDate(r.disposedAt),
-                        r.connected, r.disposition, r.converted,
+                        formatFrt(r.frtMinutes), r.connected, r.disposition, r.converted,
                       ].map(escapeCsv).join(',')),
                     ];
                     const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
