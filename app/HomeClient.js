@@ -30,17 +30,16 @@ var NEXT_PAGE_ROUTES = {
   orgoverview: '/orgoverview'
 };
 
-// Calling Team has its own three nested nav sub-items instead of one blanket
-// "coming soon" card - each is its own placeholder for now until a real report/tool
-// is wired up behind it.
-//
-// ndr points at the SAME /rto-crm CRM shell as rto, not a separate page - the shell's own
-// Process switcher already knows how to render an unimplemented process (see
-// callingProcesses.json + RtoCrmClient.js's `!currentProcess.implemented` branch), so this
-// just deep-links straight to it via ?process=ndr instead of duplicating that shell.
+// Calling Team has its own nested nav sub-items instead of one blanket "coming soon"
+// card. Only 'overview' and 'rto' get their own sidebar entry - every OTHER calling
+// process (NDR, Detractor, Product KYC) lives entirely behind /rto-crm's own Process
+// switcher instead of getting a sidebar entry of its own, since they're all really the
+// same CRM shell (see callingProcesses.json + RtoCrmClient.js's
+// `!currentProcess.implemented` branch) and don't need a second way in. Access is still
+// enforced inside that switcher via invitedProcessKeys - removing a process from this
+// sidebar list is purely navigational, not a permission change.
 var CALLING_TEAM_SUBITEMS = {
   overview: { label: 'Overview', text: 'Calling Team Overview', url: '/calling-overview' },
-  ndr: { label: 'NDR-Calling', text: 'NDR CRM Agent Inbox', url: '/rto-crm?process=ndr' },
   rto: { label: 'RTO-Calling', text: 'RTO CRM Agent & Refund Portal', url: '/rto-crm' }
 };
 
@@ -185,7 +184,7 @@ function onBrandChange(brandKey, isUserAction) {
     document.getElementById('loadingOverlay').style.opacity = '0';
     document.getElementById('loadingOverlay').style.visibility = 'hidden';
 
-    var callingViews = ['overview', 'ndr', 'rto'];
+    var callingViews = ['overview', 'rto'];
     var allowedViews = userTabPerms['calling'];
     if (Array.isArray(allowedViews) && allowedViews.length) {
       var allowedViewSet = {};
@@ -232,10 +231,10 @@ function onIframeLoaded() {
 
   syncGranularityUI();
 
-  // Calling Team manages its own static Report Views list (Overview/NDR-Calling/
-  // RTO-Calling) via selectCallingTeamView - mirroring the iframe's internal tab
-  // bar here would otherwise wipe that list out every time RTO-Calling's iframe
-  // (/rto-crm, which has no .tab-nav) finishes loading or reloads internally.
+  // Calling Team manages its own static Report Views list (Overview/RTO-Calling) via
+  // selectCallingTeamView - mirroring the iframe's internal tab bar here would otherwise
+  // wipe that list out every time RTO-Calling's iframe (/rto-crm, which has no .tab-nav)
+  // finishes loading or reloads internally.
   if (currentBrand !== 'calling') {
     populateReportNav();
   }
