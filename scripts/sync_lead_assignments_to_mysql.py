@@ -42,7 +42,7 @@ TABLE = "CLS_RTO_calling"
 RETENTION_DAYS = 30
 
 COLUMNS = [
-    "order_id", "email", "assigned_at", "disposed_at",
+    "order_id", "agent_email", "assigned_at", "disposed_at",
     "disposition", "agent_remarks", "connected", "attempt", "refund_amount", "awb_code",
 ]
 
