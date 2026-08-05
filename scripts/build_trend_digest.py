@@ -261,7 +261,9 @@ def _sentence(b, c, baseline_label, window_label):
     else:
         subject = f"{parts[0]} - {parts[1]}"
     mult = f", {c['multiplier']}x" if c.get("multiplier") else ""
-    return (f"{b['title']}: {subject} {_verb(c['delta'])} from {c['baseline_rate']}% of orders "
+    # No brand prefix here - the brand is now the group's own sub-heading (see
+    # build_worst_trends), so repeating it on every line would be redundant.
+    return (f"{subject} {_verb(c['delta'])} from {c['baseline_rate']}% of orders "
             f"({baseline_label}) to {c['window_rate']}% ({window_label}) - "
             f"{c['baseline_cases']:,} to {c['window_cases']:,} cases{mult}.")
 
@@ -270,7 +272,9 @@ def build_worst_trends(brands, baseline, window):
     """The deck's "Five Worst Trends", derived rather than written: rank every dimension's
     keys by change in complaint rate between the baseline and the window, apply volume
     floors, and keep the largest movers. Grouped by dimension so one noisy dimension can't
-    crowd out the others."""
+    crowd out the others, then by brand within each dimension - interleaving mCaffeine and
+    Hyphen lines by raw delta reads as a shuffled list; a reader wants one brand's picture
+    at a time, ranked within itself."""
     baseline_label = f"{pretty(baseline[0])}-{pretty(baseline[-1])}" if len(baseline) > 1 else pretty(baseline[0])
     window_label = f"{pretty(window[0])}-{pretty(window[-1])}" if len(window) > 1 else pretty(window[0])
     groups = []
@@ -281,17 +285,20 @@ def build_worst_trends(brands, baseline, window):
         ("sku", "product_cats", "SKU x issue", MIN_WINDOW_CASES_SKU),
     ]
     for dim, store_key, title, floor in specs:
-        items = []
+        by_brand = []
         for b in brands:
+            items = []
             for c in _candidates(b, b.get(store_key) or {}, dim, baseline, window, floor):
                 c = dict(c)
                 c["brand"] = b["brand"]
                 c["brand_title"] = b["title"]
                 c["sentence"] = _sentence(b, c, baseline_label, window_label)
                 items.append(c)
-        items.sort(key=lambda c: -abs(c["delta"]))
-        if items:
-            groups.append({"dimension": dim, "title": title, "items": items})
+            items.sort(key=lambda c: -abs(c["delta"]))
+            if items:
+                by_brand.append({"brand": b["brand"], "title": b["title"], "items": items})
+        if by_brand:
+            groups.append({"dimension": dim, "title": title, "by_brand": by_brand})
     return {"baseline_label": baseline_label, "window_label": window_label, "groups": groups}
 
 

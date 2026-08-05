@@ -149,11 +149,16 @@ function WorstTrends({ worst }) {
         <div className="og-trend-group" key={g.dimension}>
           <div className="og-trend-group-title">{g.title}</div>
           <p className="og-note" style={{ marginBottom: 8 }}>{DIMENSION_INTRO[g.dimension]}</p>
-          <ol className="og-trend-list">
-            {g.items.map((it, i) => (
-              <li key={i} className={deltaClass(it.delta)}>{it.sentence}</li>
-            ))}
-          </ol>
+          {g.by_brand.map((bb) => (
+            <div className="og-trend-brand" key={bb.brand}>
+              <div className="og-trend-brand-title">{bb.title}</div>
+              <ol className="og-trend-list">
+                {bb.items.map((it, i) => (
+                  <li key={i} className={deltaClass(it.delta)}>{it.sentence}</li>
+                ))}
+              </ol>
+            </div>
+          ))}
         </div>
       ))}
     </div>
