@@ -49,6 +49,7 @@ def get_credential():
 
 
 _conn = None
+_current_db = None
 
 
 def _get_connection(cred):
@@ -60,13 +61,14 @@ def _get_connection(cred):
     calls) started stacking up in the same run. ping(reconnect=True) transparently reconnects
     if the server ever drops an idle connection between calls - callers still see any actual
     query error raised, same contract as before."""
-    global _conn
+    global _conn, _current_db
     if _conn is None:
         import pymysql
         _conn = pymysql.connect(
             host=cred["host"], user=cred["user"], password=cred["password"],
             database=cred["database"], port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
         )
+        _current_db = cred["database"]
     else:
         _conn.ping(reconnect=True)
     return _conn
@@ -78,15 +80,21 @@ def query(sql, params=None, database=None):
     database overrides cred["database"] - some tables (e.g. the CSAT/ticket tables) live
     in a different schema (mcaff_dwh) on the same server than MYSQL_DATABASE points at. Callers
     passing different `database` values share the one connection above - select_db() just
-    switches schema on it, no new connection."""
+    switches schema on it, no new connection.
+    _current_db (not conn.db) tracks the active schema - pymysql's select_db() sends
+    COM_INIT_DB but never updates conn.db, which stays frozen at the connect-time value
+    forever. Comparing against conn.db meant a later query() targeting the connect-time
+    database name looked like a no-op switch and silently ran against whatever schema the
+    previous call had left the connection on."""
+    global _current_db
     cred = get_credential()
     if cred is None:
         return None
     conn = _get_connection(cred)
     target_db = database or cred["database"]
-    current_db = conn.db.decode() if isinstance(conn.db, bytes) else conn.db
-    if current_db != target_db:
+    if _current_db != target_db:
         conn.select_db(target_db)
+        _current_db = target_db
     cur = conn.cursor()
     cur.execute(sql, params or ())
     return cur.fetchall()
