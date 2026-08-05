@@ -211,7 +211,7 @@ export default function DashboardPage() {
       {/* Sidebar */}
       <aside className="sidebar">
         <div className="sidebar-header">
-          <a className="home-link" href="/">&larr; Dashboard Home</a>
+          <a className="home-link" href="/" target="_top">&larr; Dashboard Home</a>
           <div className="logo-container">
             <h1 className="logo-title">CX Unified Dashboard</h1>
           </div>

@@ -121,7 +121,7 @@ export default function ProductKycClient() {
     return (
       <div className="productkyc-page">
         <div className="wrap">
-          <a className="home-link" href="/">&larr; Home</a>
+          <a className="home-link" href="/" target="_top">&larr; Home</a>
           <p className="pk-error">{error}</p>
         </div>
       </div>
@@ -132,7 +132,7 @@ export default function ProductKycClient() {
     return (
       <div className="productkyc-page">
         <div className="wrap">
-          <a className="home-link" href="/">&larr; Home</a>
+          <a className="home-link" href="/" target="_top">&larr; Home</a>
           <p className="pk-meta">Loading...</p>
         </div>
       </div>
@@ -147,7 +147,7 @@ export default function ProductKycClient() {
   return (
     <div className="productkyc-page">
       <div className="wrap">
-        <a className="home-link" href="/">&larr; Home</a>
+        <a className="home-link" href="/" target="_top">&larr; Home</a>
         <header>
           <div><span className="badge">Auto-refreshed</span></div>
           <h1>Product Calling KYC</h1>

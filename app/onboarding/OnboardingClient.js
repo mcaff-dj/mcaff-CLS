@@ -145,7 +145,7 @@ export default function OnboardingClient() {
   return (
     <div className="onboarding-page">
       <div className="wrap">
-        <a className="home-link" href="/">&larr; Home</a>
+        <a className="home-link" href="/" target="_top">&larr; Home</a>
         <header>
           <div><span className="badge">Test</span></div>
           <h1>Onboarding Test</h1>

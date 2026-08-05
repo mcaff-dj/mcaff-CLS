@@ -16,7 +16,7 @@ export default function OrgOverviewClient() {
   return (
     <div className="orgoverview-page">
       <div className="wrap">
-        <a className="home-link" href="/">&larr; Home</a>
+        <a className="home-link" href="/" target="_top">&larr; Home</a>
 
         <nav className="tab-nav" id="main-tab-nav">
           {TABS.map((t) => (

@@ -220,7 +220,7 @@ export default function AdminPage() {
   return (
     <div className="admin-page">
       <div className="wrap" id="app" style={{ display: 'none' }}>
-        <a className="home-link" href="/">&larr; Home</a>
+        <a className="home-link" href="/" target="_top">&larr; Home</a>
         <h1>Access Management</h1>
         <p className="sub">Invite people, grant/revoke per-report access, and see who&apos;s viewed what.</p>
 
@@ -271,7 +271,7 @@ export default function AdminPage() {
       </div>
       <div id="denied" className="denied" style={{ display: 'none' }}>
         <p>You don&apos;t have admin access.</p>
-        <a className="home-link" href="/" style={{ justifyContent: 'center' }}>&larr; Back to Home</a>
+        <a className="home-link" href="/" target="_top" style={{ justifyContent: 'center' }}>&larr; Back to Home</a>
       </div>
     </div>
   );
