@@ -996,6 +996,162 @@ const localStorage = typeof window !== 'undefined'
         }
       };
 
+      // Per-process disposition list (see calling_process_dispositions) - reloaded whenever
+      // the admin switches process, same reasoning as loadProcessAgents above: each process's
+      // list is its own. RTO's disposition options stay the hardcoded connectedOutcomes/
+      // unreachableOutcomes arrays further up and never touch this endpoint - this only backs
+      // a process (NDR today) that has no built-in list of its own.
+      const [processDispositions, setProcessDispositions] = useState(null); // null = not loaded yet
+      const [dispositionsError, setDispositionsError] = useState('');
+      const [savingDisposition, setSavingDisposition] = useState(false);
+      const [newDispLabel, setNewDispLabel] = useState('');
+      const [newDispDesc, setNewDispDesc] = useState('');
+      const [editingDispId, setEditingDispId] = useState(null);
+      const [editDispLabel, setEditDispLabel] = useState('');
+      const [editDispDesc, setEditDispDesc] = useState('');
+
+      const loadDispositions = useCallback(async (processKey) => {
+        if (!processKey) return;
+        setProcessDispositions(null);
+        setDispositionsError('');
+        try {
+          const r = await fetch(`/api/admin/dispositions?process=${encodeURIComponent(processKey)}`);
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) { setDispositionsError(d.error || `Could not load dispositions (${r.status})`); return; }
+          setProcessDispositions(d.dispositions || []);
+        } catch (e) {
+          setDispositionsError(e.message || 'Could not load dispositions');
+        }
+      }, []);
+
+      // Fetched for everyone signed in, same as loadProcessAgents - the endpoint itself 403s a
+      // process the caller doesn't administer, and this stays a lightweight no-op for RTO
+      // (whose disposition list never reads from here) rather than an empty admin-only card.
+      useEffect(() => {
+        if (googleUser?.email) loadDispositions(activeProcess);
+      }, [googleUser, activeProcess, loadDispositions]);
+
+      const addDisposition = async () => {
+        const label = newDispLabel.trim();
+        if (!label) return;
+        setSavingDisposition(true);
+        setDispositionsError('');
+        try {
+          const r = await fetch('/api/admin/dispositions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ processKey: activeProcess, label, description: newDispDesc.trim() }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            const msg = d.error || `Could not add disposition (${r.status})`;
+            setDispositionsError(msg);
+            showToast(`⚠️ ${msg}`);
+            return;
+          }
+          setProcessDispositions(d.dispositions || []);
+          setNewDispLabel('');
+          setNewDispDesc('');
+        } catch (e) {
+          const msg = e.message || 'Could not add disposition';
+          setDispositionsError(msg);
+          showToast(`⚠️ ${msg}`);
+        } finally {
+          setSavingDisposition(false);
+        }
+      };
+
+      const saveDispositionEdit = async (id) => {
+        const label = editDispLabel.trim();
+        if (!label) return;
+        setSavingDisposition(true);
+        setDispositionsError('');
+        try {
+          const r = await fetch('/api/admin/dispositions', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ processKey: activeProcess, id, label, description: editDispDesc.trim() }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            const msg = d.error || `Could not save (${r.status})`;
+            setDispositionsError(msg);
+            showToast(`⚠️ ${msg}`);
+            return;
+          }
+          setProcessDispositions(d.dispositions || []);
+          setEditingDispId(null);
+        } catch (e) {
+          const msg = e.message || 'Could not save disposition';
+          setDispositionsError(msg);
+          showToast(`⚠️ ${msg}`);
+        } finally {
+          setSavingDisposition(false);
+        }
+      };
+
+      const deleteDisposition = async (id) => {
+        setSavingDisposition(true);
+        setDispositionsError('');
+        try {
+          const r = await fetch('/api/admin/dispositions', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ processKey: activeProcess, id }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            const msg = d.error || `Could not delete (${r.status})`;
+            setDispositionsError(msg);
+            showToast(`⚠️ ${msg}`);
+            return;
+          }
+          setProcessDispositions(d.dispositions || []);
+        } catch (e) {
+          const msg = e.message || 'Could not delete disposition';
+          setDispositionsError(msg);
+          showToast(`⚠️ ${msg}`);
+        } finally {
+          setSavingDisposition(false);
+        }
+      };
+
+      // Optimistic swap-then-confirm: the reorder feels instant, and reverts to the server's
+      // own order (via loadDispositions) if the request actually fails rather than leaving the
+      // UI showing an order that was never saved.
+      const moveDisposition = async (index, direction) => {
+        if (!processDispositions) return;
+        const next = [...processDispositions];
+        const swapWith = index + direction;
+        if (swapWith < 0 || swapWith >= next.length) return;
+        [next[index], next[swapWith]] = [next[swapWith], next[index]];
+        setProcessDispositions(next);
+        setSavingDisposition(true);
+        try {
+          const r = await fetch('/api/admin/dispositions', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ processKey: activeProcess, orderedIds: next.map(x => x.id) }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            const msg = d.error || `Could not reorder (${r.status})`;
+            setDispositionsError(msg);
+            showToast(`⚠️ ${msg}`);
+            loadDispositions(activeProcess);
+            return;
+          }
+          setProcessDispositions(d.dispositions || []);
+        } catch (e) {
+          const msg = e.message || 'Could not reorder';
+          setDispositionsError(msg);
+          showToast(`⚠️ ${msg}`);
+          loadDispositions(activeProcess);
+        } finally {
+          setSavingDisposition(false);
+        }
+      };
+
       // Cross-Tab & Multi-Client Real-Time Status & Activity Broadcast Sync
       useEffect(() => {
         let channel = null;
@@ -2495,9 +2651,16 @@ const localStorage = typeof window !== 'undefined'
                   <th className="py-3 px-4 text-center font-medium">Disposed</th>
                   <th className="py-3 px-4 text-center font-medium">Connect %</th>
                   <th className="py-3 px-4 text-left font-medium">Quota</th>
+                  {/* Prepaid Target / Priority Reasons / Reassign Only are RTO-specific: they
+                      steer build_assignment_queue's round-robin using RTO's own reason
+                      taxonomy and payment-mode split, neither of which any other process
+                      shares. Hidden rather than shown-empty for a process with no assignment
+                      engine of its own yet. */}
+                  {isRto && (<>
                   <th className="py-3 px-4 text-left font-medium" title="Soft target: this agent's share of assignments from a run that may be Prepaid. Steers the round-robin toward it, but never leaves a lead unassigned just to hit it exactly.">Prepaid Target</th>
                   <th className="py-3 px-4 text-left font-medium" title="Comma-separated RTO-reason keywords (case-insensitive, e.g. 'refused to accept, otp verified') - a lead whose reason matches gets offered to this agent before the general round-robin.">Priority Reasons</th>
                   <th className="py-3 px-4 text-left font-medium" title="Hard filter on Connected=No reassignments only (never a fresh lead): restricts this agent to reassignments of one payment type. Unlike Prepaid Target, this never relaxes - a reassignment no eligible agent accepts for its type is left unassigned.">Reassign Only</th>
+                  </>)}
                   {/* Runs THIS process (roster + its calling hours) without being a
                       company-wide admin. Only a full admin can set it - the API
                       refuses it from a process admin, so it is read-only for them. */}
@@ -2575,6 +2738,7 @@ const localStorage = typeof window !== 'undefined'
                           ]}
                         />
                       </td>
+                      {isRto && (<>
                       <td className="py-3 px-4">
                         {/* Writes prepaid_pct server-side, same round-trip as Quota beside it -
                             a soft target for build_assignment_queue/lead_priority.py's round-robin,
@@ -2626,6 +2790,7 @@ const localStorage = typeof window !== 'undefined'
                           ]}
                         />
                       </td>
+                      </>)}
                       <td className="py-3 px-4 text-center">
                         {a.isAdmin ? (
                           <span className="text-[11px] text-zinc-500" title="Company-wide admin - already administers every process">all</span>
@@ -2775,6 +2940,145 @@ const localStorage = typeof window !== 'undefined'
                 )}
 
         </>
+      );
+
+      // Admin-defined disposition list for a process with no hardcoded one of its own (see
+      // calling_process_dispositions) - "highly customisable" per the ask: an admin can add,
+      // rename, describe, reorder, and remove entries freely, with no seeded default and no
+      // fixed count. Rendered only from the Admin Panel of a process that isn't `implemented`
+      // (currentProcess.implemented is false) - RTO keeps using its own connectedOutcomes/
+      // unreachableOutcomes arrays untouched and never renders this card.
+      const renderProcessDispositionsCard = () => (
+        <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
+          <div className="flex items-start gap-3 mb-1">
+            <span className="h-9 w-9 shrink-0 rounded-xl bg-violet-950/60 border border-violet-800/60 flex items-center justify-center text-violet-300">🏷️</span>
+            <div>
+              <h2 className="text-lg font-bold text-zinc-100">
+                Disposition List{currentProcess ? ` — ${currentProcess.label.replace(/^Process:\s*/, '')}` : ''}
+              </h2>
+              <p className="text-[13px] text-zinc-500">
+                What an agent may select when disposing a lead on this process. Unlike RTO Calling
+                (a fixed, built-in list), this one starts empty - add whatever this process needs.
+              </p>
+            </div>
+          </div>
+
+          {dispositionsError && (
+            <p className="mt-3 text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2">
+              {dispositionsError}
+            </p>
+          )}
+
+          <div className="mt-4 space-y-1.5">
+            {processDispositions === null ? (
+              <p className="text-[13px] text-zinc-500">Loading…</p>
+            ) : processDispositions.length === 0 ? (
+              <p className="text-[13px] text-zinc-500">No dispositions added yet - use the form below to add the first one.</p>
+            ) : processDispositions.map((d, i) => (
+              <div key={d.id} className="rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-4 py-2.5">
+                {editingDispId === d.id ? (
+                  <div className="flex flex-col gap-2">
+                    <input
+                      value={editDispLabel}
+                      onChange={e => setEditDispLabel(e.target.value)}
+                      placeholder="Disposition label"
+                      maxLength={120}
+                      className="bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                    />
+                    <input
+                      value={editDispDesc}
+                      onChange={e => setEditDispDesc(e.target.value)}
+                      placeholder="Description (optional)"
+                      className="bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                    />
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => saveDispositionEdit(d.id)}
+                        disabled={savingDisposition || !editDispLabel.trim()}
+                        className="h-7 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-bold transition-colors disabled:opacity-50"
+                      >
+                        Save
+                      </button>
+                      <button
+                        onClick={() => setEditingDispId(null)}
+                        disabled={savingDisposition}
+                        className="h-7 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[12px] font-semibold transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-[13px] font-semibold text-zinc-200 truncate">{d.label}</p>
+                      {d.description && <p className="text-[12px] text-zinc-500 truncate">{d.description}</p>}
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        onClick={() => moveDisposition(i, -1)}
+                        disabled={savingDisposition || i === 0}
+                        title="Move up"
+                        className="h-7 w-7 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-30"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        onClick={() => moveDisposition(i, 1)}
+                        disabled={savingDisposition || i === processDispositions.length - 1}
+                        title="Move down"
+                        className="h-7 w-7 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-30"
+                      >
+                        ↓
+                      </button>
+                      <button
+                        onClick={() => { setEditingDispId(d.id); setEditDispLabel(d.label); setEditDispDesc(d.description || ''); }}
+                        disabled={savingDisposition}
+                        className="h-7 px-2.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 text-[12px] font-semibold transition-colors"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => { if (window.confirm(`Delete "${d.label}"?`)) deleteDisposition(d.id); }}
+                        disabled={savingDisposition}
+                        className="h-7 px-2.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/60 text-rose-300 text-[12px] font-semibold transition-colors"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-4 pt-4 border-t border-zinc-800/60 flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <input
+                value={newDispLabel}
+                onChange={e => setNewDispLabel(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && newDispLabel.trim()) addDisposition(); }}
+                placeholder="New disposition label"
+                maxLength={120}
+                className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+              />
+              <button
+                onClick={addDisposition}
+                disabled={savingDisposition || !newDispLabel.trim()}
+                className="h-8 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-50 shrink-0"
+              >
+                {savingDisposition ? 'Adding…' : '+ Add'}
+              </button>
+            </div>
+            <input
+              value={newDispDesc}
+              onChange={e => setNewDispDesc(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && newDispLabel.trim()) addDisposition(); }}
+              placeholder="Description (optional)"
+              className="bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+            />
+          </div>
+        </div>
       );
 
       const tabs = [
@@ -2973,7 +3277,11 @@ const localStorage = typeof window !== 'undefined'
                   </nav>
                   <div className="p-6">
                     {placeholderTab === 'admin' && canAdminTab ? (
-                      <>{renderTeamRosterTable()}{renderCallingHoursCard()}</>
+                      <div className="space-y-6">
+                        {renderTeamRosterTable()}
+                        {renderCallingHoursCard()}
+                        {renderProcessDispositionsCard()}
+                      </div>
                     ) : (
                       <div className="max-w-2xl space-y-4">
                         <div className="flex items-center gap-3">

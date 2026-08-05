@@ -373,6 +373,24 @@ async function ensurePgSchema() {
   // than forced onto someone. See build_assignment_queue's agent_reassign_payment_mode
   // parameter.
   await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS reassign_payment_mode TEXT`;
+  // A process's own admin-defined disposition list - e.g. NDR Calling's Admin Panel, where
+  // (unlike RTO) there is no hardcoded disposition set in RtoCrmClient.js to fall back to, so
+  // an admin has to be able to build one from scratch. Deliberately per-process (process_key,
+  // not a global list) and deliberately NOT touching RTO's own connectedOutcomes/
+  // unreachableOutcomes arrays - those stay hardcoded exactly as they are; this table only
+  // backs processes that have no disposition list of their own yet.
+  await pgSql`
+    CREATE TABLE IF NOT EXISTS calling_process_dispositions (
+      id SERIAL PRIMARY KEY,
+      process_key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      description TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      created_by TEXT
+    )
+  `;
+  await pgSql`CREATE INDEX IF NOT EXISTS calling_process_dispositions_process_key_idx ON calling_process_dispositions (process_key, sort_order)`;
   // Disposal side of the same lead lifecycle - written by rto-crm.html's submitDisp()
   // in real time (via a new recordDisposition auth action) alongside its existing
   // direct-to-Sheet write, so this history survives independent of the Google Sheet
@@ -1186,6 +1204,86 @@ async function getAdministeredProcesses(email) {
   return rows.map((r) => r.process_key);
 }
 
+// ── Per-process admin-defined disposition list (see calling_process_dispositions above) ────
+const DISPOSITION_LABEL_MAX = 120;
+
+async function getProcessDispositions(processKey) {
+  await ensurePgSchema();
+  if (!processKey) return [];
+  const { rows } = await pgSql`
+    SELECT id, label, description, sort_order FROM calling_process_dispositions
+    WHERE process_key = ${processKey}
+    ORDER BY sort_order ASC, id ASC
+  `;
+  return rows.map((r) => ({ id: r.id, label: r.label, description: r.description || '', sortOrder: r.sort_order }));
+}
+
+// New entries land at the end (current max sort_order + 1), so adding one never reshuffles
+// where existing entries appear in the agent's disposition dropdown.
+async function addProcessDisposition(processKey, label, description, createdBy) {
+  await ensurePgSchema();
+  if (!processKey) throw new Error('processKey is required');
+  const trimmed = String(label || '').trim();
+  if (!trimmed) throw new Error('A disposition label is required');
+  if (trimmed.length > DISPOSITION_LABEL_MAX) throw new Error(`Label must be ${DISPOSITION_LABEL_MAX} characters or fewer`);
+  const { rows: maxRows } = await pgSql`
+    SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey}
+  `;
+  await pgSql`
+    INSERT INTO calling_process_dispositions (process_key, label, description, sort_order, created_by)
+    VALUES (${processKey}, ${trimmed}, ${String(description || '').trim() || null}, ${maxRows[0].next}, ${createdBy || null})
+  `;
+  return getProcessDispositions(processKey);
+}
+
+// label/description are independently optional - omitting one (undefined) leaves it
+// untouched, same "unset means leave it alone" contract setCallingProcessAgent already uses
+// for its own optional fields. An explicitly blank description ('') really does clear it;
+// label can never be blanked out this way since a disposition must always have a name.
+async function updateProcessDisposition(processKey, id, { label, description } = {}) {
+  await ensurePgSchema();
+  if (!processKey || !id) throw new Error('processKey and id are required');
+  const labelText = label === undefined ? null : String(label).trim();
+  if (label !== undefined && !labelText) throw new Error('A disposition label is required');
+  if (labelText && labelText.length > DISPOSITION_LABEL_MAX) throw new Error(`Label must be ${DISPOSITION_LABEL_MAX} characters or fewer`);
+  const descText = description === undefined ? null : String(description || '').trim();
+  const { rows } = await pgSql`
+    UPDATE calling_process_dispositions
+    SET label = COALESCE(${labelText}, label),
+        description = COALESCE(${descText}, description)
+    WHERE id = ${id} AND process_key = ${processKey}
+    RETURNING id
+  `;
+  if (!rows.length) throw new Error('Disposition not found for this process');
+  return getProcessDispositions(processKey);
+}
+
+async function deleteProcessDisposition(processKey, id) {
+  await ensurePgSchema();
+  if (!processKey || !id) throw new Error('processKey and id are required');
+  await pgSql`DELETE FROM calling_process_dispositions WHERE id = ${id} AND process_key = ${processKey}`;
+  return getProcessDispositions(processKey);
+}
+
+// Full reorder in one shot - the UI's up/down arrows send the whole list back in its new
+// order rather than a single move, which keeps this one operation instead of needing a
+// separate swap-with-neighbour endpoint. Transactional so a request that fails partway
+// through never leaves sort_order in a half-renumbered state.
+async function reorderProcessDispositions(processKey, orderedIds) {
+  await ensurePgSchema();
+  if (!processKey) throw new Error('processKey is required');
+  if (!Array.isArray(orderedIds) || !orderedIds.length) throw new Error('orderedIds must be a non-empty array');
+  await withPgTransaction(async (client) => {
+    for (let i = 0; i < orderedIds.length; i++) {
+      await client.query(
+        'UPDATE calling_process_dispositions SET sort_order = $1 WHERE id = $2 AND process_key = $3',
+        [i, orderedIds[i], processKey]
+      );
+    }
+  });
+  return getProcessDispositions(processKey);
+}
+
 // Per-partner disposition breakdown (delivery_partner, derived from awb_code - see
 // ensurePgSchema). Surfaces "Customer Agreed to Accept" specifically alongside the total,
 // so it directly answers "which partner is most of our Customer Agreed to Accept coming
@@ -1293,4 +1391,6 @@ module.exports = {
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
   isCallingProcessAdmin, getAdministeredProcesses,
+  getProcessDispositions, addProcessDisposition, updateProcessDisposition,
+  deleteProcessDisposition, reorderProcessDispositions,
 };

@@ -17,11 +17,20 @@
 //   DELETE /api/admin/calling-agents  -> revoke ONE process's access for one agent, leaving
 //                                        every other process/card they hold untouched:
 //                                        { processKey, email }
+//   GET    /api/admin/dispositions?process=ndr -> that process's own disposition list (see
+//                                        calling_process_dispositions - RTO's list stays
+//                                        hardcoded in RtoCrmClient.js and never reads this)
+//   POST   /api/admin/dispositions    -> add: { processKey, label, description? }
+//   PUT    /api/admin/dispositions    -> edit or reorder: { processKey, id, label?, description? }
+//                                        or { processKey, orderedIds: [...] }
+//   DELETE /api/admin/dispositions    -> { processKey, id }
 const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser,
   getUserByEmail, getUserTabPermissions,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours, logEvent,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
-  isCallingProcessAdmin, getAdministeredProcesses } = require('../_lib/db');
+  isCallingProcessAdmin, getAdministeredProcesses,
+  getProcessDispositions, addProcessDisposition, updateProcessDisposition,
+  deleteProcessDisposition, reorderProcessDispositions } = require('../_lib/db');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { CARD_TABS } = require('../_lib/tabs');
 const { getSession } = require('../_lib/session');
@@ -374,6 +383,91 @@ async function handleCallingAgents(req, res, session) {
   res.status(200).json({ statuses: CALLING_STATUSES, agents: await getCallingProcessAgents(processKey) });
 }
 
+// GET    ?process=<key> -> that process's own disposition list (empty until an admin adds
+//                          some - there is no seeded default, since only RTO has a built-in
+//                          list and this table intentionally never backs RTO).
+// POST                  -> add one: { processKey, label, description? }
+// PUT                   -> either edit one ({ processKey, id, label?, description? }) or
+//                          reorder the whole list ({ processKey, orderedIds: [...] }) -
+//                          orderedIds takes precedence if both id and orderedIds are sent.
+// DELETE                -> { processKey, id }
+// Same process-admin gate as business-hours/calling-agents above: whoever runs a process may
+// shape its own disposition list without being a company-wide admin.
+async function handleDispositions(req, res, session) {
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
+  const known = CALLING_PROCESSES.processes.map((p) => p.key);
+
+  if (req.method === 'POST') {
+    const body = parseBody(req);
+    if (!known.includes(body.processKey)) {
+      res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
+      return;
+    }
+    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, body.processKey))) {
+      res.status(403).json({ error: 'You do not administer that process' });
+      return;
+    }
+    try {
+      const dispositions = await addProcessDisposition(body.processKey, body.label, body.description, session.email);
+      await logEvent(session.uid, session.email, 'calling', 'disposition-add', `${body.processKey}: added "${body.label}"`, ip);
+      res.status(200).json({ dispositions });
+    } catch (e) {
+      res.status(400).json({ error: e.message || 'Could not add disposition' });
+    }
+    return;
+  }
+
+  if (req.method === 'PUT') {
+    const body = parseBody(req);
+    if (!known.includes(body.processKey)) {
+      res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
+      return;
+    }
+    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, body.processKey))) {
+      res.status(403).json({ error: 'You do not administer that process' });
+      return;
+    }
+    try {
+      const dispositions = Array.isArray(body.orderedIds)
+        ? await reorderProcessDispositions(body.processKey, body.orderedIds)
+        : await updateProcessDisposition(body.processKey, body.id, { label: body.label, description: body.description });
+      await logEvent(session.uid, session.email, 'calling', 'disposition-edit',
+        Array.isArray(body.orderedIds) ? `${body.processKey}: reordered` : `${body.processKey}: edited #${body.id}`, ip);
+      res.status(200).json({ dispositions });
+    } catch (e) {
+      res.status(400).json({ error: e.message || 'Could not update disposition' });
+    }
+    return;
+  }
+
+  if (req.method === 'DELETE') {
+    const body = parseBody(req);
+    if (!known.includes(body.processKey)) {
+      res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
+      return;
+    }
+    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, body.processKey))) {
+      res.status(403).json({ error: 'You do not administer that process' });
+      return;
+    }
+    const dispositions = await deleteProcessDisposition(body.processKey, body.id);
+    await logEvent(session.uid, session.email, 'calling', 'disposition-delete', `${body.processKey}: deleted #${body.id}`, ip);
+    res.status(200).json({ dispositions });
+    return;
+  }
+
+  const processKey = (req.query && req.query.process) || '';
+  if (!known.includes(processKey)) {
+    res.status(400).json({ error: `process must be one of: ${known.join(', ')}` });
+    return;
+  }
+  if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, processKey))) {
+    res.status(403).json({ error: 'You do not administer that process' });
+    return;
+  }
+  res.status(200).json({ dispositions: await getProcessDispositions(processKey) });
+}
+
 module.exports = async (req, res) => {
   const session = await getSession(req);
   if (!session) {
@@ -386,7 +480,7 @@ module.exports = async (req, res) => {
   // else here - users/permissions/audit stay company-wide-admin only, because those can
   // re-grant anyone's access. Each handler then checks they administer the SPECIFIC process
   // being read or written; passing this gate alone authorises nothing.
-  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'calling-agents'];
+  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'calling-agents', 'dispositions'];
   if (!session.isAdmin && !PROCESS_ADMIN_ACTIONS.includes(action)) {
     res.status(403).json({ error: 'Forbidden' });
     return;
@@ -397,6 +491,7 @@ module.exports = async (req, res) => {
   if (action === 'audit') return handleAudit(req, res);
   if (action === 'business-hours') return handleBusinessHours(req, res, session);
   if (action === 'calling-agents') return handleCallingAgents(req, res, session);
+  if (action === 'dispositions') return handleDispositions(req, res, session);
 
   res.status(404).json({ error: 'Unknown admin route' });
 };
