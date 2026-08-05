@@ -33,9 +33,14 @@ var NEXT_PAGE_ROUTES = {
 // Calling Team has its own three nested nav sub-items instead of one blanket
 // "coming soon" card - each is its own placeholder for now until a real report/tool
 // is wired up behind it.
+//
+// ndr points at the SAME /rto-crm CRM shell as rto, not a separate page - the shell's own
+// Process switcher already knows how to render an unimplemented process (see
+// callingProcesses.json + RtoCrmClient.js's `!currentProcess.implemented` branch), so this
+// just deep-links straight to it via ?process=ndr instead of duplicating that shell.
 var CALLING_TEAM_SUBITEMS = {
   overview: { label: 'Overview', text: 'Calling Team Overview', url: '/calling-overview' },
-  ndr: { label: 'NDR-Calling', text: 'NDR-Calling report is coming soon.' },
+  ndr: { label: 'NDR-Calling', text: 'NDR CRM Agent Inbox', url: '/rto-crm?process=ndr' },
   rto: { label: 'RTO-Calling', text: 'RTO CRM Agent & Refund Portal', url: '/rto-crm' }
 };
 

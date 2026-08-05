@@ -654,13 +654,31 @@ const localStorage = typeof window !== 'undefined'
       // lists) and render a "not wired up yet" panel, because each is expected to bring its
       // own calling fields, dispositions and data source rather than reusing this one's.
       // Persisted like the other view preferences so a reload doesn't bounce an agent back to
-      // a process they weren't working.
+      // a process they weren't working - EXCEPT a one-time ?process= in the URL (how
+      // HomeClient's Calling Team sidebar deep-links straight to a specific process, e.g.
+      // /rto-crm?process=ndr for the NDR-Calling sub-item) wins on the very first load, so
+      // that link actually lands where it says it does instead of wherever this browser last
+      // left off. Read directly off window.location rather than useSearchParams(), which
+      // needs a Suspense boundary in the App Router - unnecessary here since this whole
+      // component is already client-only (see RtoCrmClientLoader's ssr:false).
       const [activeProcess, setActiveProcess] = useState(() => {
+        try {
+          const fromUrl = new URLSearchParams(window.location.search).get('process');
+          if (fromUrl) return fromUrl;
+        } catch {}
         try { return localStorage.getItem('rto_active_process') || 'rto'; } catch { return 'rto'; }
       });
       useEffect(() => {
         try { localStorage.setItem('rto_active_process', activeProcess); } catch {}
       }, [activeProcess]);
+
+      // Shell-tab navigation for a process that has no workspace yet (see the
+      // !currentProcess.implemented branch below) - deliberately separate from the real
+      // workspace's own `tab` state so switching between placeholder tabs can never be
+      // confused with (or accidentally trigger) RTO's actual lead-data fetching, which reads
+      // `tab` further down.
+      const [placeholderTab, setPlaceholderTab] = useState('overview');
+      useEffect(() => { setPlaceholderTab('overview'); }, [activeProcess]);
 
       // Server-granted process access, filled in by the auth sync below. null = no explicit
       // grant on this account (admins, or an agent with no per-process rows); the list is only
@@ -695,6 +713,14 @@ const localStorage = typeof window !== 'undefined'
       // roster it reads comes from an endpoint that already refuses processes you don't
       // administer, so the browser can't grant this to itself.
       const [isProcessAdmin, setIsProcessAdmin] = useState(false);
+      // Same reasoning as the real tab bar's own analogous effect further down: don't leave
+      // someone parked on an admin-only shell tab (see placeholderTab above) after a role
+      // switch takes that access away.
+      useEffect(() => {
+        if (userRole === 'Agent' && !isProcessAdmin && (placeholderTab === 'admin' || placeholderTab === 'predicted')) {
+          setPlaceholderTab('overview');
+        }
+      }, [userRole, isProcessAdmin, placeholderTab]);
       const [processAgentsError, setProcessAgentsError] = useState('');
       const [savingAgentEmail, setSavingAgentEmail] = useState('');
 
@@ -2904,45 +2930,78 @@ const localStorage = typeof window !== 'undefined'
             )}
 
             {/* Everything below is RTO's own workspace - its tab bar, KPI cards, lead table
-                and disposition flow all read RTO's sheet columns and its disposition list.
-                A process that isn't built yet gets this panel instead of being pointed at a
-                UI that can't represent its data. */}
-            {currentProcess && !currentProcess.implemented && (
-              <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-8 shadow-xl backdrop-blur-md">
-                <div className="max-w-2xl space-y-4">
-                  <div className="flex items-center gap-3">
-                    <span className="text-2xl">{currentProcess.icon}</span>
-                    <h2 className="text-lg font-bold text-zinc-100">
-                      {currentProcess.label.replace(/^Process:\s*/, '')}
-                    </h2>
-                    <span className="px-2 py-0.5 rounded-md bg-amber-950/60 text-amber-300 border border-amber-800/60 text-[11px] font-bold uppercase tracking-wide">
-                      Not wired up yet
-                    </span>
+                and disposition flow all read RTO's sheet columns and its disposition list, so
+                a process that isn't built yet can't be pointed at the same UI. It still gets
+                the SAME tab layout though (Overview / All Leads / Fresh Leads / Admin Panel &
+                Roster / Next to Assign) - navigable, so the shape of the eventual workspace is
+                visible - just with prose explaining what each tab will show once this process
+                has its own lead source, instead of RTO's data under a different label. Admin
+                Panel & Roster is the one exception: roster and calling-hours setup are real
+                and useful before any leads exist, so that tab renders the actual components. */}
+            {currentProcess && !currentProcess.implemented && (() => {
+              const canAdminTab = userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin;
+              const canPredictedTab = userRole === 'Admin' || isProcessAdmin;
+              const shellTabs = [
+                { key: 'overview', label: '📊 Overview (Agents Data)' },
+                { key: 'all', label: 'All Leads (Disposed)' },
+                { key: 'fresh', label: '⚡ Fresh Leads (Assigned)' },
+                ...(canAdminTab ? [{ key: 'admin', label: 'Admin Panel & Roster' }] : []),
+                ...(canPredictedTab ? [{ key: 'predicted', label: '🔮 Next to Assign' }] : []),
+              ];
+              const PLACEHOLDER_COPY = {
+                overview: 'Once this process has its own lead source, this tab will show the same agent-wise KPI rollups RTO Calling does: assigned, dialled, connected and converted counts per agent, over the same date-scope filter.',
+                all: 'This will list every disposed lead for this process, with the same search, payment-mode and date filters RTO Calling’s All Leads tab already has.',
+                fresh: 'This will show leads that are assigned but not yet worked – the same queue RTO Calling’s Fresh Leads tab tracks.',
+                predicted: 'This will preview what scripts/assign_leads.py would assign next for this process, once it has its own auto-assignment rule and a real lead source to draw from.',
+              };
+              return (
+                <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-1.5 shadow-xl backdrop-blur-md">
+                  <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar w-full mb-1.5">
+                    {shellTabs.map((t) => (
+                      <button
+                        key={t.key}
+                        onClick={() => setPlaceholderTab(t.key)}
+                        className={`relative px-4 py-2 rounded-xl text-[13px] font-bold whitespace-nowrap transition-all flex items-center gap-2.5 ${
+                          placeholderTab === t.key
+                            ? 'text-white bg-indigo-600 shadow-md shadow-indigo-950/50 border border-indigo-500/40'
+                            : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 border border-transparent'
+                        }`}
+                      >
+                        {t.label}
+                      </button>
+                    ))}
+                  </nav>
+                  <div className="p-6">
+                    {placeholderTab === 'admin' && canAdminTab ? (
+                      <>{renderTeamRosterTable()}{renderCallingHoursCard()}</>
+                    ) : (
+                      <div className="max-w-2xl space-y-4">
+                        <div className="flex items-center gap-3">
+                          <span className="text-2xl">{currentProcess.icon}</span>
+                          <h2 className="text-lg font-bold text-zinc-100">
+                            {currentProcess.label.replace(/^Process:\s*/, '')}
+                          </h2>
+                          <span className="px-2 py-0.5 rounded-md bg-amber-950/60 text-amber-300 border border-amber-800/60 text-[11px] font-bold uppercase tracking-wide">
+                            Not wired up yet
+                          </span>
+                        </div>
+                        <p className="text-[13px] text-zinc-400 leading-relaxed">{currentProcess.blurb}</p>
+                        <p className="text-[13px] text-zinc-500 leading-relaxed">
+                          {PLACEHOLDER_COPY[placeholderTab] ||
+                            'This process needs its own calling fields, disposition list and data source before it can be worked here – it is not a relabelling of the RTO view, so nothing real is shown rather than showing RTO’s data under a different name.'}
+                        </p>
+                        <button
+                          onClick={() => setActiveProcess('rto')}
+                          className="h-8 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50"
+                        >
+                          ← Back to RTO Calling
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  <p className="text-[13px] text-zinc-400 leading-relaxed">{currentProcess.blurb}</p>
-                  <p className="text-[13px] text-zinc-500 leading-relaxed">
-                    This process needs its own calling fields, disposition list and data source before it
-                    can be worked here - it isn&apos;t a relabelling of the RTO view, so nothing is shown
-                    rather than showing RTO&apos;s data under a different name.
-                  </p>
-                  <button
-                    onClick={() => setActiveProcess('rto')}
-                    className="h-8 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50"
-                  >
-                    ← Back to RTO Calling
-                  </button>
                 </div>
-              </div>
-            )}
-
-            {/* An unbuilt process still gets its admin controls. There is no lead workspace to
-                show yet, but its roster and its calling hours are precisely what has to be set
-                up BEFORE one exists - gating them on `implemented` along with the rest of the
-                workspace left a process that could never be configured. The lead-working tabs
-                stay hidden, since there is genuinely nothing behind them. */}
-            {currentProcess && !currentProcess.implemented
-              && (userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin)
-              && (<>{renderTeamRosterTable()}{renderCallingHoursCard()}</>)}
+              );
+            })()}
 
             {currentProcess && currentProcess.implemented && (<>
 
