@@ -1,0 +1,34 @@
+name: Assign NDR leads to online agents
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # every 5 minutes - cheap, only touches the Sheet + Postgres
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: assign-ndr-leads
+  cancel-in-progress: false
+
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Assign unassigned NDR leads
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+        run: python -u scripts/assign_ndr_leads.py

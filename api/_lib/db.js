@@ -373,6 +373,13 @@ async function ensurePgSchema() {
   // than forced onto someone. See build_assignment_queue's agent_reassign_payment_mode
   // parameter.
   await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS reassign_payment_mode TEXT`;
+  // Hard filter on how many prior delivery attempts (cp_ndr_attempts) a lead has had - NDR
+  // Calling's own equivalent of reassign_payment_mode above, same "'' = no restriction" real-
+  // value contract, but applied to EVERY lead (not just reassignments): comma-separated subset
+  // of '1', '2', '3', 'More than 3'. See scripts/assign_ndr_leads.py's agent_attempt_filter -
+  // a lead whose bucket no online agent's filter covers is left unassigned rather than forced
+  // onto someone.
+  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS attempt_count_filter TEXT`;
   // A process's own admin-defined disposition list - e.g. NDR Calling's Admin Panel, where
   // (unlike RTO) there is no hardcoded disposition set in RtoCrmClient.js to fall back to, so
   // an admin has to be able to build one from scratch. Deliberately per-process (process_key,
@@ -1104,7 +1111,7 @@ async function getCallingProcessAgents(processKey) {
   `;
   const { rows: state } = await pgSql`
     SELECT email, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons,
-           reassign_payment_mode, updated_at, updated_by
+           reassign_payment_mode, attempt_count_filter, updated_at, updated_by
     FROM calling_agent_process WHERE process_key = ${processKey}
   `;
   const byEmail = {};
@@ -1121,6 +1128,7 @@ async function getCallingProcessAgents(processKey) {
       prepaidPct: s && s.prepaid_pct != null ? s.prepaid_pct : null,
       priorityRtoReasons: (s && s.priority_rto_reasons) || '',
       reassignPaymentMode: (s && s.reassign_payment_mode) || '',
+      attemptCountFilter: (s && s.attempt_count_filter) || '',
       updatedAt: (s && s.updated_at) || null,
       updatedBy: (s && s.updated_by) || null,
     };
@@ -1129,7 +1137,7 @@ async function getCallingProcessAgents(processKey) {
 
 // Upserts one agent's status and/or quota for one process. Either field may be omitted, so an
 // agent flipping their own status can't accidentally reset a quota an admin set.
-async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons, reassignPaymentMode } = {}, updatedBy) {
+async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons, reassignPaymentMode, attemptCountFilter } = {}, updatedBy) {
   await ensurePgSchema();
   const key = String(email || '').trim().toLowerCase();
   if (!processKey || !key) throw new Error('processKey and email are required');
@@ -1170,9 +1178,13 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
     throw new Error("reassignPaymentMode must be '', 'Prepaid', or 'COD'");
   }
   const reassignModeText = reassignPaymentMode === undefined ? null : String(reassignPaymentMode || '').trim();
+  // Same "'' is a real, distinct-from-NULL value" contract as reasonsText/reassignModeText -
+  // clearing every attempt-count restriction must actively write '' (unrestricted), not just
+  // be indistinguishable from the field being omitted entirely.
+  const attemptFilterText = attemptCountFilter === undefined ? null : String(attemptCountFilter || '').trim();
   await pgSql`
-    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, reassign_payment_mode, updated_at, updated_by)
-    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, ${reassignModeText || ''}, now(), ${updatedBy || null})
+    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, reassign_payment_mode, attempt_count_filter, updated_at, updated_by)
+    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, ${reassignModeText || ''}, ${attemptFilterText || ''}, now(), ${updatedBy || null})
     ON CONFLICT (email, process_key) DO UPDATE
       SET status = COALESCE(${status || null}, calling_agent_process.status),
           max_quota = COALESCE(${quota}, calling_agent_process.max_quota),
@@ -1180,6 +1192,7 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
           prepaid_pct = COALESCE(${prepaidTarget}, calling_agent_process.prepaid_pct),
           priority_rto_reasons = COALESCE(${reasonsText}, calling_agent_process.priority_rto_reasons),
           reassign_payment_mode = COALESCE(${reassignModeText}, calling_agent_process.reassign_payment_mode),
+          attempt_count_filter = COALESCE(${attemptFilterText}, calling_agent_process.attempt_count_filter),
           updated_at = now(),
           updated_by = ${updatedBy || null}
   `;

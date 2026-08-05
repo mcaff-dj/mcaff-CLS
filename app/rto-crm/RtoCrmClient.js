@@ -51,6 +51,11 @@ const localStorage = typeof window !== 'undefined'
     // queue itself recognizes, so there's no free-text drift between what's typed and what
     // build_assignment_queue actually matches against.
     const PRIORITY_REASON_OPTIONS = [...new Set([...HIGH_PRIORITY_COD_RTO_REASONS, ...LOW_PRIORITY_COD_RTO_REASONS])].sort();
+    // NDR Calling's Team Roster "Attempts" picker - a hard filter (see scripts/
+    // assign_ndr_leads.py's agent_attempt_filter), unlike Priority Reasons' first-refusal above:
+    // an agent restricted here only ever receives a lead whose cp_ndr_attempts buckets to one of
+    // these. Empty selection = unrestricted, same convention as every other filter on this table.
+    const NDR_ATTEMPT_FILTER_OPTIONS = ['1', '2', '3', 'More than 3'];
     // Connected=No reassignment preview - see leadAssignmentRules.json's _reassignNote and
     // assign_leads.py's REASSIGN_BACKLOG_CUTOFF/REASSIGN_RETRY_CAP. This preview can only
     // exclude the CURRENT agent (the one who just failed to connect) - it has no client-side
@@ -2582,6 +2587,7 @@ const localStorage = typeof window !== 'undefined'
       // other process would show RTO's real numbers mislabelled as that process's own.
       const renderTeamRosterTable = () => {
         const isRto = currentProcess?.value === 'rto';
+        const isNdr = currentProcess?.value === 'ndr';
         const agentMetrics = effectiveAgentRoster.filter(a => a.inProcess).map(ag => {
           const email = ag.email.toLowerCase();
           const prefix = email.split('@')[0];
@@ -2688,6 +2694,11 @@ const localStorage = typeof window !== 'undefined'
                   <th className="py-3 px-4 text-left font-medium" title="Comma-separated RTO-reason keywords (case-insensitive, e.g. 'refused to accept, otp verified') - a lead whose reason matches gets offered to this agent before the general round-robin.">Priority Reasons</th>
                   <th className="py-3 px-4 text-left font-medium" title="Hard filter on Connected=No reassignments only (never a fresh lead): restricts this agent to reassignments of one payment type. Unlike Prepaid Target, this never relaxes - a reassignment no eligible agent accepts for its type is left unassigned.">Reassign Only</th>
                   </>)}
+                  {/* NDR-specific hard filter on delivery-attempt count - see
+                      scripts/assign_ndr_leads.py's agent_attempt_filter. */}
+                  {isNdr && (
+                  <th className="py-3 px-4 text-left font-medium" title="Hard filter: restricts this agent to leads whose delivery-attempt count falls in the selected bucket(s). No selection = unrestricted. A lead whose bucket no online agent covers is left unassigned.">Attempts</th>
+                  )}
                   {/* Runs THIS process (roster + its calling hours) without being a
                       company-wide admin. Only a full admin can set it - the API
                       refuses it from a process admin, so it is read-only for them. */}
@@ -2818,6 +2829,17 @@ const localStorage = typeof window !== 'undefined'
                         />
                       </td>
                       </>)}
+                      {isNdr && (
+                      <td className="py-3 px-4">
+                        {/* Hard filter, not first-refusal like Priority Reasons above - see
+                            assign_ndr_leads.py. Empty selection = unrestricted. */}
+                        <MultiSelectDropdown
+                          value={(a.attemptCountFilter || '').split(',').map(s => s.trim()).filter(Boolean)}
+                          onChange={(next) => saveProcessAgent(a.email, { attemptCountFilter: next.join(', ') })}
+                          options={NDR_ATTEMPT_FILTER_OPTIONS}
+                        />
+                      </td>
+                      )}
                       <td className="py-3 px-4 text-center">
                         {a.isAdmin ? (
                           <span className="text-[11px] text-zinc-500" title="Company-wide admin - already administers every process">all</span>
