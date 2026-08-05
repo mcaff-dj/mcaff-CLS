@@ -231,6 +231,7 @@ function RepeatOffenders({ repeat, windowMonths }) {
     <>
       <div className="og-card">
         <div className="og-card-title">Repeat Offenders — Couriers</div>
+        <p className="og-card-sub">Window Rate = total complaint cases across the window &divide; total orders shipped in the window, per courier.</p>
         <div className="og-grid-2">
           {repeat.couriers.map((brand) => (
             <div key={brand.brand}>
