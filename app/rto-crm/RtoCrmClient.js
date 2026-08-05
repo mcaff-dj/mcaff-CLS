@@ -100,6 +100,31 @@ const localStorage = typeof window !== 'undefined'
       if(!d.values||d.values.length<2)throw new Error('No data');return d.values;
     }
 
+    /* ── NDR Calling's own sheet - see api/ndr/sheet.js. A separate proxy/fetch from RTO's
+     * (not a parameterized fetchSheet) because it reads a completely different spreadsheet
+     * with its own service-account scope, and NDR must stay independent of RTO's code path. */
+    const NDR_SHEET_ID = '1oRPRvZaGpgQsZyXO_Q_j5HEZO1nkrFv0spTobfDoQ2g';
+    async function fetchNdrSheet(){
+      const r=await fetch(`/api/ndr/sheet?op=values&sid=${encodeURIComponent(NDR_SHEET_ID)}&range=Sheet1`);
+      if(!r.ok)throw new Error(`Sheets API ${r.status}`);const d=await r.json();
+      if(!d.values)throw new Error('No data');return d.values;
+    }
+    // Fixed positional layout, not fuzzy header matching like RTO's mapTkt - NDR's sheet
+    // layout is fully controlled by scripts/ndr_source.py/sync_ndr_leads_to_sheet.py, so a
+    // column-index map is simpler and correct. Indices 0-15 are ndr_source.COLUMNS (A:P); 16
+    // (Q) is assigned_agent, 17 (R) is assigned_at - both written only by
+    // scripts/assign_ndr_leads.py, never by this UI (read-only for now).
+    function mapNdrRow(row, idx){
+      const v = (i) => row[i] !== undefined ? row[i] : '';
+      return {
+        id: `${v(0)}-${idx}`,
+        awb: v(0), orderCode: v(1), orderDate: v(2), courier: v(3), facility: v(4),
+        channel: v(5), brand: v(6), attempts: v(7), ndrReason: v(8), lastUpdated: v(9),
+        courierStatus: v(10), phone: v(11), addressName: v(12), city: v(13), state: v(14),
+        pincode: v(15), assignedAgent: v(16), assignedAt: v(17),
+      };
+    }
+
     /* ── Live Google Sheets Write-Back Engine ──────────── */
     // A ticket's rawIndex is only as fresh as the last full sync. If the sheet's row order has
     // shifted since then (e.g. the daily import job inserting/removing rows elsewhere), writing
@@ -1388,6 +1413,23 @@ const localStorage = typeof window !== 'undefined'
       const [isSyncing, setIsSyncing] = useState(false);
       const [lastSync, setLastSync] = useState('—');
       const [syncError, setSyncError] = useState(null);
+      // NDR Calling's own sheet-sync state - deliberately separate from tickets/isSyncing/
+      // lastSync/syncError above, so the header Refresh button can drive whichever process is
+      // active without the two ever being confused with each other.
+      const [ndrTickets, setNdrTickets] = useState([]);
+      const [ndrSyncing, setNdrSyncing] = useState(false);
+      const [ndrLastSync, setNdrLastSync] = useState('—');
+      const [ndrSyncError, setNdrSyncError] = useState(null);
+      const [ndrTab, setNdrTab] = useState('overview');
+      const [ndrSearch, setNdrSearch] = useState('');
+      const [ndrPerPage, setNdrPerPage] = useState(50);
+      const [ndrPage, setNdrPage] = useState(1);
+      useEffect(() => { setNdrPage(1); }, [ndrTab, ndrSearch]);
+      useEffect(() => {
+        if (userRole === 'Agent' && !isProcessAdmin && (ndrTab === 'admin' || ndrTab === 'predicted')) {
+          setNdrTab('overview');
+        }
+      }, [userRole, isProcessAdmin, ndrTab]);
       const [search, setSearch] = useState('');
       const [adminLogSearch, setAdminLogSearch] = useState('');
       const [adminLogAgent, setAdminLogAgent] = useState('ALL');
@@ -1932,6 +1974,40 @@ const localStorage = typeof window !== 'undefined'
 
       useEffect(()=>{sync(true);},[]);
       useEffect(()=>{const t=setInterval(()=>sync(true),60000);return()=>clearInterval(t);},[sync]);
+
+      // NDR's own sync - same backoff-on-failure shape as RTO's sync() above, but only ever
+      // polls while NDR is the active process (its sheet is a separate API route/spreadsheet
+      // that has no reason to be hit while someone's looking at RTO).
+      const ndrSyncFailCountRef = useRef(0);
+      const syncNdr = useCallback(async(silent=false)=>{
+        setNdrSyncing(true);
+        try{
+          const raw = await fetchNdrSheet();
+          const mapped = raw.slice(1).map((row, idx) => mapNdrRow(row, idx));
+          setNdrTickets(mapped);
+          setNdrLastSync(new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));
+          setNdrSyncError(null);
+          ndrSyncFailCountRef.current = 0;
+          if(!silent)showToast(`${mapped.length.toLocaleString('en-IN')} NDR leads synced`);
+        } catch(e) {
+          console.error('NDR sync failed:', e);
+          setNdrSyncError(e.message || 'Sync failed');
+          if(!silent)showToast(e.message);
+          ndrSyncFailCountRef.current = Math.min(ndrSyncFailCountRef.current + 1, 6);
+          const backoffMs = Math.min(15000 * (2 ** (ndrSyncFailCountRef.current - 1)), 300000);
+          const jitterMs = Math.random() * 3000;
+          setTimeout(()=>syncNdr(true), backoffMs + jitterMs);
+        } finally {
+          setNdrSyncing(false);
+        }
+      },[showToast]);
+
+      useEffect(()=>{ if(activeProcess==='ndr') syncNdr(true); },[activeProcess,syncNdr]);
+      useEffect(()=>{
+        if(activeProcess!=='ndr') return;
+        const t=setInterval(()=>syncNdr(true),60000);
+        return()=>clearInterval(t);
+      },[activeProcess,syncNdr]);
 
       // Detects when a newer deployment of this page has shipped while this tab has been
       // sitting open. rto-crm.html is a static file with no build step / hot-reload - once
@@ -3206,6 +3282,114 @@ const localStorage = typeof window !== 'undefined'
         }
       }, [userRole, tab]);
 
+      // NDR's own tab-count/table derivations, computed unconditionally (hooks can't live
+      // inside the currentProcess.value==='ndr' branch below) but cheap when NDR isn't active
+      // (ndrTickets is just []). "Assigned" here means the sheet's own column Q is non-blank -
+      // there is no disposition/connected concept for NDR yet, unlike RTO's dispCount/
+      // freshAssignedCount above.
+      const ndrTotal = ndrTickets.length;
+      const ndrAssigned = useMemo(() => ndrTickets.filter(t => t.assignedAgent).length, [ndrTickets]);
+      const ndrUnassigned = ndrTotal - ndrAssigned;
+      const ndrAttemptBuckets = useMemo(() => {
+        const counts = { '1': 0, '2': 0, '3': 0, 'More than 3': 0 };
+        for (const t of ndrTickets) {
+          const n = parseInt(t.attempts, 10);
+          if (!Number.isFinite(n) || n <= 0) continue;
+          const bucket = n <= 3 ? String(n) : 'More than 3';
+          counts[bucket] = (counts[bucket] || 0) + 1;
+        }
+        return counts;
+      }, [ndrTickets]);
+      const ndrFilteredBase = useMemo(() => {
+        const q = ndrSearch.trim().toLowerCase();
+        if (!q) return ndrTickets;
+        return ndrTickets.filter(t =>
+          (t.awb || '').toLowerCase().includes(q) ||
+          (t.orderCode || '').toLowerCase().includes(q) ||
+          (t.phone || '').includes(q)
+        );
+      }, [ndrTickets, ndrSearch]);
+      const ndrRowsForTab = useMemo(() => {
+        if (ndrTab === 'fresh') return ndrFilteredBase.filter(t => t.assignedAgent);
+        if (ndrTab === 'predicted') return ndrFilteredBase.filter(t => !t.assignedAgent);
+        return ndrFilteredBase; // 'all'
+      }, [ndrFilteredBase, ndrTab]);
+      const ndrTotalPages = Math.max(1, Math.ceil(ndrRowsForTab.length / ndrPerPage));
+      const ndrPageRows = useMemo(
+        () => ndrRowsForTab.slice((ndrPage - 1) * ndrPerPage, ndrPage * ndrPerPage),
+        [ndrRowsForTab, ndrPage, ndrPerPage]
+      );
+      const renderNdrLeadsTable = () => (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 flex-wrap justify-between">
+            <input
+              value={ndrSearch}
+              onChange={e => setNdrSearch(e.target.value)}
+              placeholder="Search AWB, order code, phone…"
+              className="w-64 px-3 py-1.5 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+            />
+            <div className="flex items-center gap-2 text-[12px] text-zinc-500">
+              <span>{ndrRowsForTab.length.toLocaleString('en-IN')} leads</span>
+              <CustomSelect
+                value={ndrPerPage}
+                onChange={(v) => setNdrPerPage(+v)}
+                options={[{ value: 25, label: '25 per page' }, { value: 50, label: '50 per page' }, { value: 100, label: '100 per page' }]}
+              />
+            </div>
+          </div>
+          <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 overflow-hidden">
+            <div className="overflow-x-auto custom-scroll">
+              <table className="w-full text-[13px]">
+                <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
+                  <th className="py-3 px-4 text-left font-medium">AWB</th>
+                  <th className="py-3 px-4 text-left font-medium">Order</th>
+                  <th className="py-3 px-4 text-left font-medium">Order Date</th>
+                  <th className="py-3 px-4 text-left font-medium">Courier</th>
+                  <th className="py-3 px-4 text-left font-medium">Facility</th>
+                  <th className="py-3 px-4 text-left font-medium">Brand</th>
+                  <th className="py-3 px-4 text-center font-medium">Attempts</th>
+                  <th className="py-3 px-4 text-left font-medium">NDR Reason</th>
+                  <th className="py-3 px-4 text-left font-medium">Courier Status</th>
+                  <th className="py-3 px-4 text-left font-medium">Phone</th>
+                  <th className="py-3 px-4 text-left font-medium">Address</th>
+                  <th className="py-3 px-4 text-left font-medium">Assigned Agent</th>
+                  <th className="py-3 px-4 text-left font-medium">Assigned At</th>
+                </tr></thead>
+                <tbody className="divide-y divide-zinc-800/50">
+                  {ndrPageRows.map(t => (
+                    <tr key={t.id} className="hover:bg-zinc-800/30 transition-colors">
+                      <td className="py-2.5 px-4 font-mono text-zinc-300">{t.awb}</td>
+                      <td className="py-2.5 px-4 text-zinc-300">{t.orderCode}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.orderDate}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.courier}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.facility}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.brand}</td>
+                      <td className="py-2.5 px-4 text-center text-zinc-300">{t.attempts}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.ndrReason}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.courierStatus}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.phone}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{[t.addressName, t.city, t.state, t.pincode].filter(Boolean).join(', ')}</td>
+                      <td className="py-2.5 px-4 text-zinc-300">{t.assignedAgent || <span className="text-zinc-600">Unassigned</span>}</td>
+                      <td className="py-2.5 px-4 text-zinc-500">{t.assignedAt}</td>
+                    </tr>
+                  ))}
+                  {ndrPageRows.length === 0 && (
+                    <tr><td colSpan={13} className="py-8 text-center text-zinc-500">No leads found.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          {ndrTotalPages > 1 && (
+            <div className="flex items-center justify-center gap-2 text-[12px] text-zinc-400">
+              <button onClick={() => setNdrPage(p => Math.max(1, p - 1))} disabled={ndrPage <= 1} className="px-2 py-1 rounded bg-zinc-800 disabled:opacity-40">Prev</button>
+              <span>Page {ndrPage} of {ndrTotalPages}</span>
+              <button onClick={() => setNdrPage(p => Math.min(ndrTotalPages, p + 1))} disabled={ndrPage >= ndrTotalPages} className="px-2 py-1 rounded bg-zinc-800 disabled:opacity-40">Next</button>
+            </div>
+          )}
+        </div>
+      );
+
       return(
         <div className="min-h-screen flex flex-col bg-[#09090b]">
 
@@ -3224,9 +3408,9 @@ const localStorage = typeof window !== 'undefined'
                     <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
                   </h1>
                   <p className="text-[11px] text-zinc-500 font-mono hidden sm:flex items-center gap-1.5">
-                    Last sync: {lastSync}
-                    {syncError && (
-                      <span className="text-rose-400 font-sans font-semibold" title={syncError}>
+                    Last sync: {activeProcess==='ndr' ? ndrLastSync : lastSync}
+                    {(activeProcess==='ndr' ? ndrSyncError : syncError) && (
+                      <span className="text-rose-400 font-sans font-semibold" title={activeProcess==='ndr' ? ndrSyncError : syncError}>
                         ⚠ Sync failed — showing cached data, retrying…
                       </span>
                     )}
@@ -3240,9 +3424,9 @@ const localStorage = typeof window !== 'undefined'
                   <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500"/>
                   <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search orders, remarks…" className="w-48 pl-8 pr-3 py-1.5 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/50 transition-all"/>
                 </div>
-                <button onClick={()=>sync(false)} disabled={isSyncing} className="h-8 px-2.5 sm:px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors disabled:opacity-50 shrink-0" title="Refresh data">
-                  <RefreshIcon className={isSyncing?'animate-spin text-indigo-400':''}/>
-                  <span className="hidden md:inline">{isSyncing?'Syncing…':'Refresh'}</span>
+                <button onClick={()=>activeProcess==='ndr'?syncNdr(false):sync(false)} disabled={activeProcess==='ndr'?ndrSyncing:isSyncing} className="h-8 px-2.5 sm:px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors disabled:opacity-50 shrink-0" title={`Refresh ${activeProcess==='ndr'?'NDR':'RTO'} data`}>
+                  <RefreshIcon className={(activeProcess==='ndr'?ndrSyncing:isSyncing)?'animate-spin text-indigo-400':''}/>
+                  <span className="hidden md:inline">{(activeProcess==='ndr'?ndrSyncing:isSyncing)?'Syncing…':'Refresh'}</span>
                 </button>
 
                 {/* Process switcher - which calling process this page is showing (see PROCESSES). */}
@@ -3341,7 +3525,7 @@ const localStorage = typeof window !== 'undefined'
                 has its own lead source, instead of RTO's data under a different label. Admin
                 Panel & Roster is the one exception: roster and calling-hours setup are real
                 and useful before any leads exist, so that tab renders the actual components. */}
-            {currentProcess && !currentProcess.implemented && (() => {
+            {currentProcess && !currentProcess.implemented && currentProcess.value !== 'ndr' && (() => {
               const canAdminTab = userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin;
               const canPredictedTab = userRole === 'Admin' || isProcessAdmin;
               const shellTabs = [
@@ -3403,6 +3587,85 @@ const localStorage = typeof window !== 'undefined'
                         >
                           ← Back to RTO Calling
                         </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* NDR Calling's own real (read-only) workspace - independent of RTO's tab/tabs
+                state and its RTO-column-coupled table/metrics logic above. No Call/WhatsApp/
+                disposition workflow yet - "Fresh Leads" and "Next to Assign" are simple
+                partitions of the sheet's own column Q (assigned_agent) being non-blank/blank,
+                not a disposition-derived queue like RTO's. */}
+            {currentProcess && currentProcess.value === 'ndr' && (() => {
+              const canAdminTab = userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin;
+              const canPredictedTab = userRole === 'Admin' || isProcessAdmin;
+              const ndrTabsList = [
+                { key: 'overview', label: '📊 Overview', count: ndrTotal },
+                { key: 'all', label: 'All Leads', count: ndrTotal },
+                { key: 'fresh', label: '⚡ Fresh Leads (Assigned)', count: ndrAssigned },
+                ...(canAdminTab ? [{ key: 'admin', label: 'Admin Panel & Roster', count: effectiveAgentRoster.length }] : []),
+                ...(canPredictedTab ? [{ key: 'predicted', label: '🔮 Next to Assign', count: ndrUnassigned }] : []),
+              ];
+              return (
+                <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-1.5 shadow-xl backdrop-blur-md">
+                  <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar w-full mb-1.5">
+                    {ndrTabsList.map(t => (
+                      <button
+                        key={t.key}
+                        onClick={() => setNdrTab(t.key)}
+                        className={`relative px-4 py-2 rounded-xl text-[13px] font-bold whitespace-nowrap transition-all flex items-center gap-2.5 ${
+                          ndrTab === t.key
+                            ? 'text-white bg-indigo-600 shadow-md shadow-indigo-950/50 border border-indigo-500/40'
+                            : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 border border-transparent'
+                        }`}
+                      >
+                        {t.label}
+                        <span className={`text-[11px] px-1.5 py-0.5 rounded-md ${ndrTab === t.key ? 'bg-white/20' : 'bg-zinc-800'}`}>{t.count}</span>
+                      </button>
+                    ))}
+                  </nav>
+                  <div className="p-4">
+                    {ndrSyncError && (
+                      <div className="mb-3 text-[12px] text-rose-400">⚠ {ndrSyncError} — retrying…</div>
+                    )}
+                    {ndrTab === 'overview' && (
+                      <div className="space-y-4">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                          <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-4">
+                            <div className="text-[11px] text-zinc-500 uppercase font-medium">Total Leads</div>
+                            <div className="text-2xl font-bold text-zinc-100 mt-1">{ndrTotal.toLocaleString('en-IN')}</div>
+                          </div>
+                          <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-4">
+                            <div className="text-[11px] text-zinc-500 uppercase font-medium">Assigned</div>
+                            <div className="text-2xl font-bold text-indigo-400 mt-1">{ndrAssigned.toLocaleString('en-IN')}</div>
+                          </div>
+                          <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-4">
+                            <div className="text-[11px] text-zinc-500 uppercase font-medium">Unassigned</div>
+                            <div className="text-2xl font-bold text-amber-400 mt-1">{ndrUnassigned.toLocaleString('en-IN')}</div>
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[12px] text-zinc-500 mb-2 font-medium">Leads by Attempt Count</div>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                            {Object.entries(ndrAttemptBuckets).map(([bucket, count]) => (
+                              <div key={bucket} className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-4">
+                                <div className="text-[11px] text-zinc-500 uppercase font-medium">{bucket} attempt{bucket === '1' ? '' : 's'}</div>
+                                <div className="text-xl font-bold text-zinc-100 mt-1">{count.toLocaleString('en-IN')}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    {(ndrTab === 'all' || ndrTab === 'fresh' || ndrTab === 'predicted') && renderNdrLeadsTable()}
+                    {ndrTab === 'admin' && canAdminTab && (
+                      <div className="space-y-6">
+                        {renderTeamRosterTable()}
+                        {renderCallingHoursCard()}
+                        {renderProcessDispositionsCard()}
                       </div>
                     )}
                   </div>
