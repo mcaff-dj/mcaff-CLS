@@ -56,6 +56,15 @@ def main():
         raise SystemExit(f"Report generation failed for: {', '.join(failed)}")
     print("All reports regenerated.")
 
+    # Cross-brand digest, built from both brands' data/*_digest_facts.json (a side output
+    # generate_report.py just wrote above) - needs both brands present, so this can only run
+    # after the loop above, not per-brand. Its CSAT/NPS columns inherit whatever freshness
+    # --quick/--refresh-nps already gave the small-tabs/NPS caches those numbers come from;
+    # the ticket-row-derived facts (classes/categories/couriers/SKUs) are always current
+    # since data_rows itself is refreshed on every run regardless of --quick.
+    print("=== Building cross-brand trend digest ===", flush=True)
+    subprocess.run([sys.executable, "-u", str(HERE / "build_trend_digest.py")], check=True)
+
 
 if __name__ == "__main__":
     main()

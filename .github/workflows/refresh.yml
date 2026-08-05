@@ -183,6 +183,14 @@ jobs:
             aws s3 cp api/_reports/ s3://mcaff-cls-reports/reports/ --recursive \
               --exclude "*" --include "*_raw_*.csv.gz" --content-type "application/gzip" --only-show-errors
           fi
+          # Cross-brand Org_KYC_Trends digest (see build_trend_digest.py) - small (tens of
+          # KB), so no gzip; served the same signed-URL-redirect way as the report HTML (see
+          # api/report/data/[key].js's 'trend-digest' route), hence the same no-cache policy.
+          if [ -f data/trend_digest.json ]; then
+            aws s3 cp data/trend_digest.json s3://mcaff-cls-reports/reports/trend_digest.json \
+              --content-type "application/json; charset=utf-8" \
+              --cache-control "no-cache, must-revalidate" --only-show-errors
+          fi
 
       - name: Invalidate CloudFront cache for updated reports
         # The S3 upload above doesn't bust CloudFront's edge cache on its own, so
@@ -199,7 +207,7 @@ jobs:
             exit 1
           fi
           aws cloudfront create-invalidation --distribution-id "$distId" \
-            --paths "/reports/mcaffeine.html" "/reports/hyphen.html"
+            --paths "/reports/mcaffeine.html" "/reports/hyphen.html" "/reports/trend_digest.json"
 
       - name: Commit & push if changed
         run: |

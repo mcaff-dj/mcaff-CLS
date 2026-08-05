@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import gen_digest_facts
 import gen_monthly
 import gen_panels
 import gen_raw_export
@@ -325,6 +326,13 @@ def main():
         f.write(html)
     size_kb = round(out_path.stat().st_size / 1024)
     lap(f"assemble + write HTML ({size_kb} KB)")
+
+    # Aggregate-only facts for the cross-brand Org_KYC_Trends digest (see
+    # gen_digest_facts.py) - a side output of this same run rather than a separate
+    # Sheets/MySQL pull, since ctx already holds everything it needs at this point.
+    facts_path = REPO_ROOT / f"data/{b['brand']}_digest_facts.json"
+    gen_digest_facts.write_facts(ctx, facts_path)
+    lap(f"digest facts ({round(facts_path.stat().st_size / 1024)} KB)")
 
 
 def build_insights_card_overview(ctx, uniq_class_month):

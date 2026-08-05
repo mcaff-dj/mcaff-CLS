@@ -60,6 +60,11 @@ const CARD_TABS = {
     { key: 'agent', label: 'Agent wise analysis' },
     { key: 'agentactivity', label: 'Agent Activity Analysis' },
   ],
+  // Mirrors app/orgoverview/OrgOverviewClient.js's own TABS array, same reasoning as
+  // deepdive's note above.
+  orgoverview: [
+    { key: 'kyctrends', label: 'Org_KYC_Trends' },
+  ],
 };
 
 module.exports = { CARD_TABS };

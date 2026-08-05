@@ -9,6 +9,7 @@ const { GetObjectCommand } = require('@aws-sdk/client-s3');
 const { s3Client, REPORTS_BUCKET } = require('../../_lib/s3');
 const { getSession } = require('../../_lib/session');
 const { logAccess, getCallingOverviewData } = require('../../_lib/db');
+const { signedReportUrl } = require('../../_lib/reportUrls');
 
 async function streamToString(stream) {
   const chunks = [];
@@ -22,6 +23,14 @@ const DATA_ROUTES = {
   csat: { file: 'csat_dashboard_data.json', card: 'deepdive', page: '/deepdive' },
   'agent-activity': { file: 'agent_activity_data.json', card: 'deepdive', page: '/deepdive' },
   'calling-overview': { card: 'calling', tab: 'overview', page: '/calling-overview', query: getCallingOverviewData },
+  // Unlike the routes above, this one redirects to a signed CloudFront URL instead of
+  // buffering the JSON through this function (see [card].js, which does the same for the
+  // 20-30MB report HTML). Every other page's data file is fetched by ~one viewer's own
+  // request; this one is a single shared cross-brand artifact every Org Overview viewer
+  // requests on every load, so at real traffic it belongs on the CDN, not re-read from S3
+  // by Lambda per request. The file is small today (tens of KB) but the redirect path
+  // costs nothing extra and doesn't need revisiting if it grows.
+  'trend-digest': { file: 'trend_digest.json', card: 'orgoverview', page: '/orgoverview', redirect: true },
 };
 
 module.exports = async (req, res) => {
@@ -51,6 +60,19 @@ module.exports = async (req, res) => {
   }
 
   try {
+    if (route.redirect) {
+      // Same pattern as api/report/[card].js: sign a short-lived CloudFront URL and hand
+      // back only the path+query so the browser's fetch stays same-origin (Amplify's own
+      // /reports/<*> rewrite proxies it through to CloudFront server-side).
+      const url = await signedReportUrl(`reports/${route.file}`);
+      const { pathname, search } = new URL(url);
+      res.writeHead(302, { Location: pathname + search, 'Cache-Control': 'no-store' });
+      res.end();
+      const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
+      logAccess(session.uid, session.email, route.card, ip).catch(() => {});
+      return;
+    }
+
     let payload;
     if (route.query) {
       payload = await route.query(req.query);
