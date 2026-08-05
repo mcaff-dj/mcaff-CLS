@@ -64,18 +64,23 @@ def get_last_data_row(tab):
     return len(values) if values else 0
 
 
-def fetch_today_delivery_tickets(table):
+def fetch_today_delivery_tickets(table, since=None):
+    """since: optional 'YYYY-MM-DD' to backfill everything resolved from that date through
+    today (inclusive), for catching up after a run failed partway and missed a day - normal
+    runs omit it and only pick up tickets resolved today."""
+    date_filter = "DATE(resolved_at) BETWEEN %s AND CURDATE()" if since else "DATE(resolved_at) = CURDATE()"
+    params = ("%Delivery%", since) if since else ("%Delivery%",)
     sql = f"""
         SELECT ticket_number, subcategory, order_name, disposition_order,
                disposition_awb_number, disposition_partner_name,
                disposition_order_date, created_at, resolved_at,
                disposition_warehouse_name
         FROM {table}
-        WHERE category LIKE %s AND DATE(resolved_at) = CURDATE()
+        WHERE category LIKE %s AND {date_filter}
               AND (subcategory IS NULL OR subcategory != 'Estimated time of delivery')
         ORDER BY resolved_at
     """
-    rows = mysql_lib.query(sql, params=("%Delivery%",), database="PEP_CLS")
+    rows = mysql_lib.query(sql, params=params, database="PEP_CLS")
     if rows is None:
         raise RuntimeError("MYSQL_* credentials not configured - cannot fetch tickets.")
     return rows
@@ -135,16 +140,19 @@ def build_sheet_row(row):
     return row_out
 
 
-def sync_tab(tab, dry_run):
+def sync_tab(tab, dry_run, since=None):
     table = TAB_TABLE[tab]
     print(f"--- {tab} ({table}) ---")
 
     existing = get_existing_ticket_numbers(tab) if not dry_run else set()
     if not dry_run:
         print(f"  {len(existing)} ticket numbers already in sheet")
+    elif since:
+        # dry-run + since still needs the existing set to report an accurate "new rows" count
+        existing = get_existing_ticket_numbers(tab)
 
-    db_rows = fetch_today_delivery_tickets(table)
-    print(f"  {len(db_rows)} Delivery-class tickets resolved today in DB")
+    db_rows = fetch_today_delivery_tickets(table, since=since)
+    print(f"  {len(db_rows)} Delivery-class tickets resolved {'since ' + since if since else 'today'} in DB")
 
     new_rows = [build_sheet_row(r) for r in db_rows if r[0] not in existing]
     print(f"  {len(new_rows)} new rows to {'would append' if dry_run else 'append'}")
@@ -171,8 +179,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tab", choices=sorted(TAB_TABLE), required=True)
     parser.add_argument("--dry-run", action="store_true", help="Fetch and print only, no sheet writes")
+    parser.add_argument("--since", help="YYYY-MM-DD: backfill tickets resolved from this date through today (default: today only)")
     args = parser.parse_args()
-    sync_tab(args.tab, args.dry_run)
+    sync_tab(args.tab, args.dry_run, args.since)
 
 
 if __name__ == "__main__":
