@@ -996,9 +996,10 @@ const localStorage = typeof window !== 'undefined'
         }
       };
 
-      // Per-process disposition list (see calling_process_dispositions) - reloaded whenever
-      // the admin switches process, same reasoning as loadProcessAgents above: each process's
-      // list is its own. RTO's disposition options stay the hardcoded connectedOutcomes/
+      // Per-process disposition TREE (see calling_process_dispositions) - one level of
+      // nesting, [{id,label,description,sortOrder,children:[...]}]. Reloaded whenever the
+      // admin switches process, same reasoning as loadProcessAgents above: each process's list
+      // is its own. RTO's disposition options stay the hardcoded connectedOutcomes/
       // unreachableOutcomes arrays further up and never touch this endpoint - this only backs
       // a process (NDR today) that has no built-in list of its own.
       const [processDispositions, setProcessDispositions] = useState(null); // null = not loaded yet
@@ -1006,9 +1007,12 @@ const localStorage = typeof window !== 'undefined'
       const [savingDisposition, setSavingDisposition] = useState(false);
       const [newDispLabel, setNewDispLabel] = useState('');
       const [newDispDesc, setNewDispDesc] = useState('');
-      const [editingDispId, setEditingDispId] = useState(null);
-      const [editDispLabel, setEditDispLabel] = useState('');
-      const [editDispDesc, setEditDispDesc] = useState('');
+      // Which top-level options are expanded to show their children - a Set of ids, empty by
+      // default (collapsed), same "closed until you open it" convention as the reference UI.
+      const [expandedDispIds, setExpandedDispIds] = useState(() => new Set());
+      // One draft {label, description} per parent id, so "add a child" inputs under two
+      // different expanded parents never share state or clobber each other.
+      const [newChildDrafts, setNewChildDrafts] = useState({});
 
       const loadDispositions = useCallback(async (processKey) => {
         if (!processKey) return;
@@ -1031,8 +1035,19 @@ const localStorage = typeof window !== 'undefined'
         if (googleUser?.email) loadDispositions(activeProcess);
       }, [googleUser, activeProcess, loadDispositions]);
 
-      const addDisposition = async () => {
-        const label = newDispLabel.trim();
+      const toggleDispExpanded = (id) => {
+        setExpandedDispIds((prev) => {
+          const next = new Set(prev);
+          if (next.has(id)) next.delete(id); else next.add(id);
+          return next;
+        });
+      };
+
+      // parentId omitted/null adds a top-level option (reads newDispLabel/newDispDesc); passed
+      // adds a child under that parent instead (reads newChildDrafts[parentId]).
+      const addDisposition = async (parentId) => {
+        const draft = parentId ? (newChildDrafts[parentId] || { label: '', description: '' }) : { label: newDispLabel, description: newDispDesc };
+        const label = draft.label.trim();
         if (!label) return;
         setSavingDisposition(true);
         setDispositionsError('');
@@ -1040,20 +1055,25 @@ const localStorage = typeof window !== 'undefined'
           const r = await fetch('/api/admin/dispositions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ processKey: activeProcess, label, description: newDispDesc.trim() }),
+            body: JSON.stringify({ processKey: activeProcess, label, description: draft.description.trim(), parentId: parentId || undefined }),
           });
           const d = await r.json().catch(() => ({}));
           if (!r.ok) {
-            const msg = d.error || `Could not add disposition (${r.status})`;
+            const msg = d.error || `Could not add option (${r.status})`;
             setDispositionsError(msg);
             showToast(`⚠️ ${msg}`);
             return;
           }
           setProcessDispositions(d.dispositions || []);
-          setNewDispLabel('');
-          setNewDispDesc('');
+          if (parentId) {
+            setNewChildDrafts((prev) => ({ ...prev, [parentId]: { label: '', description: '' } }));
+            setExpandedDispIds((prev) => new Set(prev).add(parentId)); // stay open after adding
+          } else {
+            setNewDispLabel('');
+            setNewDispDesc('');
+          }
         } catch (e) {
-          const msg = e.message || 'Could not add disposition';
+          const msg = e.message || 'Could not add option';
           setDispositionsError(msg);
           showToast(`⚠️ ${msg}`);
         } finally {
@@ -1061,16 +1081,18 @@ const localStorage = typeof window !== 'undefined'
         }
       };
 
-      const saveDispositionEdit = async (id) => {
-        const label = editDispLabel.trim();
-        if (!label) return;
+      // Inline-editable, no separate edit mode: each row's label/description inputs are
+      // uncontrolled (defaultValue, not value) and commit on blur only if actually changed -
+      // matching the reference UI, where Options are plain always-editable fields rather than
+      // needing an Edit click first. patch is whichever of {label, description} changed.
+      const saveDispositionEdit = async (id, patch) => {
         setSavingDisposition(true);
         setDispositionsError('');
         try {
           const r = await fetch('/api/admin/dispositions', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ processKey: activeProcess, id, label, description: editDispDesc.trim() }),
+            body: JSON.stringify({ processKey: activeProcess, id, ...patch }),
           });
           const d = await r.json().catch(() => ({}));
           if (!r.ok) {
@@ -1080,7 +1102,6 @@ const localStorage = typeof window !== 'undefined'
             return;
           }
           setProcessDispositions(d.dispositions || []);
-          setEditingDispId(null);
         } catch (e) {
           const msg = e.message || 'Could not save disposition';
           setDispositionsError(msg);
@@ -1118,20 +1139,26 @@ const localStorage = typeof window !== 'undefined'
 
       // Optimistic swap-then-confirm: the reorder feels instant, and reverts to the server's
       // own order (via loadDispositions) if the request actually fails rather than leaving the
-      // UI showing an order that was never saved.
-      const moveDisposition = async (index, direction) => {
-        if (!processDispositions) return;
-        const next = [...processDispositions];
+      // UI showing an order that was never saved. parentId null/omitted reorders the top-level
+      // list; passed, reorders that ONE parent's children only - the two scopes never mix, so
+      // moving a child up/down can't accidentally touch a top-level option's position.
+      const moveDisposition = async (list, index, direction, parentId) => {
         const swapWith = index + direction;
-        if (swapWith < 0 || swapWith >= next.length) return;
+        if (swapWith < 0 || swapWith >= list.length) return;
+        const next = [...list];
         [next[index], next[swapWith]] = [next[swapWith], next[index]];
-        setProcessDispositions(next);
+        // parentId set: `list` is that ONE parent's children, so only its slot in the tree
+        // needs replacing. parentId omitted: `list` IS the top-level array already (each item
+        // carries its own .children), so the swapped copy is the complete next tree as-is.
+        setProcessDispositions((prevTree) =>
+          parentId ? prevTree.map((p) => (p.id === parentId ? { ...p, children: next } : p)) : next
+        );
         setSavingDisposition(true);
         try {
           const r = await fetch('/api/admin/dispositions', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ processKey: activeProcess, orderedIds: next.map(x => x.id) }),
+            body: JSON.stringify({ processKey: activeProcess, orderedIds: next.map((x) => x.id), parentId: parentId || undefined }),
           });
           const d = await r.json().catch(() => ({}));
           if (!r.ok) {
@@ -2948,19 +2975,112 @@ const localStorage = typeof window !== 'undefined'
       // fixed count. Rendered only from the Admin Panel of a process that isn't `implemented`
       // (currentProcess.implemented is false) - RTO keeps using its own connectedOutcomes/
       // unreachableOutcomes arrays untouched and never renders this card.
+      // One row, reused for both a top-level option and a child option (parentId set for the
+      // latter). Label/description are uncontrolled (defaultValue) and commit on blur only if
+      // changed, so typing never round-trips to the server per keystroke - see
+      // saveDispositionEdit's comment. `list` is whichever sibling array d belongs to (the
+      // top-level array, or one parent's .children), needed for the up/down bounds and to
+      // send the right reorder scope.
+      const renderDispRow = (d, list, index, parentId) => (
+        <div key={d.id} className={`rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-3 py-2 ${parentId ? 'ml-8' : ''}`}>
+          <div className="flex items-center gap-2">
+            <span className="text-zinc-600 select-none text-[13px]" title="Reorder with the ↑↓ buttons">⋮⋮</span>
+            <span className="inline-flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 rounded-lg pl-2 pr-1 py-1 shrink-0 w-[220px]">
+              <span className="text-indigo-400 text-[12px] shrink-0">🏷️</span>
+              <input
+                key={`label-${d.id}`}
+                defaultValue={d.label}
+                maxLength={120}
+                onBlur={(e) => {
+                  const v = e.target.value.trim();
+                  if (!v) { e.target.value = d.label; return; }
+                  if (v !== d.label) saveDispositionEdit(d.id, { label: v });
+                }}
+                className="min-w-0 flex-1 bg-transparent text-[13px] text-zinc-200 focus:outline-none"
+              />
+            </span>
+            {!parentId && (
+              <button
+                onClick={() => toggleDispExpanded(d.id)}
+                className="shrink-0 h-7 px-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-emerald-400 text-[11px] font-bold transition-colors flex items-center gap-1"
+                title={expandedDispIds.has(d.id) ? 'Collapse' : 'Expand to view/add child options'}
+              >
+                {d.children.length} {d.children.length === 1 ? 'child' : 'children'}
+                <span>{expandedDispIds.has(d.id) ? '⌄' : '›'}</span>
+              </button>
+            )}
+            <input
+              key={`desc-${d.id}`}
+              defaultValue={d.description}
+              placeholder="Description (optional)"
+              onBlur={(e) => {
+                const v = e.target.value.trim();
+                if (v !== d.description) saveDispositionEdit(d.id, { description: v });
+              }}
+              className="min-w-0 flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+            />
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                onClick={() => moveDisposition(list, index, -1, parentId)}
+                disabled={savingDisposition || index === 0}
+                title="Move up"
+                className="h-7 w-7 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-30"
+              >
+                ↑
+              </button>
+              <button
+                onClick={() => moveDisposition(list, index, 1, parentId)}
+                disabled={savingDisposition || index === list.length - 1}
+                title="Move down"
+                className="h-7 w-7 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-30"
+              >
+                ↓
+              </button>
+              <button
+                onClick={() => {
+                  const childNote = !parentId && d.children.length ? ` and its ${d.children.length} child option(s)` : '';
+                  if (window.confirm(`Delete "${d.label}"${childNote}?`)) deleteDisposition(d.id);
+                }}
+                disabled={savingDisposition}
+                title="Delete"
+                className="h-7 w-7 rounded-lg bg-rose-950/60 hover:bg-rose-900/60 text-rose-300 text-[12px] font-semibold transition-colors"
+              >
+                🗑
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+
+      // Admin-defined disposition list for a process with no hardcoded one of its own (see
+      // calling_process_dispositions) - "highly customisable" per the ask: an admin can add,
+      // rename, describe, nest (one level), reorder, and remove options freely, with no
+      // seeded default and no fixed count. Rendered only from the Admin Panel of a process
+      // that isn't `implemented` (currentProcess.implemented is false) - RTO keeps using its
+      // own connectedOutcomes/unreachableOutcomes arrays untouched and never renders this card.
       const renderProcessDispositionsCard = () => (
         <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
-          <div className="flex items-start gap-3 mb-1">
-            <span className="h-9 w-9 shrink-0 rounded-xl bg-violet-950/60 border border-violet-800/60 flex items-center justify-center text-violet-300">🏷️</span>
-            <div>
-              <h2 className="text-lg font-bold text-zinc-100">
-                Disposition List{currentProcess ? ` — ${currentProcess.label.replace(/^Process:\s*/, '')}` : ''}
-              </h2>
-              <p className="text-[13px] text-zinc-500">
-                What an agent may select when disposing a lead on this process. Unlike RTO Calling
-                (a fixed, built-in list), this one starts empty - add whatever this process needs.
-              </p>
+          <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
+            <div className="flex items-start gap-3">
+              <span className="h-9 w-9 shrink-0 rounded-xl bg-violet-950/60 border border-violet-800/60 flex items-center justify-center text-violet-300">🏷️</span>
+              <div>
+                <h2 className="text-lg font-bold text-zinc-100">
+                  Disposition List{currentProcess ? ` — ${currentProcess.label.replace(/^Process:\s*/, '')}` : ''}
+                </h2>
+                <p className="text-[13px] text-zinc-500">
+                  What an agent may select when disposing a lead on this process. Unlike RTO Calling
+                  (a fixed, built-in list), this one starts empty - add whatever this process needs.
+                  Expand an option to give it its own child reasons.
+                </p>
+              </div>
             </div>
+            <button
+              onClick={() => addDisposition()}
+              disabled={savingDisposition || !newDispLabel.trim()}
+              className="h-8 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-50 shrink-0"
+            >
+              {savingDisposition ? 'Adding…' : '+ Add Option'}
+            </button>
           </div>
 
           {dispositionsError && (
@@ -2973,77 +3093,36 @@ const localStorage = typeof window !== 'undefined'
             {processDispositions === null ? (
               <p className="text-[13px] text-zinc-500">Loading…</p>
             ) : processDispositions.length === 0 ? (
-              <p className="text-[13px] text-zinc-500">No dispositions added yet - use the form below to add the first one.</p>
+              <p className="text-[13px] text-zinc-500">No options added yet - use &quot;+ Add Option&quot; below to add the first one.</p>
             ) : processDispositions.map((d, i) => (
-              <div key={d.id} className="rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-4 py-2.5">
-                {editingDispId === d.id ? (
-                  <div className="flex flex-col gap-2">
-                    <input
-                      value={editDispLabel}
-                      onChange={e => setEditDispLabel(e.target.value)}
-                      placeholder="Disposition label"
-                      maxLength={120}
-                      className="bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                    />
-                    <input
-                      value={editDispDesc}
-                      onChange={e => setEditDispDesc(e.target.value)}
-                      placeholder="Description (optional)"
-                      className="bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                    />
-                    <div className="flex items-center gap-2">
+              <div key={d.id}>
+                {renderDispRow(d, processDispositions, i, null)}
+                {expandedDispIds.has(d.id) && (
+                  <div className="mt-1.5 space-y-1.5">
+                    {d.children.map((c, ci) => renderDispRow(c, d.children, ci, d.id))}
+                    <div className="ml-8 flex items-center gap-2">
+                      <span className="w-[13px]" />
+                      <input
+                        value={(newChildDrafts[d.id] || {}).label || ''}
+                        onChange={(e) => setNewChildDrafts((prev) => ({ ...prev, [d.id]: { label: e.target.value, description: (prev[d.id] || {}).description || '' } }))}
+                        onKeyDown={(e) => { if (e.key === 'Enter' && (newChildDrafts[d.id] || {}).label?.trim()) addDisposition(d.id); }}
+                        placeholder="New child option"
+                        maxLength={120}
+                        className="w-[220px] bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                      />
+                      <input
+                        value={(newChildDrafts[d.id] || {}).description || ''}
+                        onChange={(e) => setNewChildDrafts((prev) => ({ ...prev, [d.id]: { label: (prev[d.id] || {}).label || '', description: e.target.value } }))}
+                        onKeyDown={(e) => { if (e.key === 'Enter' && (newChildDrafts[d.id] || {}).label?.trim()) addDisposition(d.id); }}
+                        placeholder="Description (optional)"
+                        className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                      />
                       <button
-                        onClick={() => saveDispositionEdit(d.id)}
-                        disabled={savingDisposition || !editDispLabel.trim()}
-                        className="h-7 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-bold transition-colors disabled:opacity-50"
+                        onClick={() => addDisposition(d.id)}
+                        disabled={savingDisposition || !(newChildDrafts[d.id] || {}).label?.trim()}
+                        className="h-8 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-50 shrink-0"
                       >
-                        Save
-                      </button>
-                      <button
-                        onClick={() => setEditingDispId(null)}
-                        disabled={savingDisposition}
-                        className="h-7 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[12px] font-semibold transition-colors"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-[13px] font-semibold text-zinc-200 truncate">{d.label}</p>
-                      {d.description && <p className="text-[12px] text-zinc-500 truncate">{d.description}</p>}
-                    </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        onClick={() => moveDisposition(i, -1)}
-                        disabled={savingDisposition || i === 0}
-                        title="Move up"
-                        className="h-7 w-7 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-30"
-                      >
-                        ↑
-                      </button>
-                      <button
-                        onClick={() => moveDisposition(i, 1)}
-                        disabled={savingDisposition || i === processDispositions.length - 1}
-                        title="Move down"
-                        className="h-7 w-7 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-30"
-                      >
-                        ↓
-                      </button>
-                      <button
-                        onClick={() => { setEditingDispId(d.id); setEditDispLabel(d.label); setEditDispDesc(d.description || ''); }}
-                        disabled={savingDisposition}
-                        className="h-7 px-2.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 text-[12px] font-semibold transition-colors"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        onClick={() => { if (window.confirm(`Delete "${d.label}"?`)) deleteDisposition(d.id); }}
-                        disabled={savingDisposition}
-                        className="h-7 px-2.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/60 text-rose-300 text-[12px] font-semibold transition-colors"
-                      >
-                        Delete
+                        + Add child
                       </button>
                     </div>
                   </div>
@@ -3052,30 +3131,21 @@ const localStorage = typeof window !== 'undefined'
             ))}
           </div>
 
-          <div className="mt-4 pt-4 border-t border-zinc-800/60 flex flex-col gap-2">
-            <div className="flex items-center gap-2">
-              <input
-                value={newDispLabel}
-                onChange={e => setNewDispLabel(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && newDispLabel.trim()) addDisposition(); }}
-                placeholder="New disposition label"
-                maxLength={120}
-                className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-              />
-              <button
-                onClick={addDisposition}
-                disabled={savingDisposition || !newDispLabel.trim()}
-                className="h-8 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-50 shrink-0"
-              >
-                {savingDisposition ? 'Adding…' : '+ Add'}
-              </button>
-            </div>
+          <div className="mt-4 pt-4 border-t border-zinc-800/60 flex items-center gap-2">
+            <input
+              value={newDispLabel}
+              onChange={e => setNewDispLabel(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && newDispLabel.trim()) addDisposition(); }}
+              placeholder="New top-level option"
+              maxLength={120}
+              className="w-[220px] bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+            />
             <input
               value={newDispDesc}
               onChange={e => setNewDispDesc(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter' && newDispLabel.trim()) addDisposition(); }}
               placeholder="Description (optional)"
-              className="bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+              className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
             />
           </div>
         </div>

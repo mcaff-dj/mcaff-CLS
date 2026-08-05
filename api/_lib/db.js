@@ -391,6 +391,15 @@ async function ensurePgSchema() {
     )
   `;
   await pgSql`CREATE INDEX IF NOT EXISTS calling_process_dispositions_process_key_idx ON calling_process_dispositions (process_key, sort_order)`;
+  // One level of nesting - a disposition option (e.g. "Wrong Address") can have its own child
+  // reasons, same "N child ›" pattern as a normal ticket-field Category option. NULL = a
+  // top-level option; sort_order is scoped to siblings sharing the same parent_id (and
+  // separately to every top-level option, which all share parent_id IS NULL), not global -
+  // reordering one option's children never touches another option's order or the top level's.
+  // ON DELETE CASCADE: deleting a parent takes its children with it, since an orphaned child
+  // (pointing at a parent_id that no longer exists) has nowhere left to render.
+  await pgSql`ALTER TABLE calling_process_dispositions ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES calling_process_dispositions(id) ON DELETE CASCADE`;
+  await pgSql`CREATE INDEX IF NOT EXISTS calling_process_dispositions_parent_idx ON calling_process_dispositions (parent_id, sort_order)`;
   // Disposal side of the same lead lifecycle - written by rto-crm.html's submitDisp()
   // in real time (via a new recordDisposition auth action) alongside its existing
   // direct-to-Sheet write, so this history survives independent of the Google Sheet
@@ -1205,33 +1214,60 @@ async function getAdministeredProcesses(email) {
 }
 
 // ── Per-process admin-defined disposition list (see calling_process_dispositions above) ────
+// One level of nesting only (parent option -> child sub-options), matching the reference
+// field-builder UI this was modelled on ("N child ›"). addProcessDisposition already refuses
+// to nest a child under another child, so the tree this builds is never more than 2 deep.
 const DISPOSITION_LABEL_MAX = 120;
 
 async function getProcessDispositions(processKey) {
   await ensurePgSchema();
   if (!processKey) return [];
   const { rows } = await pgSql`
-    SELECT id, label, description, sort_order FROM calling_process_dispositions
+    SELECT id, parent_id, label, description, sort_order FROM calling_process_dispositions
     WHERE process_key = ${processKey}
     ORDER BY sort_order ASC, id ASC
   `;
-  return rows.map((r) => ({ id: r.id, label: r.label, description: r.description || '', sortOrder: r.sort_order }));
+  const byId = {};
+  rows.forEach((r) => {
+    byId[r.id] = { id: r.id, label: r.label, description: r.description || '', sortOrder: r.sort_order, children: [] };
+  });
+  const roots = [];
+  // Two passes rather than one: a child row can appear before its parent in this result set
+  // (sort_order is scoped per-parent, not global, so there's no ordering guarantee between
+  // levels) - building byId for every row first means it doesn't matter which order they're
+  // linked in.
+  rows.forEach((r) => {
+    if (r.parent_id && byId[r.parent_id]) byId[r.parent_id].children.push(byId[r.id]);
+    else if (!r.parent_id) roots.push(byId[r.id]);
+    // A row whose parent_id points at nothing in byId can't happen - ON DELETE CASCADE means
+    // a parent can't be removed while this child row still exists.
+  });
+  return roots;
 }
 
-// New entries land at the end (current max sort_order + 1), so adding one never reshuffles
-// where existing entries appear in the agent's disposition dropdown.
-async function addProcessDisposition(processKey, label, description, createdBy) {
+// New entries land at the end of their OWN scope (current max sort_order among siblings
+// sharing the same parentId, +1) - adding a child never reshuffles other top-level options,
+// and adding a top-level option never touches anyone's children.
+async function addProcessDisposition(processKey, label, description, createdBy, parentId) {
   await ensurePgSchema();
   if (!processKey) throw new Error('processKey is required');
   const trimmed = String(label || '').trim();
   if (!trimmed) throw new Error('A disposition label is required');
   if (trimmed.length > DISPOSITION_LABEL_MAX) throw new Error(`Label must be ${DISPOSITION_LABEL_MAX} characters or fewer`);
-  const { rows: maxRows } = await pgSql`
-    SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey}
-  `;
+  const parent = parentId || null;
+  if (parent) {
+    const { rows: parentRows } = await pgSql`
+      SELECT parent_id FROM calling_process_dispositions WHERE id = ${parent} AND process_key = ${processKey}
+    `;
+    if (!parentRows.length) throw new Error('Parent option not found for this process');
+    if (parentRows[0].parent_id) throw new Error('A child option cannot itself have children');
+  }
+  const maxRows = parent
+    ? (await pgSql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id = ${parent}`).rows
+    : (await pgSql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id IS NULL`).rows;
   await pgSql`
-    INSERT INTO calling_process_dispositions (process_key, label, description, sort_order, created_by)
-    VALUES (${processKey}, ${trimmed}, ${String(description || '').trim() || null}, ${maxRows[0].next}, ${createdBy || null})
+    INSERT INTO calling_process_dispositions (process_key, parent_id, label, description, sort_order, created_by)
+    VALUES (${processKey}, ${parent}, ${trimmed}, ${String(description || '').trim() || null}, ${maxRows[0].next}, ${createdBy || null})
   `;
   return getProcessDispositions(processKey);
 }
@@ -1240,6 +1276,8 @@ async function addProcessDisposition(processKey, label, description, createdBy) 
 // untouched, same "unset means leave it alone" contract setCallingProcessAgent already uses
 // for its own optional fields. An explicitly blank description ('') really does clear it;
 // label can never be blanked out this way since a disposition must always have a name.
+// Works the same regardless of whether id is a top-level option or a child - nesting depth
+// never changes once an option is created.
 async function updateProcessDisposition(processKey, id, { label, description } = {}) {
   await ensurePgSchema();
   if (!processKey || !id) throw new Error('processKey and id are required');
@@ -1258,6 +1296,8 @@ async function updateProcessDisposition(processKey, id, { label, description } =
   return getProcessDispositions(processKey);
 }
 
+// Cascades to children automatically (ON DELETE CASCADE on parent_id) - deleting a parent
+// option takes its whole child list with it.
 async function deleteProcessDisposition(processKey, id) {
   await ensurePgSchema();
   if (!processKey || !id) throw new Error('processKey and id are required');
@@ -1265,20 +1305,31 @@ async function deleteProcessDisposition(processKey, id) {
   return getProcessDispositions(processKey);
 }
 
-// Full reorder in one shot - the UI's up/down arrows send the whole list back in its new
-// order rather than a single move, which keeps this one operation instead of needing a
-// separate swap-with-neighbour endpoint. Transactional so a request that fails partway
-// through never leaves sort_order in a half-renumbered state.
-async function reorderProcessDispositions(processKey, orderedIds) {
+// Full reorder in one shot within ONE scope - either every top-level option (parentId
+// omitted/null), or one specific parent's children (parentId set). The extra
+// parent_id-matching WHERE clause is a safety net, not just a filter: if a client ever sent
+// an id that doesn't actually belong to the claimed scope, that row's update simply affects 0
+// rows instead of silently reparenting/misordering something in a different scope.
+// Transactional so a request that fails partway through never leaves sort_order in a
+// half-renumbered state.
+async function reorderProcessDispositions(processKey, parentId, orderedIds) {
   await ensurePgSchema();
   if (!processKey) throw new Error('processKey is required');
   if (!Array.isArray(orderedIds) || !orderedIds.length) throw new Error('orderedIds must be a non-empty array');
+  const parent = parentId || null;
   await withPgTransaction(async (client) => {
     for (let i = 0; i < orderedIds.length; i++) {
-      await client.query(
-        'UPDATE calling_process_dispositions SET sort_order = $1 WHERE id = $2 AND process_key = $3',
-        [i, orderedIds[i], processKey]
-      );
+      if (parent) {
+        await client.query(
+          'UPDATE calling_process_dispositions SET sort_order = $1 WHERE id = $2 AND process_key = $3 AND parent_id = $4',
+          [i, orderedIds[i], processKey, parent]
+        );
+      } else {
+        await client.query(
+          'UPDATE calling_process_dispositions SET sort_order = $1 WHERE id = $2 AND process_key = $3 AND parent_id IS NULL',
+          [i, orderedIds[i], processKey]
+        );
+      }
     }
   });
   return getProcessDispositions(processKey);

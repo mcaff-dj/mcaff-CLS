@@ -17,13 +17,21 @@
 //   DELETE /api/admin/calling-agents  -> revoke ONE process's access for one agent, leaving
 //                                        every other process/card they hold untouched:
 //                                        { processKey, email }
-//   GET    /api/admin/dispositions?process=ndr -> that process's own disposition list (see
+//   GET    /api/admin/dispositions?process=ndr -> that process's own disposition tree (see
 //                                        calling_process_dispositions - RTO's list stays
-//                                        hardcoded in RtoCrmClient.js and never reads this)
-//   POST   /api/admin/dispositions    -> add: { processKey, label, description? }
-//   PUT    /api/admin/dispositions    -> edit or reorder: { processKey, id, label?, description? }
-//                                        or { processKey, orderedIds: [...] }
-//   DELETE /api/admin/dispositions    -> { processKey, id }
+//                                        hardcoded in RtoCrmClient.js and never reads this).
+//                                        One level of nesting: each top-level option carries
+//                                        its own `children` array.
+//   POST   /api/admin/dispositions    -> add: { processKey, label, description?, parentId? }
+//                                        parentId omitted/null = top-level option; a parent's
+//                                        id = add as its child (refused if that parent is
+//                                        itself a child - only one level of nesting).
+//   PUT    /api/admin/dispositions    -> edit: { processKey, id, label?, description? }
+//                                        or reorder ONE scope: { processKey, orderedIds: [...],
+//                                        parentId? } - parentId omitted/null reorders the
+//                                        top-level list, set reorders that parent's children.
+//   DELETE /api/admin/dispositions    -> { processKey, id } (cascades to children if id is a
+//                                        parent with any)
 const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser,
   getUserByEmail, getUserTabPermissions,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours, logEvent,
@@ -408,8 +416,9 @@ async function handleDispositions(req, res, session) {
       return;
     }
     try {
-      const dispositions = await addProcessDisposition(body.processKey, body.label, body.description, session.email);
-      await logEvent(session.uid, session.email, 'calling', 'disposition-add', `${body.processKey}: added "${body.label}"`, ip);
+      const dispositions = await addProcessDisposition(body.processKey, body.label, body.description, session.email, body.parentId);
+      await logEvent(session.uid, session.email, 'calling', 'disposition-add',
+        `${body.processKey}: added "${body.label}"${body.parentId ? ` (child of #${body.parentId})` : ''}`, ip);
       res.status(200).json({ dispositions });
     } catch (e) {
       res.status(400).json({ error: e.message || 'Could not add disposition' });
@@ -429,7 +438,7 @@ async function handleDispositions(req, res, session) {
     }
     try {
       const dispositions = Array.isArray(body.orderedIds)
-        ? await reorderProcessDispositions(body.processKey, body.orderedIds)
+        ? await reorderProcessDispositions(body.processKey, body.parentId, body.orderedIds)
         : await updateProcessDisposition(body.processKey, body.id, { label: body.label, description: body.description });
       await logEvent(session.uid, session.email, 'calling', 'disposition-edit',
         Array.isArray(body.orderedIds) ? `${body.processKey}: reordered` : `${body.processKey}: edited #${body.id}`, ip);
