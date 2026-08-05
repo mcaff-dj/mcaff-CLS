@@ -410,6 +410,13 @@ const localStorage = typeof window !== 'undefined'
       return h > 0 ? `${h}h ${rem}m` : `${rem}m`;
     }
 
+    // FRT (First Response Time) column - same "Xh Ym" rendering as formatBreakMinutes, but
+    // '—' when there's nothing to average (formatBreakMinutes' own null->0 fallback would read
+    // as "instant response", which is wrong here - see frtMinutes in computeTableAgentMetrics).
+    function formatFrt(mins) {
+      return (mins === null || mins === undefined) ? '—' : formatBreakMinutes(mins);
+    }
+
     // count/total*100, rounded, as "N%" - '—' when the denominator is 0 (nothing to divide),
     // same fail-open-to-dash convention `formatTimeOfDay`'s '—' already uses. Shared by
     // every percentage column in the Agent Performance Summary table.
@@ -3600,6 +3607,23 @@ const localStorage = typeof window !== 'undefined'
                       ? Math.round(firstCallMinutesList.reduce((s, m) => s + m, 0) / firstCallMinutesList.length)
                       : null;
 
+                    // FRT (First Response Time): disposedAt - assignedAt, averaged in minutes
+                    // over disposedByDate tickets that have both timestamps - a per-ticket
+                    // duration (unlike firstCalledAtMinutes' per-day time-of-day average above),
+                    // so it's a plain mean of individual gaps, not bucketed by calendar day.
+                    // Negative gaps (bad data - disposed logged before assigned) are dropped
+                    // rather than dragging the average down.
+                    const frtMinutesList = [];
+                    for (const t of disposedByDate) {
+                      const dates = leadDates[normalizeOrderKey(t.orderNumber)];
+                      if (!dates?.assignedAt || !dates?.disposedAt) continue;
+                      const diffMin = (new Date(dates.disposedAt).getTime() - new Date(dates.assignedAt).getTime()) / 60000;
+                      if (diffMin >= 0) frtMinutesList.push(diffMin);
+                    }
+                    const frtMinutes = frtMinutesList.length
+                      ? Math.round(frtMinutesList.reduce((s, m) => s + m, 0) / frtMinutesList.length)
+                      : null;
+
                     return {
                       ...ag,
                       assigned: assignedByDate.length,
@@ -3611,6 +3635,7 @@ const localStorage = typeof window !== 'undefined'
                       prepaidConverted: prepaidConverted.length,
                       codConverted: codConverted.length,
                       firstCalledAtMinutes,
+                      frtMinutes,
                     };
                   };
                   const tableAgentMetrics = effectiveAgentRoster.map(computeTableAgentMetrics);
@@ -3766,6 +3791,9 @@ const localStorage = typeof window !== 'undefined'
                     ? Math.round(summaryLoggedInList.reduce((s, m) => s + m, 0) / summaryLoggedInList.length) : null;
                   const summaryAvgBreak = summaryBreakList.length
                     ? Math.round(summaryBreakList.reduce((s, m) => s + m, 0) / summaryBreakList.length) : 0;
+                  const summaryFrtList = summaryRows.map(am => am.frtMinutes).filter(m => m !== null && m !== undefined);
+                  const summaryAvgFrt = summaryFrtList.length
+                    ? Math.round(summaryFrtList.reduce((s, m) => s + m, 0) / summaryFrtList.length) : null;
 
                   // Same Blob/anchor download as downloadConvertedOrdersCsv below - exports
                   // exactly what's on screen in the Agent Performance Summary table, one row per
@@ -3779,7 +3807,7 @@ const localStorage = typeof window !== 'undefined'
                       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
                     };
                     const header = [
-                      'Agent Name', 'Total Leads Assigned', 'Total Disposed', 'First Called At',
+                      'Agent Name', 'Total Leads Assigned', 'Total Disposed', 'First Called At', 'FRT',
                       'Total Connected', 'Connected %', 'Total Prepaid Assigned', 'Total Prepaid Assigned %',
                       'Total Prepaid Connected', 'Total Prepaid Connected %', 'Total COD Assigned', 'Total COD Assigned %',
                       'Total Prepaid Converted', 'Total Prepaid Converted %', 'Total COD Converted', 'Total COD Converted %',
@@ -3788,7 +3816,7 @@ const localStorage = typeof window !== 'undefined'
                     const rowFor = (am) => {
                       const presence = serverPresence[am.email.toLowerCase()];
                       return [
-                        am.name, am.assigned, am.disposed, formatTimeOfDay(am.firstCalledAtMinutes),
+                        am.name, am.assigned, am.disposed, formatTimeOfDay(am.firstCalledAtMinutes), formatFrt(am.frtMinutes),
                         am.connected, formatPct(am.connected, am.disposed),
                         am.prepaidAssigned, formatPct(am.prepaidAssigned, am.assigned),
                         am.prepaidConnected, formatPct(am.prepaidConnected, am.prepaidAssigned),
@@ -3802,7 +3830,7 @@ const localStorage = typeof window !== 'undefined'
                     summaryRows.forEach(am => lines.push(rowFor(am).map(escapeCsv).join(',')));
                     if (summaryRows.length > 0) {
                       lines.push([
-                        'Team Total', summaryTotals.assigned, summaryTotals.disposed, '—',
+                        'Team Total', summaryTotals.assigned, summaryTotals.disposed, '—', formatFrt(summaryAvgFrt),
                         summaryTotals.connected, formatPct(summaryTotals.connected, summaryTotals.disposed),
                         summaryTotals.prepaidAssigned, formatPct(summaryTotals.prepaidAssigned, summaryTotals.assigned),
                         summaryTotals.prepaidConnected, formatPct(summaryTotals.prepaidConnected, summaryTotals.prepaidAssigned),
@@ -4021,7 +4049,9 @@ const localStorage = typeof window !== 'undefined'
                               disposition each active day (days with any resolved lead); Total Break Time is the average break
                               minutes per active day - all three follow the same filter (an approximate calendar-day window for
                               7 Days/30 Days, not the exact rolling hours the lead columns use), and reduce to the plain
-                              single-day numbers for Today/Yesterday/a one-day Custom range.
+                              single-day numbers for Today/Yesterday/a one-day Custom range. FRT is the average time between a
+                              lead's assignment and its disposition, across disposed leads with both timestamps (per-ticket
+                              duration, not an active-day average).
                             </p>
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
@@ -4055,6 +4085,7 @@ const localStorage = typeof window !== 'undefined'
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Leads Assigned</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Disposed</th>
                                 <th className="py-2 px-3 font-bold" title="Average time-of-day of the first disposition across the range's active days">First Called At</th>
+                                <th className="py-2 px-3 font-bold" title="Average time between a lead's assignment and its disposition (Disposed At - Assigned At), across disposed leads with both timestamps">FRT</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Connected</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Total Connected / Total Disposed">Connected %</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Prepaid Assigned</th>
@@ -4087,6 +4118,7 @@ const localStorage = typeof window !== 'undefined'
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.assigned}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.disposed}</td>
                                     <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(am.firstCalledAtMinutes)}</td>
+                                    <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatFrt(am.frtMinutes)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{am.connected}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{formatPct(am.connected, am.disposed)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.prepaidAssigned}</td>
@@ -4110,6 +4142,7 @@ const localStorage = typeof window !== 'undefined'
                                   <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.assigned}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.disposed}</td>
                                   <td className="py-2.5 px-3 text-zinc-500">—</td>
+                                  <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Average across disposed leads with both timestamps">{formatFrt(summaryAvgFrt)}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{summaryTotals.connected}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{formatPct(summaryTotals.connected, summaryTotals.disposed)}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.prepaidAssigned}</td>
@@ -4127,7 +4160,7 @@ const localStorage = typeof window !== 'undefined'
                                 </tr>
                               )}
                               {visibleTableAgentMetrics.filter(am => am.assigned > 0).length === 0 && (
-                                <tr><td colSpan={18} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
+                                <tr><td colSpan={19} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
                               )}
                             </tbody>
                           </table>
