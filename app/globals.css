@@ -768,6 +768,17 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
 }
 .og-header h2 { font-size: clamp(20px, 3.6vw, 26px); margin: 0 0 10px; letter-spacing: -0.01em; }
 .og-header p { margin: 0 auto; max-width: 760px; color: var(--text-secondary); font-size: 13.5px; line-height: 1.6; }
+.og-header .filterbar {
+  display: flex; gap: 20px; flex-wrap: wrap; align-items: center; justify-content: center;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 16px; margin: 14px auto 0; max-width: 760px; font-size: 13px;
+}
+.og-header .filter-group { display: flex; align-items: center; }
+.og-header .filterbar label { color: var(--text-secondary); margin-right: 6px; }
+.og-header .filterbar select {
+  font: inherit; font-size: 13px; padding: 5px 8px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--page-plane); color: var(--text-primary);
+}
 
 .og-section-title { font-size: 15px; font-weight: 700; margin: 0 0 14px; }
 .og-note { font-size: 12.5px; color: var(--text-muted); margin: 0; }

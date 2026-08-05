@@ -56,19 +56,22 @@ def month_sort_key(label):
     return (yr or 0, num or 0)
 
 
-def shared_axis(brands, window_n, baseline_n):
-    """The month axis for every side-by-side table: the most recent (baseline_n + window_n)
-    months present in EVERY brand. Restricting to the intersection is what makes the
-    comparison honest - mCaffeine's month list reaches further back than Hyphen's, and a
-    baseline average computed over a different span per brand isn't comparable."""
+def shared_axis(brands, window_n):
+    """The month axis for every side-by-side table: every month present in EVERY brand,
+    split into the most recent window_n months ("window") and everything shared before
+    that ("history"). Restricting to the intersection is what makes the comparison honest
+    - mCaffeine's month list reaches further back than Hyphen's, and a baseline average
+    computed over a different span per brand isn't comparable.
+
+    history is the FULL shared range before the window, not just a fixed baseline slice -
+    the frontend's baseline-range filter picks any contiguous sub-range of it live, so the
+    backend has to ship all of it rather than pre-collapsing to one baseline width."""
     common = None
     for b in brands:
         keys = {month_sort_key(m) for m in b["months"] if month_sort_key(m) != (0, 0)}
         common = keys if common is None else (common & keys)
     ordered = sorted(common or [])
-    need = window_n + baseline_n
-    ordered = ordered[-need:]
-    if len(ordered) < 2:
+    if len(ordered) < window_n + 2:
         raise SystemExit("Not enough shared months across brands to build a digest.")
     # Give back each brand's own label for those months - the labels are per-brand strings
     # and the fact dicts are keyed by them.
@@ -409,10 +412,68 @@ def build_repeat_offenders(brands, baseline, window):
     return {"couriers": couriers, "skus": skus}
 
 
+def build_raw(brands, history, window):
+    """Everything the frontend's baseline-range filter needs to recompute metrics/ratio/
+    class-tables/worst-trends/packaging for any baseline sub-range the user picks, without
+    a round trip to the server. Same per-key month->count dicts already in each brand's
+    data/<brand>_digest_facts.json, restricted to history+window and re-keyed onto the
+    SHARED pretty labels (e.g. "Aug '25") instead of each brand's own raw label - doing
+    that remap once here means the client never needs month-label parsing at all, only
+    the pretty strings it already displays."""
+    axis = history + window
+    out = []
+    for b in brands:
+        label_map = {}
+        for e in axis:
+            lbl = e["labels"].get(b["brand"])
+            if lbl:
+                label_map[lbl] = pretty(e)
+
+        def remap_flat(d):
+            return {label_map[m]: v for m, v in (d or {}).items() if m in label_map}
+
+        def remap_keyed(d):
+            res = {}
+            for k, per_month in (d or {}).items():
+                pm = remap_flat(per_month)
+                if pm:
+                    res[k] = pm
+            return res
+
+        def remap_series(d):
+            return {label_map[m]: item["v"] for m, item in (d or {}).items() if m in label_map}
+
+        # Class row order in the UI is ranked by all-time complaint volume, not by
+        # anything baseline-dependent (see build_class_tables' own sort key, which this
+        # duplicates) - it must stay fixed as the user changes the baseline filter, and
+        # computing it client-side would need each brand's full lifetime history, not just
+        # the shared axis. Shipping the order pre-computed sidesteps both problems.
+        classes_order = sorted(b["classes"], key=lambda c: -sum(b["classes"][c].values()))
+
+        out.append({
+            "brand": b["brand"], "title": b["title"],
+            "class_labels": b.get("class_labels") or {},
+            "classes_order": classes_order,
+            "sales": remap_flat(b.get("sales")),
+            "tickets": remap_flat(b.get("tickets")),
+            "classes": remap_keyed(b.get("classes")),
+            "cats": remap_keyed(b.get("cats")),
+            "partner_cats": remap_keyed(b.get("partner_cats")),
+            "product_cats": remap_keyed(b.get("product_cats")),
+            "batches": remap_keyed(b.get("batches")),
+            "csat": remap_series(b.get("csat")),
+            "ai_csat": remap_series(b.get("ai_csat")),
+            "nps_overall": remap_series(b.get("nps_overall")),
+            "nps_product": remap_series(b.get("nps_product")),
+        })
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--window", type=int, default=4, help="Months in the reporting window.")
-    ap.add_argument("--baseline", type=int, default=3, help="Months of baseline before the window.")
+    ap.add_argument("--baseline", type=int, default=3,
+                     help="Default baseline width (months) for the initial, unfiltered view.")
     args = ap.parse_args()
 
     brands = []
@@ -423,10 +484,21 @@ def main():
         with open(p, "r", encoding="utf-8-sig") as f:
             brands.append(json.load(f))
 
-    baseline, window = shared_axis(brands, args.window, args.baseline)
+    history, window = shared_axis(brands, args.window)
+    if len(history) < args.baseline:
+        raise SystemExit(f"Only {len(history)} shared month(s) of history before the window - "
+                          f"not enough for a {args.baseline}-month default baseline.")
+    # The default (unfiltered) view uses the most recent slice of history as its baseline -
+    # identical to what the old fixed-slice shared_axis used to hand back directly.
+    baseline = history[-args.baseline:]
     digest = {
         "window_months": [pretty(e) for e in window],
         "baseline_months": [pretty(e) for e in baseline],
+        "axis": {
+            "history_months": [pretty(e) for e in history],
+            "window_months": [pretty(e) for e in window],
+            "default_baseline_months": [pretty(e) for e in baseline],
+        },
         "brands": [{"brand": b["brand"], "title": b["title"]} for b in brands],
         "metrics": build_metric_table(brands, baseline, window),
         "ratio": build_ratio_table(brands, baseline, window),
@@ -434,6 +506,7 @@ def main():
         "worst_trends": build_worst_trends(brands, baseline, window),
         "packaging": build_packaging(brands, baseline, window),
         "repeat_offenders": build_repeat_offenders(brands, baseline, window),
+        "raw": build_raw(brands, history, window),
     }
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(OUT_PATH, "w", encoding="utf-8") as f:

@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { buildMetrics, buildRatio, buildClassTables, buildWorstTrends, buildPackagingBaseline } from './trendMath';
 
 function fmtPct(v) {
   if (v === null || v === undefined) return '–';
@@ -299,9 +300,32 @@ function RepeatOffenders({ repeat, windowMonths }) {
   );
 }
 
+function BaselineFilter({ historyMonths, fromIdx, toIdx, onFromChange, onToChange }) {
+  return (
+    <div className="filterbar">
+      <div className="filter-group">
+        <label htmlFor="og-baseline-from">Baseline from</label>
+        <select id="og-baseline-from" value={fromIdx} onChange={onFromChange}>
+          {historyMonths.map((m, i) => <option key={m} value={i}>{m}</option>)}
+        </select>
+      </div>
+      <div className="filter-group">
+        <label htmlFor="og-baseline-to">Baseline to</label>
+        <select id="og-baseline-to" value={toIdx} onChange={onToChange}>
+          {historyMonths.map((m, i) => <option key={m} value={i}>{m}</option>)}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 export default function OrgKycTrendsTab() {
   const [digest, setDigest] = useState(null);
   const [error, setError] = useState(null);
+  // {fromIdx, toIdx} into digest.axis.history_months - null until the digest arrives and
+  // seeds it from digest.axis.default_baseline_months (same range the server itself uses
+  // for the unfiltered view, so first render matches today exactly).
+  const [baselineRange, setBaselineRange] = useState(null);
 
   useEffect(() => {
     fetch('/api/report/data/trend-digest')
@@ -316,8 +340,42 @@ export default function OrgKycTrendsTab() {
       .catch((e) => setError(e.message || 'Could not load the trend digest.'));
   }, []);
 
+  useEffect(() => {
+    if (baselineRange || !digest || !digest.axis) return;
+    const hist = digest.axis.history_months;
+    const def = digest.axis.default_baseline_months;
+    setBaselineRange({ fromIdx: hist.indexOf(def[0]), toIdx: hist.indexOf(def[def.length - 1]) });
+  }, [digest, baselineRange]);
+
+  const historyMonths = digest && digest.axis ? digest.axis.history_months : [];
+  const windowMonths = digest ? digest.window_months : [];
+  const baselineMonths = useMemo(() => {
+    if (!digest) return [];
+    if (!digest.axis || !baselineRange) return digest.baseline_months;
+    return historyMonths.slice(baselineRange.fromIdx, baselineRange.toIdx + 1);
+  }, [digest, historyMonths, baselineRange]);
+
+  // Old cached JSON (pre-filter deploy) has no raw/axis to recompute from - fall back to
+  // the server's own precomputed default view rather than crashing until the next refresh.
+  const computed = useMemo(() => {
+    if (!digest) return null;
+    if (!digest.raw || !digest.axis) {
+      return {
+        metrics: digest.metrics, ratio: digest.ratio, classTables: digest.class_tables,
+        worstTrends: digest.worst_trends, packaging: digest.packaging,
+      };
+    }
+    return {
+      metrics: buildMetrics(digest.raw, baselineMonths, windowMonths),
+      ratio: buildRatio(digest.raw, baselineMonths, windowMonths),
+      classTables: buildClassTables(digest.raw, baselineMonths, windowMonths),
+      worstTrends: buildWorstTrends(digest.raw, baselineMonths, windowMonths),
+      packaging: buildPackagingBaseline(digest.raw, digest.packaging, baselineMonths, windowMonths),
+    };
+  }, [digest, baselineMonths, windowMonths]);
+
   if (error) return <p className="og-note og-error">{error}</p>;
-  if (!digest) return <p className="og-note">Loading...</p>;
+  if (!digest || !computed) return <p className="og-note">Loading...</p>;
 
   return (
     <div className="og-wrap">
@@ -325,39 +383,54 @@ export default function OrgKycTrendsTab() {
         <span className="og-badge">Auto-refreshed</span>
         <h2>KYC Complaint Trends</h2>
         <p>
-          mCaffeine &amp; Hyphen &middot; {digest.baseline_months[0]}&ndash;{digest.baseline_months[digest.baseline_months.length - 1]} baseline
-          vs {digest.window_months[0]}&ndash;{digest.window_months[digest.window_months.length - 1]} window.
+          mCaffeine &amp; Hyphen &middot; {baselineMonths[0]}&ndash;{baselineMonths[baselineMonths.length - 1]} baseline
+          vs {windowMonths[0]}&ndash;{windowMonths[windowMonths.length - 1]} window.
           Every number below is computed directly from ticket data on each refresh &mdash; no manually maintained figures.
         </p>
+        {historyMonths.length > 0 && baselineRange && (
+          <BaselineFilter
+            historyMonths={historyMonths}
+            fromIdx={baselineRange.fromIdx}
+            toIdx={baselineRange.toIdx}
+            onFromChange={(e) => {
+              const idx = Number(e.target.value);
+              setBaselineRange((r) => ({ fromIdx: idx, toIdx: Math.max(idx, r.toIdx) }));
+            }}
+            onToChange={(e) => {
+              const idx = Number(e.target.value);
+              setBaselineRange((r) => ({ fromIdx: Math.min(idx, r.fromIdx), toIdx: idx }));
+            }}
+          />
+        )}
       </header>
 
       <section>
         <h3 className="og-section-title">CSAT &amp; NPS</h3>
-        <MetricTables metrics={digest.metrics} windowMonths={digest.window_months} />
+        <MetricTables metrics={computed.metrics} windowMonths={windowMonths} />
       </section>
 
       <section>
         <h3 className="og-section-title">Complaint Trend</h3>
-        <RatioTable rows={digest.ratio} windowMonths={digest.window_months} />
+        <RatioTable rows={computed.ratio} windowMonths={windowMonths} />
       </section>
 
       <section>
-        <ClassTables classTables={digest.class_tables} windowMonths={digest.window_months} />
+        <ClassTables classTables={computed.classTables} windowMonths={windowMonths} />
       </section>
 
       <section>
         <h3 className="og-section-title">Worst Trends</h3>
-        <WorstTrends worst={digest.worst_trends} />
+        <WorstTrends worst={computed.worstTrends} />
       </section>
 
       <section>
         <h3 className="og-section-title">Packaging Deep Dive</h3>
-        <PackagingSection packaging={digest.packaging} windowMonths={digest.window_months} />
+        <PackagingSection packaging={computed.packaging} windowMonths={windowMonths} />
       </section>
 
       <section>
         <h3 className="og-section-title">Repeat Offenders</h3>
-        <RepeatOffenders repeat={digest.repeat_offenders} windowMonths={digest.window_months} />
+        <RepeatOffenders repeat={digest.repeat_offenders} windowMonths={windowMonths} />
       </section>
     </div>
   );
