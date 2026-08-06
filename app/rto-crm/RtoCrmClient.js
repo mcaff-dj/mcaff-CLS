@@ -3592,6 +3592,11 @@ const localStorage = typeof window !== 'undefined'
         () => ndrRowsForTab.slice((ndrPage - 1) * ndrPerPage, ndrPage * ndrPerPage),
         [ndrRowsForTab, ndrPage, ndrPerPage]
       );
+      // Connected/Remarks are raw sheet-write plumbing, not something a plain agent needs to
+      // read off the table - they already see the same info in the Call modal's own "Last
+      // called" line after disposing. Admin/Team Lead/process-admin keep both columns, same
+      // "isProcessAdmin runs this without agent-scoping" split used everywhere else on NDR.
+      const ndrAgentView = userRole === 'Agent' && !isProcessAdmin;
       const renderNdrLeadsTable = () => (
         <div className="space-y-3">
           <div className="flex items-center gap-2 flex-wrap justify-between">
@@ -3625,8 +3630,8 @@ const localStorage = typeof window !== 'undefined'
                   <th className="py-3 px-4 text-left font-medium">Status</th>
                   <th className="py-3 px-4 text-left font-medium">Calling Date</th>
                   <th className="py-3 px-4 text-left font-medium">Agent Name</th>
-                  <th className="py-3 px-4 text-left font-medium">Connected</th>
-                  <th className="py-3 px-4 text-left font-medium">Remarks</th>
+                  {!ndrAgentView && <th className="py-3 px-4 text-left font-medium">Connected</th>}
+                  {!ndrAgentView && <th className="py-3 px-4 text-left font-medium">Remarks</th>}
                   <th className="py-3 px-4 text-right font-medium">Action</th>
                 </tr></thead>
                 <tbody className="divide-y divide-zinc-800/50">
@@ -3643,8 +3648,8 @@ const localStorage = typeof window !== 'undefined'
                       <td className="py-2.5 px-4 text-zinc-400">{t.status}</td>
                       <td className="py-2.5 px-4 text-zinc-400">{t.callingDate}</td>
                       <td className="py-2.5 px-4 text-zinc-300">{t.assignedAgent || <span className="text-zinc-600">Unassigned</span>}</td>
-                      <td className="py-2.5 px-4 text-zinc-400">{t.connected}</td>
-                      <td className="py-2.5 px-4 text-zinc-400">{t.remarks}</td>
+                      {!ndrAgentView && <td className="py-2.5 px-4 text-zinc-400">{t.connected}</td>}
+                      {!ndrAgentView && <td className="py-2.5 px-4 text-zinc-400">{t.remarks}</td>}
                       <td className="py-2.5 px-4 text-right">
                         <button
                           onClick={() => openNdrCall(t)}
@@ -3656,7 +3661,7 @@ const localStorage = typeof window !== 'undefined'
                     </tr>
                   ))}
                   {ndrPageRows.length === 0 && (
-                    <tr><td colSpan={14} className="py-8 text-center text-zinc-500">No leads found.</td></tr>
+                    <tr><td colSpan={ndrAgentView ? 12 : 14} className="py-8 text-center text-zinc-500">No leads found.</td></tr>
                   )}
                 </tbody>
               </table>
