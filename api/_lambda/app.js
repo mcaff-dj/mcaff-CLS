@@ -46,6 +46,7 @@ mount('get', '/api/refresh-deepdive-status', '../refresh-deepdive-status.js');
 mount('post', '/api/refund/gokwik-initiate', '../refund/gokwik-initiate.js');
 mount('all', '/api/rto/sheet', '../rto/sheet.js');
 mount('all', '/api/ndr/sheet', '../ndr/sheet.js');
+mount('post', '/api/ndr/lead-assignment', '../ndr/lead-assignment.js');
 
 // Registered before the dynamic /api/report/:card route below - Express matches routes
 // in registration order, so these more specific paths have to win the match before

@@ -100,74 +100,95 @@ const localStorage = typeof window !== 'undefined'
       if(!d.values||d.values.length<2)throw new Error('No data');return d.values;
     }
 
-    /* ── NDR Calling's own sheet - see api/ndr/sheet.js. A separate proxy/fetch from RTO's
-     * (not a parameterized fetchSheet) because it reads a completely different spreadsheet
-     * with its own service-account scope, and NDR must stay independent of RTO's code path. */
-    const NDR_SHEET_ID = '1oRPRvZaGpgQsZyXO_Q_j5HEZO1nkrFv0spTobfDoQ2g';
+    /* ── NDR Calling's real lead source - an already-existing, actively-used external
+     * spreadsheet ("NDR Calling - June"), not one this app owns. See api/ndr/sheet.js. A
+     * separate proxy/fetch from RTO's (not a parameterized fetchSheet) because it reads a
+     * completely different spreadsheet with its own service-account scope, and NDR must stay
+     * independent of RTO's code path. */
+    const NDR_SHEET_ID = '12p3rlXyE0PDx3BMqBpl3CUo5YD3uVzQun1HFPizpSeI';
+    const NDR_SHEET_TAB = 'Latest NDR '; // trailing space is part of the real tab name
     async function fetchNdrSheetValues(range){
       const r=await fetch(`/api/ndr/sheet?op=values&sid=${encodeURIComponent(NDR_SHEET_ID)}&range=${encodeURIComponent(range)}`);
-      if(!r.ok)throw new Error(`Sheets API ${r.status}`);const d=await r.json();
+      // Include the response body in the thrown message - a bare status code (401 vs 403 vs
+      // 500) collapses several very different failure modes (our own session/permission check
+      // vs Google's own API rejecting the request vs a Lambda-level error) into one number,
+      // which cost real time to debug from the console alone when this first shipped.
+      if(!r.ok){
+        const body = await r.text().catch(()=>'');
+        throw new Error(`Sheets API ${r.status}${body ? ': '+body.slice(0,300) : ''}`);
+      }
+      const d=await r.json();
       if(!d.values)throw new Error('No data');return d.values;
     }
-    // scripts/sync_ndr_leads_to_sheet.py never deletes a row (see its own docstring), and
-    // NDR's real daily volume is tens of thousands of leads (measured: ~255 bytes/row JSON,
-    // ~47k rows landed from a single day's sync) - by the time this shipped the sheet had
-    // already passed 50,000 rows, and fetching it whole in one response (~13MB) blew past the
-    // Lambda's ~6MB synchronous response-payload limit. Surfaced as an opaque
-    // CloudFront-generated 500 with no useful body, not this code's own error - genuinely
-    // confusing to debug from the browser alone.
-    //
-    // A calendar-day bound (mirroring scripts/lib.py's get_sheet_tail_for_months) doesn't
-    // actually help here - a SINGLE day's real volume alone already exceeds the payload limit,
-    // so "last N days" is still unbounded in the dimension that matters. Capped by raw row
-    // count instead: the last NDR_MAX_ROWS rows (~1.3MB at this measured size, comfortable
-    // margin under 6MB). This is a stopgap, not the real fix - a properly scalable NDR
-    // workspace needs actual server-side pagination or a query that only ever asks for
-    // unassigned/undisposed leads directly, not "the whole sheet, then filter client-side".
+    // This sheet is owned by an existing CS/ops process, not by us, and it keeps growing
+    // under that process regardless of anything this app does - by the time this shipped it
+    // already held 7,500+ rows at ~360 bytes/row JSON (~2.6MB whole). Capped the same
+    // defensive way an earlier, much larger version of this fetch (against a different sheet)
+    // had to be after a real ~13MB response blew past the Lambda's ~6MB synchronous
+    // response-payload limit: read one cheap single-column indicator first to find the sheet's
+    // current size, then fetch only a bounded tail. NDR_MAX_ROWS is a stopgap margin, not a
+    // hard requirement at today's size - kept for when this sheet inevitably grows further.
     const NDR_MAX_ROWS = 5000;
+    const NDR_LAST_COL = 'AA'; // Remarks - the last column this UI reads or writes
     async function fetchNdrSheet(){
-      const idCol = await fetchNdrSheetValues('Sheet1!A2:A1000000');
+      const idCol = await fetchNdrSheetValues(`'${NDR_SHEET_TAB}'!A2:A1000000`);
       if(!idCol.length) return {rows: [], startRow: 2, totalRows: 0};
       const totalRows = idCol.length;
       const lastRow = totalRows + 1;
       const startRow = Math.max(2, lastRow - NDR_MAX_ROWS + 1);
-      const rows = await fetchNdrSheetValues(`Sheet1!A${startRow}:U${lastRow}`);
+      const rows = await fetchNdrSheetValues(`'${NDR_SHEET_TAB}'!A${startRow}:${NDR_LAST_COL}${lastRow}`);
       return {rows, startRow, totalRows};
     }
-    // Fixed positional layout, not fuzzy header matching like RTO's mapTkt - NDR's sheet
-    // layout is fully controlled by scripts/ndr_source.py/sync_ndr_leads_to_sheet.py, so a
-    // column-index map is simpler and correct. Indices 0-15 are ndr_source.COLUMNS (A:P); 16
-    // (Q)/17 (R) are assigned_agent/assigned_at, written by scripts/assign_ndr_leads.py OR by
-    // this UI claiming a lead on Call; 18 (S)/19 (T)/20 (U) are disposition/remarks/
-    // disposed_at, UI-owned only - no Python script ever writes or reads these. All three
-    // agent-write columns are safe from scripts/sync_ndr_leads_to_sheet.py's daily resync,
-    // which only ever touches A:P (its own LAST_SOURCE_COL).
+    // Fixed positional layout, not fuzzy header matching like RTO's mapTkt - this sheet's own
+    // columns are stable (it's someone else's existing, long-running process), so a
+    // column-index map is simpler and correct. Only assignedAgent (S, index 18) is ever
+    // written by scripts/assign_ndr_leads.py; callingDate/connected/remarks (R/T/AA) are the
+    // only three this UI's own disposition-save writes (see saveNdrDisposition) - every other
+    // column here (email, orderValue, paymentMode, csActionRemark, refundNeeded, reorderId,
+    // finalStatus, etc.) belongs to that other process and is deliberately not even read,
+    // let alone written, since we don't understand its full taxonomy well enough to touch it.
     function mapNdrRow(row, rowNum){
       const v = (i) => row[i] !== undefined ? row[i] : '';
       return {
-        id: `${v(0)}-${rowNum}`, rowNum,
-        awb: v(0), orderCode: v(1), orderDate: v(2), courier: v(3), facility: v(4),
-        channel: v(5), brand: v(6), attempts: v(7), ndrReason: v(8), lastUpdated: v(9),
-        courierStatus: v(10), phone: v(11), addressName: v(12), city: v(13), state: v(14),
-        pincode: v(15), assignedAgent: v(16), assignedAt: v(17),
-        disposition: v(18), remarks: v(19), disposedAt: v(20),
+        id: `${v(4)}-${rowNum}`, rowNum,
+        orderId: v(0), customerName: v(1), customerMobile: v(3), awb: v(4), partner: v(5),
+        address: v(6), pincode: v(7), city: v(8), state: v(9), status: v(12), attempts: v(14),
+        latestNdrDate: v(15), latestNdrReason: v(16), callingDate: v(17), assignedAgent: v(18),
+        connected: v(19), remarks: v(26),
       };
     }
     // Writes one or more cell ranges in a single batchUpdate call - the only writes this UI
-    // ever makes are Q:R (claim on Call) and S:U (disposition save), sometimes both at once
-    // (saving a disposition on a lead nobody claimed yet - see saveNdrDisposition). Same trust
-    // model as RTO's writeToSheetRow: the caller decides the exact ranges, this is just the POST.
+    // ever makes are Agent Name (claim on Call) and Calling Date/Connected/Remarks
+    // (disposition save - see saveNdrDisposition), sometimes both at once (disposing a lead
+    // nobody claimed yet). Same trust model as RTO's writeToSheetRow: the caller decides the
+    // exact ranges, this is just the POST.
     async function writeNdrCells(ranges){
       const r = await fetch('/api/ndr/sheet', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({
           op:'batchUpdate', sid: NDR_SHEET_ID,
-          data: ranges.map(({range, values}) => ({ range: `'Sheet1'!${range}`, values: [values] })),
+          data: ranges.map(({range, values}) => ({ range: `'${NDR_SHEET_TAB}'!${range}`, values: [values] })),
         }),
       });
       if(!r.ok) throw new Error(`Sheets write ${r.status}`);
       return r.json();
+    }
+    // Mirrors a claim/disposition into ndr_lead_assignments (see api/ndr/lead-assignment.js) -
+    // a parallel write alongside the sheet write above, not a replacement: the sheet stays
+    // what this UI reads from, Postgres is the durable/queryable history side. Best-effort by
+    // design - a failure here must never undo or block a sheet write that already succeeded,
+    // so callers only log/soft-toast, never throw.
+    async function recordNdrLeadAssignment(body){
+      const r = await fetch('/api/ndr/lead-assignment', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(body),
+      });
+      if(!r.ok){
+        const d = await r.json().catch(()=>({}));
+        console.error('recordNdrLeadAssignment failed:', d.error || r.status);
+      }
     }
 
     /* ── Live Google Sheets Write-Back Engine ──────────── */
@@ -2067,48 +2088,58 @@ const localStorage = typeof window !== 'undefined'
       },[activeProcess,syncNdr]);
 
       // Opens the Call/disposition modal, claiming the lead first if nobody holds it yet -
-      // same auto-claim-on-open behavior as RTO's openDisp, just written straight to Q:R
-      // instead of going through overrides/writeToSheetRow. Same "skip the claim, don't block
-      // the modal" behavior while Offline too: RTO's openDisp still opens the disposition form
-      // when claimLeadForAgent would refuse, because nothing is actually lost - submitDisp
-      // (here, saveNdrDisposition) writes assignedAgent at SAVE time if it's still blank, so
-      // the lead ends up attributed to whoever disposed it either way. Prefills the form from
-      // whatever's already on the row (editable, not one-shot) rather than always blank.
+      // same auto-claim-on-open behavior as RTO's openDisp, just written straight to this
+      // sheet's own Agent Name column instead of going through overrides/writeToSheetRow.
+      // Same "skip the claim, don't block the modal" behavior while Offline too: RTO's
+      // openDisp still opens the disposition form when claimLeadForAgent would refuse, because
+      // nothing is actually lost - submitDisp (here, saveNdrDisposition) writes assignedAgent
+      // at SAVE time if it's still blank, so the lead ends up attributed to whoever disposed
+      // it either way. Prefills the form from whatever's already on the row (editable, not
+      // one-shot) rather than always blank.
       const openNdrCall = async (t) => {
         let ticket = t;
         if (!t.assignedAgent && agentStatus !== 'Offline' && googleUser?.email) {
-          const now = new Date().toISOString();
           try {
-            await writeNdrCells([{ range: `Q${t.rowNum}:R${t.rowNum}`, values: [googleUser.email, now] }]);
-            ticket = { ...t, assignedAgent: googleUser.email, assignedAt: now };
+            await writeNdrCells([{ range: `S${t.rowNum}`, values: [googleUser.email] }]);
+            ticket = { ...t, assignedAgent: googleUser.email };
             setNdrTickets(prev => prev.map(x => x.id === t.id ? ticket : x));
+            recordNdrLeadAssignment({ action: 'claim', awbNumber: t.awb, email: googleUser.email });
           } catch (e) {
             showToast(`⚠️ Could not claim lead: ${e.message}`);
           }
         }
         setNdrDetailTkt(ticket);
-        setNdrDispSelection(ticket.disposition || '');
+        setNdrDispSelection(ticket.connected === 'Yes' ? 'Connected' : '');
         setNdrDispRemarks(ticket.remarks || '');
       };
 
-      // Writes S:U (disposition, remarks, disposed_at) for the open modal's lead - the only
-      // writer of these three columns anywhere (no Python script reads or writes them). Also
-      // claims the lead (Q:R) in the same call if it's still unassigned - covers the Offline
-      // skip in openNdrCall above, so disposing a lead always ends up attributing it to
-      // whoever actually did the work, exactly as RTO's own submitDisp guarantees.
+      // Writes exactly three of this sheet's own existing columns - Calling Date/Connected/
+      // Remarks - never Cs Action Remark/Refund Needed/Reorder ID/Final_status/45 Days Status,
+      // which belong to a separate downstream CS process this modal has no business touching.
+      // Also claims the lead (Agent Name) in the same call if it's still unassigned - covers
+      // the Offline skip in openNdrCall above, so disposing a lead always ends up attributing
+      // it to whoever actually did the work, exactly as RTO's own submitDisp guarantees.
       const saveNdrDisposition = async () => {
         if (!ndrDetailTkt || !ndrDispSelection) return;
         setNdrDispSaving(true);
         try {
-          const now = new Date().toISOString();
-          const ranges = [{ range: `S${ndrDetailTkt.rowNum}:U${ndrDetailTkt.rowNum}`, values: [ndrDispSelection, ndrDispRemarks, now] }];
+          const now = new Date();
+          const callingDate = `${String(now.getDate()).padStart(2,'0')}-${String(now.getMonth()+1).padStart(2,'0')}-${now.getFullYear()}`;
+          const connectedValue = ndrDispSelection === 'Connected' ? 'Yes' : 'No';
+          const ranges = [
+            { range: `R${ndrDetailTkt.rowNum}`, values: [callingDate] },
+            { range: `T${ndrDetailTkt.rowNum}`, values: [connectedValue] },
+            { range: `AA${ndrDetailTkt.rowNum}`, values: [ndrDispRemarks] },
+          ];
           const claimNow = !ndrDetailTkt.assignedAgent && googleUser?.email;
-          if (claimNow) ranges.push({ range: `Q${ndrDetailTkt.rowNum}:R${ndrDetailTkt.rowNum}`, values: [googleUser.email, now] });
+          if (claimNow) ranges.push({ range: `S${ndrDetailTkt.rowNum}`, values: [googleUser.email] });
           await writeNdrCells(ranges);
           setNdrTickets(prev => prev.map(x => x.id === ndrDetailTkt.id
-            ? { ...x, disposition: ndrDispSelection, remarks: ndrDispRemarks, disposedAt: now,
-                ...(claimNow ? { assignedAgent: googleUser.email, assignedAt: now } : {}) }
+            ? { ...x, callingDate, connected: connectedValue, remarks: ndrDispRemarks,
+                ...(claimNow ? { assignedAgent: googleUser.email } : {}) }
             : x));
+          if(claimNow) await recordNdrLeadAssignment({ action: 'claim', awbNumber: ndrDetailTkt.awb, email: googleUser.email });
+          await recordNdrLeadAssignment({ action: 'dispose', awbNumber: ndrDetailTkt.awb, disposition: ndrDispSelection, agentRemarks: ndrDispRemarks });
           showToast('Disposition saved');
           setNdrDetailTkt(null);
         } catch (e) {
@@ -3399,12 +3430,11 @@ const localStorage = typeof window !== 'undefined'
 
       // NDR's own tab-count/table derivations, computed unconditionally (hooks can't live
       // inside the currentProcess.value==='ndr' branch below) but cheap when NDR isn't active
-      // (ndrTickets is just []). "Disposed" mirrors RTO's own rule exactly, simplified for
-      // NDR's flatter data: RTO counts a lead worked if disposition OR agentRemarks OR
-      // status!=='Pending'; NDR has none of the latter two concepts, so disposition alone is
-      // the whole rule (see the Call modal's Save Disposition, which is the only writer of it).
+      // (ndrTickets is just []). "Disposed" = this sheet's own Connected column being
+      // non-blank - exactly the signal saveNdrDisposition itself writes, so it's
+      // self-consistent without needing a Postgres round-trip just to render the UI.
       const ndrTotal = ndrTickets.length;
-      const ndrDisposed = useMemo(() => ndrTickets.filter(t => t.disposition).length, [ndrTickets]);
+      const ndrDisposed = useMemo(() => ndrTickets.filter(t => t.connected).length, [ndrTickets]);
       const ndrAssigned = useMemo(() => ndrTickets.filter(t => t.assignedAgent).length, [ndrTickets]);
       const ndrUnassigned = ndrTotal - ndrAssigned;
       const ndrAttemptBuckets = useMemo(() => {
@@ -3422,8 +3452,8 @@ const localStorage = typeof window !== 'undefined'
         if (!q) return ndrTickets;
         return ndrTickets.filter(t =>
           (t.awb || '').toLowerCase().includes(q) ||
-          (t.orderCode || '').toLowerCase().includes(q) ||
-          (t.phone || '').includes(q)
+          (t.orderId || '').toLowerCase().includes(q) ||
+          (t.customerMobile || '').includes(q)
         );
       }, [ndrTickets, ndrSearch]);
       // 'fresh' = claimed but not yet worked (assigned, no disposition) - same "still owes a
@@ -3433,8 +3463,8 @@ const localStorage = typeof window !== 'undefined'
       // round-robin port of scripts/assign_ndr_leads.py, same relationship RTO's JS
       // predictedAssignments has to assign_leads.py.
       const ndrRowsForTab = useMemo(() => {
-        if (ndrTab === 'fresh') return ndrFilteredBase.filter(t => t.assignedAgent && !t.disposition);
-        return ndrFilteredBase.filter(t => t.disposition); // 'all'
+        if (ndrTab === 'fresh') return ndrFilteredBase.filter(t => t.assignedAgent && !t.connected);
+        return ndrFilteredBase.filter(t => t.connected); // 'all'
       }, [ndrFilteredBase, ndrTab]);
 
       // Disposition list to pick from in the Call modal - the Admin Panel's own NDR
@@ -3474,11 +3504,17 @@ const localStorage = typeof window !== 'undefined'
           return n <= 3 ? String(n) : 'More than 3';
         };
         const covers = (agent, bucket) => !agent.filter.length || bucket === null || agent.filter.includes(bucket);
+        // "DD-MM-YYYY" -> a sortable number, undated leads sort last (same convention as
+        // scripts/assign_ndr_leads.py's own parse_latest_ndr_date).
+        const parseLatestNdrDate = (raw) => {
+          const m = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec((raw || '').trim());
+          return m ? new Date(+m[3], +m[2] - 1, +m[1]).getTime() : Infinity;
+        };
 
         const pool = ndrTickets
-          .filter(t => !t.assignedAgent && !t.disposition)
+          .filter(t => !t.assignedAgent && !t.connected)
           .map(t => ({ ...t, bucket: bucketOf(t.attempts) }))
-          .sort((a, b) => new Date(a.orderDate) - new Date(b.orderDate));
+          .sort((a, b) => parseLatestNdrDate(a.latestNdrDate) - parseLatestNdrDate(b.latestNdrDate));
 
         const needed = new Map(onlineAgents.map(a => [a.email, a.quota]));
         let remaining = onlineAgents.filter(a => needed.get(a.email) > 0);
@@ -3516,7 +3552,7 @@ const localStorage = typeof window !== 'undefined'
             <input
               value={ndrSearch}
               onChange={e => setNdrSearch(e.target.value)}
-              placeholder="Search AWB, order code, phone…"
+              placeholder="Search AWB, order ID, mobile…"
               className="w-64 px-3 py-1.5 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
             />
             <div className="flex items-center gap-2 text-[12px] text-zinc-500">
@@ -3533,36 +3569,36 @@ const localStorage = typeof window !== 'undefined'
               <table className="w-full text-[13px]">
                 <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
                   <th className="py-3 px-4 text-left font-medium">AWB</th>
-                  <th className="py-3 px-4 text-left font-medium">Order</th>
-                  <th className="py-3 px-4 text-left font-medium">Order Date</th>
-                  <th className="py-3 px-4 text-left font-medium">Courier</th>
-                  <th className="py-3 px-4 text-left font-medium">Facility</th>
-                  <th className="py-3 px-4 text-left font-medium">Brand</th>
-                  <th className="py-3 px-4 text-center font-medium">Attempts</th>
-                  <th className="py-3 px-4 text-left font-medium">NDR Reason</th>
-                  <th className="py-3 px-4 text-left font-medium">Courier Status</th>
-                  <th className="py-3 px-4 text-left font-medium">Phone</th>
+                  <th className="py-3 px-4 text-left font-medium">Order ID</th>
+                  <th className="py-3 px-4 text-left font-medium">Customer</th>
+                  <th className="py-3 px-4 text-left font-medium">Mobile</th>
                   <th className="py-3 px-4 text-left font-medium">Address</th>
-                  <th className="py-3 px-4 text-left font-medium">Assigned Agent</th>
-                  <th className="py-3 px-4 text-left font-medium">Assigned At</th>
+                  <th className="py-3 px-4 text-left font-medium">Partner</th>
+                  <th className="py-3 px-4 text-center font-medium">Attempts</th>
+                  <th className="py-3 px-4 text-left font-medium">Latest NDR Reason</th>
+                  <th className="py-3 px-4 text-left font-medium">Status</th>
+                  <th className="py-3 px-4 text-left font-medium">Calling Date</th>
+                  <th className="py-3 px-4 text-left font-medium">Agent Name</th>
+                  <th className="py-3 px-4 text-left font-medium">Connected</th>
+                  <th className="py-3 px-4 text-left font-medium">Remarks</th>
                   <th className="py-3 px-4 text-right font-medium">Action</th>
                 </tr></thead>
                 <tbody className="divide-y divide-zinc-800/50">
                   {ndrPageRows.map(t => (
                     <tr key={t.id} className="hover:bg-zinc-800/30 transition-colors">
                       <td className="py-2.5 px-4 font-mono text-zinc-300">{t.awb}</td>
-                      <td className="py-2.5 px-4 text-zinc-300">{t.orderCode}</td>
-                      <td className="py-2.5 px-4 text-zinc-400">{t.orderDate}</td>
-                      <td className="py-2.5 px-4 text-zinc-400">{t.courier}</td>
-                      <td className="py-2.5 px-4 text-zinc-400">{t.facility}</td>
-                      <td className="py-2.5 px-4 text-zinc-400">{t.brand}</td>
+                      <td className="py-2.5 px-4 text-zinc-300">{t.orderId}</td>
+                      <td className="py-2.5 px-4 text-zinc-300">{t.customerName}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.customerMobile}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{[t.address, t.city, t.state, t.pincode].filter(Boolean).join(', ')}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.partner}</td>
                       <td className="py-2.5 px-4 text-center text-zinc-300">{t.attempts}</td>
-                      <td className="py-2.5 px-4 text-zinc-400">{t.ndrReason}</td>
-                      <td className="py-2.5 px-4 text-zinc-400">{t.courierStatus}</td>
-                      <td className="py-2.5 px-4 text-zinc-400">{t.phone}</td>
-                      <td className="py-2.5 px-4 text-zinc-400">{[t.addressName, t.city, t.state, t.pincode].filter(Boolean).join(', ')}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.latestNdrReason}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.status}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.callingDate}</td>
                       <td className="py-2.5 px-4 text-zinc-300">{t.assignedAgent || <span className="text-zinc-600">Unassigned</span>}</td>
-                      <td className="py-2.5 px-4 text-zinc-500">{t.assignedAt}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.connected}</td>
+                      <td className="py-2.5 px-4 text-zinc-400">{t.remarks}</td>
                       <td className="py-2.5 px-4 text-right">
                         <button
                           onClick={() => openNdrCall(t)}
@@ -3603,10 +3639,10 @@ const localStorage = typeof window !== 'undefined'
                   <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
                     <th className="py-3 px-4 text-left font-medium">#</th>
                     <th className="py-3 px-4 text-left font-medium">AWB</th>
-                    <th className="py-3 px-4 text-left font-medium">Order</th>
-                    <th className="py-3 px-4 text-left font-medium">Order Date</th>
+                    <th className="py-3 px-4 text-left font-medium">Order ID</th>
+                    <th className="py-3 px-4 text-left font-medium">Latest NDR Date</th>
                     <th className="py-3 px-4 text-center font-medium">Attempts</th>
-                    <th className="py-3 px-4 text-left font-medium">NDR Reason</th>
+                    <th className="py-3 px-4 text-left font-medium">Latest NDR Reason</th>
                     <th className="py-3 px-4 text-left font-medium">Predicted Agent</th>
                   </tr></thead>
                   <tbody className="divide-y divide-zinc-800/50">
@@ -3614,10 +3650,10 @@ const localStorage = typeof window !== 'undefined'
                       <tr key={t.id} className="hover:bg-zinc-800/30 transition-colors">
                         <td className="py-2.5 px-4 text-zinc-500">{i + 1}</td>
                         <td className="py-2.5 px-4 font-mono text-zinc-300">{t.awb}</td>
-                        <td className="py-2.5 px-4 text-zinc-300">{t.orderCode}</td>
-                        <td className="py-2.5 px-4 text-zinc-400">{t.orderDate}</td>
+                        <td className="py-2.5 px-4 text-zinc-300">{t.orderId}</td>
+                        <td className="py-2.5 px-4 text-zinc-400">{t.latestNdrDate}</td>
                         <td className="py-2.5 px-4 text-center text-zinc-300">{t.attempts}</td>
-                        <td className="py-2.5 px-4 text-zinc-400">{t.ndrReason}</td>
+                        <td className="py-2.5 px-4 text-zinc-400">{t.latestNdrReason}</td>
                         <td className="py-2.5 px-4 text-indigo-300 font-medium">{t.predictedAgent}</td>
                       </tr>
                     ))}
@@ -3934,46 +3970,45 @@ const localStorage = typeof window !== 'undefined'
               <Overlay onClose={() => setNdrDetailTkt(null)}>
                 <div className="w-full max-w-md bg-[#121215] border border-zinc-800/90 rounded-2xl shadow-2xl text-zinc-100">
                   <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800/80">
-                    <h3 className="text-base font-bold font-mono text-zinc-100">{ndrDetailTkt.orderCode || ndrDetailTkt.awb}</h3>
+                    <h3 className="text-base font-bold font-mono text-zinc-100">{ndrDetailTkt.orderId || ndrDetailTkt.awb}</h3>
                     <button onClick={() => setNdrDetailTkt(null)} className="p-1 rounded-lg hover:bg-zinc-800 text-zinc-400"><XIcon/></button>
                   </div>
                   <div className="px-6 py-5 space-y-4 max-h-[68vh] overflow-y-auto text-[13px]">
                     <div className="p-3.5 rounded-xl bg-zinc-900/90 border border-zinc-800/80 space-y-1">
-                      <p className="text-[11px] text-zinc-500 uppercase font-medium">Assigned Agent</p>
+                      <p className="text-[11px] text-zinc-500 uppercase font-medium">Agent Name</p>
                       <p className="text-zinc-100 font-bold flex items-center gap-1.5">👤 {ndrDetailTkt.assignedAgent || 'Unassigned'}</p>
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">AWB</p><p className="font-mono font-semibold text-zinc-200">{ndrDetailTkt.awb}</p></div>
-                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Order Date</p><p className="font-semibold text-zinc-200">{ndrDetailTkt.orderDate}</p></div>
+                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Customer</p><p className="font-semibold text-zinc-200">{ndrDetailTkt.customerName}</p></div>
                     </div>
                     <div className="grid grid-cols-2 gap-4">
-                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Courier</p><p className="font-semibold text-zinc-200">{ndrDetailTkt.courier}</p></div>
+                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Partner</p><p className="font-semibold text-zinc-200">{ndrDetailTkt.partner}</p></div>
                       <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Attempts</p><p className="font-semibold text-violet-300">{ndrDetailTkt.attempts}</p></div>
                     </div>
                     <div className="grid grid-cols-2 gap-4">
-                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Facility</p><p className="font-semibold text-zinc-200">{ndrDetailTkt.facility}</p></div>
-                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Brand / Channel</p><p className="font-semibold text-zinc-200">{ndrDetailTkt.brand} · {ndrDetailTkt.channel}</p></div>
+                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Status</p><p className="font-semibold text-zinc-200">{ndrDetailTkt.status || '—'}</p></div>
+                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Latest NDR Date</p><p className="font-semibold text-zinc-200">{ndrDetailTkt.latestNdrDate || '—'}</p></div>
                     </div>
-                    <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">NDR Reason</p><p className="text-zinc-300">{ndrDetailTkt.ndrReason || '—'}</p></div>
-                    <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Courier Status</p><p className="text-zinc-300">{ndrDetailTkt.courierStatus || '—'}</p></div>
-                    <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Address</p><p className="text-zinc-300">{ndrDetailTkt.addressName}</p><p className="text-zinc-200 font-medium">{ndrDetailTkt.city}, {ndrDetailTkt.state} — {ndrDetailTkt.pincode}</p></div>
+                    <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Latest NDR Reason</p><p className="text-zinc-300">{ndrDetailTkt.latestNdrReason || '—'}</p></div>
+                    <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Address</p><p className="text-zinc-300">{ndrDetailTkt.address}</p><p className="text-zinc-200 font-medium">{ndrDetailTkt.city}, {ndrDetailTkt.state} — {ndrDetailTkt.pincode}</p></div>
 
-                    {ndrDetailTkt.phone && (
+                    {ndrDetailTkt.customerMobile && (
                       <div className="flex items-center justify-between p-3 rounded-xl bg-indigo-950/30 border border-indigo-800/40">
                         <div>
                           <p className="text-[11px] font-medium uppercase tracking-wider text-indigo-300">Customer Contact</p>
-                          <p className="text-sm font-bold font-mono text-zinc-100 mt-0.5">{ndrDetailTkt.phone}</p>
+                          <p className="text-sm font-bold font-mono text-zinc-100 mt-0.5">{ndrDetailTkt.customerMobile}</p>
                         </div>
                         <div className="flex items-center gap-2">
                           <a
-                            href={`tel:${ndrDetailTkt.phone.replace(/[^0-9+]/g, '')}`}
+                            href={`tel:${ndrDetailTkt.customerMobile.replace(/[^0-9+]/g, '')}`}
                             className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[12px] font-bold flex items-center gap-1.5 shadow-md shadow-emerald-950/40 transition-all"
                           >
                             <PhoneIcon/> Call Now
                           </a>
                           <button
                             type="button"
-                            onClick={() => { navigator.clipboard.writeText(ndrDetailTkt.phone); showToast('Phone number copied!'); }}
+                            onClick={() => { navigator.clipboard.writeText(ndrDetailTkt.customerMobile); showToast('Phone number copied!'); }}
                             className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[12px] font-medium transition-colors border border-zinc-700"
                           >
                             Copy
@@ -3997,8 +4032,8 @@ const localStorage = typeof window !== 'undefined'
                         rows={3}
                         className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-[13px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 resize-none"
                       />
-                      {ndrDetailTkt.disposedAt && (
-                        <p className="text-[11px] text-zinc-500">Last disposed {ndrDetailTkt.disposedAt}</p>
+                      {ndrDetailTkt.callingDate && (
+                        <p className="text-[11px] text-zinc-500">Last called {ndrDetailTkt.callingDate} - Connected: {ndrDetailTkt.connected || '—'}</p>
                       )}
                     </div>
                   </div>

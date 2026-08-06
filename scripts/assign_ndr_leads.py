@@ -1,45 +1,44 @@
-"""Step 2 of standing up NDR Calling: round-robins unassigned NDR leads (see
-sync_ndr_leads_to_sheet.py's Sheet1) across agents who are online for NDR specifically, up to
-each agent's own NDR quota and respecting each agent's attempt-count filter (see
-agent_attempt_filter below).
+"""Step 2 of NDR Calling: round-robins unassigned NDR leads across agents who are online for
+NDR specifically, up to each agent's own NDR quota and respecting each agent's attempt-count
+filter (see agent_attempt_filter below).
+
+The lead source is NOT ours - it's an already-existing, actively-used spreadsheet ("NDR
+Calling - June") that some other CS/ops process already reads and writes (Agent Name,
+Connected, Cs Action Remark, Remarks, Final_status, etc. are all already in use there before
+this script ever touched it). This script only ever writes ONE column - Agent Name - never
+any of the others; see the module-level comments in app/rto-crm/RtoCrmClient.js's
+saveNdrDisposition for the (separate) three columns the Call modal's disposition-save writes.
 
 Deliberately independent of scripts/assign_leads.py and scripts/lead_priority.py - NDR's rules
-are simpler today and are expected to diverge further as NDR Calling grows its own disposition
-workflow, so nothing here is shared with RTO beyond the generic, already-process-keyed
-Postgres tables (calling_agent_process, agent_presence) and the generic lib.py Sheets helpers
-both processes already use.
+are simpler and diverge from RTO's, so nothing here is shared with RTO beyond the generic,
+already-process-keyed Postgres tables (calling_agent_process, agent_presence) and the generic
+lib.py Sheets helpers both processes already use.
 
-A lead is "unassigned" iff column Q (assigned_agent) is blank - once a row leaves that state,
-this script never touches it again, the same "never take back what's already handed out"
-contract RTO's own assign_leads.py uses. current_load is read straight off the sheet (a count
-of rows already carrying that agent's email in Q) rather than a separate Postgres tally: the
-sheet IS the persistence now that sync_ndr_leads_to_sheet.py no longer wipes Q/R on refresh.
-
-Column P is ndr_source.COLUMNS' own last source field (pincode) - this script must never
-write there. A prior version hardcoded the write range as "P{row}:Q{row}" from before
-courier_final_status shifted the source columns from 15 to 16 wide, silently overwriting
-pincode with the agent's email and putting a timestamp in Q instead - fixed by computing the
-write range from COL_AGENT/COL_ASSIGNED_AT instead of a literal string.
+A lead is "unassigned" iff Agent Name is blank - once a row leaves that state, this script
+never touches it again, the same "never take back what's already handed out" contract RTO's
+own assign_leads.py uses. current_load is read straight off the sheet (a count of rows
+already carrying that agent's email in Agent Name) rather than a separate Postgres tally.
 """
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 
 import psycopg
 
 import lib
-import ndr_source
 
 PROCESS_KEY = "ndr"
-SPREADSHEET_ID = "1oRPRvZaGpgQsZyXO_Q_j5HEZO1nkrFv0spTobfDoQ2g"
-SHEET_TAB = "Sheet1"
+SPREADSHEET_ID = "12p3rlXyE0PDx3BMqBpl3CUo5YD3uVzQun1HFPizpSeI"
+SHEET_TAB = "Latest NDR "  # trailing space is part of the real tab name - do not trim it
 
-COL_ORDER_DATE = 2                                       # C - uni_Order_Date, the sort key
-COL_NDR_ATTEMPTS = ndr_source.COLUMNS.index("cp_ndr_attempts")  # H
-COL_AGENT = len(ndr_source.COLUMNS)                      # assigned_agent - Q now that
-COL_ASSIGNED_AT = COL_AGENT + 1                          # ndr_source.COLUMNS has grown to 16
-COL_AGENT_LETTER = lib.get_column_letter(COL_AGENT)              # "Q"
-COL_ASSIGNED_AT_LETTER = lib.get_column_letter(COL_ASSIGNED_AT)  # "R"
-LAST_COL = COL_ASSIGNED_AT_LETTER
+# 0-based column indices in this sheet - see the module docstring above: this is someone
+# else's existing sheet, not ours, so these are fixed positions, not derived from a source
+# schema. Only COL_AGENT is ever written by this script.
+COL_AWB = 4                  # E
+COL_ATTEMPTS = 14            # O - Attempt Count
+COL_LATEST_NDR_DATE = 15     # P - "DD-MM-YYYY", the round-robin's oldest-first sort key
+COL_AGENT = 18               # S - Agent Name - the only column this script writes
+COL_AGENT_LETTER = lib.get_column_letter(COL_AGENT)  # "S"
+LAST_COL = COL_AGENT_LETTER  # nothing past Agent Name is read or written here
 
 STALE_MINUTES = 10  # must match the CRM's own heartbeat cadence - same convention as RTO's
 DEFAULT_QUOTA = 20  # NDR's own fallback, independent of RTO's leadAssignmentRules.json value
@@ -48,7 +47,7 @@ ATTEMPT_BUCKETS = ("1", "2", "3", "More than 3")
 
 
 def attempt_bucket(raw):
-    """cp_ndr_attempts (a sheet cell, string) -> one of ATTEMPT_BUCKETS, or None if it can't be
+    """Attempt Count (a sheet cell, string) -> one of ATTEMPT_BUCKETS, or None if it can't be
     parsed. None is treated as "don't restrict" wherever it's used below (fails open) - an
     unreadable attempt count shouldn't be the reason a lead never gets called, the same
     fail-open philosophy assign_leads.py's own GoKwik check uses."""
@@ -59,6 +58,16 @@ def attempt_bucket(raw):
     if n <= 0:
         return None
     return str(n) if n <= 3 else "More than 3"
+
+
+def parse_latest_ndr_date(raw):
+    """'DD-MM-YYYY' -> datetime, or None if unparseable - sorts to the end (oldest-first
+    means an undated lead never jumps the queue, the same "undated sorts last" convention
+    used elsewhere in this codebase, e.g. lead_priority.py's parse_rto_initiated_date)."""
+    try:
+        return datetime.strptime(str(raw).strip(), "%d-%m-%Y")
+    except (TypeError, ValueError):
+        return None
 
 
 def fetch_online_ndr_agents():
@@ -116,6 +125,37 @@ def fetch_online_ndr_agents():
     return eligible, quotas, attempt_filters
 
 
+def record_new_assignments(new_assignments):
+    """Mirrors each freshly-assigned (awb_number, email) into Postgres ndr_lead_assignments -
+    NDR's own equivalent of assign_leads.py's record_lead_assignments, a parallel write
+    alongside the sheet, not a replacement (see api/_lib/db.js's claimNdrLead, which the Call
+    modal's own claim-on-open path uses for the exact same table). ON CONFLICT targets the
+    partial unique index on (awb_number) WHERE reassigned_away_at IS NULL, so this is a safe
+    no-op for an awb somehow already claimed. Best-effort: a Postgres write failure here must
+    never undo or block the sheet write that already succeeded - the sheet is what the CRM
+    reads from, this is just history."""
+    if not new_assignments:
+        return
+    conn_str = os.environ.get("POSTGRES_URL")
+    if not conn_str:
+        print("  (POSTGRES_URL not configured - skipping ndr_lead_assignments write)")
+        return
+    try:
+        with psycopg.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO ndr_lead_assignments (awb_number, email)
+                    VALUES (%s, %s)
+                    ON CONFLICT (awb_number) WHERE reassigned_away_at IS NULL DO NOTHING
+                    """,
+                    new_assignments,
+                )
+            conn.commit()
+    except Exception as e:
+        print(f"  (ndr_lead_assignments write failed: {e} - sheet assignment already stands)")
+
+
 def main():
     online_agents, quotas, attempt_filters = fetch_online_ndr_agents()
     if not online_agents:
@@ -125,24 +165,28 @@ def main():
     sheet_rows = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!A2:{LAST_COL}1000000")
 
     current_load = {email: 0 for email in online_agents}
-    unassigned = []  # (row_number, order_date, attempt_bucket)
+    unassigned = []  # (row_number, latest_ndr_date, attempt_bucket, awb_number)
     for i, row in enumerate(sheet_rows):
         agent = row[COL_AGENT].strip().lower() if len(row) > COL_AGENT and row[COL_AGENT] else ""
         if agent:
             if agent in current_load:
                 current_load[agent] += 1
         else:
-            order_date = row[COL_ORDER_DATE] if len(row) > COL_ORDER_DATE else ""
-            bucket = attempt_bucket(row[COL_NDR_ATTEMPTS] if len(row) > COL_NDR_ATTEMPTS else "")
-            unassigned.append((i + 2, order_date, bucket))
+            latest_ndr_date = parse_latest_ndr_date(row[COL_LATEST_NDR_DATE] if len(row) > COL_LATEST_NDR_DATE else "")
+            bucket = attempt_bucket(row[COL_ATTEMPTS] if len(row) > COL_ATTEMPTS else "")
+            awb = row[COL_AWB] if len(row) > COL_AWB else ""
+            if awb:
+                unassigned.append((i + 2, latest_ndr_date, bucket, awb))
 
     if not unassigned:
         print("No unassigned NDR leads found - nothing to assign.")
         return
 
-    # Oldest order first - a lead that's been waiting longest outranks a fresher one, the same
-    # spirit as RTO's queue ordering without RTO's tier machinery.
-    unassigned.sort(key=lambda t: t[1])
+    # Oldest Latest NDR Date first (undated leads sort last) - a lead that's been waiting
+    # longest outranks a fresher one, the same spirit as RTO's queue ordering without RTO's
+    # tier machinery.
+    EPOCH_MAX = datetime.max
+    unassigned.sort(key=lambda t: t[1] if t[1] is not None else EPOCH_MAX)
 
     needed = {email: max(0, quotas.get(email, DEFAULT_QUOTA) - current_load.get(email, 0))
               for email in online_agents}
@@ -152,12 +196,12 @@ def main():
         filt = attempt_filters.get(email)
         return not filt or bucket is None or bucket in filt
 
-    now = datetime.now(timezone.utc).isoformat()
     value_ranges = []
+    new_assignments = []  # (awb_number, email) - mirrored into Postgres after the sheet write
     assigned_count = {}
     no_agent_for_bucket = 0
     idx = 0
-    for row_num, _, bucket in unassigned:
+    for row_num, _, bucket, awb in unassigned:
         if not remaining_agents:
             break
         n = len(remaining_agents)
@@ -175,9 +219,10 @@ def main():
             continue
         email = remaining_agents[chosen]
         value_ranges.append({
-            "range": f"'{SHEET_TAB}'!{COL_AGENT_LETTER}{row_num}:{COL_ASSIGNED_AT_LETTER}{row_num}",
-            "values": [[email, now]],
+            "range": f"'{SHEET_TAB}'!{COL_AGENT_LETTER}{row_num}",
+            "values": [[email]],
         })
+        new_assignments.append((awb, email))
         assigned_count[email] = assigned_count.get(email, 0) + 1
         needed[email] -= 1
         if needed[email] <= 0:
@@ -194,6 +239,8 @@ def main():
 
     for start in range(0, len(value_ranges), 300):
         lib.set_sheet_values_batch(SPREADSHEET_ID, value_ranges[start:start + 300])
+
+    record_new_assignments(new_assignments)
 
     print(f"Assigned {len(value_ranges)} lead(s):")
     for email, count in sorted(assigned_count.items()):

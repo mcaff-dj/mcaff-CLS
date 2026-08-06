@@ -479,6 +479,31 @@ async function ensurePgSchema() {
     )
   `;
   await pgSql`CREATE INDEX IF NOT EXISTS agent_presence_log_email_idx ON agent_presence_log (email, changed_at DESC)`;
+  // NDR Calling's own assignment/disposition history - the same role lead_assignments plays
+  // for RTO, but deliberately a SEPARATE table (not a shared/generic one): NDR has no
+  // reassignment/connected/refund workflow yet, so this only carries the shape actually used
+  // today. Parallel write alongside the Google Sheet (scripts/assign_ndr_leads.py's Q:R,
+  // the Call modal's S:U in app/rto-crm/RtoCrmClient.js) - the sheet stays what the UI reads
+  // from; this is the durable/queryable history side, same relationship RTO's own sheet
+  // Column Q + lead_assignments already have. reassigned_away_at exists for the same
+  // future-proofing reason RTO's table has it, but nothing sets it yet - NDR has no retry
+  // loop to reassign a lead away from anyone.
+  await pgSql`
+    CREATE TABLE IF NOT EXISTS ndr_lead_assignments (
+      id BIGSERIAL PRIMARY KEY,
+      awb_number TEXT NOT NULL,
+      email TEXT NOT NULL,
+      assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      reassigned_away_at TIMESTAMPTZ,
+      disposed_at TIMESTAMPTZ,
+      disposition TEXT,
+      agent_remarks TEXT
+    )
+  `;
+  // At most one live cycle per awb - same partial-unique-index pattern as RTO's
+  // lead_assignments_order_id_current_key, so claimNdrLead's ON CONFLICT below has a real
+  // arbiter to target.
+  await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS ndr_lead_assignments_awb_current_key ON ndr_lead_assignments (awb_number) WHERE reassigned_away_at IS NULL`;
   } catch (e) {
     // Postgres codes for "already exists" (duplicate_column/duplicate_table/duplicate_object)
     // - a benign race, not a real failure: every statement above is its own ADD COLUMN IF NOT
@@ -876,6 +901,34 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
       new_order_id = COALESCE(EXCLUDED.new_order_id, lead_assignments.new_order_id),
       rto_reason = COALESCE(lead_assignments.rto_reason, EXCLUDED.rto_reason),
       delivery_partner = COALESCE(EXCLUDED.delivery_partner, lead_assignments.delivery_partner)
+  `;
+}
+
+// NDR's own equivalent of the assignment half of record_lead_assignments (scripts/
+// assign_leads.py) - a fresh live cycle for this awb. ON CONFLICT targets the partial unique
+// index (ndr_lead_assignments_awb_current_key), so a re-claim of an already-live row (a race,
+// or the UI's own auto-claim firing twice) is a safe no-op rather than an error - the sheet's
+// own Q/R write already decided who holds the lead; this just mirrors that into Postgres.
+async function claimNdrLead(awbNumber, email) {
+  await ensurePgSchema();
+  await pgSql`
+    INSERT INTO ndr_lead_assignments (awb_number, email)
+    VALUES (${awbNumber}, ${email})
+    ON CONFLICT (awb_number) WHERE reassigned_away_at IS NULL DO NOTHING
+  `;
+}
+
+// NDR's own equivalent of the disposal half of recordLeadDisposition above - updates the
+// SAME live row claimNdrLead created, never inserts one: a disposition is only ever recorded
+// for a lead that's already been claimed (see the Call modal's claim-then-dispose sequence),
+// so there's nothing to upsert here unlike RTO's version (which also has to handle a
+// self-claimed lead with no prior assignment row).
+async function disposeNdrLead(awbNumber, disposition, agentRemarks) {
+  await ensurePgSchema();
+  await pgSql`
+    UPDATE ndr_lead_assignments
+    SET disposed_at = now(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null}
+    WHERE awb_number = ${awbNumber} AND reassigned_away_at IS NULL
   `;
 }
 
@@ -1457,4 +1510,5 @@ module.exports = {
   isCallingProcessAdmin, getAdministeredProcesses,
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions,
+  claimNdrLead, disposeNdrLead,
 };

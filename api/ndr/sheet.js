@@ -1,17 +1,19 @@
-// Gated Google Sheets proxy for NDR Calling's own sheet - sibling to api/rto/sheet.js. Now
-// read+write: the Call modal's disposition form writes S:U (disposition/remarks/disposed_at)
-// and Q:R (assigned_agent/assigned_at claim-on-open) directly from the browser, same trust
-// model as RTO's own writeToSheetRow (the frontend owns which range it writes; this route
-// stays a dumb, permission-gated proxy). Same service account
-// (GOOGLE_SHEETS_CLIENT_EMAIL/GOOGLE_SHEETS_PRIVATE_KEY) already has access to this sheet -
-// it's the same one the Python scripts (scripts/lib.py) use to write it.
+// Gated Google Sheets proxy for NDR Calling's real lead source - an already-existing,
+// actively-used external spreadsheet ("NDR Calling - June"), not one this app owns. Sibling
+// to api/rto/sheet.js. Read+write: the Call modal's disposition form writes exactly three of
+// that sheet's own existing columns (Calling Date/Connected/Remarks - see
+// RtoCrmClient.js's saveNdrDisposition) and the claim-on-open path writes Agent Name, directly
+// from the browser, same trust model as RTO's own writeToSheetRow (the frontend owns which
+// range it writes; this route stays a dumb, permission-gated proxy). Confirmed this session
+// that the service account (GOOGLE_SHEETS_CLIENT_EMAIL/GOOGLE_SHEETS_PRIVATE_KEY) already has
+// Editor access on this external sheet, not just Viewer.
 const { JWT } = require('google-auth-library');
 const { getSession } = require('../_lib/session');
 
-// The one sheet this proxy is allowed to touch - see scripts/sync_ndr_leads_to_sheet.py's
+// The one sheet this proxy is allowed to touch - see scripts/assign_ndr_leads.py's
 // SPREADSHEET_ID. Rejecting any other sid keeps a permitted-but-malicious request from
 // repurposing this service account's access against an unrelated sheet.
-const NDR_SHEET_ID = '1oRPRvZaGpgQsZyXO_Q_j5HEZO1nkrFv0spTobfDoQ2g';
+const NDR_SHEET_ID = '12p3rlXyE0PDx3BMqBpl3CUo5YD3uVzQun1HFPizpSeI';
 const CARD_KEY = 'calling';
 const TAB_KEY = 'ndr';
 
