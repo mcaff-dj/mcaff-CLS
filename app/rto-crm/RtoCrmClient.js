@@ -3428,34 +3428,49 @@ const localStorage = typeof window !== 'undefined'
         }
       }, [userRole, tab]);
 
+      // Same "a plain Agent only sees their own leads, Admin/Team Lead/isProcessAdmin see
+      // everyone's" scoping RTO's own inMyScope already applies (line ~2562) - missing here
+      // let every agent see every other agent's customer PII (name/mobile/address) in the
+      // leads table, which is exactly the bug reported this session. Flexible substring match
+      // (not exact equality) on purpose: this sheet's Agent Name values aren't all full emails
+      // - some pre-existing rows from before this app touched the sheet carry a bare first
+      // name (e.g. "Naziya") instead.
+      const ndrMyScopeEmail = userRole === 'Agent' && !isProcessAdmin ? (googleUser?.email || '').toLowerCase() : '';
+      const ndrInMyScope = (t) => {
+        if (!ndrMyScopeEmail) return true;
+        const a = (t.assignedAgent || '').toLowerCase();
+        return a.includes(ndrMyScopeEmail) || ndrMyScopeEmail.includes(a);
+      };
+
       // NDR's own tab-count/table derivations, computed unconditionally (hooks can't live
       // inside the currentProcess.value==='ndr' branch below) but cheap when NDR isn't active
       // (ndrTickets is just []). "Disposed" = this sheet's own Connected column being
       // non-blank - exactly the signal saveNdrDisposition itself writes, so it's
       // self-consistent without needing a Postgres round-trip just to render the UI.
-      const ndrTotal = ndrTickets.length;
-      const ndrDisposed = useMemo(() => ndrTickets.filter(t => t.connected).length, [ndrTickets]);
-      const ndrAssigned = useMemo(() => ndrTickets.filter(t => t.assignedAgent).length, [ndrTickets]);
+      const ndrScopedTickets = useMemo(() => ndrTickets.filter(ndrInMyScope), [ndrTickets, ndrMyScopeEmail]);
+      const ndrTotal = ndrScopedTickets.length;
+      const ndrDisposed = useMemo(() => ndrScopedTickets.filter(t => t.connected).length, [ndrScopedTickets]);
+      const ndrAssigned = useMemo(() => ndrScopedTickets.filter(t => t.assignedAgent).length, [ndrScopedTickets]);
       const ndrUnassigned = ndrTotal - ndrAssigned;
       const ndrAttemptBuckets = useMemo(() => {
         const counts = { '1': 0, '2': 0, '3': 0, 'More than 3': 0 };
-        for (const t of ndrTickets) {
+        for (const t of ndrScopedTickets) {
           const n = parseInt(t.attempts, 10);
           if (!Number.isFinite(n) || n <= 0) continue;
           const bucket = n <= 3 ? String(n) : 'More than 3';
           counts[bucket] = (counts[bucket] || 0) + 1;
         }
         return counts;
-      }, [ndrTickets]);
+      }, [ndrScopedTickets]);
       const ndrFilteredBase = useMemo(() => {
         const q = ndrSearch.trim().toLowerCase();
-        if (!q) return ndrTickets;
-        return ndrTickets.filter(t =>
+        if (!q) return ndrScopedTickets;
+        return ndrScopedTickets.filter(t =>
           (t.awb || '').toLowerCase().includes(q) ||
           (t.orderId || '').toLowerCase().includes(q) ||
           (t.customerMobile || '').includes(q)
         );
-      }, [ndrTickets, ndrSearch]);
+      }, [ndrScopedTickets, ndrSearch]);
       // 'fresh' = claimed but not yet worked (assigned, no disposition) - same "still owes a
       // call" queue RTO's own Fresh Leads tracks, not just "has an agent's name in it".
       // 'all' (tab label "Total Leads Disposed") = only leads that have actually been worked.
@@ -4019,12 +4034,20 @@ const localStorage = typeof window !== 'undefined'
 
                     <div className="space-y-2.5 pt-1">
                       <p className="text-[11px] text-zinc-500 uppercase font-medium">Disposition</p>
-                      <CustomSelect
+                      {/* Native <select>, not CustomSelect - CustomSelect's dropdown panel is
+                          position:absolute inside this modal's own overflow-y-auto body, which
+                          clips it (opens with the chevron rotating but no visible options) once
+                          the button sits anywhere the panel would overflow that scroll
+                          container. A native select's popup is rendered by the browser itself,
+                          immune to any ancestor's CSS overflow. */}
+                      <select
                         value={ndrDispSelection}
-                        onChange={setNdrDispSelection}
-                        placeholder="Select an outcome…"
-                        options={ndrDispositionOptions.map(o => ({ value: o, label: o }))}
-                      />
+                        onChange={e => setNdrDispSelection(e.target.value)}
+                        className="w-full h-9 px-3 bg-zinc-900 border border-zinc-800 rounded-lg text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                      >
+                        <option value="" disabled>Select an outcome…</option>
+                        {ndrDispositionOptions.map(o => <option key={o} value={o}>{o}</option>)}
+                      </select>
                       <textarea
                         value={ndrDispRemarks}
                         onChange={e => setNdrDispRemarks(e.target.value)}
