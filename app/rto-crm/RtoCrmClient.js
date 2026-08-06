@@ -160,8 +160,10 @@ const localStorage = typeof window !== 'undefined'
     // columns are stable (it's someone else's existing, long-running process), so a
     // column-index map is simpler and correct. Only assignedAgent (S, index 18) is ever
     // written by scripts/assign_ndr_leads.py; callingDate/connected/outcome/remarks
-    // (R/T/U/AB) are the only four this UI's own disposition-save writes (see
-    // saveNdrDisposition) - every other column here (email, orderValue, paymentMode,
+    // (R/T/U/AB), plus V ("Did you receive any call from the delivery agent?", only when the
+    // agent went down the "Have you got call from Partner" branch), are the only ones this
+    // UI's own disposition-save writes (see saveNdrDisposition) - every other column here
+    // (email, orderValue, paymentMode,
     // csActionRemark, refundNeeded, reorderId, finalStatus, etc.) belongs to that other
     // process and is deliberately not even read, let alone written, since we don't understand
     // its full taxonomy well enough to touch it.
@@ -178,7 +180,7 @@ const localStorage = typeof window !== 'undefined'
         orderId: v(0), customerName: v(1), customerMobile: v(3), awb: v(4), partner: v(5),
         address: v(6), pincode: v(7), city: v(8), state: v(9), status: v(12), attempts: v(14),
         latestNdrDate: v(15), latestNdrReason: v(16), callingDate: v(17), assignedAgent: v(18),
-        connected: v(19), outcome: v(20), remarks: v(27),
+        connected: v(19), outcome: v(20), deliveryAgentCall: v(21), remarks: v(27),
       };
     }
     // Writes one or more cell ranges in a single batchUpdate call - the only writes this UI
@@ -2159,21 +2161,33 @@ const localStorage = typeof window !== 'undefined'
           const now = new Date();
           const callingDate = `${String(now.getDate()).padStart(2,'0')}-${String(now.getMonth()+1).padStart(2,'0')}-${now.getFullYear()}`;
           const connectedValue = ndrDispPath[0] === 'Connected' ? 'Yes' : 'No';
-          // Outcome (column U) is the SPECIFIC reason picked - the deepest label in the path,
-          // whatever depth that turned out to be ("Ringing", or "Wrong Address" three levels
-          // down). Distinct from Connected (Yes/No, the coarse signal) and Remarks (free text).
-          const outcomeValue = ndrDispPath[ndrDispPath.length - 1] || ndrDispSelection;
+          // Outcome (column U) is the category picked one level under Connected/Not Connected
+          // ("New order Placed", "Reattempt", "Ringing", ...) - NOT the deepest leaf, which can
+          // be a generic Yes/No that means nothing without the question it answered. A leaf
+          // picked directly at the top level (no children at all) falls back to path[0] itself.
+          const outcomeValue = ndrDispPath[1] || ndrDispPath[0] || ndrDispSelection;
+          // "Have you got call from Partner" is this sheet's own pre-existing question -
+          // column V, "Did you receive any call from the delivery agent?" - so whichever leaf
+          // is picked directly under a node with that exact label goes there instead of
+          // getting buried as a meaningless "Yes"/"No" Outcome. Matched by label, same as the
+          // Connected/Not Connected tone lookup above - there's no other way to know a given
+          // admin-authored tree node maps to this particular pre-existing column.
+          const partnerCallValue = ndrDispPath[ndrDispPath.length - 2] === 'Have you got call from Partner'
+            ? ndrDispPath[ndrDispPath.length - 1]
+            : null;
           const ranges = [
             { range: `R${ndrDetailTkt.rowNum}`, values: [callingDate] },
             { range: `T${ndrDetailTkt.rowNum}`, values: [connectedValue] },
             { range: `U${ndrDetailTkt.rowNum}`, values: [outcomeValue] },
             { range: `AB${ndrDetailTkt.rowNum}`, values: [ndrDispRemarks] },
           ];
+          if (partnerCallValue) ranges.push({ range: `V${ndrDetailTkt.rowNum}`, values: [partnerCallValue] });
           const claimNow = !ndrDetailTkt.assignedAgent && googleUser?.email;
           if (claimNow) ranges.push({ range: `S${ndrDetailTkt.rowNum}`, values: [googleUser.email] });
           await writeNdrCells(ranges);
           setNdrTickets(prev => prev.map(x => x.id === ndrDetailTkt.id
             ? { ...x, callingDate, connected: connectedValue, outcome: outcomeValue, remarks: ndrDispRemarks,
+                ...(partnerCallValue ? { deliveryAgentCall: partnerCallValue } : {}),
                 ...(claimNow ? { assignedAgent: googleUser.email } : {}) }
             : x));
           if(claimNow) await recordNdrLeadAssignment({ action: 'claim', awbNumber: ndrDetailTkt.awb, email: googleUser.email });
