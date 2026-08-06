@@ -472,8 +472,20 @@ async function handleDispositions(req, res, session) {
     res.status(400).json({ error: `process must be one of: ${known.join(', ')}` });
     return;
   }
-  if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, processKey))) {
-    res.status(403).json({ error: 'You do not administer that process' });
+  // Reading the list only needs the same 'calling' card + per-process tab access every other
+  // process-scoped read already checks (see api/ndr/sheet.js's checkAccess) - NOT admin/
+  // process-admin, which stayed the bar for POST/PUT/DELETE above (editing the list) since
+  // those actually change it. This table was built purely for the Admin-side editor, where
+  // "can read" and "can edit" were the same person, so nobody had reason to tell them apart
+  // until NDR's own Call modal became the first PLAIN AGENT that needs to read this list to
+  // pick a disposition - the old isCallingProcessAdmin-only gate 403'd every agent silently
+  // (an empty picker, no visible error) since loadDispositions swallows the failure into
+  // dispositionsError, which nothing outside the Admin tab's own card ever renders.
+  const tabs = session.tabPerms && session.tabPerms.calling;
+  const hasProcessAccess = (session.perms || []).includes('calling') &&
+    (!Array.isArray(tabs) || !tabs.length || tabs.includes(processKey));
+  if (!hasProcessAccess) {
+    res.status(403).json({ error: 'You do not have access to that process.' });
     return;
   }
   res.status(200).json({ dispositions: await getProcessDispositions(processKey) });
