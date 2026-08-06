@@ -126,9 +126,17 @@ const localStorage = typeof window !== 'undefined'
     // defensive way an earlier, much larger version of this fetch (against a different sheet)
     // had to be after a real ~13MB response blew past the Lambda's ~6MB synchronous
     // response-payload limit: read one cheap single-column indicator first to find the sheet's
-    // current size, then fetch only a bounded tail. NDR_MAX_ROWS is a stopgap margin, not a
-    // hard requirement at today's size - kept for when this sheet inevitably grows further.
-    const NDR_MAX_ROWS = 5000;
+    // current size, then fetch only a bounded TAIL (most recent rows by sheet position).
+    //
+    // That tail-by-position choice broke a real case at 5,000: Agent Name gets assigned by
+    // scripts/assign_ndr_leads.py's own round-robin, which sorts by Latest NDR Date, NOT by
+    // sheet row position - an agent's own assigned rows can sit anywhere in the sheet, so a
+    // 5,000-row tail window silently excluded a real agent's real assigned leads that happened
+    // to land in the older 2,500 rows outside it (Fresh Leads showed 0 for someone who
+    // genuinely had 5 assigned). Raised well past today's size (12,000 vs 7,512 - ~60%
+    // headroom before this stops covering the whole sheet again) - not a permanent fix, but a
+    // properly scalable version needs to fetch by WHO the row belongs to, not by recency.
+    const NDR_MAX_ROWS = 12000;
     const NDR_LAST_COL = 'AA'; // Remarks - the last column this UI reads or writes
     async function fetchNdrSheet(){
       const idCol = await fetchNdrSheetValues(`'${NDR_SHEET_TAB}'!A2:A1000000`);
@@ -3445,7 +3453,11 @@ const localStorage = typeof window !== 'undefined'
       const ndrInMyScope = (t) => {
         if (!ndrMyScopeEmail) return true;
         const a = (t.assignedAgent || '').toLowerCase();
-        return a.includes(ndrMyScopeEmail) || ndrMyScopeEmail.includes(a);
+        // An unassigned row (a === '') must never pass: ''.includes('') and
+        // myScopeEmail.includes('') are BOTH true in JS, which silently let every unclaimed
+        // lead count as "mine" for every agent - inflated a real agent's Overview total from
+        // ~5 genuinely-assigned leads to 1,764 (nearly the whole loaded window).
+        return !!a && (a.includes(ndrMyScopeEmail) || ndrMyScopeEmail.includes(a));
       };
 
       // NDR's own tab-count/table derivations, computed unconditionally (hooks can't live
