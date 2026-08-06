@@ -2234,6 +2234,12 @@ const localStorage = typeof window !== 'undefined'
             // Same "unset -> no restriction" convention as above; only applies to Connected=No
             // reassignments, see predictedAssignments' matchesReassignPaymentMode.
             if (perProcess[email].reassignPaymentMode) a.reassignPaymentMode = perProcess[email].reassignPaymentMode;
+            // Same bug class the isAdmin/isProcessAdmin comment below already flags as
+            // recurring in this merge: attemptCountFilter (NDR's Team Roster "Attempts"
+            // picker) was never copied here either, so its MultiSelectDropdown's value was
+            // always [] ("None") no matter what was actually saved - a click saved correctly
+            // server-side (no error toast) but the checkbox never visually reflected it.
+            if (perProcess[email].attemptCountFilter) a.attemptCountFilter = perProcess[email].attemptCountFilter;
             a.inProcess = true;
             // isAdmin/isProcessAdmin were previously never copied here, only onto the
             // separate roster card's own objects - so the Team Roster's "Process admin"
