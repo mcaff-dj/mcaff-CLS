@@ -72,12 +72,18 @@ module.exports = async (req, res) => {
 
     if (req.method === 'POST' && (req.body || {}).op === 'batchUpdate') {
       const data = (req.body || {}).data || [];
+      // RAW, not USER_ENTERED: every value this UI ever writes (Agent Name, Connected Yes/No,
+      // Outcome, Remarks, Calling Date) is plain text nobody needs Sheets to auto-convert.
+      // USER_ENTERED bit us for real - writing "06-08-2026" (DD-MM-YYYY, the format the user
+      // explicitly asked for) got silently reinterpreted as MM-DD-YYYY under this sheet's
+      // locale and displayed back as "8 Jun" instead of the intended 6 Aug. RAW stores exactly
+      // the string sent, no locale-dependent guessing.
       const r = await fetch(
         `https://sheets.googleapis.com/v4/spreadsheets/${NDR_SHEET_ID}/values:batchUpdate`,
         {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data }),
+          body: JSON.stringify({ valueInputOption: 'RAW', data }),
         }
       );
       const out = await r.json().catch(() => ({}));

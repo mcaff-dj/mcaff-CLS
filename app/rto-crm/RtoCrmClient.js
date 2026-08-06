@@ -137,7 +137,7 @@ const localStorage = typeof window !== 'undefined'
     // headroom before this stops covering the whole sheet again) - not a permanent fix, but a
     // properly scalable version needs to fetch by WHO the row belongs to, not by recency.
     const NDR_MAX_ROWS = 12000;
-    const NDR_LAST_COL = 'AA'; // Remarks - the last column this UI reads or writes
+    const NDR_LAST_COL = 'AB'; // Remarks - the last column this UI reads or writes
     async function fetchNdrSheet(){
       const idCol = await fetchNdrSheetValues(`'${NDR_SHEET_TAB}'!A2:A1000000`);
       if(!idCol.length) return {rows: [], startRow: 2, totalRows: 0};
@@ -150,11 +150,18 @@ const localStorage = typeof window !== 'undefined'
     // Fixed positional layout, not fuzzy header matching like RTO's mapTkt - this sheet's own
     // columns are stable (it's someone else's existing, long-running process), so a
     // column-index map is simpler and correct. Only assignedAgent (S, index 18) is ever
-    // written by scripts/assign_ndr_leads.py; callingDate/connected/remarks (R/T/AA) are the
-    // only three this UI's own disposition-save writes (see saveNdrDisposition) - every other
-    // column here (email, orderValue, paymentMode, csActionRemark, refundNeeded, reorderId,
-    // finalStatus, etc.) belongs to that other process and is deliberately not even read,
-    // let alone written, since we don't understand its full taxonomy well enough to touch it.
+    // written by scripts/assign_ndr_leads.py; callingDate/connected/outcome/remarks
+    // (R/T/U/AB) are the only four this UI's own disposition-save writes (see
+    // saveNdrDisposition) - every other column here (email, orderValue, paymentMode,
+    // csActionRemark, refundNeeded, reorderId, finalStatus, etc.) belongs to that other
+    // process and is deliberately not even read, let alone written, since we don't understand
+    // its full taxonomy well enough to touch it.
+    //
+    // NOTE: there's a real column named "Outcome" at index 20 (U), sitting BETWEEN Connected
+    // (19) and "Did you receive any call from the delivery agent?" (21) - missed in the
+    // original header scan this mapping was built from, which shifted every field after
+    // Connected down by one (what's written here as index 26/AA is actually Reorder ID, not
+    // Remarks - Remarks is really 27/AB). Fixed directly against the sheet's real header row.
     function mapNdrRow(row, rowNum){
       const v = (i) => row[i] !== undefined ? row[i] : '';
       return {
@@ -162,7 +169,7 @@ const localStorage = typeof window !== 'undefined'
         orderId: v(0), customerName: v(1), customerMobile: v(3), awb: v(4), partner: v(5),
         address: v(6), pincode: v(7), city: v(8), state: v(9), status: v(12), attempts: v(14),
         latestNdrDate: v(15), latestNdrReason: v(16), callingDate: v(17), assignedAgent: v(18),
-        connected: v(19), remarks: v(26),
+        connected: v(19), outcome: v(20), remarks: v(27),
       };
     }
     // Writes one or more cell ranges in a single batchUpdate call - the only writes this UI
@@ -2140,16 +2147,23 @@ const localStorage = typeof window !== 'undefined'
           const now = new Date();
           const callingDate = `${String(now.getDate()).padStart(2,'0')}-${String(now.getMonth()+1).padStart(2,'0')}-${now.getFullYear()}`;
           const connectedValue = ndrDispSelection === 'Connected' ? 'Yes' : 'No';
+          // Outcome (column U) is the SPECIFIC reason picked - the child label if one was
+          // chosen ("Ringing"), else the parent itself for a leaf disposition ("Connected").
+          // Distinct from Connected (Yes/No, the coarse signal) and Remarks (free text).
+          const outcomeValue = ndrDispSelection.startsWith(`${ndrDispParent} - `)
+            ? ndrDispSelection.slice(ndrDispParent.length + 3)
+            : ndrDispSelection;
           const ranges = [
             { range: `R${ndrDetailTkt.rowNum}`, values: [callingDate] },
             { range: `T${ndrDetailTkt.rowNum}`, values: [connectedValue] },
-            { range: `AA${ndrDetailTkt.rowNum}`, values: [ndrDispRemarks] },
+            { range: `U${ndrDetailTkt.rowNum}`, values: [outcomeValue] },
+            { range: `AB${ndrDetailTkt.rowNum}`, values: [ndrDispRemarks] },
           ];
           const claimNow = !ndrDetailTkt.assignedAgent && googleUser?.email;
           if (claimNow) ranges.push({ range: `S${ndrDetailTkt.rowNum}`, values: [googleUser.email] });
           await writeNdrCells(ranges);
           setNdrTickets(prev => prev.map(x => x.id === ndrDetailTkt.id
-            ? { ...x, callingDate, connected: connectedValue, remarks: ndrDispRemarks,
+            ? { ...x, callingDate, connected: connectedValue, outcome: outcomeValue, remarks: ndrDispRemarks,
                 ...(claimNow ? { assignedAgent: googleUser.email } : {}) }
             : x));
           if(claimNow) await recordNdrLeadAssignment({ action: 'claim', awbNumber: ndrDetailTkt.awb, email: googleUser.email });
@@ -4085,7 +4099,7 @@ const localStorage = typeof window !== 'undefined'
                         className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-[13px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 resize-none"
                       />
                       {ndrDetailTkt.callingDate && (
-                        <p className="text-[11px] text-zinc-500">Last called {ndrDetailTkt.callingDate} - Connected: {ndrDetailTkt.connected || '—'}</p>
+                        <p className="text-[11px] text-zinc-500">Last called {ndrDetailTkt.callingDate} - Connected: {ndrDetailTkt.connected || '—'} - Outcome: {ndrDetailTkt.outcome || '—'}</p>
                       )}
                     </div>
                   </div>
