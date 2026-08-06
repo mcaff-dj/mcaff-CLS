@@ -1499,6 +1499,11 @@ const localStorage = typeof window !== 'undefined'
       // against NDR's own sheet columns (Q:R claim, S:U disposition) instead of RTO's.
       const [ndrDetailTkt, setNdrDetailTkt] = useState(null);
       const [ndrDispSelection, setNdrDispSelection] = useState('');
+      // Which top-level disposition (e.g. "Connected"/"Not Connected") is picked - drives
+      // which children (if any) the second dropdown offers. ndrDispSelection stays the single
+      // FINAL value everything else (save, the disabled check) already reads - unchanged by
+      // this two-step picker, just now derived from parent+child instead of one flat list.
+      const [ndrDispParent, setNdrDispParent] = useState('');
       const [ndrDispRemarks, setNdrDispRemarks] = useState('');
       const [ndrDispSaving, setNdrDispSaving] = useState(false);
       useEffect(() => { setNdrPage(1); }, [ndrTab, ndrSearch]);
@@ -2110,6 +2115,7 @@ const localStorage = typeof window !== 'undefined'
         }
         setNdrDetailTkt(ticket);
         setNdrDispSelection(ticket.connected === 'Yes' ? 'Connected' : '');
+        setNdrDispParent(ticket.connected === 'Yes' ? 'Connected' : '');
         setNdrDispRemarks(ticket.remarks || '');
       };
 
@@ -3483,21 +3489,12 @@ const localStorage = typeof window !== 'undefined'
       }, [ndrFilteredBase, ndrTab]);
 
       // Disposition list to pick from in the Call modal - the Admin Panel's own NDR
-      // disposition list (processDispositions, already loaded per-process), flattened to LEAF
-      // options only: "Connected" has no children so it contributes itself; "Not Connected"
-      // has 4 children so it contributes those 4 (prefixed for context), not the parent
-      // grouping itself - an agent picks a concrete outcome, never a bare category.
-      const ndrDispositionOptions = useMemo(() => {
-        const opts = [];
-        for (const d of (processDispositions || [])) {
-          if (d.children && d.children.length) {
-            for (const c of d.children) opts.push(`${d.label} - ${c.label}`);
-          } else {
-            opts.push(d.label);
-          }
-        }
-        return opts;
-      }, [processDispositions]);
+      // disposition list (processDispositions, already loaded per-process), used directly as
+      // the parent options; the second dropdown only ever shows the CHOSEN parent's own
+      // children, never a flat mixed list an agent has to hunt through.
+      const ndrDispositionParents = processDispositions || [];
+      const ndrDispositionParentObj = ndrDispositionParents.find(d => d.label === ndrDispParent);
+      const ndrDispositionChildren = ndrDispositionParentObj?.children || [];
 
       // Live round-robin PREDICTION of what scripts/assign_ndr_leads.py would assign next -
       // read-only, writes nothing, same relationship RTO's own predictedAssignments has to
@@ -4034,20 +4031,40 @@ const localStorage = typeof window !== 'undefined'
 
                     <div className="space-y-2.5 pt-1">
                       <p className="text-[11px] text-zinc-500 uppercase font-medium">Disposition</p>
-                      {/* Native <select>, not CustomSelect - CustomSelect's dropdown panel is
-                          position:absolute inside this modal's own overflow-y-auto body, which
-                          clips it (opens with the chevron rotating but no visible options) once
-                          the button sits anywhere the panel would overflow that scroll
-                          container. A native select's popup is rendered by the browser itself,
-                          immune to any ancestor's CSS overflow. */}
+                      {/* Two-step: pick the parent first, then (only if it has any) its own
+                          children - never a flat mixed list. Native <select>s, not
+                          CustomSelect - CustomSelect's dropdown panel is position:absolute
+                          inside this modal's own overflow-y-auto body, which clips it (opens
+                          with the chevron rotating but no visible options) once the button
+                          sits anywhere the panel would overflow that scroll container. A
+                          native select's popup is rendered by the browser itself, immune to
+                          any ancestor's CSS overflow. */}
                       <select
-                        value={ndrDispSelection}
-                        onChange={e => setNdrDispSelection(e.target.value)}
+                        value={ndrDispParent}
+                        onChange={e => {
+                          const label = e.target.value;
+                          const parent = ndrDispositionParents.find(d => d.label === label);
+                          setNdrDispParent(label);
+                          // A leaf parent (no children, e.g. "Connected") is a complete
+                          // selection on its own; one with children needs the second dropdown
+                          // picked before ndrDispSelection (and Save) can go through.
+                          setNdrDispSelection(parent && parent.children && parent.children.length ? '' : label);
+                        }}
                         className="w-full h-9 px-3 bg-zinc-900 border border-zinc-800 rounded-lg text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
                       >
                         <option value="" disabled>Select an outcome…</option>
-                        {ndrDispositionOptions.map(o => <option key={o} value={o}>{o}</option>)}
+                        {ndrDispositionParents.map(d => <option key={d.id} value={d.label}>{d.label}</option>)}
                       </select>
+                      {ndrDispositionChildren.length > 0 && (
+                        <select
+                          value={ndrDispSelection.startsWith(`${ndrDispParent} - `) ? ndrDispSelection.slice(ndrDispParent.length + 3) : ''}
+                          onChange={e => setNdrDispSelection(e.target.value ? `${ndrDispParent} - ${e.target.value}` : '')}
+                          className="w-full h-9 px-3 bg-zinc-900 border border-zinc-800 rounded-lg text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                        >
+                          <option value="" disabled>Select a reason…</option>
+                          {ndrDispositionChildren.map(c => <option key={c.id} value={c.label}>{c.label}</option>)}
+                        </select>
+                      )}
                       <textarea
                         value={ndrDispRemarks}
                         onChange={e => setNdrDispRemarks(e.target.value)}
