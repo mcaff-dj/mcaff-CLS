@@ -9,11 +9,17 @@ workflow, so nothing here is shared with RTO beyond the generic, already-process
 Postgres tables (calling_agent_process, agent_presence) and the generic lib.py Sheets helpers
 both processes already use.
 
-A lead is "unassigned" iff column P (assigned_agent) is blank - once a row leaves that state,
+A lead is "unassigned" iff column Q (assigned_agent) is blank - once a row leaves that state,
 this script never touches it again, the same "never take back what's already handed out"
 contract RTO's own assign_leads.py uses. current_load is read straight off the sheet (a count
-of rows already carrying that agent's email in P) rather than a separate Postgres tally: the
-sheet IS the persistence now that sync_ndr_leads_to_sheet.py no longer wipes P/Q on refresh.
+of rows already carrying that agent's email in Q) rather than a separate Postgres tally: the
+sheet IS the persistence now that sync_ndr_leads_to_sheet.py no longer wipes Q/R on refresh.
+
+Column P is ndr_source.COLUMNS' own last source field (pincode) - this script must never
+write there. A prior version hardcoded the write range as "P{row}:Q{row}" from before
+courier_final_status shifted the source columns from 15 to 16 wide, silently overwriting
+pincode with the agent's email and putting a timestamp in Q instead - fixed by computing the
+write range from COL_AGENT/COL_ASSIGNED_AT instead of a literal string.
 """
 import os
 from datetime import datetime, timezone
@@ -29,9 +35,11 @@ SHEET_TAB = "Sheet1"
 
 COL_ORDER_DATE = 2                                       # C - uni_Order_Date, the sort key
 COL_NDR_ATTEMPTS = ndr_source.COLUMNS.index("cp_ndr_attempts")  # H
-COL_AGENT = len(ndr_source.COLUMNS)                      # P (0-based 15) - assigned_agent
-COL_ASSIGNED_AT = COL_AGENT + 1                          # Q (0-based 16) - assigned_at
-LAST_COL = lib.get_column_letter(COL_ASSIGNED_AT)        # "Q"
+COL_AGENT = len(ndr_source.COLUMNS)                      # assigned_agent - Q now that
+COL_ASSIGNED_AT = COL_AGENT + 1                          # ndr_source.COLUMNS has grown to 16
+COL_AGENT_LETTER = lib.get_column_letter(COL_AGENT)              # "Q"
+COL_ASSIGNED_AT_LETTER = lib.get_column_letter(COL_ASSIGNED_AT)  # "R"
+LAST_COL = COL_ASSIGNED_AT_LETTER
 
 STALE_MINUTES = 10  # must match the CRM's own heartbeat cadence - same convention as RTO's
 DEFAULT_QUOTA = 20  # NDR's own fallback, independent of RTO's leadAssignmentRules.json value
@@ -167,7 +175,7 @@ def main():
             continue
         email = remaining_agents[chosen]
         value_ranges.append({
-            "range": f"'{SHEET_TAB}'!P{row_num}:Q{row_num}",
+            "range": f"'{SHEET_TAB}'!{COL_AGENT_LETTER}{row_num}:{COL_ASSIGNED_AT_LETTER}{row_num}",
             "values": [[email, now]],
         })
         assigned_count[email] = assigned_count.get(email, 0) + 1
