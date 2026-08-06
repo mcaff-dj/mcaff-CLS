@@ -21,12 +21,11 @@
 //   GET    /api/admin/dispositions?process=ndr -> that process's own disposition tree (see
 //                                        calling_process_dispositions - RTO's list stays
 //                                        hardcoded in RtoCrmClient.js and never reads this).
-//                                        One level of nesting: each top-level option carries
-//                                        its own `children` array.
+//                                        Arbitrary nesting: each option carries its own
+//                                        `children` array, at any depth.
 //   POST   /api/admin/dispositions    -> add: { processKey, label, description?, parentId? }
 //                                        parentId omitted/null = top-level option; a parent's
-//                                        id = add as its child (refused if that parent is
-//                                        itself a child - only one level of nesting).
+//                                        id = add as its child, at any depth.
 //   PUT    /api/admin/dispositions    -> edit: { processKey, id, label?, description? }
 //                                        or reorder ONE scope: { processKey, orderedIds: [...],
 //                                        parentId? } - parentId omitted/null reorders the

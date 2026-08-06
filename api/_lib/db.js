@@ -1280,9 +1280,9 @@ async function getAdministeredProcesses(email) {
 }
 
 // ── Per-process admin-defined disposition list (see calling_process_dispositions above) ────
-// One level of nesting only (parent option -> child sub-options), matching the reference
-// field-builder UI this was modelled on ("N child ›"). addProcessDisposition already refuses
-// to nest a child under another child, so the tree this builds is never more than 2 deep.
+// Arbitrary nesting depth - any option, at any depth, can have its own child sub-options.
+// parent_id is self-referencing with no depth check, and getProcessDispositions' two-pass
+// build already links children regardless of how deep they are.
 const DISPOSITION_LABEL_MAX = 120;
 
 async function getProcessDispositions(processKey) {
@@ -1323,10 +1323,9 @@ async function addProcessDisposition(processKey, label, description, createdBy, 
   const parent = parentId || null;
   if (parent) {
     const { rows: parentRows } = await pgSql`
-      SELECT parent_id FROM calling_process_dispositions WHERE id = ${parent} AND process_key = ${processKey}
+      SELECT id FROM calling_process_dispositions WHERE id = ${parent} AND process_key = ${processKey}
     `;
     if (!parentRows.length) throw new Error('Parent option not found for this process');
-    if (parentRows[0].parent_id) throw new Error('A child option cannot itself have children');
   }
   const maxRows = parent
     ? (await pgSql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id = ${parent}`).rows

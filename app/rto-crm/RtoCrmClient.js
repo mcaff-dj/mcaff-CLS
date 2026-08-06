@@ -1114,8 +1114,8 @@ const localStorage = typeof window !== 'undefined'
         }
       };
 
-      // Per-process disposition TREE (see calling_process_dispositions) - one level of
-      // nesting, [{id,label,description,sortOrder,children:[...]}]. Reloaded whenever the
+      // Per-process disposition TREE (see calling_process_dispositions) - arbitrary nesting,
+      // [{id,label,description,sortOrder,children:[...]}]. Reloaded whenever the
       // admin switches process, same reasoning as loadProcessAgents above: each process's list
       // is its own. RTO's disposition options stay the hardcoded connectedOutcomes/
       // unreachableOutcomes arrays further up and never touch this endpoint - this only backs
@@ -1514,11 +1514,13 @@ const localStorage = typeof window !== 'undefined'
       // against NDR's own sheet columns (Q:R claim, S:U disposition) instead of RTO's.
       const [ndrDetailTkt, setNdrDetailTkt] = useState(null);
       const [ndrDispSelection, setNdrDispSelection] = useState('');
-      // Which top-level disposition (e.g. "Connected"/"Not Connected") is picked - drives
-      // which children (if any) the second dropdown offers. ndrDispSelection stays the single
-      // FINAL value everything else (save, the disabled check) already reads - unchanged by
-      // this two-step picker, just now derived from parent+child instead of one flat list.
-      const [ndrDispParent, setNdrDispParent] = useState('');
+      // The label picked at each depth (e.g. ["Not Connected", "Reattempt", "Wrong Address"]) -
+      // drives which cascading <select> options render at ndrDispLevels' next depth. Changing
+      // a level truncates everything picked below it, same as the old two-step picker's "new
+      // parent resets the child". ndrDispSelection stays the single FINAL value everything
+      // else (save, the disabled check) already reads - it's only set once the deepest picked
+      // node has no children of its own left to choose.
+      const [ndrDispPath, setNdrDispPath] = useState([]);
       const [ndrDispRemarks, setNdrDispRemarks] = useState('');
       const [ndrDispSaving, setNdrDispSaving] = useState(false);
       useEffect(() => { setNdrPage(1); }, [ndrTab, ndrSearch]);
@@ -2129,8 +2131,9 @@ const localStorage = typeof window !== 'undefined'
           }
         }
         setNdrDetailTkt(ticket);
-        setNdrDispSelection(ticket.connected === 'Yes' ? 'Connected' : '');
-        setNdrDispParent(ticket.connected === 'Yes' ? 'Connected' : '');
+        const connected = ticket.connected === 'Yes';
+        setNdrDispSelection(connected ? 'Connected' : '');
+        setNdrDispPath(connected ? ['Connected'] : []);
         setNdrDispRemarks(ticket.remarks || '');
       };
 
@@ -2146,13 +2149,11 @@ const localStorage = typeof window !== 'undefined'
         try {
           const now = new Date();
           const callingDate = `${String(now.getDate()).padStart(2,'0')}-${String(now.getMonth()+1).padStart(2,'0')}-${now.getFullYear()}`;
-          const connectedValue = ndrDispSelection === 'Connected' ? 'Yes' : 'No';
-          // Outcome (column U) is the SPECIFIC reason picked - the child label if one was
-          // chosen ("Ringing"), else the parent itself for a leaf disposition ("Connected").
-          // Distinct from Connected (Yes/No, the coarse signal) and Remarks (free text).
-          const outcomeValue = ndrDispSelection.startsWith(`${ndrDispParent} - `)
-            ? ndrDispSelection.slice(ndrDispParent.length + 3)
-            : ndrDispSelection;
+          const connectedValue = ndrDispPath[0] === 'Connected' ? 'Yes' : 'No';
+          // Outcome (column U) is the SPECIFIC reason picked - the deepest label in the path,
+          // whatever depth that turned out to be ("Ringing", or "Wrong Address" three levels
+          // down). Distinct from Connected (Yes/No, the coarse signal) and Remarks (free text).
+          const outcomeValue = ndrDispPath[ndrDispPath.length - 1] || ndrDispSelection;
           const ranges = [
             { range: `R${ndrDetailTkt.rowNum}`, values: [callingDate] },
             { range: `T${ndrDetailTkt.rowNum}`, values: [connectedValue] },
@@ -3248,20 +3249,14 @@ const localStorage = typeof window !== 'undefined'
         </>
       );
 
-      // Admin-defined disposition list for a process with no hardcoded one of its own (see
-      // calling_process_dispositions) - "highly customisable" per the ask: an admin can add,
-      // rename, describe, reorder, and remove entries freely, with no seeded default and no
-      // fixed count. Rendered only from the Admin Panel of a process that isn't `implemented`
-      // (currentProcess.implemented is false) - RTO keeps using its own connectedOutcomes/
-      // unreachableOutcomes arrays untouched and never renders this card.
-      // One row, reused for both a top-level option and a child option (parentId set for the
-      // latter). Label/description are uncontrolled (defaultValue) and commit on blur only if
-      // changed, so typing never round-trips to the server per keystroke - see
+      // One row, reused at every depth (depth 0 = top-level option, depth 1 = child, depth 2 =
+      // grandchild, ...). Label/description are uncontrolled (defaultValue) and commit on blur
+      // only if changed, so typing never round-trips to the server per keystroke - see
       // saveDispositionEdit's comment. `list` is whichever sibling array d belongs to (the
       // top-level array, or one parent's .children), needed for the up/down bounds and to
       // send the right reorder scope.
-      const renderDispRow = (d, list, index, parentId) => (
-        <div key={d.id} className={`rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-3 py-2 ${parentId ? 'ml-8' : ''}`}>
+      const renderDispRow = (d, list, index, parentId, depth) => (
+        <div key={d.id} className="rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-3 py-2" style={depth ? { marginLeft: depth * 32 } : undefined}>
           <div className="flex items-center gap-2">
             <span className="text-zinc-600 select-none text-[13px]" title="Reorder with the ↑↓ buttons">⋮⋮</span>
             <span className="inline-flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 rounded-lg pl-2 pr-1 py-1 shrink-0 w-[220px]">
@@ -3278,16 +3273,14 @@ const localStorage = typeof window !== 'undefined'
                 className="min-w-0 flex-1 bg-transparent text-[13px] text-zinc-200 focus:outline-none"
               />
             </span>
-            {!parentId && (
-              <button
-                onClick={() => toggleDispExpanded(d.id)}
-                className="shrink-0 h-7 px-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-emerald-400 text-[11px] font-bold transition-colors flex items-center gap-1"
-                title={expandedDispIds.has(d.id) ? 'Collapse' : 'Expand to view/add child options'}
-              >
-                {d.children.length} {d.children.length === 1 ? 'child' : 'children'}
-                <span>{expandedDispIds.has(d.id) ? '⌄' : '›'}</span>
-              </button>
-            )}
+            <button
+              onClick={() => toggleDispExpanded(d.id)}
+              className="shrink-0 h-7 px-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-emerald-400 text-[11px] font-bold transition-colors flex items-center gap-1"
+              title={expandedDispIds.has(d.id) ? 'Collapse' : 'Expand to view/add child options'}
+            >
+              {d.children.length} {d.children.length === 1 ? 'child' : 'children'}
+              <span>{expandedDispIds.has(d.id) ? '⌄' : '›'}</span>
+            </button>
             <input
               key={`desc-${d.id}`}
               defaultValue={d.description}
@@ -3317,7 +3310,7 @@ const localStorage = typeof window !== 'undefined'
               </button>
               <button
                 onClick={() => {
-                  const childNote = !parentId && d.children.length ? ` and its ${d.children.length} child option(s)` : '';
+                  const childNote = d.children.length ? ` and its ${d.children.length} child option(s)` : '';
                   if (window.confirm(`Delete "${d.label}"${childNote}?`)) deleteDisposition(d.id);
                 }}
                 disabled={savingDisposition}
@@ -3331,9 +3324,48 @@ const localStorage = typeof window !== 'undefined'
         </div>
       );
 
+      // Recursive: renders d's own row, then (if expanded) every child at depth+1 plus an
+      // "add child" input scoped to d - so any option, at any depth, can grow its own
+      // sub-options the same way a top-level one does.
+      const renderDispNode = (d, list, index, parentId, depth) => (
+        <div key={d.id}>
+          {renderDispRow(d, list, index, parentId, depth)}
+          {expandedDispIds.has(d.id) && (
+            <div className="mt-1.5 space-y-1.5">
+              {d.children.map((c, ci) => renderDispNode(c, d.children, ci, d.id, depth + 1))}
+              <div className="flex items-center gap-2" style={{ marginLeft: (depth + 1) * 32 }}>
+                <span className="w-[13px]" />
+                <input
+                  value={(newChildDrafts[d.id] || {}).label || ''}
+                  onChange={(e) => setNewChildDrafts((prev) => ({ ...prev, [d.id]: { label: e.target.value, description: (prev[d.id] || {}).description || '' } }))}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && (newChildDrafts[d.id] || {}).label?.trim()) addDisposition(d.id); }}
+                  placeholder="New child option"
+                  maxLength={120}
+                  className="w-[220px] bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                />
+                <input
+                  value={(newChildDrafts[d.id] || {}).description || ''}
+                  onChange={(e) => setNewChildDrafts((prev) => ({ ...prev, [d.id]: { label: (prev[d.id] || {}).label || '', description: e.target.value } }))}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && (newChildDrafts[d.id] || {}).label?.trim()) addDisposition(d.id); }}
+                  placeholder="Description (optional)"
+                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                />
+                <button
+                  onClick={() => addDisposition(d.id)}
+                  disabled={savingDisposition || !(newChildDrafts[d.id] || {}).label?.trim()}
+                  className="h-8 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-50 shrink-0"
+                >
+                  + Add child
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+
       // Admin-defined disposition list for a process with no hardcoded one of its own (see
       // calling_process_dispositions) - "highly customisable" per the ask: an admin can add,
-      // rename, describe, nest (one level), reorder, and remove options freely, with no
+      // rename, describe, nest (any depth), reorder, and remove options freely, with no
       // seeded default and no fixed count. Rendered only from the Admin Panel of a process
       // that isn't `implemented` (currentProcess.implemented is false) - RTO keeps using its
       // own connectedOutcomes/unreachableOutcomes arrays untouched and never renders this card.
@@ -3373,41 +3405,7 @@ const localStorage = typeof window !== 'undefined'
               <p className="text-[13px] text-zinc-500">Loading…</p>
             ) : processDispositions.length === 0 ? (
               <p className="text-[13px] text-zinc-500">No options added yet - use &quot;+ Add Option&quot; below to add the first one.</p>
-            ) : processDispositions.map((d, i) => (
-              <div key={d.id}>
-                {renderDispRow(d, processDispositions, i, null)}
-                {expandedDispIds.has(d.id) && (
-                  <div className="mt-1.5 space-y-1.5">
-                    {d.children.map((c, ci) => renderDispRow(c, d.children, ci, d.id))}
-                    <div className="ml-8 flex items-center gap-2">
-                      <span className="w-[13px]" />
-                      <input
-                        value={(newChildDrafts[d.id] || {}).label || ''}
-                        onChange={(e) => setNewChildDrafts((prev) => ({ ...prev, [d.id]: { label: e.target.value, description: (prev[d.id] || {}).description || '' } }))}
-                        onKeyDown={(e) => { if (e.key === 'Enter' && (newChildDrafts[d.id] || {}).label?.trim()) addDisposition(d.id); }}
-                        placeholder="New child option"
-                        maxLength={120}
-                        className="w-[220px] bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                      />
-                      <input
-                        value={(newChildDrafts[d.id] || {}).description || ''}
-                        onChange={(e) => setNewChildDrafts((prev) => ({ ...prev, [d.id]: { label: (prev[d.id] || {}).label || '', description: e.target.value } }))}
-                        onKeyDown={(e) => { if (e.key === 'Enter' && (newChildDrafts[d.id] || {}).label?.trim()) addDisposition(d.id); }}
-                        placeholder="Description (optional)"
-                        className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                      />
-                      <button
-                        onClick={() => addDisposition(d.id)}
-                        disabled={savingDisposition || !(newChildDrafts[d.id] || {}).label?.trim()}
-                        className="h-8 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-50 shrink-0"
-                      >
-                        + Add child
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))}
+            ) : processDispositions.map((d, i) => renderDispNode(d, processDispositions, i, null, 0))}
           </div>
 
           <div className="mt-4 pt-4 border-t border-zinc-800/60 flex items-center gap-2">
@@ -3515,12 +3513,22 @@ const localStorage = typeof window !== 'undefined'
       }, [ndrFilteredBase, ndrTab]);
 
       // Disposition list to pick from in the Call modal - the Admin Panel's own NDR
-      // disposition list (processDispositions, already loaded per-process), used directly as
-      // the parent options; the second dropdown only ever shows the CHOSEN parent's own
-      // children, never a flat mixed list an agent has to hunt through.
-      const ndrDispositionParents = processDispositions || [];
-      const ndrDispositionParentObj = ndrDispositionParents.find(d => d.label === ndrDispParent);
-      const ndrDispositionChildren = ndrDispositionParentObj?.children || [];
+      // disposition list (processDispositions, already loaded per-process), walked one level
+      // per cascading <select> so each dropdown only ever shows the PREVIOUSLY chosen node's
+      // own children, never a flat mixed list an agent has to hunt through. ndrDispLevels[0]
+      // is always the top-level list; ndrDispLevels[i] (i>0) only exists once ndrDispPath has
+      // a label at depth i-1 whose node actually has children - the moment a picked node is a
+      // leaf, the walk stops, matching how deep this particular branch of the tree goes.
+      const ndrDispLevels = [processDispositions || []];
+      {
+        let nodes = processDispositions || [];
+        for (let i = 0; ; i++) {
+          const node = ndrDispPath[i] ? nodes.find(d => d.label === ndrDispPath[i]) : null;
+          if (!node || !node.children || !node.children.length) break;
+          nodes = node.children;
+          ndrDispLevels.push(nodes);
+        }
+      }
 
       // Live round-robin PREDICTION of what scripts/assign_ndr_leads.py would assign next -
       // read-only, writes nothing, same relationship RTO's own predictedAssignments has to
@@ -4057,40 +4065,36 @@ const localStorage = typeof window !== 'undefined'
 
                     <div className="space-y-2.5 pt-1">
                       <p className="text-[11px] text-zinc-500 uppercase font-medium">Disposition</p>
-                      {/* Two-step: pick the parent first, then (only if it has any) its own
-                          children - never a flat mixed list. Native <select>s, not
-                          CustomSelect - CustomSelect's dropdown panel is position:absolute
+                      {/* Cascading: pick a level, then (only if that node has any) its own
+                          children in the next <select>, as many levels deep as this branch of
+                          the tree actually goes - never a flat mixed list. Native <select>s,
+                          not CustomSelect - CustomSelect's dropdown panel is position:absolute
                           inside this modal's own overflow-y-auto body, which clips it (opens
                           with the chevron rotating but no visible options) once the button
                           sits anywhere the panel would overflow that scroll container. A
                           native select's popup is rendered by the browser itself, immune to
                           any ancestor's CSS overflow. */}
-                      <select
-                        value={ndrDispParent}
-                        onChange={e => {
-                          const label = e.target.value;
-                          const parent = ndrDispositionParents.find(d => d.label === label);
-                          setNdrDispParent(label);
-                          // A leaf parent (no children, e.g. "Connected") is a complete
-                          // selection on its own; one with children needs the second dropdown
-                          // picked before ndrDispSelection (and Save) can go through.
-                          setNdrDispSelection(parent && parent.children && parent.children.length ? '' : label);
-                        }}
-                        className="w-full h-9 px-3 bg-zinc-900 border border-zinc-800 rounded-lg text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                      >
-                        <option value="" disabled>Select an outcome…</option>
-                        {ndrDispositionParents.map(d => <option key={d.id} value={d.label}>{d.label}</option>)}
-                      </select>
-                      {ndrDispositionChildren.length > 0 && (
+                      {ndrDispLevels.map((levelOptions, i) => (
                         <select
-                          value={ndrDispSelection.startsWith(`${ndrDispParent} - `) ? ndrDispSelection.slice(ndrDispParent.length + 3) : ''}
-                          onChange={e => setNdrDispSelection(e.target.value ? `${ndrDispParent} - ${e.target.value}` : '')}
+                          key={i}
+                          value={ndrDispPath[i] || ''}
+                          onChange={e => {
+                            const label = e.target.value;
+                            const node = levelOptions.find(d => d.label === label);
+                            const newPath = ndrDispPath.slice(0, i);
+                            newPath[i] = label;
+                            setNdrDispPath(newPath);
+                            // A leaf (no children) completes the selection; a node with
+                            // children needs the next <select> picked before ndrDispSelection
+                            // (and Save) can go through.
+                            setNdrDispSelection(node && node.children && node.children.length ? '' : newPath.join(' - '));
+                          }}
                           className="w-full h-9 px-3 bg-zinc-900 border border-zinc-800 rounded-lg text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
                         >
-                          <option value="" disabled>Select a reason…</option>
-                          {ndrDispositionChildren.map(c => <option key={c.id} value={c.label}>{c.label}</option>)}
+                          <option value="" disabled>{i === 0 ? 'Select an outcome…' : 'Select a reason…'}</option>
+                          {levelOptions.map(d => <option key={d.id} value={d.label}>{d.label}</option>)}
                         </select>
-                      )}
+                      ))}
                       <textarea
                         value={ndrDispRemarks}
                         onChange={e => setNdrDispRemarks(e.target.value)}
