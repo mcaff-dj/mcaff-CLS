@@ -2175,18 +2175,26 @@ const localStorage = typeof window !== 'undefined'
           const partnerCallValue = ndrDispPath[ndrDispPath.length - 2] === 'Have you got call from Partner'
             ? ndrDispPath[ndrDispPath.length - 1]
             : null;
+          // "Mark RTO"'s own leaf (Delay in Delivery / Packaging issue / Better Pricing
+          // elsewhere / Others) is the SPECIFIC RTO reason - Outcome above only ever captures
+          // "Mark RTO" itself, so without this the actual reason would just be dropped.
+          // Prefixed onto the free-text remarks in brackets rather than overwriting them, same
+          // "[Already Refunded] " + agentRemarks convention RTO's own submitDisp already uses
+          // for a different auto-known signal.
+          const rtoReasonValue = ndrDispPath[1] === 'Mark RTO' ? ndrDispPath[2] : null;
+          const remarksValue = (rtoReasonValue ? `[${rtoReasonValue}] ` : '') + ndrDispRemarks.trim();
           const ranges = [
             { range: `R${ndrDetailTkt.rowNum}`, values: [callingDate] },
             { range: `T${ndrDetailTkt.rowNum}`, values: [connectedValue] },
             { range: `U${ndrDetailTkt.rowNum}`, values: [outcomeValue] },
-            { range: `AB${ndrDetailTkt.rowNum}`, values: [ndrDispRemarks] },
+            { range: `AB${ndrDetailTkt.rowNum}`, values: [remarksValue] },
           ];
           if (partnerCallValue) ranges.push({ range: `V${ndrDetailTkt.rowNum}`, values: [partnerCallValue] });
           const claimNow = !ndrDetailTkt.assignedAgent && googleUser?.email;
           if (claimNow) ranges.push({ range: `S${ndrDetailTkt.rowNum}`, values: [googleUser.email] });
           await writeNdrCells(ranges);
           setNdrTickets(prev => prev.map(x => x.id === ndrDetailTkt.id
-            ? { ...x, callingDate, connected: connectedValue, outcome: outcomeValue, remarks: ndrDispRemarks,
+            ? { ...x, callingDate, connected: connectedValue, outcome: outcomeValue, remarks: remarksValue,
                 ...(partnerCallValue ? { deliveryAgentCall: partnerCallValue } : {}),
                 ...(claimNow ? { assignedAgent: googleUser.email } : {}) }
             : x));
