@@ -104,10 +104,35 @@ const localStorage = typeof window !== 'undefined'
      * (not a parameterized fetchSheet) because it reads a completely different spreadsheet
      * with its own service-account scope, and NDR must stay independent of RTO's code path. */
     const NDR_SHEET_ID = '1oRPRvZaGpgQsZyXO_Q_j5HEZO1nkrFv0spTobfDoQ2g';
-    async function fetchNdrSheet(){
-      const r=await fetch(`/api/ndr/sheet?op=values&sid=${encodeURIComponent(NDR_SHEET_ID)}&range=Sheet1`);
+    async function fetchNdrSheetValues(range){
+      const r=await fetch(`/api/ndr/sheet?op=values&sid=${encodeURIComponent(NDR_SHEET_ID)}&range=${encodeURIComponent(range)}`);
       if(!r.ok)throw new Error(`Sheets API ${r.status}`);const d=await r.json();
       if(!d.values)throw new Error('No data');return d.values;
+    }
+    // scripts/sync_ndr_leads_to_sheet.py never deletes a row (see its own docstring), and
+    // NDR's real daily volume is tens of thousands of leads (measured: ~255 bytes/row JSON,
+    // ~47k rows landed from a single day's sync) - by the time this shipped the sheet had
+    // already passed 50,000 rows, and fetching it whole in one response (~13MB) blew past the
+    // Lambda's ~6MB synchronous response-payload limit. Surfaced as an opaque
+    // CloudFront-generated 500 with no useful body, not this code's own error - genuinely
+    // confusing to debug from the browser alone.
+    //
+    // A calendar-day bound (mirroring scripts/lib.py's get_sheet_tail_for_months) doesn't
+    // actually help here - a SINGLE day's real volume alone already exceeds the payload limit,
+    // so "last N days" is still unbounded in the dimension that matters. Capped by raw row
+    // count instead: the last NDR_MAX_ROWS rows (~1.3MB at this measured size, comfortable
+    // margin under 6MB). This is a stopgap, not the real fix - a properly scalable NDR
+    // workspace needs actual server-side pagination or a query that only ever asks for
+    // unassigned/undisposed leads directly, not "the whole sheet, then filter client-side".
+    const NDR_MAX_ROWS = 5000;
+    async function fetchNdrSheet(){
+      const idCol = await fetchNdrSheetValues('Sheet1!A2:A1000000');
+      if(!idCol.length) return {rows: [], startRow: 2, totalRows: 0};
+      const totalRows = idCol.length;
+      const lastRow = totalRows + 1;
+      const startRow = Math.max(2, lastRow - NDR_MAX_ROWS + 1);
+      const rows = await fetchNdrSheetValues(`Sheet1!A${startRow}:U${lastRow}`);
+      return {rows, startRow, totalRows};
     }
     // Fixed positional layout, not fuzzy header matching like RTO's mapTkt - NDR's sheet
     // layout is fully controlled by scripts/ndr_source.py/sync_ndr_leads_to_sheet.py, so a
@@ -117,10 +142,10 @@ const localStorage = typeof window !== 'undefined'
     // disposed_at, UI-owned only - no Python script ever writes or reads these. All three
     // agent-write columns are safe from scripts/sync_ndr_leads_to_sheet.py's daily resync,
     // which only ever touches A:P (its own LAST_SOURCE_COL).
-    function mapNdrRow(row, idx){
+    function mapNdrRow(row, rowNum){
       const v = (i) => row[i] !== undefined ? row[i] : '';
       return {
-        id: `${v(0)}-${idx}`, rowNum: idx + 2, // sheet row - data starts at row 2 (row 1 is the header)
+        id: `${v(0)}-${rowNum}`, rowNum,
         awb: v(0), orderCode: v(1), orderDate: v(2), courier: v(3), facility: v(4),
         channel: v(5), brand: v(6), attempts: v(7), ndrReason: v(8), lastUpdated: v(9),
         courierStatus: v(10), phone: v(11), addressName: v(12), city: v(13), state: v(14),
@@ -1437,6 +1462,10 @@ const localStorage = typeof window !== 'undefined'
       // lastSync/syncError above, so the header Refresh button can drive whichever process is
       // active without the two ever being confused with each other.
       const [ndrTickets, setNdrTickets] = useState([]);
+      // Total row count in the sheet as of the last sync, vs. ndrTickets.length (which is
+      // capped at NDR_MAX_ROWS) - lets the UI say "showing most recent N of TOTAL" instead of
+      // silently pretending a capped view is the whole picture.
+      const [ndrTotalRows, setNdrTotalRows] = useState(0);
       const [ndrSyncing, setNdrSyncing] = useState(false);
       const [ndrLastSync, setNdrLastSync] = useState('—');
       const [ndrSyncError, setNdrSyncError] = useState(null);
@@ -2009,9 +2038,10 @@ const localStorage = typeof window !== 'undefined'
       const syncNdr = useCallback(async(silent=false)=>{
         setNdrSyncing(true);
         try{
-          const raw = await fetchNdrSheet();
-          const mapped = raw.slice(1).map((row, idx) => mapNdrRow(row, idx));
+          const { rows, startRow, totalRows } = await fetchNdrSheet();
+          const mapped = rows.map((row, idx) => mapNdrRow(row, startRow + idx));
           setNdrTickets(mapped);
+          setNdrTotalRows(totalRows);
           setNdrLastSync(new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));
           setNdrSyncError(null);
           ndrSyncFailCountRef.current = 0;
@@ -3837,6 +3867,11 @@ const localStorage = typeof window !== 'undefined'
                   <div className="p-4">
                     {ndrSyncError && (
                       <div className="mb-3 text-[12px] text-rose-400">⚠ {ndrSyncError} — retrying…</div>
+                    )}
+                    {ndrTotalRows > ndrTotal && (
+                      <div className="mb-3 text-[12px] text-amber-400">
+                        ⚠ Showing the most recent {ndrTotal.toLocaleString('en-IN')} of {ndrTotalRows.toLocaleString('en-IN')} total leads in the sheet - older rows aren&apos;t loaded (payload size cap).
+                      </div>
                     )}
                     {ndrTab === 'overview' && (
                       <div className="space-y-4">
