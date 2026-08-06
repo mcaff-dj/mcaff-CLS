@@ -112,17 +112,37 @@ const localStorage = typeof window !== 'undefined'
     // Fixed positional layout, not fuzzy header matching like RTO's mapTkt - NDR's sheet
     // layout is fully controlled by scripts/ndr_source.py/sync_ndr_leads_to_sheet.py, so a
     // column-index map is simpler and correct. Indices 0-15 are ndr_source.COLUMNS (A:P); 16
-    // (Q) is assigned_agent, 17 (R) is assigned_at - both written only by
-    // scripts/assign_ndr_leads.py, never by this UI (read-only for now).
+    // (Q)/17 (R) are assigned_agent/assigned_at, written by scripts/assign_ndr_leads.py OR by
+    // this UI claiming a lead on Call; 18 (S)/19 (T)/20 (U) are disposition/remarks/
+    // disposed_at, UI-owned only - no Python script ever writes or reads these. All three
+    // agent-write columns are safe from scripts/sync_ndr_leads_to_sheet.py's daily resync,
+    // which only ever touches A:P (its own LAST_SOURCE_COL).
     function mapNdrRow(row, idx){
       const v = (i) => row[i] !== undefined ? row[i] : '';
       return {
-        id: `${v(0)}-${idx}`,
+        id: `${v(0)}-${idx}`, rowNum: idx + 2, // sheet row - data starts at row 2 (row 1 is the header)
         awb: v(0), orderCode: v(1), orderDate: v(2), courier: v(3), facility: v(4),
         channel: v(5), brand: v(6), attempts: v(7), ndrReason: v(8), lastUpdated: v(9),
         courierStatus: v(10), phone: v(11), addressName: v(12), city: v(13), state: v(14),
         pincode: v(15), assignedAgent: v(16), assignedAt: v(17),
+        disposition: v(18), remarks: v(19), disposedAt: v(20),
       };
+    }
+    // Writes one or more cell ranges in a single batchUpdate call - the only writes this UI
+    // ever makes are Q:R (claim on Call) and S:U (disposition save), sometimes both at once
+    // (saving a disposition on a lead nobody claimed yet - see saveNdrDisposition). Same trust
+    // model as RTO's writeToSheetRow: the caller decides the exact ranges, this is just the POST.
+    async function writeNdrCells(ranges){
+      const r = await fetch('/api/ndr/sheet', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+          op:'batchUpdate', sid: NDR_SHEET_ID,
+          data: ranges.map(({range, values}) => ({ range: `'Sheet1'!${range}`, values: [values] })),
+        }),
+      });
+      if(!r.ok) throw new Error(`Sheets write ${r.status}`);
+      return r.json();
     }
 
     /* ── Live Google Sheets Write-Back Engine ──────────── */
@@ -1424,9 +1444,13 @@ const localStorage = typeof window !== 'undefined'
       const [ndrSearch, setNdrSearch] = useState('');
       const [ndrPerPage, setNdrPerPage] = useState(50);
       const [ndrPage, setNdrPage] = useState(1);
-      // Which NDR lead's details modal is open - a read-only view (no disposition form, no
-      // claiming) since NDR has no disposition workflow yet, unlike RTO's dispTkt/detailTkt.
+      // Which NDR lead's Call/disposition modal is open, and the form fields it's editing -
+      // same claim-on-open + disposition-save shape as RTO's dispTkt/openDisp/submitDisp, just
+      // against NDR's own sheet columns (Q:R claim, S:U disposition) instead of RTO's.
       const [ndrDetailTkt, setNdrDetailTkt] = useState(null);
+      const [ndrDispSelection, setNdrDispSelection] = useState('');
+      const [ndrDispRemarks, setNdrDispRemarks] = useState('');
+      const [ndrDispSaving, setNdrDispSaving] = useState(false);
       useEffect(() => { setNdrPage(1); }, [ndrTab, ndrSearch]);
       useEffect(() => {
         if (userRole === 'Agent' && !isProcessAdmin && (ndrTab === 'admin' || ndrTab === 'predicted')) {
@@ -2011,6 +2035,58 @@ const localStorage = typeof window !== 'undefined'
         const t=setInterval(()=>syncNdr(true),60000);
         return()=>clearInterval(t);
       },[activeProcess,syncNdr]);
+
+      // Opens the Call/disposition modal, claiming the lead first if nobody holds it yet -
+      // same auto-claim-on-open behavior as RTO's openDisp, just written straight to Q:R
+      // instead of going through overrides/writeToSheetRow. Same "skip the claim, don't block
+      // the modal" behavior while Offline too: RTO's openDisp still opens the disposition form
+      // when claimLeadForAgent would refuse, because nothing is actually lost - submitDisp
+      // (here, saveNdrDisposition) writes assignedAgent at SAVE time if it's still blank, so
+      // the lead ends up attributed to whoever disposed it either way. Prefills the form from
+      // whatever's already on the row (editable, not one-shot) rather than always blank.
+      const openNdrCall = async (t) => {
+        let ticket = t;
+        if (!t.assignedAgent && agentStatus !== 'Offline' && googleUser?.email) {
+          const now = new Date().toISOString();
+          try {
+            await writeNdrCells([{ range: `Q${t.rowNum}:R${t.rowNum}`, values: [googleUser.email, now] }]);
+            ticket = { ...t, assignedAgent: googleUser.email, assignedAt: now };
+            setNdrTickets(prev => prev.map(x => x.id === t.id ? ticket : x));
+          } catch (e) {
+            showToast(`⚠️ Could not claim lead: ${e.message}`);
+          }
+        }
+        setNdrDetailTkt(ticket);
+        setNdrDispSelection(ticket.disposition || '');
+        setNdrDispRemarks(ticket.remarks || '');
+      };
+
+      // Writes S:U (disposition, remarks, disposed_at) for the open modal's lead - the only
+      // writer of these three columns anywhere (no Python script reads or writes them). Also
+      // claims the lead (Q:R) in the same call if it's still unassigned - covers the Offline
+      // skip in openNdrCall above, so disposing a lead always ends up attributing it to
+      // whoever actually did the work, exactly as RTO's own submitDisp guarantees.
+      const saveNdrDisposition = async () => {
+        if (!ndrDetailTkt || !ndrDispSelection) return;
+        setNdrDispSaving(true);
+        try {
+          const now = new Date().toISOString();
+          const ranges = [{ range: `S${ndrDetailTkt.rowNum}:U${ndrDetailTkt.rowNum}`, values: [ndrDispSelection, ndrDispRemarks, now] }];
+          const claimNow = !ndrDetailTkt.assignedAgent && googleUser?.email;
+          if (claimNow) ranges.push({ range: `Q${ndrDetailTkt.rowNum}:R${ndrDetailTkt.rowNum}`, values: [googleUser.email, now] });
+          await writeNdrCells(ranges);
+          setNdrTickets(prev => prev.map(x => x.id === ndrDetailTkt.id
+            ? { ...x, disposition: ndrDispSelection, remarks: ndrDispRemarks, disposedAt: now,
+                ...(claimNow ? { assignedAgent: googleUser.email, assignedAt: now } : {}) }
+            : x));
+          showToast('Disposition saved');
+          setNdrDetailTkt(null);
+        } catch (e) {
+          showToast(`⚠️ Could not save disposition: ${e.message}`);
+        } finally {
+          setNdrDispSaving(false);
+        }
+      };
 
       // Detects when a newer deployment of this page has shipped while this tab has been
       // sitting open. rto-crm.html is a static file with no build step / hot-reload - once
@@ -3287,10 +3363,12 @@ const localStorage = typeof window !== 'undefined'
 
       // NDR's own tab-count/table derivations, computed unconditionally (hooks can't live
       // inside the currentProcess.value==='ndr' branch below) but cheap when NDR isn't active
-      // (ndrTickets is just []). "Assigned" here means the sheet's own column Q is non-blank -
-      // there is no disposition/connected concept for NDR yet, unlike RTO's dispCount/
-      // freshAssignedCount above.
+      // (ndrTickets is just []). "Disposed" mirrors RTO's own rule exactly, simplified for
+      // NDR's flatter data: RTO counts a lead worked if disposition OR agentRemarks OR
+      // status!=='Pending'; NDR has none of the latter two concepts, so disposition alone is
+      // the whole rule (see the Call modal's Save Disposition, which is the only writer of it).
       const ndrTotal = ndrTickets.length;
+      const ndrDisposed = useMemo(() => ndrTickets.filter(t => t.disposition).length, [ndrTickets]);
       const ndrAssigned = useMemo(() => ndrTickets.filter(t => t.assignedAgent).length, [ndrTickets]);
       const ndrUnassigned = ndrTotal - ndrAssigned;
       const ndrAttemptBuckets = useMemo(() => {
@@ -3312,11 +3390,85 @@ const localStorage = typeof window !== 'undefined'
           (t.phone || '').includes(q)
         );
       }, [ndrTickets, ndrSearch]);
+      // 'fresh' = claimed but not yet worked (assigned, no disposition) - same "still owes a
+      // call" queue RTO's own Fresh Leads tracks, not just "has an agent's name in it".
+      // 'all' (tab label "Total Leads Disposed") = only leads that have actually been worked.
+      // 'predicted' is NOT a filter of this data - see ndrPredicted below, its own live
+      // round-robin port of scripts/assign_ndr_leads.py, same relationship RTO's JS
+      // predictedAssignments has to assign_leads.py.
       const ndrRowsForTab = useMemo(() => {
-        if (ndrTab === 'fresh') return ndrFilteredBase.filter(t => t.assignedAgent);
-        if (ndrTab === 'predicted') return ndrFilteredBase.filter(t => !t.assignedAgent);
-        return ndrFilteredBase; // 'all'
+        if (ndrTab === 'fresh') return ndrFilteredBase.filter(t => t.assignedAgent && !t.disposition);
+        return ndrFilteredBase.filter(t => t.disposition); // 'all'
       }, [ndrFilteredBase, ndrTab]);
+
+      // Disposition list to pick from in the Call modal - the Admin Panel's own NDR
+      // disposition list (processDispositions, already loaded per-process), flattened to LEAF
+      // options only: "Connected" has no children so it contributes itself; "Not Connected"
+      // has 4 children so it contributes those 4 (prefixed for context), not the parent
+      // grouping itself - an agent picks a concrete outcome, never a bare category.
+      const ndrDispositionOptions = useMemo(() => {
+        const opts = [];
+        for (const d of (processDispositions || [])) {
+          if (d.children && d.children.length) {
+            for (const c of d.children) opts.push(`${d.label} - ${c.label}`);
+          } else {
+            opts.push(d.label);
+          }
+        }
+        return opts;
+      }, [processDispositions]);
+
+      // Live round-robin PREDICTION of what scripts/assign_ndr_leads.py would assign next -
+      // read-only, writes nothing, same relationship RTO's own predictedAssignments has to
+      // assign_leads.py/lead_priority.py. Ported field-for-field from that script:
+      // attempt_bucket()/_covers()/the pop-when-exhausted cursor.
+      const ndrPredicted = useMemo(() => {
+        const onlineAgents = (processAgents || [])
+          .filter(a => a.status === 'Online')
+          .map(a => ({
+            email: a.email,
+            quota: a.maxQuota != null ? a.maxQuota : 20, // DEFAULT_QUOTA in assign_ndr_leads.py
+            filter: (a.attemptCountFilter || '').split(',').map(s => s.trim()).filter(Boolean),
+          }));
+        if (!onlineAgents.length) return { rows: [], onlineAgents: [] };
+
+        const bucketOf = (raw) => {
+          const n = parseInt(raw, 10);
+          if (!Number.isFinite(n) || n <= 0) return null;
+          return n <= 3 ? String(n) : 'More than 3';
+        };
+        const covers = (agent, bucket) => !agent.filter.length || bucket === null || agent.filter.includes(bucket);
+
+        const pool = ndrTickets
+          .filter(t => !t.assignedAgent && !t.disposition)
+          .map(t => ({ ...t, bucket: bucketOf(t.attempts) }))
+          .sort((a, b) => new Date(a.orderDate) - new Date(b.orderDate));
+
+        const needed = new Map(onlineAgents.map(a => [a.email, a.quota]));
+        let remaining = onlineAgents.filter(a => needed.get(a.email) > 0);
+        const rows = [];
+        let idx = 0;
+        for (const t of pool) {
+          if (!remaining.length) break;
+          const n = remaining.length;
+          let chosen = -1;
+          for (let step = 0; step < n; step++) {
+            const cand = (idx + step) % n;
+            if (covers(remaining[cand], t.bucket)) { chosen = cand; break; }
+          }
+          if (chosen === -1) continue; // no online agent's filter covers this lead's bucket
+          const agent = remaining[chosen];
+          rows.push({ ...t, predictedAgent: agent.email });
+          needed.set(agent.email, needed.get(agent.email) - 1);
+          if (needed.get(agent.email) <= 0) {
+            remaining = remaining.filter((_, i) => i !== chosen);
+            idx = remaining.length ? chosen % remaining.length : 0;
+          } else {
+            idx = (chosen + 1) % remaining.length;
+          }
+        }
+        return { rows, onlineAgents };
+      }, [ndrTickets, processAgents]);
       const ndrTotalPages = Math.max(1, Math.ceil(ndrRowsForTab.length / ndrPerPage));
       const ndrPageRows = useMemo(
         () => ndrRowsForTab.slice((ndrPage - 1) * ndrPerPage, ndrPage * ndrPerPage),
@@ -3377,7 +3529,7 @@ const localStorage = typeof window !== 'undefined'
                       <td className="py-2.5 px-4 text-zinc-500">{t.assignedAt}</td>
                       <td className="py-2.5 px-4 text-right">
                         <button
-                          onClick={() => setNdrDetailTkt(t)}
+                          onClick={() => openNdrCall(t)}
                           className="ml-auto px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-bold flex items-center gap-1.5 shadow-md shadow-indigo-950/40 transition-all"
                         >
                           <PhoneIcon/> Call
@@ -3397,6 +3549,48 @@ const localStorage = typeof window !== 'undefined'
               <button onClick={() => setNdrPage(p => Math.max(1, p - 1))} disabled={ndrPage <= 1} className="px-2 py-1 rounded bg-zinc-800 disabled:opacity-40">Prev</button>
               <span>Page {ndrPage} of {ndrTotalPages}</span>
               <button onClick={() => setNdrPage(p => Math.min(ndrTotalPages, p + 1))} disabled={ndrPage >= ndrTotalPages} className="px-2 py-1 rounded bg-zinc-800 disabled:opacity-40">Next</button>
+            </div>
+          )}
+        </div>
+      );
+
+      // Read-only prediction table - no Action/Call column, same as RTO's own predicted tab:
+      // this shows what WOULD happen next, not a real queue an agent works from directly.
+      const renderNdrPredictedTable = () => (
+        <div className="space-y-3">
+          {ndrPredicted.onlineAgents.length === 0 ? (
+            <p className="text-[13px] text-zinc-500 py-8 text-center">No agents online for NDR right now - nothing to predict.</p>
+          ) : (
+            <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 overflow-hidden">
+              <div className="overflow-x-auto custom-scroll">
+                <table className="w-full text-[13px]">
+                  <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
+                    <th className="py-3 px-4 text-left font-medium">#</th>
+                    <th className="py-3 px-4 text-left font-medium">AWB</th>
+                    <th className="py-3 px-4 text-left font-medium">Order</th>
+                    <th className="py-3 px-4 text-left font-medium">Order Date</th>
+                    <th className="py-3 px-4 text-center font-medium">Attempts</th>
+                    <th className="py-3 px-4 text-left font-medium">NDR Reason</th>
+                    <th className="py-3 px-4 text-left font-medium">Predicted Agent</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-zinc-800/50">
+                    {ndrPredicted.rows.map((t, i) => (
+                      <tr key={t.id} className="hover:bg-zinc-800/30 transition-colors">
+                        <td className="py-2.5 px-4 text-zinc-500">{i + 1}</td>
+                        <td className="py-2.5 px-4 font-mono text-zinc-300">{t.awb}</td>
+                        <td className="py-2.5 px-4 text-zinc-300">{t.orderCode}</td>
+                        <td className="py-2.5 px-4 text-zinc-400">{t.orderDate}</td>
+                        <td className="py-2.5 px-4 text-center text-zinc-300">{t.attempts}</td>
+                        <td className="py-2.5 px-4 text-zinc-400">{t.ndrReason}</td>
+                        <td className="py-2.5 px-4 text-indigo-300 font-medium">{t.predictedAgent}</td>
+                      </tr>
+                    ))}
+                    {ndrPredicted.rows.length === 0 && (
+                      <tr><td colSpan={7} className="py-8 text-center text-zinc-500">No unassigned leads for any online agent&apos;s attempt filter right now.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </div>
@@ -3606,20 +3800,21 @@ const localStorage = typeof window !== 'undefined'
               );
             })()}
 
-            {/* NDR Calling's own real (read-only) workspace - independent of RTO's tab/tabs
-                state and its RTO-column-coupled table/metrics logic above. No Call/WhatsApp/
-                disposition workflow yet - "Fresh Leads" and "Next to Assign" are simple
-                partitions of the sheet's own column Q (assigned_agent) being non-blank/blank,
-                not a disposition-derived queue like RTO's. */}
+            {/* NDR Calling's own real workspace - independent of RTO's tab/tabs state and its
+                RTO-column-coupled table/metrics logic above. Disposition-recording (Call
+                modal) and its two dependents - "Total Leads Disposed" (worked leads only) and
+                "Next to Assign" (a live scripts/assign_ndr_leads.py round-robin PREDICTION,
+                not a plain filter) - now mirror RTO's own logic, just against NDR's own
+                sheet/rules instead of sharing RTO's code. */}
             {currentProcess && currentProcess.value === 'ndr' && (() => {
               const canAdminTab = userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin;
               const canPredictedTab = userRole === 'Admin' || isProcessAdmin;
               const ndrTabsList = [
                 { key: 'overview', label: '📊 Overview', count: ndrTotal },
-                { key: 'all', label: 'All Leads', count: ndrTotal },
+                { key: 'all', label: 'Total Leads Disposed', count: ndrDisposed },
                 { key: 'fresh', label: '⚡ Fresh Leads (Assigned)', count: ndrAssigned },
                 ...(canAdminTab ? [{ key: 'admin', label: 'Admin Panel & Roster', count: effectiveAgentRoster.length }] : []),
-                ...(canPredictedTab ? [{ key: 'predicted', label: '🔮 Next to Assign', count: ndrUnassigned }] : []),
+                ...(canPredictedTab ? [{ key: 'predicted', label: '🔮 Next to Assign', count: ndrPredicted.rows.length }] : []),
               ];
               return (
                 <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-1.5 shadow-xl backdrop-blur-md">
@@ -3658,6 +3853,10 @@ const localStorage = typeof window !== 'undefined'
                             <div className="text-[11px] text-zinc-500 uppercase font-medium">Unassigned</div>
                             <div className="text-2xl font-bold text-amber-400 mt-1">{ndrUnassigned.toLocaleString('en-IN')}</div>
                           </div>
+                          <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-4">
+                            <div className="text-[11px] text-zinc-500 uppercase font-medium">Disposed</div>
+                            <div className="text-2xl font-bold text-emerald-400 mt-1">{ndrDisposed.toLocaleString('en-IN')}</div>
+                          </div>
                         </div>
                         <div>
                           <div className="text-[12px] text-zinc-500 mb-2 font-medium">Leads by Attempt Count</div>
@@ -3672,7 +3871,8 @@ const localStorage = typeof window !== 'undefined'
                         </div>
                       </div>
                     )}
-                    {(ndrTab === 'all' || ndrTab === 'fresh' || ndrTab === 'predicted') && renderNdrLeadsTable()}
+                    {(ndrTab === 'all' || ndrTab === 'fresh') && renderNdrLeadsTable()}
+                    {ndrTab === 'predicted' && canPredictedTab && renderNdrPredictedTable()}
                     {ndrTab === 'admin' && canAdminTab && (
                       <div className="space-y-6">
                         {renderTeamRosterTable()}
@@ -3685,9 +3885,10 @@ const localStorage = typeof window !== 'undefined'
               );
             })()}
 
-            {/* ═══ NDR LEAD DETAILS + CALL MODAL ═══ read-only, no disposition form/claiming -
-                same visual pattern as RTO's detailTkt/dispTkt modals' contact-action bar, but
-                nothing here writes anything (no disposition workflow for NDR yet). */}
+            {/* ═══ NDR LEAD DETAILS + CALL/DISPOSITION MODAL ═══ same visual pattern as RTO's
+                detailTkt/dispTkt modals' contact-action bar, but a single combined modal
+                (NDR has no separate claim-vs-dispose steps) - opening it via openNdrCall
+                already claimed the lead if it was unassigned. */}
             {ndrDetailTkt && (
               <Overlay onClose={() => setNdrDetailTkt(null)}>
                 <div className="w-full max-w-md bg-[#121215] border border-zinc-800/90 rounded-2xl shadow-2xl text-zinc-100">
@@ -3739,9 +3940,36 @@ const localStorage = typeof window !== 'undefined'
                         </div>
                       </div>
                     )}
+
+                    <div className="space-y-2.5 pt-1">
+                      <p className="text-[11px] text-zinc-500 uppercase font-medium">Disposition</p>
+                      <CustomSelect
+                        value={ndrDispSelection}
+                        onChange={setNdrDispSelection}
+                        placeholder="Select an outcome…"
+                        options={ndrDispositionOptions.map(o => ({ value: o, label: o }))}
+                      />
+                      <textarea
+                        value={ndrDispRemarks}
+                        onChange={e => setNdrDispRemarks(e.target.value)}
+                        placeholder="Remarks (optional)"
+                        rows={3}
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-[13px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 resize-none"
+                      />
+                      {ndrDetailTkt.disposedAt && (
+                        <p className="text-[11px] text-zinc-500">Last disposed {ndrDetailTkt.disposedAt}</p>
+                      )}
+                    </div>
                   </div>
                   <div className="flex items-center justify-end gap-2 px-6 py-3 border-t border-zinc-800/80">
                     <button onClick={() => setNdrDetailTkt(null)} className="px-4 py-2 rounded-xl text-[13px] text-zinc-400">Close</button>
+                    <button
+                      onClick={saveNdrDisposition}
+                      disabled={!ndrDispSelection || ndrDispSaving}
+                      className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-semibold disabled:opacity-50"
+                    >
+                      {ndrDispSaving ? 'Saving…' : 'Save Disposition'}
+                    </button>
                   </div>
                 </div>
               </Overlay>

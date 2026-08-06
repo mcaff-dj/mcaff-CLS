@@ -1,6 +1,8 @@
-// Gated Google Sheets proxy for NDR Calling's own sheet - sibling to api/rto/sheet.js, but
-// read-only (no batchUpdate): nothing in the UI writes to this sheet yet, assignment is done
-// server-side by scripts/assign_ndr_leads.py. Same service account
+// Gated Google Sheets proxy for NDR Calling's own sheet - sibling to api/rto/sheet.js. Now
+// read+write: the Call modal's disposition form writes S:U (disposition/remarks/disposed_at)
+// and Q:R (assigned_agent/assigned_at claim-on-open) directly from the browser, same trust
+// model as RTO's own writeToSheetRow (the frontend owns which range it writes; this route
+// stays a dumb, permission-gated proxy). Same service account
 // (GOOGLE_SHEETS_CLIENT_EMAIL/GOOGLE_SHEETS_PRIVATE_KEY) already has access to this sheet -
 // it's the same one the Python scripts (scripts/lib.py) use to write it.
 const { JWT } = require('google-auth-library');
@@ -19,7 +21,7 @@ function getClient() {
   const email = process.env.GOOGLE_SHEETS_CLIENT_EMAIL;
   const key = (process.env.GOOGLE_SHEETS_PRIVATE_KEY || '').replace(/\\n/g, '\n');
   if (!email || !key) throw new Error('Missing GOOGLE_SHEETS_CLIENT_EMAIL / GOOGLE_SHEETS_PRIVATE_KEY env vars');
-  _client = new JWT({ email, key, scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'] });
+  _client = new JWT({ email, key, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
   return _client;
 }
 
@@ -63,6 +65,21 @@ module.exports = async (req, res) => {
       );
       const data = await r.json();
       res.status(r.status).json(data);
+      return;
+    }
+
+    if (req.method === 'POST' && (req.body || {}).op === 'batchUpdate') {
+      const data = (req.body || {}).data || [];
+      const r = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${NDR_SHEET_ID}/values:batchUpdate`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data }),
+        }
+      );
+      const out = await r.json().catch(() => ({}));
+      res.status(r.status).json(out);
       return;
     }
 
