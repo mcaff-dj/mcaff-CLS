@@ -13,6 +13,15 @@ import leadAssignmentRules from '../../api/_lib/leadAssignmentRules.json';
 // hours). Same directory, and same reason, as leadAssignmentRules.json above.
 import CALLING_PROCESSES from '../../api/_lib/callingProcesses.json';
 
+// Selected-card tone classes for the NDR Call modal's disposition picker (see saveNdrDisposition
+// below) - full literal strings, not built via `${tone}` interpolation, since Tailwind's
+// build-time scanner only keeps classes that appear as complete substrings in the source.
+// Reuses the exact strings RTO's own dispTkt modal already uses for its Connected/Unreachable/
+// outcome cards, so both modals render identically for the same tone.
+const NDR_DISP_TONE_EMERALD = { card: 'bg-emerald-950/30 border-emerald-500/80 text-emerald-200 shadow-lg shadow-emerald-950/40 ring-1 ring-emerald-500/50', icon: 'text-emerald-400' };
+const NDR_DISP_TONE_ROSE = { card: 'bg-rose-950/30 border-rose-500/80 text-rose-200 shadow-lg shadow-rose-950/40 ring-1 ring-rose-500/50', icon: 'text-rose-400' };
+const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-indigo-100 shadow-md shadow-indigo-950/30 ring-1 ring-indigo-500/40', icon: 'text-indigo-400' };
+
 // Next.js still server-renders this "use client" component once for the initial HTML,
 // where `localStorage` doesn't exist - unlike the old CDN-script version, which only ever
 // ran in the browser. Every callsite below already treats a missing/empty value as "no
@@ -4068,45 +4077,66 @@ const localStorage = typeof window !== 'undefined'
                       </div>
                     )}
 
-                    <div className="space-y-2.5 pt-1">
-                      <p className="text-[11px] text-zinc-500 uppercase font-medium">Disposition</p>
-                      {/* Cascading: pick a level, then (only if that node has any) its own
-                          children in the next <select>, as many levels deep as this branch of
-                          the tree actually goes - never a flat mixed list. Native <select>s,
-                          not CustomSelect - CustomSelect's dropdown panel is position:absolute
-                          inside this modal's own overflow-y-auto body, which clips it (opens
-                          with the chevron rotating but no visible options) once the button
-                          sits anywhere the panel would overflow that scroll container. A
-                          native select's popup is rendered by the browser itself, immune to
-                          any ancestor's CSS overflow. */}
+                    <div className="space-y-5 pt-1">
+                      {/* Card-grid picker, same visual language as RTO's own dispTkt modal
+                          (Connected/Unreachable cards -> outcome grid) - one numbered section
+                          per depth of NDR's admin-configurable disposition tree, as many
+                          sections as this particular branch actually goes (ndrDispLevels
+                          already stops growing past a leaf). Picking a card at depth i resets
+                          everything picked below it, same as the old cascading-select version. */}
                       {ndrDispLevels.map((levelOptions, i) => (
-                        <select
-                          key={i}
-                          value={ndrDispPath[i] || ''}
-                          onChange={e => {
-                            const label = e.target.value;
-                            const node = levelOptions.find(d => d.label === label);
-                            const newPath = ndrDispPath.slice(0, i);
-                            newPath[i] = label;
-                            setNdrDispPath(newPath);
-                            // A leaf (no children) completes the selection; a node with
-                            // children needs the next <select> picked before ndrDispSelection
-                            // (and Save) can go through.
-                            setNdrDispSelection(node && node.children && node.children.length ? '' : newPath.join(' - '));
-                          }}
-                          className="w-full h-9 px-3 bg-zinc-900 border border-zinc-800 rounded-lg text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                        >
-                          <option value="" disabled>{i === 0 ? 'Select an outcome…' : 'Select a reason…'}</option>
-                          {levelOptions.map(d => <option key={d.id} value={d.label}>{d.label}</option>)}
-                        </select>
+                        <div key={i}>
+                          <p className="text-[12px] font-bold uppercase tracking-wider text-zinc-400 mb-2.5">
+                            {i + 1}. {i === 0 ? 'Was the call connected with the customer?' : 'Select reason'}
+                          </p>
+                          <div className={`grid gap-2 ${i === 0 ? 'grid-cols-2' : 'grid-cols-1 sm:grid-cols-2 max-h-52 overflow-y-auto custom-scroll pr-1'}`}>
+                            {levelOptions.map(d => {
+                              const isSel = ndrDispPath[i] === d.label;
+                              // Full static class strings per tone, picked by lookup rather
+                              // than interpolated (`bg-${tone}-950/30`) - Tailwind's build-time
+                              // scanner only picks up class names that appear as complete
+                              // literal substrings somewhere in the source, so a partially
+                              // built class name would silently never make it into the
+                              // production CSS bundle.
+                              const tone = d.label === 'Connected' ? NDR_DISP_TONE_EMERALD
+                                : d.label === 'Not Connected' ? NDR_DISP_TONE_ROSE
+                                : NDR_DISP_TONE_INDIGO;
+                              return (
+                                <button
+                                  key={d.id}
+                                  type="button"
+                                  onClick={() => {
+                                    const newPath = ndrDispPath.slice(0, i);
+                                    newPath[i] = d.label;
+                                    setNdrDispPath(newPath);
+                                    setNdrDispSelection(d.children && d.children.length ? '' : newPath.join(' - '));
+                                  }}
+                                  className={`p-3 rounded-xl border text-left transition-all flex items-start gap-3 ${isSel ? tone.card : 'bg-zinc-900/80 border-zinc-800 text-zinc-300 hover:border-zinc-700'}`}
+                                >
+                                  <span className="text-base shrink-0">{d.label === 'Connected' ? '📞' : d.label === 'Not Connected' ? '📵' : '🏷️'}</span>
+                                  <div className="min-w-0 flex-1">
+                                    <p className="text-[13px] font-bold truncate flex items-center justify-between gap-2">
+                                      {d.label}
+                                      {isSel && <CheckIcon className={`${tone.icon} shrink-0`}/>}
+                                    </p>
+                                    {d.description && <p className="text-[11px] text-zinc-500 mt-0.5">{d.description}</p>}
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
                       ))}
-                      <textarea
-                        value={ndrDispRemarks}
-                        onChange={e => setNdrDispRemarks(e.target.value)}
-                        placeholder="Remarks (optional)"
-                        rows={3}
-                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-[13px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 resize-none"
-                      />
+                      <div>
+                        <p className="text-[11px] text-zinc-500 uppercase font-medium mb-1.5">Agent Remarks</p>
+                        <textarea
+                          value={ndrDispRemarks}
+                          onChange={e => setNdrDispRemarks(e.target.value)}
+                          placeholder="Remarks (optional)"
+                          rows={3}
+                          className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-[13px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 resize-none"
+                        />
+                      </div>
                       {ndrDetailTkt.callingDate && (
                         <p className="text-[11px] text-zinc-500">Last called {ndrDetailTkt.callingDate} - Connected: {ndrDetailTkt.connected || '—'} - Outcome: {ndrDetailTkt.outcome || '—'}</p>
                       )}
