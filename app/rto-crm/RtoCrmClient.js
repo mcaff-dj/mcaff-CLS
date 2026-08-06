@@ -1424,6 +1424,9 @@ const localStorage = typeof window !== 'undefined'
       const [ndrSearch, setNdrSearch] = useState('');
       const [ndrPerPage, setNdrPerPage] = useState(50);
       const [ndrPage, setNdrPage] = useState(1);
+      // Which NDR lead's details modal is open - a read-only view (no disposition form, no
+      // claiming) since NDR has no disposition workflow yet, unlike RTO's dispTkt/detailTkt.
+      const [ndrDetailTkt, setNdrDetailTkt] = useState(null);
       useEffect(() => { setNdrPage(1); }, [ndrTab, ndrSearch]);
       useEffect(() => {
         if (userRole === 'Agent' && !isProcessAdmin && (ndrTab === 'admin' || ndrTab === 'predicted')) {
@@ -3354,6 +3357,7 @@ const localStorage = typeof window !== 'undefined'
                   <th className="py-3 px-4 text-left font-medium">Address</th>
                   <th className="py-3 px-4 text-left font-medium">Assigned Agent</th>
                   <th className="py-3 px-4 text-left font-medium">Assigned At</th>
+                  <th className="py-3 px-4 text-right font-medium">Action</th>
                 </tr></thead>
                 <tbody className="divide-y divide-zinc-800/50">
                   {ndrPageRows.map(t => (
@@ -3371,10 +3375,18 @@ const localStorage = typeof window !== 'undefined'
                       <td className="py-2.5 px-4 text-zinc-400">{[t.addressName, t.city, t.state, t.pincode].filter(Boolean).join(', ')}</td>
                       <td className="py-2.5 px-4 text-zinc-300">{t.assignedAgent || <span className="text-zinc-600">Unassigned</span>}</td>
                       <td className="py-2.5 px-4 text-zinc-500">{t.assignedAt}</td>
+                      <td className="py-2.5 px-4 text-right">
+                        <button
+                          onClick={() => setNdrDetailTkt(t)}
+                          className="ml-auto px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-bold flex items-center gap-1.5 shadow-md shadow-indigo-950/40 transition-all"
+                        >
+                          <PhoneIcon/> Call
+                        </button>
+                      </td>
                     </tr>
                   ))}
                   {ndrPageRows.length === 0 && (
-                    <tr><td colSpan={13} className="py-8 text-center text-zinc-500">No leads found.</td></tr>
+                    <tr><td colSpan={14} className="py-8 text-center text-zinc-500">No leads found.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -3672,6 +3684,68 @@ const localStorage = typeof window !== 'undefined'
                 </div>
               );
             })()}
+
+            {/* ═══ NDR LEAD DETAILS + CALL MODAL ═══ read-only, no disposition form/claiming -
+                same visual pattern as RTO's detailTkt/dispTkt modals' contact-action bar, but
+                nothing here writes anything (no disposition workflow for NDR yet). */}
+            {ndrDetailTkt && (
+              <Overlay onClose={() => setNdrDetailTkt(null)}>
+                <div className="w-full max-w-md bg-[#121215] border border-zinc-800/90 rounded-2xl shadow-2xl text-zinc-100">
+                  <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800/80">
+                    <h3 className="text-base font-bold font-mono text-zinc-100">{ndrDetailTkt.orderCode || ndrDetailTkt.awb}</h3>
+                    <button onClick={() => setNdrDetailTkt(null)} className="p-1 rounded-lg hover:bg-zinc-800 text-zinc-400"><XIcon/></button>
+                  </div>
+                  <div className="px-6 py-5 space-y-4 max-h-[68vh] overflow-y-auto text-[13px]">
+                    <div className="p-3.5 rounded-xl bg-zinc-900/90 border border-zinc-800/80 space-y-1">
+                      <p className="text-[11px] text-zinc-500 uppercase font-medium">Assigned Agent</p>
+                      <p className="text-zinc-100 font-bold flex items-center gap-1.5">👤 {ndrDetailTkt.assignedAgent || 'Unassigned'}</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">AWB</p><p className="font-mono font-semibold text-zinc-200">{ndrDetailTkt.awb}</p></div>
+                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Order Date</p><p className="font-semibold text-zinc-200">{ndrDetailTkt.orderDate}</p></div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Courier</p><p className="font-semibold text-zinc-200">{ndrDetailTkt.courier}</p></div>
+                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Attempts</p><p className="font-semibold text-violet-300">{ndrDetailTkt.attempts}</p></div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Facility</p><p className="font-semibold text-zinc-200">{ndrDetailTkt.facility}</p></div>
+                      <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Brand / Channel</p><p className="font-semibold text-zinc-200">{ndrDetailTkt.brand} · {ndrDetailTkt.channel}</p></div>
+                    </div>
+                    <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">NDR Reason</p><p className="text-zinc-300">{ndrDetailTkt.ndrReason || '—'}</p></div>
+                    <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Courier Status</p><p className="text-zinc-300">{ndrDetailTkt.courierStatus || '—'}</p></div>
+                    <div><p className="text-[11px] text-zinc-500 uppercase font-medium mb-0.5">Address</p><p className="text-zinc-300">{ndrDetailTkt.addressName}</p><p className="text-zinc-200 font-medium">{ndrDetailTkt.city}, {ndrDetailTkt.state} — {ndrDetailTkt.pincode}</p></div>
+
+                    {ndrDetailTkt.phone && (
+                      <div className="flex items-center justify-between p-3 rounded-xl bg-indigo-950/30 border border-indigo-800/40">
+                        <div>
+                          <p className="text-[11px] font-medium uppercase tracking-wider text-indigo-300">Customer Contact</p>
+                          <p className="text-sm font-bold font-mono text-zinc-100 mt-0.5">{ndrDetailTkt.phone}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <a
+                            href={`tel:${ndrDetailTkt.phone.replace(/[^0-9+]/g, '')}`}
+                            className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[12px] font-bold flex items-center gap-1.5 shadow-md shadow-emerald-950/40 transition-all"
+                          >
+                            <PhoneIcon/> Call Now
+                          </a>
+                          <button
+                            type="button"
+                            onClick={() => { navigator.clipboard.writeText(ndrDetailTkt.phone); showToast('Phone number copied!'); }}
+                            className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[12px] font-medium transition-colors border border-zinc-700"
+                          >
+                            Copy
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-end gap-2 px-6 py-3 border-t border-zinc-800/80">
+                    <button onClick={() => setNdrDetailTkt(null)} className="px-4 py-2 rounded-xl text-[13px] text-zinc-400">Close</button>
+                  </div>
+                </div>
+              </Overlay>
+            )}
 
             {currentProcess && currentProcess.implemented && (<>
 
