@@ -792,8 +792,10 @@ async function getAgentPresenceLogSummary(dateFrom, dateTo) {
       : null;
 
     let breakMs = 0;
+    let busyMs = 0;
     for (let i = 0; i < timeline.length; i++) {
-      if (timeline[i].status !== 'Busy') continue;
+      const status = timeline[i].status;
+      if (status !== 'Busy' && status !== 'OnCall') continue;
       // The synthetic pre-range snapshot only says what an agent's LAST reported status was,
       // possibly long before the range started - not that they were continuously, actively on
       // break the whole time since. agent_presence_log only records a real transition (see
@@ -805,14 +807,18 @@ async function getAgentPresenceLogSummary(dateFrom, dateTo) {
       // time, well before they'd even logged in. Only an interval that STARTS with a real
       // transition logged WITHIN the range counts - the carried-over status is used solely to
       // seed the timeline (so a later transition away from it still resolves correctly),
-      // never as a break interval of its own.
+      // never as a break/busy interval of its own. Same rule applies to 'OnCall' (the "Busy"
+      // status the UI shows today - see CALLING_STATUSES' comment for why it isn't also
+      // called 'Busy' internally), just accumulated separately from break time.
       if (i === 0 && timeline[i].synthetic) continue;
       const end = i + 1 < timeline.length ? timeline[i + 1].at : rangeEnd;
-      breakMs += Math.max(0, end.getTime() - timeline[i].at.getTime());
+      const durationMs = Math.max(0, end.getTime() - timeline[i].at.getTime());
+      if (status === 'Busy') breakMs += durationMs; else busyMs += durationMs;
     }
     out[email] = {
       loggedInMinutes,
       breakMinutes: numActiveDays > 0 ? Math.round((breakMs / 60000) / numActiveDays) : 0,
+      busyMinutes: numActiveDays > 0 ? Math.round((busyMs / 60000) / numActiveDays) : 0,
     };
   }
   return out;

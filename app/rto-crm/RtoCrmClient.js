@@ -4563,10 +4563,15 @@ const localStorage = typeof window !== 'undefined'
                   const summaryBreakList = summaryRows
                     .map(am => serverPresence[am.email.toLowerCase()]?.breakMinutes)
                     .filter(m => m !== null && m !== undefined);
+                  const summaryBusyList = summaryRows
+                    .map(am => serverPresence[am.email.toLowerCase()]?.busyMinutes)
+                    .filter(m => m !== null && m !== undefined);
                   const summaryAvgLoggedIn = summaryLoggedInList.length
                     ? Math.round(summaryLoggedInList.reduce((s, m) => s + m, 0) / summaryLoggedInList.length) : null;
                   const summaryAvgBreak = summaryBreakList.length
                     ? Math.round(summaryBreakList.reduce((s, m) => s + m, 0) / summaryBreakList.length) : 0;
+                  const summaryAvgBusy = summaryBusyList.length
+                    ? Math.round(summaryBusyList.reduce((s, m) => s + m, 0) / summaryBusyList.length) : 0;
                   const summaryFrtList = summaryRows.map(am => am.frtMinutes).filter(m => m !== null && m !== undefined);
                   const summaryAvgFrt = summaryFrtList.length
                     ? Math.round(summaryFrtList.reduce((s, m) => s + m, 0) / summaryFrtList.length) : null;
@@ -4587,7 +4592,7 @@ const localStorage = typeof window !== 'undefined'
                       'Total Connected', 'Connected %', 'Total Prepaid Assigned', 'Total Prepaid Assigned %',
                       'Total Prepaid Connected', 'Total Prepaid Connected %', 'Total COD Assigned', 'Total COD Assigned %',
                       'Total Prepaid Converted', 'Total Prepaid Converted %', 'Total COD Converted', 'Total COD Converted %',
-                      'Logged In At', 'Total Break Time',
+                      'Logged In At', 'Total Break Time', 'Total Busy Time',
                     ];
                     const rowFor = (am) => {
                       const presence = serverPresence[am.email.toLowerCase()];
@@ -4599,7 +4604,7 @@ const localStorage = typeof window !== 'undefined'
                         am.codAssigned, formatPct(am.codAssigned, am.assigned),
                         am.prepaidConverted, formatPct(am.prepaidConverted, am.prepaidAssigned),
                         am.codConverted, formatPct(am.codConverted, am.codAssigned),
-                        formatTimeOfDay(presence?.loggedInMinutes), formatBreakMinutes(presence?.breakMinutes),
+                        formatTimeOfDay(presence?.loggedInMinutes), formatBreakMinutes(presence?.breakMinutes), formatBreakMinutes(presence?.busyMinutes),
                       ];
                     };
                     const lines = [header.map(escapeCsv).join(',')];
@@ -4613,7 +4618,7 @@ const localStorage = typeof window !== 'undefined'
                         summaryTotals.codAssigned, formatPct(summaryTotals.codAssigned, summaryTotals.assigned),
                         summaryTotals.prepaidConverted, formatPct(summaryTotals.prepaidConverted, summaryTotals.prepaidAssigned),
                         summaryTotals.codConverted, formatPct(summaryTotals.codConverted, summaryTotals.codAssigned),
-                        formatTimeOfDay(summaryAvgLoggedIn), formatBreakMinutes(summaryAvgBreak),
+                        formatTimeOfDay(summaryAvgLoggedIn), formatBreakMinutes(summaryAvgBreak), formatBreakMinutes(summaryAvgBusy),
                       ].map(escapeCsv).join(','));
                     }
                     const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
@@ -4883,7 +4888,8 @@ const localStorage = typeof window !== 'undefined'
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total COD Converted</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Total COD Converted / Total COD Assigned">Total COD Converted %</th>
                                 <th className="py-2 px-3 font-bold" title="Average first-login time-of-day across the range's active days">Logged In At</th>
-                                <th className="py-2 pl-3 font-bold" title="Average break minutes per active day in the range">Total Break Time</th>
+                                <th className="py-2 px-3 font-bold" title="Average break minutes per active day in the range">Total Break Time</th>
+                                <th className="py-2 pl-3 font-bold" title="Average Busy (on-call) minutes per active day in the range">Total Busy Time</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -4916,7 +4922,8 @@ const localStorage = typeof window !== 'undefined'
                                     <td className="py-2.5 px-3 text-right tabular-nums text-indigo-400">{am.codConverted}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-indigo-300">{formatPct(am.codConverted, am.codAssigned)}</td>
                                     <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(presence?.loggedInMinutes)}</td>
-                                    <td className="py-2.5 pl-3 text-amber-400 font-mono whitespace-nowrap">{formatBreakMinutes(presence?.breakMinutes)}</td>
+                                    <td className="py-2.5 px-3 text-amber-400 font-mono whitespace-nowrap">{formatBreakMinutes(presence?.breakMinutes)}</td>
+                                    <td className="py-2.5 pl-3 text-rose-400 font-mono whitespace-nowrap">{formatBreakMinutes(presence?.busyMinutes)}</td>
                                   </tr>
                                 );
                               })}
@@ -4940,11 +4947,12 @@ const localStorage = typeof window !== 'undefined'
                                   <td className="py-2.5 px-3 text-right tabular-nums text-indigo-300">{summaryTotals.codConverted}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-indigo-200">{formatPct(summaryTotals.codConverted, summaryTotals.codAssigned)}</td>
                                   <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Average across agents with a real value">{formatTimeOfDay(summaryAvgLoggedIn)}</td>
-                                  <td className="py-2.5 pl-3 text-amber-300 font-mono whitespace-nowrap" title="Average across agents with a real value">{formatBreakMinutes(summaryAvgBreak)}</td>
+                                  <td className="py-2.5 px-3 text-amber-300 font-mono whitespace-nowrap" title="Average across agents with a real value">{formatBreakMinutes(summaryAvgBreak)}</td>
+                                  <td className="py-2.5 pl-3 text-rose-300 font-mono whitespace-nowrap" title="Average across agents with a real value">{formatBreakMinutes(summaryAvgBusy)}</td>
                                 </tr>
                               )}
                               {visibleTableAgentMetrics.filter(am => am.assigned > 0).length === 0 && (
-                                <tr><td colSpan={19} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
+                                <tr><td colSpan={20} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
                               )}
                             </tbody>
                           </table>

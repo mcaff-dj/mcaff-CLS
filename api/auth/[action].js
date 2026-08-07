@@ -253,6 +253,7 @@ async function handlePresence(req, res) {
             updatedAt: allAgents[email]?.updatedAt,
             loggedInMinutes: summary?.loggedInMinutes ?? null,
             breakMinutes: summary?.breakMinutes || 0,
+            busyMinutes: summary?.busyMinutes || 0,
           };
         }
         res.status(200).json({ agents });
@@ -270,6 +271,7 @@ async function handlePresence(req, res) {
           [email]: {
             loggedInMinutes: summary.loggedInMinutes ?? null,
             breakMinutes: summary.breakMinutes || 0,
+            busyMinutes: summary.busyMinutes || 0,
           },
         },
       });
@@ -280,6 +282,7 @@ async function handlePresence(req, res) {
       const summary = presenceSummary[email];
       agents[email].loggedInMinutes = summary?.loggedInMinutes ?? null;
       agents[email].breakMinutes = summary?.breakMinutes || 0;
+      agents[email].busyMinutes = summary?.busyMinutes || 0;
     }
     res.status(200).json({ agents });
     return;
@@ -294,7 +297,7 @@ async function handlePresence(req, res) {
   }
   body = body || {};
   if (!PRESENCE_STATUSES.has(body.status)) {
-    res.status(400).json({ error: 'status must be one of Online, Busy, Offline' });
+    res.status(400).json({ error: 'status must be one of Online, Busy, OnCall, Offline' });
     return;
   }
   let targetEmail = session.email;
