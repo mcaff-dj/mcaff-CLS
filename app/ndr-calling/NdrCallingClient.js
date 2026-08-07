@@ -187,6 +187,12 @@ export default function NdrCallingClient() {
   const [ndrDispRemarks, setNdrDispRemarks] = useState('');
   const [ndrDispSaving, setNdrDispSaving] = useState(false);
 
+  // All Leads/Fresh Leads tabs' own agent filter (renderNdrLeadsTable, shared by both tabs) -
+  // separate from ndrDateScope below, which those same tabs' stat cards also reuse (same
+  // page-wide date filter as the Overview tab, not a tab-local one - matches RTO's own
+  // agentPerf/pend, which read the page-wide dateScope too).
+  const [ndrLeadAgentFilter, setNdrLeadAgentFilter] = useState('ALL');
+
   // Executive Overview date-scope filter - same options/semantics as RTO's own (see
   // app/rto-crm/RtoCrmClient.js's dateOptions), namespaced localStorage keys since this is a
   // separate page, not a shared one. Drives the KPI tiles, the Agent Performance Summary table,
@@ -563,13 +569,86 @@ export default function NdrCallingClient() {
 
   const renderNdrLeadsTable = () => (
     <div className="space-y-3">
+      {/* Stats header cards, date-scoped/agent-filtered same as the Overview tab above */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+        <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs flex flex-col justify-between">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-emerald-500 mb-1 flex items-center gap-1.5">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span> Connected Calls
+          </p>
+          <p className="text-2xl font-extrabold text-emerald-500 tabular-nums tracking-tight">{ndrLeadConnectedCalls.toLocaleString('en-IN')}</p>
+          <p className="text-[11px] text-zinc-500 font-medium mt-1">{ndrLeadConnectRate}% connect rate</p>
+        </div>
+        <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs flex flex-col justify-between">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-indigo-500 mb-1 flex items-center gap-1.5">
+            <span className="h-1.5 w-1.5 rounded-full bg-indigo-500"></span> Reorders Converted
+          </p>
+          <p className="text-2xl font-extrabold text-indigo-500 tabular-nums tracking-tight">{ndrLeadReordersConverted.toLocaleString('en-IN')}</p>
+          <p className="text-[11px] text-zinc-500 font-medium mt-1">{ndrLeadReorderRate}% conversion rate</p>
+        </div>
+        <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs flex flex-col justify-between">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-rose-500 mb-1 flex items-center gap-1.5">
+            <span className="h-1.5 w-1.5 rounded-full bg-rose-500"></span> Mark RTO
+          </p>
+          <p className="text-2xl font-extrabold text-rose-500 tabular-nums tracking-tight">{ndrLeadMarkedRto.toLocaleString('en-IN')}</p>
+          <p className="text-[11px] text-zinc-500 font-medium mt-1">Recommended for RTO</p>
+        </div>
+        <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs flex flex-col justify-between">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
+            <span className="h-1.5 w-1.5 rounded-full bg-zinc-400"></span> Active Pending Box
+          </p>
+          <p className="text-2xl font-extrabold text-zinc-100 tabular-nums tracking-tight">{ndrLeadPending.toLocaleString('en-IN')}</p>
+          <p className="text-[11px] text-zinc-500 font-medium mt-1">{userRole === 'Agent' && !isProcessAdmin ? 'My Active Queue' : (ndrLeadAgentFilter !== 'ALL' ? ndrLeadAgentFilter.split('@')[0] : 'All agents')}</p>
+        </div>
+        <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs flex flex-col justify-between">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
+            <span className="h-1.5 w-1.5 rounded-full bg-zinc-400"></span> Fresh Unassigned
+          </p>
+          <p className="text-2xl font-extrabold text-zinc-100 tabular-nums tracking-tight">{ndrLeadFreshUnassigned.toLocaleString('en-IN')}</p>
+          <p className="text-[11px] text-zinc-500 font-medium mt-1">Ready to claim</p>
+        </div>
+      </div>
+
       <div className="flex items-center gap-2 flex-wrap justify-between">
-        <input
-          value={ndrSearch}
-          onChange={e => setNdrSearch(e.target.value)}
-          placeholder="Search AWB, order ID, mobile…"
-          className="w-64 px-3 py-1.5 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-        />
+        <div className="flex items-center gap-2 flex-wrap">
+          <input
+            value={ndrSearch}
+            onChange={e => setNdrSearch(e.target.value)}
+            placeholder="Search AWB, order ID, mobile…"
+            className="w-64 px-3 py-1.5 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+          />
+          {userRole !== 'Agent' && (
+            <CustomSelect
+              value={ndrLeadAgentFilter}
+              onChange={setNdrLeadAgentFilter}
+              options={ndrLeadAgentOptions}
+              placeholder="Agent Filter"
+            />
+          )}
+          <CustomSelect
+            value={ndrDateScope}
+            onChange={(val) => { setNdrDateScope(val); safeStorage.setItem('ndr_date_scope', val); }}
+            options={ndrDateOptions}
+            icon={CalendarIcon}
+            placeholder="Date Scope"
+          />
+          {ndrDateScope === 'CUSTOM' && (
+            <div className="flex items-center gap-1.5">
+              <input
+                type="date"
+                value={ndrCustomDateFrom}
+                onChange={(e) => { setNdrCustomDateFrom(e.target.value); safeStorage.setItem('ndr_custom_date_from', e.target.value); }}
+                className="h-8 px-2 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[12px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+              />
+              <span className="text-zinc-500 text-[12px]">to</span>
+              <input
+                type="date"
+                value={ndrCustomDateTo}
+                onChange={(e) => { setNdrCustomDateTo(e.target.value); safeStorage.setItem('ndr_custom_date_to', e.target.value); }}
+                className="h-8 px-2 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[12px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+              />
+            </div>
+          )}
+        </div>
         <div className="flex items-center gap-2 text-[12px] text-zinc-500">
           <span>{ndrRowsForTab.length.toLocaleString('en-IN')} leads</span>
           <CustomSelect
@@ -898,6 +977,39 @@ export default function NdrCallingClient() {
     const t = (ndrHeatmapMax - value) / (ndrHeatmapMax - ndrHeatmapMin);
     return { backgroundColor: `rgba(245, 158, 11, ${(t * 0.4).toFixed(2)})` };
   }
+
+  // ═══ All Leads/Fresh Leads tabs' own stat cards + agent filter (renderNdrLeadsTable) ═══
+  // Same idea as RTO's own agentPerf/pend/freshUnassignedCount above its lead table - reuses
+  // ndrIsAssignedTo/ndrKpiInScope/ndrDateOptions from the Executive Overview block above.
+  const ndrLeadAgentValues = (() => {
+    const s = new Set();
+    (processAgents || []).forEach(a => s.add(a.email));
+    ndrTickets.forEach(t => { if (t.assignedAgent && t.assignedAgent !== 'Unassigned') s.add(t.assignedAgent); });
+    return [...s].sort();
+  })();
+  const ndrLeadAgentOptions = [
+    { value: 'ALL', label: 'All agents' },
+    ...ndrLeadAgentValues.map(a => ({ value: a, label: a.includes('@') ? a.split('@')[0] : a })),
+  ];
+  const ndrLeadTargetTickets = ndrScopedTickets.filter(t =>
+    (ndrLeadAgentFilter === 'ALL' || ndrIsAssignedTo(t, ndrLeadAgentFilter)) && ndrKpiInScope(t)
+  );
+  const ndrLeadDisposed = ndrLeadTargetTickets.filter(t => t.connected);
+  const ndrLeadConnectedCalls = ndrLeadDisposed.filter(t => t.connected === 'Yes').length;
+  const ndrLeadReordersConverted = ndrLeadDisposed.filter(t => t.outcome === 'New order Placed').length;
+  const ndrLeadMarkedRto = ndrLeadDisposed.filter(t => t.outcome === 'Mark RTO').length;
+  const ndrLeadConnectRate = ndrLeadDisposed.length > 0 ? Math.round((ndrLeadConnectedCalls / ndrLeadDisposed.length) * 100) : 0;
+  const ndrLeadReorderRate = ndrLeadConnectedCalls > 0 ? Math.round((ndrLeadReordersConverted / ndrLeadConnectedCalls) * 100) : 0;
+  // Active Pending Box - a specific agent picked in the dropdown overrides the viewer's own
+  // role-scope (ndrMyScopeEmail), so an Admin picking one agent sees just that agent's queue.
+  // Unlike the cards above, deliberately NOT filtered by ndrDateScope - a lead sitting unworked
+  // in the queue is "pending" regardless of when it was assigned.
+  const ndrLeadPendingScopeEmail = ndrLeadAgentFilter !== 'ALL' ? ndrLeadAgentFilter : ndrMyScopeEmail;
+  const ndrLeadPending = ndrTickets.filter(t =>
+    (!ndrLeadPendingScopeEmail || ndrIsAssignedTo(t, ndrLeadPendingScopeEmail)) && t.assignedAgent && !t.connected
+  ).length;
+  // Flat sheet-wide count, unscoped by role/agent/date - same as RTO's own freshUnassignedCount.
+  const ndrLeadFreshUnassigned = ndrTickets.filter(t => !t.assignedAgent).length;
 
   const ndrTabsList = [
     { key: 'overview', label: '📊 Overview', count: ndrTotal },
