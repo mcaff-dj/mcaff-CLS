@@ -179,3 +179,26 @@ export function formatPct(count, total) {
   if (!total) return '—';
   return `${Math.round((count / total) * 100)}%`;
 }
+
+// Best-effort POST to our own API with one retry after a short delay - a transient network
+// blip or a cold Lambda container is long enough to fail a single fire-and-forget request
+// outright (fetch() doesn't reject on a non-2xx status, so a plain `.catch(()=>{})` never even
+// sees it - the write silently vanishes with zero trace). Never blocks the caller's UI;
+// failures are only logged to the console for later debugging.
+export async function postJsonWithRetry(url, body, attempts = 2) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (resp.ok) return true;
+      console.error(`${url} responded ${resp.status}:`, await resp.text().catch(() => ''));
+    } catch (e) {
+      console.error(`${url} network error:`, e);
+    }
+    if (i < attempts - 1) await new Promise(r => setTimeout(r, 2000));
+  }
+  return false;
+}

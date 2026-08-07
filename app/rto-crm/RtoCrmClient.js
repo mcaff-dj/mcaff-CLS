@@ -12,7 +12,8 @@ import leadAssignmentRules from '../../api/_lib/leadAssignmentRules.json';
 // (which turns these into the grantable 'calling' tabs) and scripts/assign_leads.py (business
 // hours). Same directory, and same reason, as leadAssignmentRules.json above.
 import CALLING_PROCESSES from '../../api/_lib/callingProcesses.json';
-import { safeStorage as localStorage, startOfDay, isDateInScope, scopeToDateBounds, normalizeOrderKey, isLeadDateInScope, istMinutesSinceMidnightClient, istDayKeyClient, formatTimeOfDay, formatBreakMinutes, formatFrt, formatPct } from '../_calling/util';
+import { safeStorage as localStorage, startOfDay, isDateInScope, scopeToDateBounds, normalizeOrderKey, isLeadDateInScope, istMinutesSinceMidnightClient, istDayKeyClient, formatTimeOfDay, formatBreakMinutes, formatFrt, formatPct, postJsonWithRetry } from '../_calling/util';
+import { useCallingSession, STATUS_OPTIONS, ROSTER_STATUS_OPTIONS, ROLE_OPTIONS } from '../_calling/useCallingSession';
 import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, DownloadIcon, ChevronDown, UserIcon, CalendarIcon, CreditCardIcon, ChatIcon, ShieldIcon, SparklesIcon, CustomSelect, MultiSelectDropdown, Badge, Overlay, EmptyState } from '../_calling/ui';
 
 // Selected-card tone classes for the NDR Call modal's disposition picker (see saveNdrDisposition
@@ -321,30 +322,6 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
       }
     }
 
-    // Best-effort POST to our own API with one retry after a short delay - a transient
-    // network blip or a cold Lambda container is long enough to fail a single
-    // fire-and-forget request outright (fetch() doesn't reject on a non-2xx status, so a
-    // plain `.catch(()=>{})` never even sees it - the write silently vanishes with zero
-    // trace). Never blocks the caller's UI; failures are only logged to the console for
-    // later debugging.
-    async function postJsonWithRetry(url, body, attempts = 2) {
-      for (let i = 0; i < attempts; i++) {
-        try {
-          const resp = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          });
-          if (resp.ok) return true;
-          console.error(`${url} responded ${resp.status}:`, await resp.text().catch(() => ''));
-        } catch (e) {
-          console.error(`${url} network error:`, e);
-        }
-        if (i < attempts - 1) await new Promise(r => setTimeout(r, 2000));
-      }
-      return false;
-    }
-
     function extractSheetId(i){const m=i.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);return m?m[1]:/^[a-zA-Z0-9_-]{20,}$/.test(i.trim())?i.trim():null;}
 
     function parseDate(s){
@@ -472,16 +449,6 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
 
     /* ── Main Application ─────────────────────────────── */
     function App(){
-      const [googleUser, setGoogleUser] = useState(()=>{try{const s=localStorage.getItem('rto_google_user');if(s)return JSON.parse(s);}catch{}return{name:'Vighnesh Patil',email:'vighnesh.patil@mcaffeine.com',picture:'https://api.dicebear.com/7.x/avataaars/svg?seed=vighnesh.patil@mcaffeine.com'};});
-
-      const [userRole, setUserRole] = useState(() => {
-        try {
-          const saved = localStorage.getItem('rto_active_role');
-          if (saved) return saved;
-        } catch {}
-        return 'Admin';
-      });
-
       // One theme, always - there used to be a Dark/Light/Purple switcher (rto_theme in
       // localStorage), so every agent could end up looking at a different-colored CRM
       // depending on what they'd previously picked, and a brand-new session defaulted to
@@ -523,14 +490,28 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
       const [placeholderTab, setPlaceholderTab] = useState('overview');
       useEffect(() => { setPlaceholderTab('overview'); }, [activeProcess]);
 
-      // Server-granted process access, filled in by the auth sync below. null = no explicit
-      // grant on this account (admins, or an agent with no per-process rows); the list is only
-      // narrowed when the database actually says which processes were granted. Kept out of
-      // localStorage on purpose - it is an authorisation answer, so it gets re-fetched from
-      // the session on every load rather than remembered by the browser.
-      const [invitedProcessKeys, setInvitedProcessKeys] = useState(null);
-      const [sessionIsAdmin, setSessionIsAdmin] = useState(false);
-      const [processPermsLoaded, setProcessPermsLoaded] = useState(false);
+      // Session/permissions/presence shared with every Calling process page (see
+      // app/_calling/useCallingSession.js) - session/userRole/processAgents/isProcessAdmin/
+      // agentStatus/serverPresence/toast/etc. below are all destructured straight out of this
+      // one hook call, under the same names this file always used, so the rest of this
+      // component is unchanged by the extraction. getPendingBox/getDateBounds are getters
+      // (not the values themselves) because `pend`/`dateScope` are declared further down this
+      // same function - passing their current value directly here would be a
+      // temporal-dead-zone crash; the hook only ever calls these from effects, which run after
+      // the whole component has finished rendering for the first time.
+      const session = useCallingSession(activeProcess, {
+        getPendingBox: () => pend,
+        getDateBounds: () => scopeToDateBounds(dateScope, customDateFrom, customDateTo),
+      });
+      const {
+        googleUser, userRole, setUserRole,
+        sessionIsAdmin, invitedProcessKeys, processPermsLoaded,
+        processAgents, isProcessAdmin, processAgentsError, savingAgentEmail,
+        loadProcessAgents, saveProcessAgent,
+        agentStatus, serverPresence,
+        toast, showToast,
+        updateAvailable,
+      } = session;
 
       // Admin-editable calling hours, per process and per weekday. Server-owned (the
       // calling_business_hours table, via /api/admin/business-hours) rather than local state,
@@ -545,17 +526,6 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
       const [hoursSaving, setHoursSaving] = useState(false);
       const [hoursError, setHoursError] = useState('');
 
-      // The active process's own roster: who is invited to it, and their status/quota FOR THIS
-      // PROCESS. Server-owned for the same reason as the hours above - assign_leads.py reads
-      // the same rows, so a browser-only value would change nothing about who gets leads. This
-      // is separate from `agentRoster` (localStorage), which stays as the legacy RTO view.
-      const [processAgents, setProcessAgents] = useState(null);
-      // Whether the signed-in user administers the ACTIVE process (calling_agent_process
-      // .is_process_admin). Separate from sessionIsAdmin, which is company-wide: a process
-      // admin runs one process's roster and hours and gets nothing else. Server-derived - the
-      // roster it reads comes from an endpoint that already refuses processes you don't
-      // administer, so the browser can't grant this to itself.
-      const [isProcessAdmin, setIsProcessAdmin] = useState(false);
       // Same reasoning as the real tab bar's own analogous effect further down: don't leave
       // someone parked on an admin-only shell tab (see placeholderTab above) after a role
       // switch takes that access away.
@@ -564,8 +534,6 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
           setPlaceholderTab('overview');
         }
       }, [userRole, isProcessAdmin, placeholderTab]);
-      const [processAgentsError, setProcessAgentsError] = useState('');
-      const [savingAgentEmail, setSavingAgentEmail] = useState('');
 
       const [agentRoster, setAgentRoster] = useState(()=>{
         try { const s = localStorage.getItem('rto_agent_roster'); if (s) { const p = JSON.parse(s); if (Array.isArray(p) && p.length) return p; } } catch {}
@@ -596,18 +564,9 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
       });
 
       const [agentFilter, setAgentFilter] = useState('ALL');
-      const [agentStatus, setAgentStatus] = useState(()=>localStorage.getItem('rto_agent_status')||'Online');
       // Team Roster tab: filters the roster table by an agent's live status (Online /
       // On Break / Busy / Offline) - purely a client-side view filter, doesn't touch the server.
       const [rosterStatusFilter, setRosterStatusFilter] = useState('All');
-
-      // Real presence from Postgres (agent_presence table), keyed by lowercase email -
-      // {}'d out for non-admin sessions (the GET is admin-only), in which case the
-      // roster table just falls back to each agent's local/mock status as before.
-      // fetchServerPresence itself is defined further down (after dateScope/customDateFrom/
-      // customDateTo exist to close over - it now sends them as dateFrom/dateTo query params
-      // so loggedInMinutes/breakMinutes follow the same filter every other Overview column does).
-      const [serverPresence, setServerPresence] = useState({});
 
       // {order_id: {assignedAt, disposedAt}} for every lead ever assigned (GET
       // /api/auth/leadDates - see getAllLeadDates in db.js) - the real dates a lead was handed
@@ -637,27 +596,6 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
         return () => clearInterval(t);
       }, [fetchLeadDates]);
 
-      // The signed-in agent's own availability is per process, so switching process has to show
-      // that process's answer rather than carrying the previous one over - being Online for RTO
-      // says nothing about NDR. Read from the server (not localStorage) because this is the
-      // value assign_leads.py acts on; the local copy is only a first-paint placeholder.
-      useEffect(() => {
-        if (!googleUser?.email || !activeProcess) return;
-        let cancelled = false;
-        fetch(`/api/auth/processPresence?process=${encodeURIComponent(activeProcess)}`)
-          .then(r => r.ok ? r.json() : null)
-          .then(d => {
-            if (cancelled || !d || !d.status) return;
-            setAgentStatus(d.status);
-            try { localStorage.setItem('rto_agent_status', d.status); } catch {}
-          })
-          .catch(() => {});
-        return () => { cancelled = true; };
-      }, [googleUser, activeProcess]);
-
-      const [toast, setToast] = useState(null);
-      const showToast = useCallback(m=>{setToast(m);setTimeout(()=>setToast(null),3000);},[]);
-
       // Role Switch Handler
       const handleSwitchRole = (newRole) => {
         setUserRole(newRole);
@@ -674,41 +612,6 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
         }
         showToast(`Role switched to ${newRole}`);
       };
-
-      // Auth sync
-      useEffect(()=>{
-        fetch('/api/auth/me').then(r=>r.json()).then(d=>{
-          if(d?.authenticated&&d.email){
-            const u={name:d.name||d.email.split('@')[0],email:d.email,picture:`https://api.dicebear.com/7.x/avataaars/svg?seed=${d.email}`};
-            setGoogleUser(u);
-            localStorage.setItem('rto_google_user',JSON.stringify(u));
-            // Role defaults from the account itself (users.is_admin), not from a hardcoded
-            // list of names - an admin who isn't called vighnesh or vikash is still an admin.
-            const savedRole = localStorage.getItem('rto_active_role');
-            if(!savedRole){
-              setUserRole(d.isAdmin ? 'Admin' : 'Agent');
-            } else if (!d.isAdmin && savedRole !== 'Agent') {
-              // A cached role can only ever LOWER what you see, never raise it: someone who is
-              // not an admin on the server must not keep an 'Admin' view just because their
-              // browser remembers one. (The panels behind it are all server-gated anyway, so
-              // this is about not showing controls that would only fail.)
-              setUserRole('Agent');
-              try { localStorage.setItem('rto_active_role', 'Agent'); } catch {}
-            }
-            // Which processes this account has actually been invited to. getSession() reads
-            // report_tab_permissions fresh from the database on every request, so this is the
-            // real grant, not something the browser can talk itself into: an agent editing
-            // localStorage still can't add a process here. is_admin users come back with an
-            // empty tabPerms, which by that model's own convention means "unrestricted".
-            setSessionIsAdmin(!!d.isAdmin);
-            const callingTabs = (d.tabPerms && d.tabPerms.calling) || null;
-            setInvitedProcessKeys(Array.isArray(callingTabs) && callingTabs.length ? callingTabs : null);
-            setProcessPermsLoaded(true);
-          } else {
-            setProcessPermsLoaded(true);
-          }
-        }).catch(()=>{ setProcessPermsLoaded(true); });
-      },[]);
 
       // Calling hours: loaded once an admin actually opens the panel that shows them, rather
        // than on every page load - agents never see this card, so most sessions have no reason
@@ -748,68 +651,6 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
           setHoursError('');
         }
       }, [hoursByProcess, activeProcess]);
-
-      // Per-process roster, reloaded whenever the admin switches process - the whole point is
-      // that each process has its own answer, so it can't be cached across them.
-      const loadProcessAgents = useCallback(async (processKey) => {
-        if (!processKey) return;
-        setProcessAgents(null);
-        setProcessAgentsError('');
-        try {
-          const r = await fetch(`/api/admin/calling-agents?process=${encodeURIComponent(processKey)}`);
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) { setProcessAgentsError(d.error || `Could not load roster (${r.status})`); return; }
-          setProcessAgents(d.agents || []);
-          const me = (d.agents || []).find(a => (a.email || '').toLowerCase() === (googleUser?.email || '').toLowerCase());
-          setIsProcessAdmin(!!(me && me.isProcessAdmin));
-        } catch (e) {
-          setProcessAgentsError(e.message || 'Could not load roster');
-        }
-      }, [googleUser]);
-
-      // Not tab-gated: the roster feeds effectiveAgentRoster, which the Overview metrics and the
-      // reassignment dropdowns use too, not just the admin panel. Reloaded on process change
-      // because each process has its own roster. A non-admin simply gets 403 and processAgents
-      // stays null, which effectiveAgentRoster treats as "no per-process data" and falls back.
-      // Fetched for everyone signed in: the endpoint itself decides (403s a process you don't
-      // administer), and it's the only way to learn you ARE a process admin - gating the fetch
-      // on a role the browser holds would make that unknowable.
-      useEffect(() => {
-        if (googleUser?.email) loadProcessAgents(activeProcess);
-      }, [googleUser, activeProcess, loadProcessAgents]);
-
-      // One agent, one process, one field at a time. status and maxQuota are sent
-      // independently so changing availability never disturbs a quota an admin set.
-      const saveProcessAgent = async (email, patch) => {
-        setSavingAgentEmail(email);
-        setProcessAgentsError('');
-        try {
-          const r = await fetch('/api/admin/calling-agents', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ processKey: activeProcess, email, ...patch }),
-          });
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) {
-            const msg = d.error || `Could not save (${r.status})`;
-            setProcessAgentsError(msg);
-            // processAgentsError only renders inside the simple roster card, used for an
-            // UNBUILT process - the Team Roster table (a built process, e.g. RTO) has nowhere
-            // to show it, so a rejected save (wrong permissions, a stale process key) looked
-            // exactly like a checkbox that silently did nothing. The toast is the one place
-            // both contexts already render.
-            showToast(`⚠️ ${msg}`);
-            return;
-          }
-          setProcessAgents(d.agents || []);
-        } catch (e) {
-          const msg = e.message || 'Could not save';
-          setProcessAgentsError(msg);
-          showToast(`⚠️ ${msg}`);
-        } finally {
-          setSavingAgentEmail('');
-        }
-      };
 
       const saveBusinessHours = async () => {
         if (!hoursDraft || !activeProcess) return;
@@ -1022,11 +863,15 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
         }
       };
 
-      // Cross-Tab & Multi-Client Real-Time Status & Activity Broadcast Sync
+      // Cross-Tab & Multi-Client Real-Time Status & Activity Broadcast Sync. Namespaced per
+      // process - a single global channel meant a status change on ONE process (e.g. going
+      // Offline in an NDR tab) rewrote this legacy roster/activity cache in a completely
+      // unrelated RTO tab open at the same time.
+      const syncChannelName = `rto_crm_sync_channel:${activeProcess}`;
       useEffect(() => {
         let channel = null;
         try {
-          channel = new BroadcastChannel('rto_crm_sync_channel');
+          channel = new BroadcastChannel(syncChannelName);
           channel.onmessage = (event) => {
             const data = event.data;
             if (data?.type === 'STATUS_UPDATE' && data.email && data.status) {
@@ -1060,44 +905,22 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
           window.removeEventListener('storage', handleStorageEvent);
           if (channel) channel.close();
         };
-      }, []);
+      }, [syncChannelName]);
 
       const [newAgentEmail, setNewAgentEmail] = useState('');
       const [newAgentRole, setNewAgentRole] = useState('Agent');
 
-      // Manually set any single agent's status (Online / On Break / Busy / Offline) from the roster
-      // table - syncs to the server (agent_presence) for every row, not just your own: the
-      // server honors a client-supplied target email only for an admin session (see
-      // api/auth/[action].js's presence handler), which is exactly who can reach this table.
+      // Manually set any single agent's status (Online / On Break / Busy / Offline) from the
+      // roster table - the server-write half (both agent_presence AND calling_agent_process,
+      // self vs. someone else, optimistic serverPresence update) lives in the shared
+      // useCallingSession hook as setStatusForAgent; this wrapper only adds RTO's own legacy
+      // agentRoster cache and toast on top; see api/auth/[action].js's presence handler for why
+      // the server only honors a client-supplied target email for an admin session.
       const setAgentStatusManually = (email, newStatus) => {
         const lower = (email || '').toLowerCase();
         if (!lower) return;
-        const isSelf = googleUser?.email && googleUser.email.toLowerCase() === lower;
-
-        // Availability has two halves and BOTH have to be written, or assign_leads.py won't
-        // agree with what this row shows: agent_presence ("at their desk", global) and
-        // calling_agent_process ("available for this process"). Writing only the first is what
-        // made this control look effective while changing nothing about who receives leads.
-        if (activeProcess) {
-          if (isSelf) {
-            postJsonWithRetry('/api/auth/processPresence', { processKey: activeProcess, status: newStatus });
-          } else {
-            saveProcessAgent(lower, { status: newStatus });
-          }
-        }
-
-        if (isSelf) {
-          setAgentStatus(newStatus);
-          try { localStorage.setItem('rto_agent_status', newStatus); } catch {}
-          syncPresenceToServer(newStatus, { pendingBox: newStatus === 'Online' ? pend : undefined });
-        } else {
-          const target = effectiveAgentRoster.find(a => (a.email || '').toLowerCase() === lower);
-          syncPresenceToServer(newStatus, { email: lower, name: target?.name });
-          // Optimistic - effectiveAgentRoster prefers serverPresence for non-self rows,
-          // so without this the row would flicker back to the old status until the next
-          // 30s poll catches up with what we just wrote.
-          setServerPresence(p => ({ ...p, [lower]: { status: newStatus, updatedAt: null } }));
-        }
+        const target = effectiveAgentRoster.find(a => (a.email || '').toLowerCase() === lower);
+        session.setStatusForAgent(email, newStatus, target?.name);
 
         setAgentRoster(p => {
           const u = p.map(a => (a.email || '').toLowerCase() === lower ? { ...a, status: newStatus } : a);
@@ -1107,38 +930,11 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
         showToast(`Status set to ${newStatus} for ${email}`);
       };
 
-      // Reports an agent's status to the server (Postgres-backed agent_presence -
-      // see api/auth/[action].js's presence handler) - this is what
-      // scripts/assign_leads.py reads to decide who's eligible for new leads.
-      // Best-effort: a failed sync just means that agent won't show as eligible for
-      // the next assignment pass, not a UI error.
-      //   opts.pendingBox - this browser's own already-computed "My Active Queue"
-      //     count (see `pend` below); passing it when going Online with an empty
-      //     queue lets the server trigger an immediate off-cycle assignment run
-      //     instead of waiting up to 5 minutes for the next scheduled one.
-      //   opts.email/opts.name - set a DIFFERENT agent's status (the roster
-      //     table's per-row dropdown) instead of the caller's own; the server only
-      //     honors this for an admin session, so a non-admin trying it just ends up
-      //     reporting their own status regardless.
-      const syncPresenceToServer = (status, opts = {}) => {
-        const body = { status };
-        if (typeof opts.pendingBox === 'number') body.pendingBox = opts.pendingBox;
-        if (opts.email) { body.email = opts.email; body.name = opts.name; }
-        postJsonWithRetry('/api/auth/presence', body);
-      };
-
+      // Combined self-status write (both agent_presence and calling_agent_process) lives in the
+      // shared hook as session.setStatus; this wrapper adds RTO's own activity log, legacy
+      // agentRoster cache, and cross-tab broadcast on top.
       const handleSetStatus = (s)=>{
-        setAgentStatus(s);
-        try { localStorage.setItem('rto_agent_status', s); } catch {}
-        // Two different facts, both needed before assign_leads.py will hand this agent a lead:
-        //   /auth/presence        -> "at their desk" (global, heartbeat-backed)
-        //   /auth/processPresence -> "available for THIS process" (per process, no heartbeat)
-        // Written together so one status control keeps both true, rather than leaving an agent
-        // who looks Online in the header but is invisible to the process they're working.
-        syncPresenceToServer(s, { pendingBox: s === 'Online' ? pend : undefined });
-        if (activeProcess) {
-          postJsonWithRetry('/api/auth/processPresence', { processKey: activeProcess, status: s });
-        }
+        session.setStatus(s);
         const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const newLog = {
           time: t,
@@ -1147,7 +943,7 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
           // The log's own text should read the same human-facing label the status dropdown
           // shows, not the raw stored value - 'Busy' displays as "On Break" and 'OnCall'
           // displays as "Busy" (see statusOptions' own comment on why those two don't match).
-          action: `Status → ${statusOptions.find(o => o.value === s)?.label || s}`,
+          action: `Status → ${STATUS_OPTIONS.find(o => o.value === s)?.label || s}`,
           type: s === 'Online' ? 'online' : s === 'Busy' ? 'break' : s === 'OnCall' ? 'busy' : 'offline'
         };
 
@@ -1164,56 +960,12 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
         });
 
         try {
-          const channel = new BroadcastChannel('rto_crm_sync_channel');
+          const channel = new BroadcastChannel(syncChannelName);
           channel.postMessage({ type: 'STATUS_UPDATE', email: googleUser.email, status: s });
           channel.postMessage({ type: 'ACTIVITY_LOG', log: newLog });
           channel.close();
         } catch {}
       };
-
-      // Presence heartbeat: push status to the server immediately on sign-in, then
-      // every 2 minutes while active, well inside assign_leads.py's 10-minute
-      // staleness window - an agent who opens the app and just starts working
-      // without ever touching the status dropdown still needs the server to know
-      // they're Online. Also passes pendingBox so returning to the app already
-      // Online with an empty queue (e.g. a page refresh) still gets the instant-
-      // assignment trigger, not just an explicit dropdown change - a stale/low
-      // pend reading here (tickets not fully synced yet) only risks one harmless
-      // extra assignment pass, same tradeoff as the admin-override path.
-      //
-      // Deliberately does NOT push a locally-cached 'Offline' this same way: unlike
-      // Online/Busy, this cached value could just be leftover from a stale/background
-      // tab (rto_agent_status in localStorage, read once on mount) rather than anything
-      // the agent actually just chose - blindly replaying it here could silently flip a
-      // genuinely-Online agent (set from a different, currently-active tab) back to
-      // Offline with no explicit action on this tab's part at all. Only an agent's own
-      // dropdown click (setAgentStatusManually) should ever write Offline - same
-      // principle already applied to the idle-timer removal above.
-      useEffect(() => {
-        if (googleUser?.email && agentStatus !== 'Offline') {
-          syncPresenceToServer(agentStatus, { pendingBox: agentStatus === 'Online' ? pend : undefined });
-        }
-      }, [googleUser]);
-
-      // Presence heartbeat: keeps this agent's agent_presence row fresh in Postgres every
-      // 2 minutes, well inside assign_leads.py's 10-minute staleness window, so someone
-      // who's been Online/Busy for a while doesn't silently fall out of the eligible pool.
-      // This used to also auto-mark the agent Offline (and release their pending leads
-      // back to the pool via unassignMyPendingLeads) after 10 minutes of no
-      // mouse/keyboard/scroll activity - removed per instruction: only the agent's own
-      // explicit status choice should ever change their status or touch their
-      // assignments now, never an idle timer (a long call, a meeting, or just reading
-      // something could trigger it for no good reason, silently pulling leads out from
-      // under someone who was still actively working them).
-      useEffect(() => {
-        if (!googleUser?.email) return;
-        const t = setInterval(() => {
-          if (agentStatus !== 'Offline') {
-            syncPresenceToServer(agentStatus);
-          }
-        }, 2 * 60 * 1000);
-        return () => clearInterval(t);
-      }, [agentStatus, googleUser]);
 
       // Data
       const [tickets, setTickets] = useState(()=>{try{const s=localStorage.getItem('rto_cache_v4');if(s){const p=JSON.parse(s);if(Array.isArray(p)&&p.length)return p.map(t=>({...t,rowDate:t.rowDate?new Date(t.rowDate):null,rtoInitiatedDate:t.rtoInitiatedDate?new Date(t.rtoInitiatedDate):null}));}}catch{}return[];});
@@ -1273,32 +1025,6 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
       // the cells (Dialled/Connected/Converted).
       const [heatmapIntervalMinutes, setHeatmapIntervalMinutes] = useState(() => Number(localStorage.getItem('rto_heatmap_interval')) || 30);
       const [heatmapMetric, setHeatmapMetric] = useState(() => localStorage.getItem('rto_heatmap_metric') || 'dialled');
-
-      // GET /api/auth/presence, now with dateFrom/dateTo (see scopeToDateBounds above) so
-      // loggedInMinutes/breakMinutes follow the Overview tab's own date-scope filter instead of
-      // always meaning "today" - re-fetches immediately when the filter changes (not just on
-      // the 30s poll), so switching to Yesterday/a Custom range doesn't sit on stale numbers
-      // for up to 30 seconds.
-      const fetchServerPresence = useCallback(() => {
-        const { dateFrom, dateTo } = scopeToDateBounds(dateScope, customDateFrom, customDateTo);
-        const params = new URLSearchParams();
-        if (dateFrom) params.set('dateFrom', dateFrom);
-        if (dateTo) params.set('dateTo', dateTo);
-        // Lets the server recognize a process admin (not company-wide) and scope them to their
-        // OWN process's roster instead of self-only - see handlePresence's own comment. Harmless
-        // for a plain agent or a full admin, who ignore it (self-only / everyone respectively).
-        if (activeProcess) params.set('process', activeProcess);
-        const qs = params.toString();
-        fetch(`/api/auth/presence${qs ? `?${qs}` : ''}`)
-          .then(r => r.ok ? r.json() : null)
-          .then(d => { if (d && d.agents) setServerPresence(d.agents); })
-          .catch(() => {});
-      }, [dateScope, customDateFrom, customDateTo, activeProcess]);
-      useEffect(() => {
-        fetchServerPresence();
-        const t = setInterval(fetchServerPresence, 30000);
-        return () => clearInterval(t);
-      }, [fetchServerPresence]);
 
       const [payFilter, setPayFilter] = useState('ALL');
       const [page, setPage] = useState(1);
@@ -1935,36 +1661,6 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
         }
       };
 
-      // Detects when a newer deployment of this page has shipped while this tab has been
-      // sitting open. rto-crm.html is a static file with no build step / hot-reload - once
-      // loaded, a long-lived tab keeps running that exact JS forever with zero indication a
-      // new version exists, which is exactly how some agents' browsers kept running old JS
-      // that predated a feature (e.g. Postgres disposition syncing) while others, who'd
-      // reloaded more recently, silently got it. Polls the file's own ETag/Last-Modified via
-      // a no-store HEAD request rather than requiring a manually-bumped version constant, so
-      // this stays accurate with zero upkeep on every future edit to this file.
-      const [updateAvailable, setUpdateAvailable] = useState(false);
-      const deployedVersionRef = useRef(null);
-      useEffect(() => {
-        const checkVersion = async () => {
-          try {
-            const res = await fetch(window.location.pathname, { method: 'HEAD', cache: 'no-store' });
-            const v = res.headers.get('etag') || res.headers.get('last-modified');
-            if (!v) return;
-            if (deployedVersionRef.current === null) {
-              deployedVersionRef.current = v;
-            } else if (v !== deployedVersionRef.current) {
-              setUpdateAvailable(true);
-            }
-          } catch (e) {
-            // Network hiccup - just skip this round, next interval tries again.
-          }
-        };
-        checkVersion();
-        const t = setInterval(checkVersion, 3 * 60 * 1000);
-        return () => clearInterval(t);
-      }, []);
-
       // Dynamic Roster that automatically includes EVERY unique agent found in Google Sheet tickets or overrides
       // "badshasab.pathan" -> "Badshasab Pathan" - the fallback used whenever nothing better
       // (a real name from googleUser, a ticket's own agent string, or users.name server-side)
@@ -2404,28 +2100,12 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
         { value: 100, label: '100 per page' },
       ];
 
-      // value 'Busy' predates the "On Break" label and is kept as-is (see CALLING_STATUSES'
-      // comment in api/_lib/db.js) - the new "Busy" status below (an agent currently on a
-      // call) is a genuinely different state, so it gets its own value, 'OnCall', rather than
-      // colliding with the existing one.
-      const statusOptions = [
-        { value: 'Online', label: 'Online', icon: '🟢' },
-        { value: 'Busy', label: 'On Break', icon: '🟡' },
-        { value: 'OnCall', label: 'Busy', icon: '🔴' },
-        { value: 'Offline', label: 'Offline', icon: '⚪' },
-      ];
-
-      // Team Roster tab's status filter - same three live statuses plus an "All" option.
-      const rosterStatusOptions = [
-        { value: 'All', label: 'All Statuses', icon: '📋' },
-        ...statusOptions,
-      ];
-
-      const roleOptions = [
-        { value: 'Admin', label: 'Role: Admin', icon: '🛡️' },
-        { value: 'Team Lead', label: 'Role: Team Lead', icon: '👑' },
-        { value: 'Agent', label: 'Role: Agent', icon: '👤' },
-      ];
+      // Now shared (app/_calling/useCallingSession.js) - both RTO and NDR need the same status
+      // list, and eventually the same role list, so both are imported rather than declared
+      // twice. Aliased to their old local names since every usage below predates the move.
+      const statusOptions = STATUS_OPTIONS;
+      const rosterStatusOptions = ROSTER_STATUS_OPTIONS;
+      const roleOptions = ROLE_OPTIONS;
 
       // Every process the CRM knows about, from the shared registry - the same file
       // api/_lib/tabs.js builds the grantable 'calling' tabs from, so a process can never be
