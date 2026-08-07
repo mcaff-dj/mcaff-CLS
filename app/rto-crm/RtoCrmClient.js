@@ -14,6 +14,7 @@ import leadAssignmentRules from '../../api/_lib/leadAssignmentRules.json';
 import CALLING_PROCESSES from '../../api/_lib/callingProcesses.json';
 import { safeStorage as localStorage, startOfDay, isDateInScope, scopeToDateBounds, normalizeOrderKey, isLeadDateInScope, istMinutesSinceMidnightClient, istDayKeyClient, formatTimeOfDay, formatBreakMinutes, formatFrt, formatPct, postJsonWithRetry } from '../_calling/util';
 import { useCallingSession, STATUS_OPTIONS, ROSTER_STATUS_OPTIONS, ROLE_OPTIONS } from '../_calling/useCallingSession';
+import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, DownloadIcon, ChevronDown, UserIcon, CalendarIcon, CreditCardIcon, ChatIcon, ShieldIcon, SparklesIcon, CustomSelect, MultiSelectDropdown, Badge, Overlay, EmptyState } from '../_calling/ui';
 
 // Selected-card tone classes for the NDR Call modal's disposition picker (see saveNdrDisposition
@@ -513,18 +514,16 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
         updateAvailable,
       } = session;
 
-      // Admin-editable calling hours, per process and per weekday. Server-owned (the
-      // calling_business_hours table, via /api/admin/business-hours) rather than local state,
-      // because scripts/assign_leads.py has to read the same values to decide whether it may
-      // hand out leads - a browser-only setting would change nothing about that.
-      const BUSINESS_HOUR_DAY_LABELS = [
-        ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'],
-        ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday'],
-      ];
-      const [hoursByProcess, setHoursByProcess] = useState(null);   // null = not loaded yet
-      const [hoursDraft, setHoursDraft] = useState(null);           // the week being edited
-      const [hoursSaving, setHoursSaving] = useState(false);
-      const [hoursError, setHoursError] = useState('');
+      // Business hours + disposition-tree editors are shared with every Calling process page
+      // (see app/_calling/CallingAdminPanel.js) - both hooks own their own state/CRUD; this
+      // component just supplies processKey/session and renders the matching card. RTO never
+      // renders ProcessDispositionsCard (its own hardcoded connectedOutcomes/unreachableOutcomes
+      // arrays stay put), but NDR's own Call modal disposition picker (ndrDispLevels, below)
+      // reads `disp.processDispositions` directly, so that piece is aliased back to its old
+      // local name rather than only used inside the card.
+      const hours = useBusinessHours(activeProcess, { userRole, isProcessAdmin, showToast });
+      const disp = useProcessDispositions(activeProcess, { googleUser, showToast });
+      const { processDispositions } = disp;
 
       // Same reasoning as the real tab bar's own analogous effect further down: don't leave
       // someone parked on an admin-only shell tab (see placeholderTab above) after a role
@@ -611,256 +610,6 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
           setAgentFilter('ALL');
         }
         showToast(`Role switched to ${newRole}`);
-      };
-
-      // Calling hours: loaded once an admin actually opens the panel that shows them, rather
-       // than on every page load - agents never see this card, so most sessions have no reason
-      // to make the call. /api/admin/* is admin-only server-side, so a non-admin simply gets a
-      // 403 here and the card stays hidden.
-      const loadBusinessHours = useCallback(async () => {
-        try {
-          const r = await fetch('/api/admin/business-hours');
-          if (!r.ok) return;
-          const d = await r.json();
-          const byKey = {};
-          (d.processes || []).forEach(p => { byKey[p.key] = p; });
-          setHoursByProcess(byKey);
-        } catch { /* leave unloaded - the card just won't render */ }
-      }, []);
-
-      useEffect(() => {
-        // Deliberately NOT gated on the active tab: `tab` is declared further down the
-        // component, and naming it in this dependency array read it before initialization -
-        // a temporal-dead-zone ReferenceError that broke the whole page on load, since
-        // dependency arrays are evaluated during render rather than when the effect runs.
-        // Loading once per admin session is cheap enough not to need the gate. isProcessAdmin
-        // included too (was missing - same bug class the Invariants doc section calls out): the
-        // endpoint itself (/api/admin/business-hours) already scopes to whatever the caller
-        // actually administers server-side, so a process admin calling this just gets their own
-        // process's hours back, not an error - the client just never asked before.
-        if ((userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin) && hoursByProcess === null) {
-          loadBusinessHours();
-        }
-      }, [userRole, isProcessAdmin, hoursByProcess, loadBusinessHours]);
-
-      // Editing starts from whatever the server returned for the process currently selected in
-      // the header, so the card always shows the hours for the process being administered.
-      useEffect(() => {
-        if (hoursByProcess && activeProcess && hoursByProcess[activeProcess]) {
-          setHoursDraft(JSON.parse(JSON.stringify(hoursByProcess[activeProcess].week)));
-          setHoursError('');
-        }
-      }, [hoursByProcess, activeProcess]);
-
-      const saveBusinessHours = async () => {
-        if (!hoursDraft || !activeProcess) return;
-        setHoursSaving(true);
-        setHoursError('');
-        try {
-          const r = await fetch('/api/admin/business-hours', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ processKey: activeProcess, week: hoursDraft }),
-          });
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) {
-            // The server validates each day (close after open, both-or-neither) and returns a
-            // readable reason - surfaced as-is so the admin can correct the actual field.
-            setHoursError(d.error || `Could not save (${r.status})`);
-            return;
-          }
-          const byKey = {};
-          (d.processes || []).forEach(p => { byKey[p.key] = p; });
-          setHoursByProcess(byKey);
-          showToast('🕒 Calling hours saved');
-        } catch (e) {
-          setHoursError(e.message || 'Could not save calling hours');
-        } finally {
-          setHoursSaving(false);
-        }
-      };
-
-      // Per-process disposition TREE (see calling_process_dispositions) - arbitrary nesting,
-      // [{id,label,description,sortOrder,children:[...]}]. Reloaded whenever the
-      // admin switches process, same reasoning as loadProcessAgents above: each process's list
-      // is its own. RTO's disposition options stay the hardcoded connectedOutcomes/
-      // unreachableOutcomes arrays further up and never touch this endpoint - this only backs
-      // a process (NDR today) that has no built-in list of its own.
-      const [processDispositions, setProcessDispositions] = useState(null); // null = not loaded yet
-      const [dispositionsError, setDispositionsError] = useState('');
-      const [savingDisposition, setSavingDisposition] = useState(false);
-      const [newDispLabel, setNewDispLabel] = useState('');
-      const [newDispDesc, setNewDispDesc] = useState('');
-      // Which top-level options are expanded to show their children - a Set of ids, empty by
-      // default (collapsed), same "closed until you open it" convention as the reference UI.
-      const [expandedDispIds, setExpandedDispIds] = useState(() => new Set());
-      // One draft {label, description} per parent id, so "add a child" inputs under two
-      // different expanded parents never share state or clobber each other.
-      const [newChildDrafts, setNewChildDrafts] = useState({});
-
-      const loadDispositions = useCallback(async (processKey) => {
-        if (!processKey) return;
-        setProcessDispositions(null);
-        setDispositionsError('');
-        try {
-          const r = await fetch(`/api/admin/dispositions?process=${encodeURIComponent(processKey)}`);
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) { setDispositionsError(d.error || `Could not load dispositions (${r.status})`); return; }
-          setProcessDispositions(d.dispositions || []);
-        } catch (e) {
-          setDispositionsError(e.message || 'Could not load dispositions');
-        }
-      }, []);
-
-      // Fetched for everyone signed in, same as loadProcessAgents - the endpoint itself 403s a
-      // process the caller doesn't administer, and this stays a lightweight no-op for RTO
-      // (whose disposition list never reads from here) rather than an empty admin-only card.
-      useEffect(() => {
-        if (googleUser?.email) loadDispositions(activeProcess);
-      }, [googleUser, activeProcess, loadDispositions]);
-
-      const toggleDispExpanded = (id) => {
-        setExpandedDispIds((prev) => {
-          const next = new Set(prev);
-          if (next.has(id)) next.delete(id); else next.add(id);
-          return next;
-        });
-      };
-
-      // parentId omitted/null adds a top-level option (reads newDispLabel/newDispDesc); passed
-      // adds a child under that parent instead (reads newChildDrafts[parentId]).
-      const addDisposition = async (parentId) => {
-        const draft = parentId ? (newChildDrafts[parentId] || { label: '', description: '' }) : { label: newDispLabel, description: newDispDesc };
-        const label = draft.label.trim();
-        if (!label) return;
-        setSavingDisposition(true);
-        setDispositionsError('');
-        try {
-          const r = await fetch('/api/admin/dispositions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ processKey: activeProcess, label, description: draft.description.trim(), parentId: parentId || undefined }),
-          });
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) {
-            const msg = d.error || `Could not add option (${r.status})`;
-            setDispositionsError(msg);
-            showToast(`⚠️ ${msg}`);
-            return;
-          }
-          setProcessDispositions(d.dispositions || []);
-          if (parentId) {
-            setNewChildDrafts((prev) => ({ ...prev, [parentId]: { label: '', description: '' } }));
-            setExpandedDispIds((prev) => new Set(prev).add(parentId)); // stay open after adding
-          } else {
-            setNewDispLabel('');
-            setNewDispDesc('');
-          }
-        } catch (e) {
-          const msg = e.message || 'Could not add option';
-          setDispositionsError(msg);
-          showToast(`⚠️ ${msg}`);
-        } finally {
-          setSavingDisposition(false);
-        }
-      };
-
-      // Inline-editable, no separate edit mode: each row's label/description inputs are
-      // uncontrolled (defaultValue, not value) and commit on blur only if actually changed -
-      // matching the reference UI, where Options are plain always-editable fields rather than
-      // needing an Edit click first. patch is whichever of {label, description} changed.
-      const saveDispositionEdit = async (id, patch) => {
-        setSavingDisposition(true);
-        setDispositionsError('');
-        try {
-          const r = await fetch('/api/admin/dispositions', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ processKey: activeProcess, id, ...patch }),
-          });
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) {
-            const msg = d.error || `Could not save (${r.status})`;
-            setDispositionsError(msg);
-            showToast(`⚠️ ${msg}`);
-            return;
-          }
-          setProcessDispositions(d.dispositions || []);
-        } catch (e) {
-          const msg = e.message || 'Could not save disposition';
-          setDispositionsError(msg);
-          showToast(`⚠️ ${msg}`);
-        } finally {
-          setSavingDisposition(false);
-        }
-      };
-
-      const deleteDisposition = async (id) => {
-        setSavingDisposition(true);
-        setDispositionsError('');
-        try {
-          const r = await fetch('/api/admin/dispositions', {
-            method: 'DELETE',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ processKey: activeProcess, id }),
-          });
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) {
-            const msg = d.error || `Could not delete (${r.status})`;
-            setDispositionsError(msg);
-            showToast(`⚠️ ${msg}`);
-            return;
-          }
-          setProcessDispositions(d.dispositions || []);
-        } catch (e) {
-          const msg = e.message || 'Could not delete disposition';
-          setDispositionsError(msg);
-          showToast(`⚠️ ${msg}`);
-        } finally {
-          setSavingDisposition(false);
-        }
-      };
-
-      // Optimistic swap-then-confirm: the reorder feels instant, and reverts to the server's
-      // own order (via loadDispositions) if the request actually fails rather than leaving the
-      // UI showing an order that was never saved. parentId null/omitted reorders the top-level
-      // list; passed, reorders that ONE parent's children only - the two scopes never mix, so
-      // moving a child up/down can't accidentally touch a top-level option's position.
-      const moveDisposition = async (list, index, direction, parentId) => {
-        const swapWith = index + direction;
-        if (swapWith < 0 || swapWith >= list.length) return;
-        const next = [...list];
-        [next[index], next[swapWith]] = [next[swapWith], next[index]];
-        // parentId set: `list` is that ONE parent's children, so only its slot in the tree
-        // needs replacing. parentId omitted: `list` IS the top-level array already (each item
-        // carries its own .children), so the swapped copy is the complete next tree as-is.
-        setProcessDispositions((prevTree) =>
-          parentId ? prevTree.map((p) => (p.id === parentId ? { ...p, children: next } : p)) : next
-        );
-        setSavingDisposition(true);
-        try {
-          const r = await fetch('/api/admin/dispositions', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ processKey: activeProcess, orderedIds: next.map((x) => x.id), parentId: parentId || undefined }),
-          });
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) {
-            const msg = d.error || `Could not reorder (${r.status})`;
-            setDispositionsError(msg);
-            showToast(`⚠️ ${msg}`);
-            loadDispositions(activeProcess);
-            return;
-          }
-          setProcessDispositions(d.dispositions || []);
-        } catch (e) {
-          const msg = e.message || 'Could not reorder';
-          setDispositionsError(msg);
-          showToast(`⚠️ ${msg}`);
-          loadDispositions(activeProcess);
-        } finally {
-          setSavingDisposition(false);
-        }
       };
 
       // Cross-Tab & Multi-Client Real-Time Status & Activity Broadcast Sync. Namespaced per
@@ -2591,285 +2340,6 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
         );
       };
 
-      const renderCallingHoursCard = () => (
-        <>
-                {/* ═══ CALLING HOURS ═══
-                    Per weekday, for the process selected in the header - a single open/close
-                    pair for the whole week couldn't express "Friday closes early" or "Sunday
-                    closed". Leaving both boxes of a day blank means closed. These are the same
-                    values scripts/assign_leads.py reads, so changing them here genuinely stops
-                    and starts automatic lead hand-out; it does NOT stop an agent recording a
-                    call they've already made. */}
-                {hoursDraft && currentProcess && (
-                  <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
-                    <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
-                      <div className="flex items-start gap-3">
-                        <span className="h-9 w-9 shrink-0 rounded-xl bg-emerald-950/60 border border-emerald-800/60 flex items-center justify-center text-emerald-300">🕒</span>
-                        <div>
-                          <h2 className="text-lg font-bold text-zinc-100">
-                            Calling Hours &mdash; {currentProcess.label.replace(/^Process:\s*/, '')}
-                          </h2>
-                          <p className="text-[13px] text-zinc-500">
-                            Automatic lead hand-out only runs inside these hours ({(hoursByProcess?.[activeProcess]?.timezone) || 'IST'}).
-                            Leave a day blank to close it. Agents can still record calls they&apos;ve already made at any time.
-                            {hoursByProcess?.[activeProcess]?.isDefault && (
-                              <span className="text-amber-400"> Currently using defaults &mdash; not yet set by an admin.</span>
-                            )}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => setHoursDraft(JSON.parse(JSON.stringify(hoursByProcess[activeProcess].week)))}
-                          disabled={hoursSaving}
-                          className="h-8 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[13px] font-semibold transition-colors disabled:opacity-40"
-                        >
-                          Reset
-                        </button>
-                        <button
-                          onClick={saveBusinessHours}
-                          disabled={hoursSaving}
-                          className="h-8 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-50"
-                        >
-                          {hoursSaving ? 'Saving…' : 'Save hours'}
-                        </button>
-                      </div>
-                    </div>
-
-                    {hoursError && (
-                      <p className="mt-3 text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2">
-                        {hoursError}
-                      </p>
-                    )}
-
-                    <div className="mt-4 space-y-1.5">
-                      {BUSINESS_HOUR_DAY_LABELS.map(([key, label]) => {
-                        const day = hoursDraft[key] || { open: '', close: '' };
-                        const closed = !day.open && !day.close;
-                        const setDay = (field, value) =>
-                          setHoursDraft(p => ({ ...p, [key]: { ...(p[key] || { open: '', close: '' }), [field]: value } }));
-                        return (
-                          <div key={key} className="flex items-center justify-between gap-3 rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-4 py-2.5">
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <span className="text-[13px] font-semibold text-zinc-200 w-24">{label}</span>
-                              {closed && <span className="text-[11px] font-bold uppercase tracking-wide text-zinc-500 bg-zinc-800/80 border border-zinc-700/60 rounded-md px-2 py-0.5">Closed</span>}
-                            </div>
-                            <div className="flex items-center gap-3 shrink-0">
-                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
-                                Open:
-                                <input
-                                  type="time"
-                                  value={day.open || ''}
-                                  onChange={e => setDay('open', e.target.value)}
-                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                                />
-                              </label>
-                              <label className="flex items-center gap-1.5 text-[12px] text-zinc-500">
-                                Close:
-                                <input
-                                  type="time"
-                                  value={day.close || ''}
-                                  onChange={e => setDay('close', e.target.value)}
-                                  className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                                />
-                              </label>
-                              <button
-                                onClick={() => setHoursDraft(p => ({ ...p, [key]: { open: '', close: '' } }))}
-                                title="Close this day"
-                                className="h-7 px-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[11px] font-semibold transition-colors"
-                              >
-                                Clear
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-        </>
-      );
-
-      // One row, reused at every depth (depth 0 = top-level option, depth 1 = child, depth 2 =
-      // grandchild, ...). Label/description are uncontrolled (defaultValue) and commit on blur
-      // only if changed, so typing never round-trips to the server per keystroke - see
-      // saveDispositionEdit's comment. `list` is whichever sibling array d belongs to (the
-      // top-level array, or one parent's .children), needed for the up/down bounds and to
-      // send the right reorder scope.
-      const renderDispRow = (d, list, index, parentId, depth) => (
-        <div key={d.id} className="rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-3 py-2" style={depth ? { marginLeft: depth * 32 } : undefined}>
-          <div className="flex items-center gap-2">
-            <span className="text-zinc-600 select-none text-[13px]" title="Reorder with the ↑↓ buttons">⋮⋮</span>
-            <span className="inline-flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 rounded-lg pl-2 pr-1 py-1 shrink-0 w-[220px]">
-              <span className="text-indigo-400 text-[12px] shrink-0">🏷️</span>
-              <input
-                key={`label-${d.id}`}
-                defaultValue={d.label}
-                maxLength={120}
-                onBlur={(e) => {
-                  const v = e.target.value.trim();
-                  if (!v) { e.target.value = d.label; return; }
-                  if (v !== d.label) saveDispositionEdit(d.id, { label: v });
-                }}
-                className="min-w-0 flex-1 bg-transparent text-[13px] text-zinc-200 focus:outline-none"
-              />
-            </span>
-            <button
-              onClick={() => toggleDispExpanded(d.id)}
-              className="shrink-0 h-7 px-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-emerald-400 text-[11px] font-bold transition-colors flex items-center gap-1"
-              title={expandedDispIds.has(d.id) ? 'Collapse' : 'Expand to view/add child options'}
-            >
-              {d.children.length} {d.children.length === 1 ? 'child' : 'children'}
-              <span>{expandedDispIds.has(d.id) ? '⌄' : '›'}</span>
-            </button>
-            <input
-              key={`desc-${d.id}`}
-              defaultValue={d.description}
-              placeholder="Description (optional)"
-              onBlur={(e) => {
-                const v = e.target.value.trim();
-                if (v !== d.description) saveDispositionEdit(d.id, { description: v });
-              }}
-              className="min-w-0 flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-            />
-            <div className="flex items-center gap-1 shrink-0">
-              <button
-                onClick={() => moveDisposition(list, index, -1, parentId)}
-                disabled={savingDisposition || index === 0}
-                title="Move up"
-                className="h-7 w-7 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-30"
-              >
-                ↑
-              </button>
-              <button
-                onClick={() => moveDisposition(list, index, 1, parentId)}
-                disabled={savingDisposition || index === list.length - 1}
-                title="Move down"
-                className="h-7 w-7 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-30"
-              >
-                ↓
-              </button>
-              <button
-                onClick={() => {
-                  const childNote = d.children.length ? ` and its ${d.children.length} child option(s)` : '';
-                  if (window.confirm(`Delete "${d.label}"${childNote}?`)) deleteDisposition(d.id);
-                }}
-                disabled={savingDisposition}
-                title="Delete"
-                className="h-7 w-7 rounded-lg bg-rose-950/60 hover:bg-rose-900/60 text-rose-300 text-[12px] font-semibold transition-colors"
-              >
-                🗑
-              </button>
-            </div>
-          </div>
-        </div>
-      );
-
-      // Recursive: renders d's own row, then (if expanded) every child at depth+1 plus an
-      // "add child" input scoped to d - so any option, at any depth, can grow its own
-      // sub-options the same way a top-level one does.
-      const renderDispNode = (d, list, index, parentId, depth) => (
-        <div key={d.id}>
-          {renderDispRow(d, list, index, parentId, depth)}
-          {expandedDispIds.has(d.id) && (
-            <div className="mt-1.5 space-y-1.5">
-              {d.children.map((c, ci) => renderDispNode(c, d.children, ci, d.id, depth + 1))}
-              <div className="flex items-center gap-2" style={{ marginLeft: (depth + 1) * 32 }}>
-                <span className="w-[13px]" />
-                <input
-                  value={(newChildDrafts[d.id] || {}).label || ''}
-                  onChange={(e) => setNewChildDrafts((prev) => ({ ...prev, [d.id]: { label: e.target.value, description: (prev[d.id] || {}).description || '' } }))}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && (newChildDrafts[d.id] || {}).label?.trim()) addDisposition(d.id); }}
-                  placeholder="New child option"
-                  maxLength={120}
-                  className="w-[220px] bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                />
-                <input
-                  value={(newChildDrafts[d.id] || {}).description || ''}
-                  onChange={(e) => setNewChildDrafts((prev) => ({ ...prev, [d.id]: { label: (prev[d.id] || {}).label || '', description: e.target.value } }))}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && (newChildDrafts[d.id] || {}).label?.trim()) addDisposition(d.id); }}
-                  placeholder="Description (optional)"
-                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                />
-                <button
-                  onClick={() => addDisposition(d.id)}
-                  disabled={savingDisposition || !(newChildDrafts[d.id] || {}).label?.trim()}
-                  className="h-8 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-50 shrink-0"
-                >
-                  + Add child
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      );
-
-      // Admin-defined disposition list for a process with no hardcoded one of its own (see
-      // calling_process_dispositions) - "highly customisable" per the ask: an admin can add,
-      // rename, describe, nest (any depth), reorder, and remove options freely, with no
-      // seeded default and no fixed count. Rendered only from the Admin Panel of a process
-      // that isn't `implemented` (currentProcess.implemented is false) - RTO keeps using its
-      // own connectedOutcomes/unreachableOutcomes arrays untouched and never renders this card.
-      const renderProcessDispositionsCard = () => (
-        <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
-          <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
-            <div className="flex items-start gap-3">
-              <span className="h-9 w-9 shrink-0 rounded-xl bg-violet-950/60 border border-violet-800/60 flex items-center justify-center text-violet-300">🏷️</span>
-              <div>
-                <h2 className="text-lg font-bold text-zinc-100">
-                  Disposition List{currentProcess ? ` — ${currentProcess.label.replace(/^Process:\s*/, '')}` : ''}
-                </h2>
-                <p className="text-[13px] text-zinc-500">
-                  What an agent may select when disposing a lead on this process. Unlike RTO Calling
-                  (a fixed, built-in list), this one starts empty - add whatever this process needs.
-                  Expand an option to give it its own child reasons.
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={() => addDisposition()}
-              disabled={savingDisposition || !newDispLabel.trim()}
-              className="h-8 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-50 shrink-0"
-            >
-              {savingDisposition ? 'Adding…' : '+ Add Option'}
-            </button>
-          </div>
-
-          {dispositionsError && (
-            <p className="mt-3 text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2">
-              {dispositionsError}
-            </p>
-          )}
-
-          <div className="mt-4 space-y-1.5">
-            {processDispositions === null ? (
-              <p className="text-[13px] text-zinc-500">Loading…</p>
-            ) : processDispositions.length === 0 ? (
-              <p className="text-[13px] text-zinc-500">No options added yet - use &quot;+ Add Option&quot; below to add the first one.</p>
-            ) : processDispositions.map((d, i) => renderDispNode(d, processDispositions, i, null, 0))}
-          </div>
-
-          <div className="mt-4 pt-4 border-t border-zinc-800/60 flex items-center gap-2">
-            <input
-              value={newDispLabel}
-              onChange={e => setNewDispLabel(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && newDispLabel.trim()) addDisposition(); }}
-              placeholder="New top-level option"
-              maxLength={120}
-              className="w-[220px] bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-            />
-            <input
-              value={newDispDesc}
-              onChange={e => setNewDispDesc(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && newDispLabel.trim()) addDisposition(); }}
-              placeholder="Description (optional)"
-              className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-            />
-          </div>
-        </div>
-      );
-
       const tabs = [
         { key: 'overview', label: userRole === 'Agent' && !isProcessAdmin ? '📊 My Overview & Team Metrics' : '📊 Overview (Agents Data)', count: effectiveAgentRoster.length },
         { key: 'all', label: 'All Leads (Disposed)', count: dispCount },
@@ -3333,8 +2803,8 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
                     {placeholderTab === 'admin' && canAdminTab ? (
                       <div className="space-y-6">
                         {renderTeamRosterTable()}
-                        {renderCallingHoursCard()}
-                        {renderProcessDispositionsCard()}
+                        <CallingHoursCard processKey={activeProcess} processLabel={currentProcess?.label.replace(/^Process:\s*/, '')} hours={hours} />
+                        <ProcessDispositionsCard processLabel={currentProcess?.label.replace(/^Process:\s*/, '')} disp={disp} />
                       </div>
                     ) : (
                       <div className="max-w-2xl space-y-4">
@@ -3446,8 +2916,8 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
                     {ndrTab === 'admin' && canAdminTab && (
                       <div className="space-y-6">
                         {renderTeamRosterTable()}
-                        {renderCallingHoursCard()}
-                        {renderProcessDispositionsCard()}
+                        <CallingHoursCard processKey={activeProcess} processLabel={currentProcess?.label.replace(/^Process:\s*/, '')} hours={hours} />
+                        <ProcessDispositionsCard processLabel={currentProcess?.label.replace(/^Process:\s*/, '')} disp={disp} />
                       </div>
                     )}
                   </div>
@@ -4501,7 +3971,7 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
 
                 {renderTeamRosterTable()}
 
-                {renderCallingHoursCard()}
+                <CallingHoursCard processKey={activeProcess} processLabel={currentProcess?.label.replace(/^Process:\s*/, '')} hours={hours} />
 
                 {(() => {
                   return (
