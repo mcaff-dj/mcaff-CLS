@@ -539,7 +539,11 @@ async function ensurePgSchema() {
   `;
   // At most one live cycle per order - same partial-unique-index pattern as RTO's
   // lead_assignments_order_id_current_key and NDR's ndr_lead_assignments_awb_current_key.
-  await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS escalation_lead_assignments_parent_order_current_key ON escalation_lead_assignments (parent_order) WHERE reassigned_away_at IS NULL`;
+  // "Live" means neither reassigned nor resolved - reassigned_away_at IS NULL AND
+  // resolved_at IS NULL - so a fresh re-escalation after resolution gets a new row, not
+  // a silent conflict with the old one.
+  await pgSql`DROP INDEX IF EXISTS escalation_lead_assignments_parent_order_current_key`;
+  await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS escalation_lead_assignments_parent_order_current_key ON escalation_lead_assignments (parent_order) WHERE reassigned_away_at IS NULL AND resolved_at IS NULL`;
   } catch (e) {
     // Postgres codes for "already exists" (duplicate_column/duplicate_table/duplicate_object)
     // - a benign race, not a real failure: every statement above is its own ADD COLUMN IF NOT
@@ -980,29 +984,31 @@ async function disposeNdrLead(awbNumber, disposition, agentRemarks) {
 // preserved (matches RTO/NDR's "reassigned_away_at, not overwritten" cycle model) rather than
 // silently mutating email in place. A no-op re-assign to the SAME agent (e.g. re-saving the
 // dropdown without changing it) touches nothing, same ON CONFLICT DO NOTHING safety claimNdrLead
-// relies on.
+// relies on. "Live" means neither reassigned nor resolved (reassigned_away_at IS NULL AND
+// resolved_at IS NULL), so a fresh assignment after resolution starts a new cycle.
 async function assignEscalationOrder(parentOrder, email) {
   await ensurePgSchema();
   await pgSql`
     UPDATE escalation_lead_assignments
     SET reassigned_away_at = now()
-    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND email <> ${email}
+    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND resolved_at IS NULL AND email <> ${email}
   `;
   await pgSql`
     INSERT INTO escalation_lead_assignments (parent_order, email)
     VALUES (${parentOrder}, ${email})
-    ON CONFLICT (parent_order) WHERE reassigned_away_at IS NULL DO NOTHING
+    ON CONFLICT (parent_order) WHERE reassigned_away_at IS NULL AND resolved_at IS NULL DO NOTHING
   `;
 }
 
 // Clears an order's live assignment (the queue table's "Clear assignment" action) without
-// assigning it to anyone new - closes the live cycle, leaving its history intact.
+// assigning it to anyone new - closes the live cycle, leaving its history intact. Only touches
+// unresolved rows (resolved rows are already closed and shouldn't be touched).
 async function unassignEscalationOrder(parentOrder) {
   await ensurePgSchema();
   await pgSql`
     UPDATE escalation_lead_assignments
     SET reassigned_away_at = now()
-    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL
+    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND resolved_at IS NULL
   `;
 }
 
