@@ -1013,7 +1013,9 @@ async function unassignEscalationOrder(parentOrder) {
 }
 
 // Stamps a resolution onto the SAME live row assignEscalationOrder created - same relationship
-// disposeNdrLead has to claimNdrLead. Silently a no-op if the order was never assigned to
+// disposeNdrLead has to claimNdrLead. Targets the one row guaranteed unique by the partial
+// index (reassigned_away_at IS NULL AND resolved_at IS NULL), so calling resolve twice on an
+// already-resolved order is safely a no-op. Silently a no-op if the order was never assigned to
 // anyone (WHERE matches zero rows) - resolving an unassigned order still writes to the sheet
 // (the desk's real source of truth) via updateOrder/batchUpdateOrders; this table is only the
 // durable history side, so having nothing to update here is not an error.
@@ -1022,7 +1024,7 @@ async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks
   await pgSql`
     UPDATE escalation_lead_assignments
     SET resolved_at = now(), resolution = ${resolution || null}, agent_remarks = ${agentRemarks || null}
-    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL
+    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND resolved_at IS NULL
   `;
 }
 
