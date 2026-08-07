@@ -9,19 +9,24 @@ const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/se
 const PRESENCE_STATUSES = new Set(['Online', 'Busy', 'OnCall', 'Offline']);
 const GH_REPO = 'mcaff-dj/mcaff-CLS';
 const GH_ASSIGN_WORKFLOW = 'assign-leads.yml';
+// Per-process assign workflow, for the /processPresence path below. Only processes with
+// their own cron-driven assignment script need an entry; rto's own immediate trigger goes
+// through the global /presence path instead (see handlePresence).
+const PROCESS_ASSIGN_WORKFLOW = { ndr: 'assign-ndr-leads.yml' };
 
 // Fires the same assign-leads workflow the 5-minute cron runs, on demand, so an agent
-// who comes online with an empty queue doesn't have to wait up to 5 minutes for the
-// next scheduled pass. Needs a GitHub PAT (Actions: write on this repo only) in
-// GH_ACTIONS_TOKEN - best-effort: if it's not configured, or the dispatch call fails,
-// this silently no-ops and the agent just gets picked up by the next scheduled run
+// who comes online with an empty queue doesn't have to wait for the next scheduled pass
+// (scheduled runs on this repo can lag well past their nominal 5-minute cadence under
+// GitHub's best-effort cron scheduling). Needs a GitHub PAT (Actions: write on this repo
+// only) in GH_ACTIONS_TOKEN - best-effort: if it's not configured, or the dispatch call
+// fails, this silently no-ops and the agent just gets picked up by the next scheduled run
 // instead, so a missing/expired token never blocks the agent from working.
-async function triggerImmediateAssignment() {
+async function triggerImmediateAssignment(workflowFile = GH_ASSIGN_WORKFLOW) {
   const token = process.env.GH_ACTIONS_TOKEN;
   if (!token) return;
   try {
     const resp = await fetch(
-      `https://api.github.com/repos/${GH_REPO}/actions/workflows/${GH_ASSIGN_WORKFLOW}/dispatches`,
+      `https://api.github.com/repos/${GH_REPO}/actions/workflows/${workflowFile}/dispatches`,
       {
         method: 'POST',
         headers: {
@@ -452,6 +457,9 @@ async function handleProcessPresence(req, res) {
   } catch (e) {
     res.status(400).json({ error: e.message || 'Could not update availability' });
     return;
+  }
+  if (body.status === 'Online' && PROCESS_ASSIGN_WORKFLOW[body.processKey]) {
+    triggerImmediateAssignment(PROCESS_ASSIGN_WORKFLOW[body.processKey]).catch(() => {});
   }
   res.status(200).json({ ok: true, processKey: body.processKey, status: body.status });
 }
