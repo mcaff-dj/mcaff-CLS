@@ -6,7 +6,7 @@ const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPe
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
 
-const PRESENCE_STATUSES = new Set(['Online', 'Busy', 'Offline']);
+const PRESENCE_STATUSES = new Set(['Online', 'Busy', 'OnCall', 'Offline']);
 const GH_REPO = 'mcaff-dj/mcaff-CLS';
 const GH_ASSIGN_WORKFLOW = 'assign-leads.yml';
 

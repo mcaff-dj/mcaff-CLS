@@ -630,7 +630,8 @@ async function logAccess(userId, email, cardKey, ip) {
   return logEvent(userId, email, cardKey, 'view', null, ip);
 }
 
-// status: 'Online' | 'Busy' | 'Offline'. email/name always come from the caller's own
+// status: 'Online' | 'Busy' | 'OnCall' | 'Offline' (see CALLING_STATUSES above for why
+// 'Busy' and 'OnCall' are two different values). email/name always come from the caller's own
 // session, never from client-supplied data, so an agent can only ever set their own
 // presence - not spoof anyone else's (the gap that made the old Supabase anon-key
 // design insecure).
@@ -1124,7 +1125,12 @@ async function setCallingBusinessHours(processKey, week, updatedBy) {
 }
 
 // ── Per-process calling roster ─────────────────────────────────────────────────────────
-const CALLING_STATUSES = ['Online', 'Busy', 'Offline'];
+// 'Busy' (UI label "On Break") predates this file's own naming conventions - kept as-is
+// rather than renamed, since it's already load-bearing history in agent_presence_log and
+// getAgentPresenceLogSummary's break-time math below. The new "Busy" status the UI actually
+// shows today (an agent currently on a call, not on a break) is a DIFFERENT status, so it
+// gets its own distinct value, 'OnCall', to avoid colliding with the existing one.
+const CALLING_STATUSES = ['Online', 'Busy', 'OnCall', 'Offline'];
 
 // Everyone invited to a process, with their per-process status and quota.
 //

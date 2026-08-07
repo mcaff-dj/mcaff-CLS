@@ -884,7 +884,7 @@ const localStorage = typeof window !== 'undefined'
       const [agentFilter, setAgentFilter] = useState('ALL');
       const [agentStatus, setAgentStatus] = useState(()=>localStorage.getItem('rto_agent_status')||'Online');
       // Team Roster tab: filters the roster table by an agent's live status (Online /
-      // On Break / Offline) - purely a client-side view filter, doesn't touch the server.
+      // On Break / Busy / Offline) - purely a client-side view filter, doesn't touch the server.
       const [rosterStatusFilter, setRosterStatusFilter] = useState('All');
 
       // Real presence from Postgres (agent_presence table), keyed by lowercase email -
@@ -1351,7 +1351,7 @@ const localStorage = typeof window !== 'undefined'
       const [newAgentEmail, setNewAgentEmail] = useState('');
       const [newAgentRole, setNewAgentRole] = useState('Agent');
 
-      // Manually set any single agent's status (Online / On Break / Offline) from the roster
+      // Manually set any single agent's status (Online / On Break / Busy / Offline) from the roster
       // table - syncs to the server (agent_presence) for every row, not just your own: the
       // server honors a client-supplied target email only for an admin session (see
       // api/auth/[action].js's presence handler), which is exactly who can reach this table.
@@ -1431,7 +1431,7 @@ const localStorage = typeof window !== 'undefined'
           agent: googleUser.email,
           agentName: googleUser.name || googleUser.email.split('@')[0],
           action: `Status → ${s}`,
-          type: s === 'Online' ? 'online' : s === 'Busy' ? 'break' : 'offline'
+          type: s === 'Online' ? 'online' : s === 'Busy' ? 'break' : s === 'OnCall' ? 'busy' : 'offline'
         };
 
         setActivityLogs(p => {
@@ -2678,9 +2678,14 @@ const localStorage = typeof window !== 'undefined'
         { value: 100, label: '100 per page' },
       ];
 
+      // value 'Busy' predates the "On Break" label and is kept as-is (see CALLING_STATUSES'
+      // comment in api/_lib/db.js) - the new "Busy" status below (an agent currently on a
+      // call) is a genuinely different state, so it gets its own value, 'OnCall', rather than
+      // colliding with the existing one.
       const statusOptions = [
         { value: 'Online', label: 'Online', icon: '🟢' },
         { value: 'Busy', label: 'On Break', icon: '🟡' },
+        { value: 'OnCall', label: 'Busy', icon: '🔴' },
         { value: 'Offline', label: 'Offline', icon: '⚪' },
       ];
 
@@ -3005,7 +3010,7 @@ const localStorage = typeof window !== 'undefined'
                             <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-600 to-violet-700 flex items-center justify-center text-white font-bold text-[11px] shadow">
                               {a.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
                             </div>
-                            <span className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-zinc-900 ${a.status === 'Online' ? 'bg-emerald-500' : a.status === 'Busy' ? 'bg-amber-400' : 'bg-zinc-500'}`}></span>
+                            <span className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-zinc-900 ${a.status === 'Online' ? 'bg-emerald-500' : a.status === 'Busy' ? 'bg-amber-400' : a.status === 'OnCall' ? 'bg-rose-500' : 'bg-zinc-500'}`}></span>
                           </div>
                           <div>
                             <p className="font-semibold text-zinc-100">{a.name}</p>
@@ -5117,7 +5122,7 @@ const localStorage = typeof window !== 'undefined'
                                   </p>
                                 )}
                               </div>
-                              <Badge color={l.type === 'online' ? 'green' : l.type === 'break' ? 'amber' : l.type === 'refund' ? 'green' : 'indigo'}>{l.type}</Badge>
+                              <Badge color={l.type === 'online' ? 'green' : l.type === 'break' ? 'amber' : l.type === 'busy' ? 'red' : l.type === 'refund' ? 'green' : 'indigo'}>{l.type}</Badge>
                             </div>
                           ))}
                         </div>
