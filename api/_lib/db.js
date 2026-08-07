@@ -21,7 +21,19 @@ function getPgPool() {
   if (pgPool) return pgPool;
   const conn = process.env.POSTGRES_URL;
   if (!conn) throw new Error('Missing POSTGRES_URL env var');
-  pgPool = new PgPool({ connectionString: conn, ssl: { rejectUnauthorized: false } });
+  // Supabase's pooler runs this project in session mode, capped at pool_size: 15 total
+  // concurrent connections - but `pg`'s own default `max` (10) is PER POOL INSTANCE, and this
+  // pool is a per-Lambda-container singleton. Lambda scales by running several concurrent
+  // containers under load, each getting its own pool - a handful of warm containers at the
+  // default max alone exceeds 15 and starts throwing EMAXCONNSESSION. Capped low enough that
+  // even quite a few concurrent containers stay under the ceiling; idleTimeoutMillis releases
+  // a container's connections quickly once traffic quiets down instead of holding them open.
+  pgPool = new PgPool({
+    connectionString: conn,
+    ssl: { rejectUnauthorized: false },
+    max: 3,
+    idleTimeoutMillis: 10000,
+  });
   return pgPool;
 }
 // Same sql`...` tagged-template calling convention every call site below already
