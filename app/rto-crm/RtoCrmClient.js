@@ -2085,8 +2085,17 @@ const localStorage = typeof window !== 'undefined'
         }
       },[googleUser,userRole,showToast]);
 
-      useEffect(()=>{sync(true);},[]);
-      useEffect(()=>{const t=setInterval(()=>sync(true),60000);return()=>clearInterval(t);},[sync]);
+      // Only while RTO is the active process - same reasoning as NDR's own sync below (its
+      // sheet/permissions are a separate API route that has no reason to be hit while someone's
+      // looking at NDR). Before this gate, an NDR-only agent's browser polled RTO's sheet every
+      // 60s forever regardless of which process they were actually viewing, 403ing every time
+      // (they never held the RTO card/tab) and spamming the console indefinitely.
+      useEffect(()=>{ if(activeProcess==='rto') sync(true); },[activeProcess,sync]);
+      useEffect(()=>{
+        if(activeProcess!=='rto') return;
+        const t=setInterval(()=>sync(true),60000);
+        return()=>clearInterval(t);
+      },[activeProcess,sync]);
 
       // NDR's own sync - same backoff-on-failure shape as RTO's sync() above, but only ever
       // polls while NDR is the active process (its sheet is a separate API route/spreadsheet
