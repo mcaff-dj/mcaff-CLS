@@ -15,6 +15,7 @@ import CALLING_PROCESSES from '../../api/_lib/callingProcesses.json';
 import { safeStorage as localStorage, startOfDay, isDateInScope, scopeToDateBounds, normalizeOrderKey, isLeadDateInScope, istMinutesSinceMidnightClient, istDayKeyClient, formatTimeOfDay, formatBreakMinutes, formatFrt, formatPct, postJsonWithRetry } from '../_calling/util';
 import { useCallingSession, STATUS_OPTIONS, ROSTER_STATUS_OPTIONS, ROLE_OPTIONS } from '../_calling/useCallingSession';
 import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
+import { CallingShell } from '../_calling/CallingShell';
 import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, DownloadIcon, ChevronDown, UserIcon, CalendarIcon, CreditCardIcon, ChatIcon, ShieldIcon, SparklesIcon, CustomSelect, MultiSelectDropdown, Badge, Overlay, EmptyState } from '../_calling/ui';
 
 // Selected-card tone classes for the NDR Call modal's disposition picker (see saveNdrDisposition
@@ -2634,105 +2635,30 @@ const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-in
       return(
         <div className="min-h-screen flex flex-col bg-[#09090b]">
 
-          {/* ═══ CLEAN TOP UTILITY HEADER ═══ */}
-          <header className="sticky top-0 z-30 bg-[#09090b]/95 backdrop-blur-xl border-b border-zinc-800/80">
-            <div className="max-w-[1440px] mx-auto px-3 sm:px-5 min-h-13 py-2 flex items-center justify-between flex-wrap gap-2 sm:gap-4">
-
-              {/* Header Title & Branding */}
-              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-                <div className="w-8 h-8 shrink-0 rounded-xl bg-gradient-to-br from-indigo-600 to-violet-700 flex items-center justify-center text-white font-extrabold text-xs shadow-md shadow-indigo-950/50">
-                  RTO
-                </div>
-                <div className="min-w-0">
-                  <h1 className="text-sm font-extrabold text-zinc-100 tracking-tight flex items-center gap-2 truncate">
-                    <span className="truncate">RTO Support Command Center</span>
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
-                  </h1>
-                  <p className="text-[11px] text-zinc-500 font-mono hidden sm:flex items-center gap-1.5">
-                    Last sync: {activeProcess==='ndr' ? ndrLastSync : lastSync}
-                    {(activeProcess==='ndr' ? ndrSyncError : syncError) && (
-                      <span className="text-rose-400 font-sans font-semibold" title={activeProcess==='ndr' ? ndrSyncError : syncError}>
-                        ⚠ Sync failed — showing cached data, retrying…
-                      </span>
-                    )}
-                  </p>
-                </div>
+          <CallingShell
+            logoLabel="RTO"
+            title="RTO Support Command Center"
+            lastSync={activeProcess==='ndr' ? ndrLastSync : lastSync}
+            syncing={activeProcess==='ndr' ? ndrSyncing : isSyncing}
+            syncError={activeProcess==='ndr' ? ndrSyncError : syncError}
+            onSync={() => activeProcess==='ndr' ? syncNdr(false) : sync(false)}
+            session={session}
+            onSetStatus={handleSetStatus}
+            onSwitchRole={handleSwitchRole}
+            rightSlot={<>
+              <div className="relative hidden lg:block">
+                <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500"/>
+                <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search orders, remarks…" className="w-48 pl-8 pr-3 py-1.5 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/50 transition-all"/>
               </div>
-
-              {/* Header Controls: Search, Sync, Role Switcher, Status */}
-              <div className="flex items-center gap-1.5 sm:gap-2.5 flex-wrap justify-end">
-                <div className="relative hidden lg:block">
-                  <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500"/>
-                  <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search orders, remarks…" className="w-48 pl-8 pr-3 py-1.5 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/50 transition-all"/>
-                </div>
-                <button onClick={()=>activeProcess==='ndr'?syncNdr(false):sync(false)} disabled={activeProcess==='ndr'?ndrSyncing:isSyncing} className="h-8 px-2.5 sm:px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors disabled:opacity-50 shrink-0" title={`Refresh ${activeProcess==='ndr'?'NDR':'RTO'} data`}>
-                  <RefreshIcon className={(activeProcess==='ndr'?ndrSyncing:isSyncing)?'animate-spin text-indigo-400':''}/>
-                  <span className="hidden md:inline">{(activeProcess==='ndr'?ndrSyncing:isSyncing)?'Syncing…':'Refresh'}</span>
-                </button>
-
-                {/* Process switcher - which calling process this page is showing (see PROCESSES). */}
-                <CustomSelect
-                  value={activeProcess}
-                  onChange={setActiveProcess}
-                  options={processOptions}
-                  className="shrink-0"
-                />
-
-                {/* UI Role Switcher - hidden for genuine Agents, who have no legitimate
-                    reason to switch into Admin/Team Lead view (handleSwitchRole is a plain
-                    client-side setUserRole with no server-side check, so this is the only
-                    gate). Gated on the underlying account, NOT on the current userRole -
-                    otherwise a real admin who switches into "Agent" view to preview it would
-                    lose the only control that switches them back.
-
-                    Now keyed on the session's own isAdmin (users.is_admin, re-read from the
-                    database on every request) instead of a hardcoded vighnesh|vikash email
-                    match. That match was both too narrow and self-defeating: a genuine admin
-                    whose name isn't in it - soumya.shah, for one - could never reach the admin
-                    panel at all, and an admin with a stale 'Agent' in localStorage had no way
-                    back, because the switcher that fixes it was the thing being hidden. */}
-                {sessionIsAdmin && (
-                  <CustomSelect
-                    value={userRole}
-                    onChange={handleSwitchRole}
-                    options={roleOptions}
-                    icon={ShieldIcon}
-                    className="shrink-0"
-                  />
-                )}
-
-                {/* Custom Status Dropdown */}
-                <CustomSelect
-                  value={agentStatus}
-                  onChange={handleSetStatus}
-                  options={statusOptions}
-                  className="shrink-0"
-                />
-              </div>
-            </div>
-          </header>
-
-          {/* ═══ TOAST ═══ */}
-          {toast&&<div className="fixed top-16 right-5 z-50 animate-slideUp"><div className="px-4 py-2.5 rounded-xl bg-zinc-800/90 text-zinc-100 border border-zinc-700 text-[13px] shadow-2xl flex items-center gap-2.5 backdrop-blur-md"><CheckIcon className="text-emerald-400 shrink-0"/>{toast}</div></div>}
-
-          {/* ═══ NEW VERSION BANNER — this tab is running stale JS, a newer deploy exists ═══ */}
-          {updateAvailable && (
-            <div className="bg-amber-950/95 backdrop-blur-xl border-b border-amber-800/60">
-              <div className="max-w-[1440px] mx-auto px-5 py-2 flex items-center justify-between gap-3">
-                <span className="text-[13px] text-amber-200 font-medium flex items-center gap-2">
-                  <RefreshIcon className="text-amber-400 shrink-0" />
-                  A newer version of this app is available. Refresh to make sure your leads sync correctly.
-                </span>
-                <button
-                  type="button"
-                  onClick={() => window.location.reload()}
-                  className="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-amber-950 text-[12px] font-bold transition-colors shadow-xs shrink-0"
-                >
-                  Refresh Now
-                </button>
-              </div>
-            </div>
-          )}
+              {/* Process switcher - which calling process this page is showing (see PROCESSES). */}
+              <CustomSelect
+                value={activeProcess}
+                onChange={setActiveProcess}
+                options={processOptions}
+                className="shrink-0"
+              />
+            </>}
+          />
 
           {/* ═══ MAIN WORKSPACE ═══ */}
           <main className="flex-1 max-w-[1440px] w-full mx-auto px-5 py-5 space-y-5">
