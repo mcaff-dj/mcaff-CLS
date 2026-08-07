@@ -17,9 +17,14 @@ const {
   getEligibleOrders, updateOrder, batchUpdateOrders, getSheetIndex,
 } = require('../_lib/escalationSheet');
 const { CSV_HEADERS, parseCSV, toCSV } = require('../_lib/escalationCsv');
+const {
+  getCallingProcessAgents, assignEscalationOrder, unassignEscalationOrder,
+  resolveEscalationAssignment, getEscalationAssignments,
+} = require('../_lib/db');
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'escalation';
+const PROCESS_KEY = 'escalation';
 
 function checkAccess(session) {
   if (!session) return 'Not authenticated';
@@ -28,25 +33,6 @@ function checkAccess(session) {
   if (Array.isArray(tabs) && tabs.length && !tabs.includes(TAB_KEY)) return 'You do not have access to Escalation.';
   return null;
 }
-
-// Static roster for the assignment picker. Carried over from the standalone app's
-// pages/api/agents.js as-is - the real roster lives in calling_agent_process (see
-// /api/admin/calling-agents), and wiring this desk onto it is follow-up work; until then this
-// list only labels an assignment chip and grants nothing.
-const AGENTS = [
-  { id: 'agent_1', name: 'Priya Sharma', email: 'priya@company.com', avatar: 'PS' },
-  { id: 'agent_2', name: 'Rahul Verma', email: 'rahul@company.com', avatar: 'RV' },
-  { id: 'agent_3', name: 'Anita Gupta', email: 'anita@company.com', avatar: 'AG' },
-  { id: 'agent_4', name: 'Karan Mehta', email: 'karan@company.com', avatar: 'KM' },
-  { id: 'agent_5', name: 'Sneha Pillai', email: 'sneha@company.com', avatar: 'SP' },
-];
-
-// Row -> agent assignment. In-memory, exactly as in the standalone app: it is a UI convenience
-// (who is looking at what right now), not access control and not durable - a Lambda cold start
-// or a second concurrent instance starts empty. `global` keeps it alive across the module
-// re-evaluation a dev-server hot reload causes. Persisting this belongs in the sheet or
-// lead_assignments alongside the rest of the port's follow-up work.
-const assignmentMap = global._escalationAssignmentMap || (global._escalationAssignmentMap = {});
 
 // Only statuses that need NO replacement order/AWB can be bulk-applied - anything else has to be
 // filled in per row, where the form can require the new order id/AWB.
@@ -66,7 +52,7 @@ const handler = async (req, res) => {
   try {
     if (action === 'agents') {
       if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
-      return res.status(200).json({ agents: AGENTS });
+      return res.status(200).json({ agents: await getCallingProcessAgents(PROCESS_KEY) });
     }
 
     if (action === 'orders') {
@@ -75,32 +61,48 @@ const handler = async (req, res) => {
     }
 
     if (action === 'assign') {
-      if (req.method === 'GET') return res.status(200).json({ assignments: assignmentMap });
+      if (req.method === 'GET') {
+        const history = await getEscalationAssignments();
+        const { byParent } = await getSheetIndex();
+        const assignments = {};
+        history.forEach((r) => {
+          if (r.reassignedAwayAt || r.resolvedAt) return; // not a live cycle
+          const rowNumber = byParent.get(String(r.parentOrder).trim().toLowerCase());
+          if (rowNumber != null) assignments[rowNumber] = { agentId: r.email };
+        });
+        return res.status(200).json({ assignments });
+      }
       if (req.method === 'POST') {
-        const { rowNumber, agentId, agentName } = body;
-        if (!rowNumber) return res.status(400).json({ error: 'rowNumber required' });
-        if (!agentId) delete assignmentMap[rowNumber];
-        else assignmentMap[rowNumber] = { agentId, agentName: agentName || agentId };
-        return res.status(200).json({ ok: true, assignments: assignmentMap });
+        const { rowNumber, parentOrder, agentId } = body;
+        if (!rowNumber || !parentOrder) return res.status(400).json({ error: 'rowNumber and parentOrder are required' });
+        if (!agentId) await unassignEscalationOrder(parentOrder);
+        else await assignEscalationOrder(parentOrder, agentId);
+        return res.status(200).json({ ok: true });
       }
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
+    if (action === 'assignments') {
+      if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+      return res.status(200).json({ assignments: await getEscalationAssignments() });
+    }
+
     if (action === 'update') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-      const { rowNumber, newOrderId, newAwb, newStatus, notes } = body;
+      const { rowNumber, parentOrder, newOrderId, newAwb, newStatus, notes } = body;
       if (!rowNumber || !newOrderId || !newAwb || !newStatus) {
         return res.status(400).json({ error: 'rowNumber, newOrderId, newAwb, and newStatus are all required' });
       }
       await updateOrder(rowNumber, { newOrderId, newAwb, newStatus, notes: notes || '' });
+      if (parentOrder) await resolveEscalationAssignment(parentOrder, newStatus, notes || '');
       return res.status(200).json({ ok: true });
     }
 
     if (action === 'bulk-update') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-      const { rowNumbers, status } = body;
-      if (!Array.isArray(rowNumbers) || !rowNumbers.length) {
-        return res.status(400).json({ error: 'rowNumbers array is required' });
+      const { items, status } = body;
+      if (!Array.isArray(items) || !items.length) {
+        return res.status(400).json({ error: 'items array is required' });
       }
       if (!status) return res.status(400).json({ error: 'status is required' });
       if (!BULK_ALLOWED.includes(status)) {
@@ -109,7 +111,10 @@ const handler = async (req, res) => {
         });
       }
       const updated = await batchUpdateOrders(
-        rowNumbers.map((rowNumber) => ({ rowNumber, newOrderId: '-', newAwb: '-', newStatus: status }))
+        items.map(({ rowNumber }) => ({ rowNumber, newOrderId: '-', newAwb: '-', newStatus: status }))
+      );
+      await Promise.all(
+        items.map(({ parentOrder }) => (parentOrder ? resolveEscalationAssignment(parentOrder, status, '') : Promise.resolve()))
       );
       return res.status(200).json({ ok: true, updated });
     }
