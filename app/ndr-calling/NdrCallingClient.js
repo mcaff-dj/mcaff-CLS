@@ -360,6 +360,11 @@ export default function NdrCallingClient() {
   const ndrDisposed = useMemo(() => ndrScopedTickets.filter(t => t.connected).length, [ndrScopedTickets]);
   const ndrAssigned = useMemo(() => ndrScopedTickets.filter(t => t.assignedAgent).length, [ndrScopedTickets]);
   const ndrUnassigned = ndrTotal - ndrAssigned;
+  // Assigned but not yet disposed - what the 'fresh' tab's own filter actually shows
+  // (t.assignedAgent && !t.connected, see ndrRowsForTab below). ndrAssigned counts every lead
+  // ever assigned, disposed or not, so using it for the Fresh Leads tab's badge overstated what
+  // that tab actually contains once most assigned leads had already been worked.
+  const ndrFreshCount = useMemo(() => ndrScopedTickets.filter(t => t.assignedAgent && !t.connected).length, [ndrScopedTickets]);
   const ndrAttemptBuckets = useMemo(() => {
     const counts = { '1': 0, '2': 0, '3': 0, 'More than 3': 0 };
     for (const t of ndrScopedTickets) {
@@ -1014,7 +1019,7 @@ export default function NdrCallingClient() {
   const ndrTabsList = [
     { key: 'overview', label: '📊 Overview', count: ndrTotal },
     { key: 'all', label: 'Total Leads Disposed', count: ndrDisposed },
-    { key: 'fresh', label: '⚡ Fresh Leads (Assigned)', count: ndrAssigned },
+    { key: 'fresh', label: '⚡ Fresh Leads (Assigned)', count: ndrFreshCount },
     ...(canAdminTab ? [{ key: 'admin', label: 'Admin Panel & Roster', count: (processAgents || []).length }] : []),
     ...(canPredictedTab ? [{ key: 'predicted', label: '🔮 Next to Assign', count: ndrPredicted.rows.length }] : []),
   ];
