@@ -572,6 +572,12 @@ export default function NdrCallingClient() {
     );
   };
 
+  // Connected/Remarks are always blank on the Fresh Leads tab (assigned but not yet disposed
+  // - see saveNdrDisposition, the only place either column gets written), so hidden there for
+  // every role, not just plain agents.
+  const ndrShowConnectedRemarks = !ndrAgentView && ndrTab !== 'fresh';
+  const ndrLeadsTableColCount = 10 + (ndrAgentView ? 0 : 2) + (ndrShowConnectedRemarks ? 2 : 0);
+
   const renderNdrLeadsTable = () => (
     <div className="space-y-3">
       {/* Stats header cards, date-scoped/agent-filtered same as the Overview tab above */}
@@ -676,10 +682,12 @@ export default function NdrCallingClient() {
               <th className="py-3 px-4 text-center font-medium">Attempts</th>
               <th className="py-3 px-4 text-left font-medium">Latest NDR Reason</th>
               <th className="py-3 px-4 text-left font-medium">Status</th>
-              <th className="py-3 px-4 text-left font-medium">Calling Date</th>
-              <th className="py-3 px-4 text-left font-medium">Agent Name</th>
-              {!ndrAgentView && <th className="py-3 px-4 text-left font-medium">Connected</th>}
-              {!ndrAgentView && <th className="py-3 px-4 text-left font-medium">Remarks</th>}
+              {!ndrAgentView && <th className="py-3 px-4 text-left font-medium">Calling Date</th>}
+              {!ndrAgentView && <th className="py-3 px-4 text-left font-medium">Agent Name</th>}
+              {/* Fresh Leads = assigned but not yet disposed, so Connected/Remarks are always
+                  blank there regardless of role - hidden on that tab, not just for agents. */}
+              {ndrShowConnectedRemarks && <th className="py-3 px-4 text-left font-medium">Connected</th>}
+              {ndrShowConnectedRemarks && <th className="py-3 px-4 text-left font-medium">Remarks</th>}
               <th className="py-3 px-4 text-right font-medium">Action</th>
             </tr></thead>
             <tbody className="divide-y divide-zinc-800/50">
@@ -694,10 +702,10 @@ export default function NdrCallingClient() {
                   <td className="py-2.5 px-4 text-center text-zinc-300">{t.attempts}</td>
                   <td className="py-2.5 px-4 text-zinc-400">{t.latestNdrReason}</td>
                   <td className="py-2.5 px-4 text-zinc-400">{t.status}</td>
-                  <td className="py-2.5 px-4 text-zinc-400">{t.callingDate}</td>
-                  <td className="py-2.5 px-4 text-zinc-300">{t.assignedAgent || <span className="text-zinc-600">Unassigned</span>}</td>
-                  {!ndrAgentView && <td className="py-2.5 px-4 text-zinc-400">{t.connected}</td>}
-                  {!ndrAgentView && <td className="py-2.5 px-4 text-zinc-400">{t.remarks}</td>}
+                  {!ndrAgentView && <td className="py-2.5 px-4 text-zinc-400">{t.callingDate}</td>}
+                  {!ndrAgentView && <td className="py-2.5 px-4 text-zinc-300">{t.assignedAgent || <span className="text-zinc-600">Unassigned</span>}</td>}
+                  {ndrShowConnectedRemarks && <td className="py-2.5 px-4 text-zinc-400">{t.connected}</td>}
+                  {ndrShowConnectedRemarks && <td className="py-2.5 px-4 text-zinc-400">{t.remarks}</td>}
                   <td className="py-2.5 px-4 text-right">
                     <button
                       onClick={() => openNdrCall(t)}
@@ -709,7 +717,7 @@ export default function NdrCallingClient() {
                 </tr>
               ))}
               {ndrPageRows.length === 0 && (
-                <tr><td colSpan={ndrAgentView ? 12 : 14} className="py-8 text-center text-zinc-500">No leads found.</td></tr>
+                <tr><td colSpan={ndrLeadsTableColCount} className="py-8 text-center text-zinc-500">No leads found.</td></tr>
               )}
             </tbody>
           </table>
