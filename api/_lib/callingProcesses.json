@@ -22,7 +22,11 @@
     "",
     "`implemented: false` means the process has no workspace yet - the CRM shows a panel",
     "explaining what it still needs. Each is expected to bring its own calling fields,",
-    "dispositions and data source; none of them share RTO's."
+    "dispositions and data source; none of them share RTO's.",
+    "",
+    "`implemented: true` does NOT mean the workspace lives in app/rto-crm/RtoCrmClient.js -",
+    "NDR's is its own page/folder (app/ndr-calling/), not a branch of RTO's Process switcher.",
+    "See the plan for splitting Calling processes into their own pages, one folder per process."
   ],
 
   "processes": [
@@ -43,8 +47,8 @@
       "key": "ndr",
       "label": "NDR Calling",
       "icon": "🚚",
-      "implemented": false,
-      "blurb": "Non-delivery-report leads. Needs its own source sheet/table, the NDR attempt fields (courier reason, attempt count, next-attempt date) and an NDR disposition list - none of which map onto RTO's columns.",
+      "implemented": true,
+      "blurb": "Non-delivery-report leads, worked from its own page at /ndr-calling (app/ndr-calling/NdrCallingClient.js) rather than this file's own Process switcher - see the plan for splitting Calling processes into their own pages.",
       "businessHours": {
         "timezone": "IST",
         "days": ["mon", "tue", "wed", "thu", "fri", "sat"],
