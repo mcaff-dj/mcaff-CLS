@@ -10,6 +10,8 @@
 //     keyframes are prefixed esc- (see scripts/scope_escalation_css.js)
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import './escalation.css';
+import { useCallingSession } from '../_calling/useCallingSession';
+import { initials } from './escalationHelpers';
 
 /* ============================================================
    Constants
@@ -56,18 +58,14 @@ const TAG_FILTER_OPTIONS = [
   ...TAGS.map((t) => ({ value: t.key, label: t.label })),
 ];
 
-// Simulated user profiles — in a real app this would come from auth
-const USERS = {
-  admin: { name: 'Admin User',   avatar: 'AU', roleLabel: 'Administrator',  agentId: null },
-  agent: { name: 'Priya Sharma', avatar: 'PS', roleLabel: 'Support Agent',  agentId: 'agent_1' },
-};
-
-// Availability states an agent can broadcast. `color` maps to a CSS variable family.
+// Availability states an agent can broadcast — matches useCallingSession's real vocabulary
+// exactly (STATUS_OPTIONS in app/_calling/useCallingSession.js), not an Escalation-local set,
+// since this now writes real presence RTO/NDR's own tooling reads too.
 const AGENT_STATUSES = [
-  { key: 'online',  label: 'Online',  color: 'success', desc: 'Available for new tickets' },
-  { key: 'busy',    label: 'Busy',    color: 'danger',  desc: 'On a call — do not disturb' },
-  { key: 'break',   label: 'On Break', color: 'warning', desc: 'Away for a short while' },
-  { key: 'offline', label: 'Offline', color: 'muted',   desc: 'Not working right now' },
+  { key: 'Online',  label: 'Online',   color: 'success', desc: 'Available for new tickets' },
+  { key: 'OnCall',  label: 'Busy',     color: 'danger',  desc: 'On a call — do not disturb' },
+  { key: 'Busy',    label: 'On Break', color: 'warning', desc: 'Away for a short while' },
+  { key: 'Offline', label: 'Offline',  color: 'muted',   desc: 'Not working right now' },
 ];
 const STATUS_BY_KEY = Object.fromEntries(AGENT_STATUSES.map((s) => [s.key, s]));
 
@@ -1022,11 +1020,17 @@ function OrderRow({
    Main Page
    ============================================================ */
 export default function EscalationClient() {
-  const [role,             setRole]             = useState('admin');
+  const session = useCallingSession('escalation', {});
+  const {
+    googleUser, sessionIsAdmin, isProcessAdmin,
+    processAgents, saveProcessAgent, savingAgentEmail,
+    agentStatus, serverPresence, setStatus, setStatusForAgent,
+  } = session;
+  const isAdmin = sessionIsAdmin || isProcessAdmin;
+
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [theme,            setTheme]            = useState('light');
   const [view,             setView]             = useState('queue'); // 'queue' | 'overview' | 'agents' | 'assigns' | 'settings'
-  const [agentStatus,      setAgentStatus]      = useState('online'); // 'online' | 'offline' | 'busy' | 'break'
 
   const [orders,      setOrders]      = useState([]);
   const [loading,     setLoading]     = useState(true);
@@ -1108,12 +1112,13 @@ export default function EscalationClient() {
 
   useEffect(() => { load(); }, [load]);
 
-  // Overview / Agents / Assignments are admin-only — bounce agents back to the queue.
+  // Overview / Agent Management / Assignments / Settings are admin-only — bounce agents
+  // back to the queue.
   useEffect(() => {
-    if (role !== 'admin' && (view === 'overview' || view === 'agents' || view === 'assigns')) {
+    if (!isAdmin && (view === 'overview' || view === 'agents' || view === 'assigns' || view === 'settings')) {
       setView('queue');
     }
-  }, [role, view]);
+  }, [isAdmin, view]);
 
   /* --- Handlers --- */
   function handleSaved(rowNumber) {
@@ -1315,7 +1320,6 @@ export default function EscalationClient() {
   const unassignedCount = totalPending - assignedCount;
   const highCount       = orders.filter((o) => getPriority(o.totalTimesConsumerReached).level === 'high').length;
 
-  const isAdmin   = role === 'admin';
   const allPageSelected = pageItems.length > 0 && pageItems.every((o) => selectedRows.has(o.rowNumber));
   const somePageSelected = pageItems.some((o) => selectedRows.has(o.rowNumber));
 
