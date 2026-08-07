@@ -218,11 +218,11 @@ function OverviewPanel({ overview, agents, loading, resolvedCount }) {
               </thead>
               <tbody>
                 {perAgent.map((a) => (
-                  <tr key={a.id}>
+                  <tr key={a.email}>
                     <td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <div className="userAvatar" style={{ fontSize: 10, width: 24, height: 24 }}>
-                          {a.avatar}
+                          {initials(a.name)}
                         </div>
                         <strong>{a.name}</strong>
                       </div>
@@ -1328,7 +1328,7 @@ export default function EscalationClient() {
   /* --- Overview stats (derived from what we can actually track) --- */
   const overview = useMemo(() => {
     // Per-agent workload: count live orders currently assigned to each agent.
-    const load = Object.fromEntries(agents.map((a) => [a.id, 0]));
+    const load = Object.fromEntries(agents.map((a) => [a.email, 0]));
     orders.forEach((o) => {
       const asgn = assignments[o.rowNumber];
       if (asgn && load[asgn.agentId] != null) load[asgn.agentId] += 1;
@@ -1351,8 +1351,8 @@ export default function EscalationClient() {
     const assignedTotal = orders.filter((o) => assignments[o.rowNumber]).length;
     const perAgent = agents.map((a) => ({
       ...a,
-      load: load[a.id] || 0,
-      share: assignedTotal ? Math.round(((load[a.id] || 0) / assignedTotal) * 100) : 0,
+      load: load[a.email] || 0,
+      share: assignedTotal ? Math.round(((load[a.email] || 0) / assignedTotal) * 100) : 0,
     })).sort((x, y) => y.load - x.load);
 
     const busiest = perAgent[0] && perAgent[0].load > 0 ? perAgent[0] : null;
@@ -1378,7 +1378,7 @@ export default function EscalationClient() {
   if (filterStatus)    activeFilters.push({ key: 'status',   label: `Status: ${STATUS_FILTER_OPTIONS.find((o) => o.value === filterStatus)?.label || filterStatus}`, clear: () => setFilterStatus('') });
   if (filterPriority)  activeFilters.push({ key: 'priority', label: `Priority: ${PRIORITY_FILTER_OPTIONS.find((o) => o.value === filterPriority)?.label || filterPriority}`, clear: () => setFilterPriority('') });
   if (filterPartner)   activeFilters.push({ key: 'partner',  label: `Partner: ${filterPartner}`, clear: () => setFilterPartner('') });
-  if (filterAgent)     activeFilters.push({ key: 'agent',    label: `Agent: ${agents.find((a) => a.id === filterAgent)?.name || filterAgent}`, clear: () => setFilterAgent('') });
+  if (filterAgent)     activeFilters.push({ key: 'agent',    label: `Agent: ${agents.find((a) => a.email === filterAgent)?.name || filterAgent}`, clear: () => setFilterAgent('') });
   if (filterTag)       activeFilters.push({ key: 'tag',      label: `Tag: ${TAG_BY_KEY[filterTag]?.label || filterTag}`, clear: () => setFilterTag('') });
 
   function clearAllFilters() {
@@ -1548,7 +1548,7 @@ export default function EscalationClient() {
             {isAdmin && agents.length > 0 && (
               <select className={`filterSelect${filterAgent ? ' filterSelectActive' : ''}`} value={filterAgent} onChange={(e) => setFilterAgent(e.target.value)} aria-label="Filter agent">
                 <option value="">All Agents</option>
-                {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                {agents.map((a) => <option key={a.email} value={a.email}>{a.name}</option>)}
               </select>
             )}
 
