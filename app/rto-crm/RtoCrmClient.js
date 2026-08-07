@@ -1430,7 +1430,10 @@ const localStorage = typeof window !== 'undefined'
           time: t,
           agent: googleUser.email,
           agentName: googleUser.name || googleUser.email.split('@')[0],
-          action: `Status → ${s}`,
+          // The log's own text should read the same human-facing label the status dropdown
+          // shows, not the raw stored value - 'Busy' displays as "On Break" and 'OnCall'
+          // displays as "Busy" (see statusOptions' own comment on why those two don't match).
+          action: `Status → ${statusOptions.find(o => o.value === s)?.label || s}`,
           type: s === 'Online' ? 'online' : s === 'Busy' ? 'break' : s === 'OnCall' ? 'busy' : 'offline'
         };
 
