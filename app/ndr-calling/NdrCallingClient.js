@@ -144,6 +144,16 @@ export default function NdrCallingClient() {
   const disp = useProcessDispositions(PROCESS_KEY, { googleUser, showToast });
   const { processDispositions } = disp;
 
+  // Same theme setup as RtoCrmClient.js's App() - one theme, always. The "zinc-900"/"#09090b"
+  // etc. Tailwind classes used throughout this file are NOT actually dark in the shipped app;
+  // body.theme-light in app/globals.css repaints all of them to a light background at the CSS
+  // layer. Without this class on <body>, this page renders those classes literally (dark)
+  // instead of matching every other page in this app.
+  useEffect(() => {
+    document.documentElement.className = 'light';
+    document.body.className = 'font-sans antialiased min-h-screen theme-light';
+  }, []);
+
   const [rosterStatusFilter, setRosterStatusFilter] = useState('All');
 
   const [ndrTickets, setNdrTickets] = useState([]);
