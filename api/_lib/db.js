@@ -1522,11 +1522,25 @@ async function getAllLeadDates() {
   return out;
 }
 
+// NDR's own equivalent of getAllLeadDates above, keyed by awb_number (NDR's live-cycle identity
+// - see claimNdrLead/disposeNdrLead) rather than order_id. WHERE reassigned_away_at IS NULL for
+// the same reason getAllLeadDates reads lead_assignments_current instead of the base table: only
+// the current cycle's dates matter to whatever's on screen right now.
+async function getAllNdrLeadDates() {
+  await ensurePgSchema();
+  const { rows } = await pgSql`
+    SELECT awb_number, assigned_at, disposed_at FROM ndr_lead_assignments WHERE reassigned_away_at IS NULL
+  `;
+  const out = {};
+  for (const r of rows) out[r.awb_number] = { assignedAt: r.assigned_at, disposedAt: r.disposed_at };
+  return out;
+}
+
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
-  getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getRecentLeadAssignments, recordLeadDisposition,
+  getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,

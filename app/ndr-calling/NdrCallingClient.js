@@ -13,10 +13,15 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   XIcon, CheckIcon, PhoneIcon, CustomSelect, MultiSelectDropdown, Overlay,
+  CalendarIcon, DownloadIcon,
 } from '../_calling/ui';
 import { useCallingSession, STATUS_OPTIONS, ROSTER_STATUS_OPTIONS } from '../_calling/useCallingSession';
 import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
+import {
+  safeStorage, parseDate, isDateInScope, isLeadDateInScope, scopeToDateBounds, normalizeOrderKey,
+  istMinutesSinceMidnightClient, istDayKeyClient, formatTimeOfDay, formatBreakMinutes, formatFrt, formatPct,
+} from '../_calling/util';
 
 const PROCESS_KEY = 'ndr';
 
@@ -128,11 +133,13 @@ async function recordNdrLeadAssignment(body) {
 export default function NdrCallingClient() {
   const session = useCallingSession(PROCESS_KEY, {
     // NDR has no RTO-style "My Active Queue" pending-box concept to trigger an instant
-    // off-cycle assignment run with, and no per-agent date-scope filter on presence figures -
-    // both are RTO-specific refinements, safe to omit (the hook treats a missing getter as
-    // "no value", not an error).
+    // off-cycle assignment run with - safe to omit (the hook treats a missing getter as "no
+    // value", not an error). getDateBounds IS wired (see ndrDateScope below, declared further
+    // down this function) so Logged In At/Total Break Time in the Agent Performance Summary
+    // table follow the same date-scope filter as everything else in it - same
+    // temporal-dead-zone-safe getter-closure pattern RTO's own call uses.
     getPendingBox: undefined,
-    getDateBounds: undefined,
+    getDateBounds: () => scopeToDateBounds(ndrDateScope, ndrCustomDateFrom, ndrCustomDateTo),
   });
   const {
     googleUser, userRole, sessionIsAdmin, invitedProcessKeys, processPermsLoaded,
@@ -179,6 +186,34 @@ export default function NdrCallingClient() {
   const [ndrDispPath, setNdrDispPath] = useState([]);
   const [ndrDispRemarks, setNdrDispRemarks] = useState('');
   const [ndrDispSaving, setNdrDispSaving] = useState(false);
+
+  // Executive Overview date-scope filter - same options/semantics as RTO's own (see
+  // app/rto-crm/RtoCrmClient.js's dateOptions), namespaced localStorage keys since this is a
+  // separate page, not a shared one. Drives the KPI tiles, the Agent Performance Summary table,
+  // and (via getDateBounds above) Logged In At/Total Break Time.
+  const [ndrDateScope, setNdrDateScope] = useState(() => safeStorage.getItem('ndr_date_scope') || 'ALL_TIME');
+  const [ndrCustomDateFrom, setNdrCustomDateFrom] = useState(() => safeStorage.getItem('ndr_custom_date_from') || '');
+  const [ndrCustomDateTo, setNdrCustomDateTo] = useState(() => safeStorage.getItem('ndr_custom_date_to') || '');
+  const [ndrHeatmapMetric, setNdrHeatmapMetric] = useState(() => safeStorage.getItem('ndr_heatmap_metric') || 'dialled');
+  const [ndrHeatmapIntervalMinutes, setNdrHeatmapIntervalMinutes] = useState(() => Number(safeStorage.getItem('ndr_heatmap_interval')) || 30);
+
+  // Every live NDR lead's real {assignedAt, disposedAt} (see getAllNdrLeadDates in db.js), keyed
+  // by AWB - NDR's own equivalent of RTO's leadDates, needed so the Agent Performance Summary
+  // table below can scope its Assigned-flavored columns by real assignment date and its
+  // Disposed/Connected-flavored columns by real disposal date, same two-universe design as
+  // RTO's computeTableAgentMetrics (a lead assigned yesterday and disposed today counts toward
+  // today's Disposed number even though it doesn't count toward today's Assigned one).
+  const [ndrLeadDates, setNdrLeadDates] = useState({});
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => fetch('/api/auth/leadDates?process=ndr').then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled && d?.leadDates) setNdrLeadDates(d.leadDates); })
+      .catch(() => {});
+    load();
+    const t = setInterval(load, 5 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
   useEffect(() => { setNdrPage(1); }, [ndrTab, ndrSearch]);
   useEffect(() => {
     if (userRole === 'Agent' && !isProcessAdmin && (ndrTab === 'admin' || ndrTab === 'predicted')) {
@@ -648,6 +683,222 @@ export default function NdrCallingClient() {
     </div>
   );
 
+  // ═══ EXECUTIVE OVERVIEW & AGENTS PERFORMANCE ═══
+  // Adapted port of RTO's own Overview tab (app/rto-crm/RtoCrmClient.js) - same two designs:
+  // (1) KPI tiles scope by the sheet's own Calling Date (ndrKpiInScope), (2) the Agent
+  // Performance Summary table scopes Assigned-flavored columns by real assigned_at and
+  // Disposed/Connected-flavored columns by real disposed_at (ndrLeadDates, from
+  // ndr_lead_assignments) - two independent universes of the same agent's tickets, not one
+  // funnel, same reasoning as RTO's computeTableAgentMetrics doc comment. NDR has no payment
+  // mode/refund data at all, so every Prepaid/COD/Refund column RTO has is replaced here with
+  // NDR's own equivalents: Reorders Converted (outcome 'New order Placed'), Mark RTO Count
+  // (outcome 'Mark RTO'), and High-Attempt Assigned (3+ delivery attempts).
+  const ndrIsAssignedTo = (t, email) => {
+    const e = (email || '').toLowerCase();
+    const a = (t.assignedAgent || '').toLowerCase();
+    return !!a && (a.includes(e) || e.includes(a));
+  };
+  const ndrMyEmailLower = (googleUser?.email || '').toLowerCase();
+  const ndrIsMyAgentRow = (ag) => ndrMyEmailLower && ag.email.toLowerCase() === ndrMyEmailLower;
+  const ndrOverviewRoster = (userRole === 'Agent' && !isProcessAdmin)
+    ? (processAgents || []).filter(ndrIsMyAgentRow) : (processAgents || []);
+
+  // KPI tiles - scoped by Calling Date/ndrDateScope, same single-scope shape as RTO's
+  // computeAgentMetrics (deliberately separate from the table below's two-universe scoping).
+  const ndrKpiInScope = (t) => isDateInScope(parseDate(t.callingDate), ndrDateScope, ndrCustomDateFrom, ndrCustomDateTo);
+  const ndrAgentMetrics = ndrOverviewRoster.map(ag => {
+    const assigned = ndrTickets.filter(t => ndrIsAssignedTo(t, ag.email) && ndrKpiInScope(t));
+    const disposed = assigned.filter(t => t.connected);
+    const connected = disposed.filter(t => t.connected === 'Yes');
+    return { ...ag, assigned: assigned.length, disposed: disposed.length, connected: connected.length };
+  });
+  const ndrKpiTotalAssigned = ndrAgentMetrics.reduce((s, a) => s + a.assigned, 0);
+  const ndrKpiTotalDisposed = ndrAgentMetrics.reduce((s, a) => s + a.disposed, 0);
+  const ndrKpiTotalConnected = ndrAgentMetrics.reduce((s, a) => s + a.connected, 0);
+  const ndrKpiTotalPending = ndrKpiTotalAssigned - ndrKpiTotalDisposed;
+  const ndrKpiAvgConnectRate = ndrKpiTotalDisposed > 0 ? Math.round((ndrKpiTotalConnected / ndrKpiTotalDisposed) * 100) : 0;
+  const ndrKpiTotalReordersConverted = ndrTickets.filter(t =>
+    ndrOverviewRoster.some(ag => ndrIsAssignedTo(t, ag.email)) && t.outcome === 'New order Placed' && ndrKpiInScope(t)
+  ).length;
+  // Unscoped by role (matches RTO's own freshUnassignedInScope) - an unassigned lead isn't
+  // "assigned to" any agent, so per-agent roster scoping doesn't apply to it either way.
+  const ndrKpiFreshUnassigned = ndrTickets.filter(t => !t.assignedAgent && ndrKpiInScope(t)).length;
+  const ndrOnlineCount = (processAgents || []).filter(a => a.status === 'Online').length;
+
+  // Agent Performance Summary table - real-date two-universe scoping via ndrLeadDates.
+  const ndrAssignedDateInScope = (t) => isLeadDateInScope(
+    ndrLeadDates[normalizeOrderKey(t.awb)]?.assignedAt, ndrDateScope, ndrCustomDateFrom, ndrCustomDateTo
+  );
+  const ndrDisposedDateInScope = (t) => isLeadDateInScope(
+    ndrLeadDates[normalizeOrderKey(t.awb)]?.disposedAt, ndrDateScope, ndrCustomDateFrom, ndrCustomDateTo
+  );
+  const computeNdrTableAgentMetrics = (ag) => {
+    const assignedByDate = ndrTickets.filter(t => ndrIsAssignedTo(t, ag.email) && ndrAssignedDateInScope(t));
+    const highAttempt = assignedByDate.filter(t => { const n = parseInt(t.attempts, 10); return Number.isFinite(n) && n > 3; });
+
+    const disposedByDate = ndrTickets.filter(t => ndrIsAssignedTo(t, ag.email) && t.connected && ndrDisposedDateInScope(t));
+    const connected = disposedByDate.filter(t => t.connected === 'Yes');
+    const reordersConverted = disposedByDate.filter(t => t.outcome === 'New order Placed');
+    const markedRto = disposedByDate.filter(t => t.outcome === 'Mark RTO');
+
+    // First Called At / FRT - per active IST day, same averaging as RTO's own
+    // computeTableAgentMetrics: earliest disposal each day, then averaged across active days.
+    const firstCallMinutesByDay = new Map();
+    const frtList = [];
+    for (const t of disposedByDate) {
+      const dates = ndrLeadDates[normalizeOrderKey(t.awb)] || {};
+      if (!dates.disposedAt) continue;
+      const disposedAt = new Date(dates.disposedAt);
+      const dayKey = istDayKeyClient(disposedAt);
+      const mins = istMinutesSinceMidnightClient(disposedAt);
+      if (!firstCallMinutesByDay.has(dayKey) || mins < firstCallMinutesByDay.get(dayKey)) firstCallMinutesByDay.set(dayKey, mins);
+      if (dates.assignedAt) {
+        const frt = (disposedAt.getTime() - new Date(dates.assignedAt).getTime()) / 60000;
+        if (frt >= 0) frtList.push(frt);
+      }
+    }
+    const firstCalledAtMinutes = firstCallMinutesByDay.size
+      ? Math.round([...firstCallMinutesByDay.values()].reduce((s, m) => s + m, 0) / firstCallMinutesByDay.size) : null;
+    const frtMinutes = frtList.length ? Math.round(frtList.reduce((s, m) => s + m, 0) / frtList.length) : null;
+
+    return {
+      ...ag,
+      assigned: assignedByDate.length, disposed: disposedByDate.length, connected: connected.length,
+      reordersConverted: reordersConverted.length, markedRto: markedRto.length, highAttempt: highAttempt.length,
+      firstCalledAtMinutes, frtMinutes,
+    };
+  };
+  const ndrTableAgentMetrics = ndrOverviewRoster.map(computeNdrTableAgentMetrics);
+  const ndrSummaryRows = ndrTableAgentMetrics.filter(am => am.assigned > 0);
+  const ndrSummaryTotals = ndrSummaryRows.reduce((acc, am) => {
+    acc.assigned += am.assigned; acc.disposed += am.disposed; acc.connected += am.connected;
+    acc.reordersConverted += am.reordersConverted; acc.markedRto += am.markedRto; acc.highAttempt += am.highAttempt;
+    return acc;
+  }, { assigned: 0, disposed: 0, connected: 0, reordersConverted: 0, markedRto: 0, highAttempt: 0 });
+  const ndrSummaryLoggedInList = ndrSummaryRows.map(am => serverPresence[am.email.toLowerCase()]?.loggedInMinutes).filter(m => m != null);
+  const ndrSummaryBreakList = ndrSummaryRows.map(am => serverPresence[am.email.toLowerCase()]?.breakMinutes).filter(m => m != null);
+  const ndrSummaryBusyList = ndrSummaryRows.map(am => serverPresence[am.email.toLowerCase()]?.busyMinutes).filter(m => m != null);
+  const ndrSummaryAvgLoggedIn = ndrSummaryLoggedInList.length ? Math.round(ndrSummaryLoggedInList.reduce((s, m) => s + m, 0) / ndrSummaryLoggedInList.length) : null;
+  const ndrSummaryAvgBreak = ndrSummaryBreakList.length ? Math.round(ndrSummaryBreakList.reduce((s, m) => s + m, 0) / ndrSummaryBreakList.length) : 0;
+  const ndrSummaryAvgBusy = ndrSummaryBusyList.length ? Math.round(ndrSummaryBusyList.reduce((s, m) => s + m, 0) / ndrSummaryBusyList.length) : 0;
+  const ndrSummaryFrtList = ndrSummaryRows.map(am => am.frtMinutes).filter(m => m != null);
+  const ndrSummaryAvgFrt = ndrSummaryFrtList.length ? Math.round(ndrSummaryFrtList.reduce((s, m) => s + m, 0) / ndrSummaryFrtList.length) : null;
+
+  // One row per lead behind the summary table (audit/reconcile), union of assigned-in-scope OR
+  // (worked AND disposed-in-scope) - same as RTO's rawLeadDetailsList.
+  const ndrRawLeadDetailsList = ndrOverviewRoster.flatMap(ag => ndrTickets
+    .filter(t => ndrIsAssignedTo(t, ag.email) && (ndrAssignedDateInScope(t) || (t.connected && ndrDisposedDateInScope(t))))
+    .map(t => {
+      const dates = ndrLeadDates[normalizeOrderKey(t.awb)] || {};
+      const frt = (dates.assignedAt && dates.disposedAt)
+        ? (new Date(dates.disposedAt).getTime() - new Date(dates.assignedAt).getTime()) / 60000 : null;
+      return {
+        awb: t.awb, orderId: t.orderId, agentName: ag.name,
+        assignedAt: dates.assignedAt || '', disposedAt: dates.disposedAt || '',
+        frtMinutes: (frt !== null && frt >= 0) ? Math.round(frt) : null,
+        connected: t.connected || '', outcome: t.outcome || '',
+      };
+    })
+  ).sort((a, b) => a.agentName.localeCompare(b.agentName) || a.awb.localeCompare(b.awb));
+
+  function downloadNdrAgentSummaryCsv() {
+    const escapeCsv = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const header = [
+      'Agent Name', 'Total Leads Assigned', 'Total Disposed', 'First Called At', 'FRT',
+      'Total Connected', 'Connected %', 'Reorders Converted', 'Reorders Converted %',
+      'Mark RTO Count', 'Mark RTO %', 'High-Attempt Assigned', 'High-Attempt %',
+      'Logged In At', 'Total Break Time', 'Total Busy Time',
+    ];
+    const rowFor = (am) => {
+      const presence = serverPresence[am.email.toLowerCase()];
+      return [
+        am.name, am.assigned, am.disposed, formatTimeOfDay(am.firstCalledAtMinutes), formatFrt(am.frtMinutes),
+        am.connected, formatPct(am.connected, am.disposed),
+        am.reordersConverted, formatPct(am.reordersConverted, am.disposed),
+        am.markedRto, formatPct(am.markedRto, am.disposed),
+        am.highAttempt, formatPct(am.highAttempt, am.assigned),
+        formatTimeOfDay(presence?.loggedInMinutes), formatBreakMinutes(presence?.breakMinutes), formatBreakMinutes(presence?.busyMinutes),
+      ];
+    };
+    const lines = [header.map(escapeCsv).join(',')];
+    ndrSummaryRows.forEach(am => lines.push(rowFor(am).map(escapeCsv).join(',')));
+    if (ndrSummaryRows.length > 0) {
+      lines.push([
+        'Team Total', ndrSummaryTotals.assigned, ndrSummaryTotals.disposed, '—', formatFrt(ndrSummaryAvgFrt),
+        ndrSummaryTotals.connected, formatPct(ndrSummaryTotals.connected, ndrSummaryTotals.disposed),
+        ndrSummaryTotals.reordersConverted, formatPct(ndrSummaryTotals.reordersConverted, ndrSummaryTotals.disposed),
+        ndrSummaryTotals.markedRto, formatPct(ndrSummaryTotals.markedRto, ndrSummaryTotals.disposed),
+        ndrSummaryTotals.highAttempt, formatPct(ndrSummaryTotals.highAttempt, ndrSummaryTotals.assigned),
+        formatTimeOfDay(ndrSummaryAvgLoggedIn), formatBreakMinutes(ndrSummaryAvgBreak), formatBreakMinutes(ndrSummaryAvgBusy),
+      ].map(escapeCsv).join(','));
+    }
+    const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `ndr-agent-performance-summary-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+  }
+
+  function downloadNdrRawLeadDetailsCsv() {
+    const escapeCsv = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const formatCsvDate = (iso) => iso ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '';
+    const lines = [
+      ['AWB', 'Order ID', 'Agent Name', 'Assigned Date', 'Disposed Date', 'FRT', 'Connected', 'Outcome'].join(','),
+      ...ndrRawLeadDetailsList.map(r => [
+        r.awb, r.orderId, r.agentName, formatCsvDate(r.assignedAt), formatCsvDate(r.disposedAt),
+        formatFrt(r.frtMinutes), r.connected, r.outcome,
+      ].map(escapeCsv).join(',')),
+    ];
+    const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `ndr-agent-performance-raw-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+  }
+
+  const ndrDateOptions = [
+    { value: 'ALL_TIME', label: 'All time' }, { value: 'TODAY', label: 'Today' },
+    { value: 'YESTERDAY', label: 'Yesterday' }, { value: '7_DAYS', label: 'Last 7 days' },
+    { value: '30_DAYS', label: 'Last 30 days' }, { value: 'CUSTOM', label: 'Custom range' },
+  ];
+  const ndrHeatmapIntervalOptions = [{ value: 15, label: '15 min' }, { value: 30, label: '30 min' }, { value: 60, label: '1 hour' }];
+  const ndrHeatmapMetricOptions = [
+    { value: 'dialled', label: 'Total Dialled' }, { value: 'connected', label: 'Total Connected' }, { value: 'converted', label: 'Total Converted' },
+  ];
+
+  // Time-of-Day Distribution - same date range as the table above, bucketed by disposal time of
+  // day; local metric/interval dropdowns only change bucketing, never which leads count.
+  const ndrHeatmapAgentData = ndrOverviewRoster.map(ag => {
+    const disposedByDate = ndrTickets.filter(t => ndrIsAssignedTo(t, ag.email) && t.connected && ndrDisposedDateInScope(t));
+    const metricTickets = ndrHeatmapMetric === 'connected' ? disposedByDate.filter(t => t.connected === 'Yes')
+      : ndrHeatmapMetric === 'converted' ? disposedByDate.filter(t => t.outcome === 'New order Placed')
+      : disposedByDate;
+    const bucketCounts = new Map();
+    for (const t of metricTickets) {
+      const iso = ndrLeadDates[normalizeOrderKey(t.awb)]?.disposedAt;
+      if (!iso) continue;
+      const idx = Math.floor(istMinutesSinceMidnightClient(new Date(iso)) / ndrHeatmapIntervalMinutes);
+      bucketCounts.set(idx, (bucketCounts.get(idx) || 0) + 1);
+    }
+    return { ...ag, bucketCounts };
+  });
+  const ndrVisibleHeatmapAgentData = ndrHeatmapAgentData.filter(a => a.bucketCounts.size > 0);
+  const ndrAllHeatmapBucketIndexes = ndrVisibleHeatmapAgentData.flatMap(a => [...a.bucketCounts.keys()]);
+  const ndrHeatmapBucketIndexes = ndrAllHeatmapBucketIndexes.length
+    ? (() => {
+        const lo = Math.min(...ndrAllHeatmapBucketIndexes), hi = Math.max(...ndrAllHeatmapBucketIndexes);
+        return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
+      })()
+    : [];
+  const ndrAllHeatmapValues = ndrVisibleHeatmapAgentData.flatMap(a => ndrHeatmapBucketIndexes.map(idx => a.bucketCounts.get(idx) || 0));
+  const ndrHeatmapMin = ndrAllHeatmapValues.length ? Math.min(...ndrAllHeatmapValues) : 0;
+  const ndrHeatmapMax = ndrAllHeatmapValues.length ? Math.max(...ndrAllHeatmapValues) : 0;
+  function ndrHeatmapCellStyle(value) {
+    if (ndrHeatmapMax <= ndrHeatmapMin) return undefined;
+    const t = (ndrHeatmapMax - value) / (ndrHeatmapMax - ndrHeatmapMin);
+    return { backgroundColor: `rgba(245, 158, 11, ${(t * 0.4).toFixed(2)})` };
+  }
+
   const ndrTabsList = [
     { key: 'overview', label: '📊 Overview', count: ndrTotal },
     { key: 'all', label: 'Total Leads Disposed', count: ndrDisposed },
@@ -715,7 +966,274 @@ export default function NdrCallingClient() {
                 </div>
               )}
               {ndrTab === 'overview' && (
-                <div className="space-y-4">
+                <div className="space-y-6">
+                  {/* ═══ Executive Overview & Agents Performance ═══ */}
+                  <div className="flex items-center justify-between flex-wrap gap-3">
+                    <div>
+                      <h2 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
+                        {userRole === 'Agent' && !isProcessAdmin ? '📊 My Performance Overview' : '📊 Executive Overview & Agents Performance'}
+                      </h2>
+                      <p className="text-[13px] text-zinc-500 mt-0.5">
+                        {userRole === 'Agent' && !isProcessAdmin
+                          ? 'Your own real-time metrics and lead activity.'
+                          : `Comprehensive real-time metrics and lead activity across all ${(processAgents || []).length} team members.`}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <CustomSelect
+                        value={ndrDateScope}
+                        onChange={(val) => { setNdrDateScope(val); safeStorage.setItem('ndr_date_scope', val); }}
+                        options={ndrDateOptions}
+                        icon={CalendarIcon}
+                        placeholder="Date Scope"
+                      />
+                      {ndrDateScope === 'CUSTOM' && (
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="date"
+                            value={ndrCustomDateFrom}
+                            onChange={(e) => { setNdrCustomDateFrom(e.target.value); safeStorage.setItem('ndr_custom_date_from', e.target.value); }}
+                            className="h-8 px-2 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[12px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+                          />
+                          <span className="text-zinc-500 text-[12px]">to</span>
+                          <input
+                            type="date"
+                            value={ndrCustomDateTo}
+                            onChange={(e) => { setNdrCustomDateTo(e.target.value); safeStorage.setItem('ndr_custom_date_to', e.target.value); }}
+                            className="h-8 px-2 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[12px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+                          />
+                        </div>
+                      )}
+                      {userRole !== 'Agent' && (
+                        <>
+                          <span className="text-[12px] text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-2.5 py-1 rounded-lg font-mono flex items-center gap-1.5">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 pulse-dot"></span>
+                            {ndrOnlineCount}/{(processAgents || []).length} Active
+                          </span>
+                          <span className="text-[12px] text-indigo-400 bg-indigo-950/40 border border-indigo-800/40 px-2.5 py-1 rounded-lg font-mono">
+                            {(processAgents || []).length} Total Agents
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                    <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Total Assigned</p>
+                      <p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{ndrKpiTotalAssigned.toLocaleString('en-IN')}</p>
+                      <p className="text-[11px] text-zinc-500 mt-0.5">Across all agents</p>
+                    </div>
+                    <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Total Disposed</p>
+                      <p className="text-2xl font-extrabold text-indigo-400 tabular-nums">{ndrKpiTotalDisposed.toLocaleString('en-IN')}</p>
+                      <p className="text-[11px] text-zinc-500 mt-0.5">Actioned leads</p>
+                    </div>
+                    <div className="bg-zinc-900/70 rounded-xl p-4 border border-amber-900/50 shadow-xs">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-amber-400 mb-1">Pending Queue</p>
+                      <p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{ndrKpiTotalPending.toLocaleString('en-IN')}</p>
+                      <p className="text-[11px] text-amber-400/70 mt-0.5">Awaiting action</p>
+                    </div>
+                    <div className="bg-zinc-900/70 rounded-xl p-4 border border-emerald-900/50 shadow-xs">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 mb-1">Avg Connect Rate</p>
+                      <p className="text-2xl font-extrabold text-emerald-400 tabular-nums">{ndrKpiAvgConnectRate}<span className="text-sm font-normal text-zinc-400">%</span></p>
+                      <p className="text-[11px] text-zinc-500 mt-0.5">Call success</p>
+                    </div>
+                    <div className="bg-zinc-900/70 rounded-xl p-4 border border-violet-900/50 shadow-xs">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-violet-400 mb-1">Reorders Converted</p>
+                      <p className="text-2xl font-extrabold text-violet-400 tabular-nums">{ndrKpiTotalReordersConverted.toLocaleString('en-IN')}</p>
+                      <p className="text-[11px] text-zinc-500 mt-0.5">New order Placed</p>
+                    </div>
+                    <div className="bg-zinc-900/70 rounded-xl p-4 border border-zinc-800/80 shadow-xs">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Fresh Unassigned</p>
+                      <p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{ndrKpiFreshUnassigned.toLocaleString('en-IN')}</p>
+                      <p className="text-[11px] text-zinc-500 mt-0.5">Ready to claim</p>
+                    </div>
+                  </div>
+
+                  {/* Agent Performance Summary */}
+                  <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
+                    <div className="flex items-start justify-between flex-wrap gap-3">
+                      <div>
+                        <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">📋 Agent Performance Summary</h3>
+                        <p className="text-[12px] text-zinc-500 mt-0.5">
+                          Follows the date range above, but each column uses its own REAL event date (not Calling Date, unlike
+                          the KPI tiles above): Assigned columns use when the lead was actually claimed by the agent;
+                          Disposed/Connected/Reorders/Mark RTO columns use when the agent actually resolved it. Hover a header
+                          for which, and for what each % is of. Logged In At/Total Break Time/Total Busy Time follow the same
+                          filter as Total Break Time on RTO's own table. FRT is the average time between a lead's assignment
+                          and its disposition, across disposed leads with both timestamps.
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={downloadNdrRawLeadDetailsCsv}
+                          disabled={ndrRawLeadDetailsList.length === 0}
+                          title="One row per lead behind this table - AWB, Order ID, Agent Name, Assigned Date, Disposed Date, Connected, Outcome"
+                          className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-[13px] font-medium text-zinc-200 transition-all shadow-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          <DownloadIcon /> Raw Lead Details
+                        </button>
+                        <button
+                          type="button"
+                          onClick={downloadNdrAgentSummaryCsv}
+                          disabled={ndrSummaryRows.length === 0}
+                          title="This table exactly as shown, one row per agent plus Team Total"
+                          className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-[13px] font-medium text-zinc-200 transition-all shadow-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          <DownloadIcon /> Export CSV
+                        </button>
+                      </div>
+                    </div>
+                    <div className="overflow-x-auto custom-scroll">
+                      <table className="w-full min-w-[980px] text-[12.5px] border-collapse">
+                        <thead>
+                          <tr className="text-left text-zinc-500 uppercase text-[10px] tracking-wider border-b border-zinc-800">
+                            <th className="py-2 pr-3 font-bold sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Agent Name</th>
+                            <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Leads Assigned</th>
+                            <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Disposed</th>
+                            <th className="py-2 px-3 font-bold" title="Average time-of-day of the first disposition across the range's active days">First Called At</th>
+                            <th className="py-2 px-3 font-bold" title="Average time between a lead's assignment and its disposition">FRT</th>
+                            <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Connected</th>
+                            <th className="py-2 px-3 font-bold text-right" title="Total Connected / Total Disposed">Connected %</th>
+                            <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Reorders Converted</th>
+                            <th className="py-2 px-3 font-bold text-right" title="Reorders Converted / Total Disposed">Reorders Converted %</th>
+                            <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Mark RTO Count</th>
+                            <th className="py-2 px-3 font-bold text-right" title="Mark RTO Count / Total Disposed">Mark RTO %</th>
+                            <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date - 3+ delivery attempts">High-Attempt Assigned</th>
+                            <th className="py-2 px-3 font-bold text-right" title="High-Attempt Assigned / Total Leads Assigned">High-Attempt %</th>
+                            <th className="py-2 px-3 font-bold" title="Average first-login time-of-day across the range's active days">Logged In At</th>
+                            <th className="py-2 px-3 font-bold" title="Average break minutes per active day in the range">Total Break Time</th>
+                            <th className="py-2 pl-3 font-bold" title="Average Busy (on-call) minutes per active day in the range">Total Busy Time</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {ndrSummaryRows.map(am => {
+                            const presence = serverPresence[am.email.toLowerCase()];
+                            return (
+                              <tr key={am.email} className="group border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
+                                <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800 border-r border-zinc-800 transition-colors">{am.name}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.assigned}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.disposed}</td>
+                                <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(am.firstCalledAtMinutes)}</td>
+                                <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatFrt(am.frtMinutes)}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{am.connected}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{formatPct(am.connected, am.disposed)}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-violet-400">{am.reordersConverted}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-violet-300">{formatPct(am.reordersConverted, am.disposed)}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-rose-400">{am.markedRto}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-rose-300">{formatPct(am.markedRto, am.disposed)}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-amber-400">{am.highAttempt}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-amber-300">{formatPct(am.highAttempt, am.assigned)}</td>
+                                <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(presence?.loggedInMinutes)}</td>
+                                <td className="py-2.5 px-3 text-amber-400 font-mono whitespace-nowrap">{formatBreakMinutes(presence?.breakMinutes)}</td>
+                                <td className="py-2.5 pl-3 text-rose-400 font-mono whitespace-nowrap">{formatBreakMinutes(presence?.busyMinutes)}</td>
+                              </tr>
+                            );
+                          })}
+                          {ndrSummaryRows.length > 0 && (
+                            <tr className="border-t-2 border-zinc-700 bg-zinc-900/80 font-bold">
+                              <td className="py-2.5 pr-3 text-zinc-100 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Team Total</td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{ndrSummaryTotals.assigned}</td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{ndrSummaryTotals.disposed}</td>
+                              <td className="py-2.5 px-3 text-zinc-500">—</td>
+                              <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Average across disposed leads with both timestamps">{formatFrt(ndrSummaryAvgFrt)}</td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{ndrSummaryTotals.connected}</td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{formatPct(ndrSummaryTotals.connected, ndrSummaryTotals.disposed)}</td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-violet-300">{ndrSummaryTotals.reordersConverted}</td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-violet-200">{formatPct(ndrSummaryTotals.reordersConverted, ndrSummaryTotals.disposed)}</td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-rose-300">{ndrSummaryTotals.markedRto}</td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-rose-200">{formatPct(ndrSummaryTotals.markedRto, ndrSummaryTotals.disposed)}</td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-amber-300">{ndrSummaryTotals.highAttempt}</td>
+                              <td className="py-2.5 px-3 text-right tabular-nums text-amber-200">{formatPct(ndrSummaryTotals.highAttempt, ndrSummaryTotals.assigned)}</td>
+                              <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Average across agents with a real value">{formatTimeOfDay(ndrSummaryAvgLoggedIn)}</td>
+                              <td className="py-2.5 px-3 text-amber-300 font-mono whitespace-nowrap" title="Average across agents with a real value">{formatBreakMinutes(ndrSummaryAvgBreak)}</td>
+                              <td className="py-2.5 pl-3 text-rose-300 font-mono whitespace-nowrap" title="Average across agents with a real value">{formatBreakMinutes(ndrSummaryAvgBusy)}</td>
+                            </tr>
+                          )}
+                          {ndrSummaryRows.length === 0 && (
+                            <tr><td colSpan={16} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Time-of-Day Distribution */}
+                  <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
+                    <div className="flex items-center justify-between flex-wrap gap-3">
+                      <div>
+                        <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">🕐 Time-of-Day Distribution</h3>
+                        <p className="text-[12px] text-zinc-500 mt-0.5">
+                          Same date range as above, bucketed by time of day - columns span only the buckets with any activity.
+                          Cell shading is a whole-table scale - the darker the highlight, the lower that count is relative to
+                          every other cell currently shown.
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <CustomSelect
+                          value={ndrHeatmapMetric}
+                          onChange={(v) => { setNdrHeatmapMetric(v); safeStorage.setItem('ndr_heatmap_metric', v); }}
+                          options={ndrHeatmapMetricOptions}
+                        />
+                        <CustomSelect
+                          value={ndrHeatmapIntervalMinutes}
+                          onChange={(v) => { setNdrHeatmapIntervalMinutes(v); safeStorage.setItem('ndr_heatmap_interval', String(v)); }}
+                          options={ndrHeatmapIntervalOptions}
+                        />
+                      </div>
+                    </div>
+                    <div className="overflow-x-auto custom-scroll">
+                      <table className="w-full text-[12.5px] border-collapse">
+                        <thead>
+                          <tr className="text-left text-zinc-500 uppercase text-[10px] tracking-wider border-b border-zinc-800">
+                            <th className="py-2 pr-3 font-bold whitespace-nowrap sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Agent Name</th>
+                            {ndrHeatmapBucketIndexes.map(idx => (
+                              <th key={idx} className="py-2 px-3 font-bold text-right whitespace-nowrap">{formatTimeOfDay(idx * ndrHeatmapIntervalMinutes)}</th>
+                            ))}
+                            <th className="py-2 pl-3 font-bold text-right whitespace-nowrap border-l border-zinc-800">Total</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {ndrVisibleHeatmapAgentData.map(a => {
+                            const rowTotal = ndrHeatmapBucketIndexes.reduce((s, idx) => s + (a.bucketCounts.get(idx) || 0), 0);
+                            return (
+                              <tr key={a.email} className="group border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
+                                <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800 border-r border-zinc-800 transition-colors">{a.name}</td>
+                                {ndrHeatmapBucketIndexes.map(idx => {
+                                  const value = a.bucketCounts.get(idx) || 0;
+                                  return <td key={idx} className="py-2.5 px-3 text-right tabular-nums text-zinc-200" style={ndrHeatmapCellStyle(value)}>{value}</td>;
+                                })}
+                                <td className="py-2.5 pl-3 text-right tabular-nums text-zinc-100 font-bold border-l border-zinc-800">{rowTotal}</td>
+                              </tr>
+                            );
+                          })}
+                          {ndrVisibleHeatmapAgentData.length > 0 && (
+                            <tr className="border-t-2 border-zinc-700 bg-zinc-900/80 font-bold">
+                              <td className="py-2.5 pr-3 text-zinc-100 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Team Total</td>
+                              {ndrHeatmapBucketIndexes.map(idx => {
+                                const columnTotal = ndrVisibleHeatmapAgentData.reduce((s, a) => s + (a.bucketCounts.get(idx) || 0), 0);
+                                return <td key={idx} className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{columnTotal}</td>;
+                              })}
+                              <td className="py-2.5 pl-3 text-right tabular-nums text-zinc-100 border-l border-zinc-800">
+                                {ndrVisibleHeatmapAgentData.reduce((s, a) => s + ndrHeatmapBucketIndexes.reduce((s2, idx) => s2 + (a.bucketCounts.get(idx) || 0), 0), 0)}
+                              </td>
+                            </tr>
+                          )}
+                          {ndrVisibleHeatmapAgentData.length === 0 && (
+                            <tr>
+                              <td colSpan={ndrHeatmapBucketIndexes.length + 2} className="py-6 text-center text-zinc-500">
+                                No {ndrHeatmapMetricOptions.find(o => o.value === ndrHeatmapMetric)?.label.toLowerCase()} activity in this date range.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* All-time snapshot cards (unrelated to the date scope above) */}
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                     <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-4">
                       <div className="text-[11px] text-zinc-500 uppercase font-medium">Total Leads</div>

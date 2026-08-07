@@ -1,7 +1,7 @@
 // Consolidated auth routes (login/logout/callback/me/presence) into one dynamic-route
 // file to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells
 // us which logical route was hit; URLs are unchanged.
-const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getRecentLeadAssignments, recordLeadDisposition,
+const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent, isCallingProcessAdmin } = require('../_lib/db');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
@@ -336,13 +336,14 @@ async function handleRecentAssignments(req, res) {
   res.status(200).json({ assignments });
 }
 
-// Every lead's real {assignedAt, disposedAt}, unbounded (see getAllLeadDates in db.js) - lets
-// the RTO CRM Overview tab's Agent Performance Summary table date-filter each column by the
-// real date its own event happened (assigned_at for the Assigned columns, disposed_at for the
-// Disposed/Connected/Converted ones) instead of the lead's own Calling Date/Order Date. Same
+// Every lead's real {assignedAt, disposedAt}, unbounded (see getAllLeadDates/getAllNdrLeadDates
+// in db.js) - lets an Overview tab's Agent Performance Summary table date-filter each column by
+// the real date its own event happened (assigned_at for the Assigned columns, disposed_at for
+// the Disposed/Connected/Converted ones) instead of the lead's own Calling Date/Order Date. Same
 // auth level as handleRecentAssignments above (authenticated, not admin-only): this is a
 // different pair of date fields for rows a signed-in agent can already see in the ticket data
-// itself, not new exposure.
+// itself, not new exposure. `process=ndr` switches to NDR's own table (keyed by awb, not order
+// ID) - default (no query param) stays RTO's, so RtoCrmClient.js's existing call is unaffected.
 async function handleLeadDates(req, res) {
   if (req.method !== 'GET') {
     res.status(405).json({ error: 'Method not allowed' });
@@ -353,7 +354,7 @@ async function handleLeadDates(req, res) {
     res.status(401).json({ error: 'Not signed in' });
     return;
   }
-  const leadDates = await getAllLeadDates();
+  const leadDates = req.query.process === 'ndr' ? await getAllNdrLeadDates() : await getAllLeadDates();
   res.status(200).json({ leadDates });
 }
 
