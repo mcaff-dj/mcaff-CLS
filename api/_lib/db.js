@@ -516,6 +516,30 @@ async function ensurePgSchema() {
   // lead_assignments_order_id_current_key, so claimNdrLead's ON CONFLICT below has a real
   // arbiter to target.
   await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS ndr_lead_assignments_awb_current_key ON ndr_lead_assignments (awb_number) WHERE reassigned_away_at IS NULL`;
+  // Escalation desk's own assignment/resolution history - the same role lead_assignments
+  // plays for RTO and ndr_lead_assignments for NDR. Deliberately keyed by parent_order
+  // (HYP_Parent_OrderID), NOT the sheet's row number: a row number shifts whenever the sheet
+  // is re-sorted or re-synced, while parent_order is the same stable key
+  // api/_lib/escalationSheet.js's getSheetIndex already matches CSV-import rows on. Written
+  // directly from api/escalation/[action].js's assign/update/bulk-update actions (there is no
+  // cron equivalent of assign_leads.py for this desk - assignment here is always an admin/
+  // agent clicking something in the UI), replacing the old non-durable in-memory
+  // assignmentMap that lost every assignment on a Lambda cold start.
+  await pgSql`
+    CREATE TABLE IF NOT EXISTS escalation_lead_assignments (
+      id BIGSERIAL PRIMARY KEY,
+      parent_order TEXT NOT NULL,
+      email TEXT NOT NULL,
+      assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      reassigned_away_at TIMESTAMPTZ,
+      resolved_at TIMESTAMPTZ,
+      resolution TEXT,
+      agent_remarks TEXT
+    )
+  `;
+  // At most one live cycle per order - same partial-unique-index pattern as RTO's
+  // lead_assignments_order_id_current_key and NDR's ndr_lead_assignments_awb_current_key.
+  await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS escalation_lead_assignments_parent_order_current_key ON escalation_lead_assignments (parent_order) WHERE reassigned_away_at IS NULL`;
   } catch (e) {
     // Postgres codes for "already exists" (duplicate_column/duplicate_table/duplicate_object)
     // - a benign race, not a real failure: every statement above is its own ADD COLUMN IF NOT
@@ -949,6 +973,77 @@ async function disposeNdrLead(awbNumber, disposition, agentRemarks) {
     SET disposed_at = now(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null}
     WHERE awb_number = ${awbNumber} AND reassigned_away_at IS NULL
   `;
+}
+
+// Escalation's own equivalent of claimNdrLead, but explicit about reassignment: closes any
+// OTHER agent's currently-live row for this order before opening a new one, so history is
+// preserved (matches RTO/NDR's "reassigned_away_at, not overwritten" cycle model) rather than
+// silently mutating email in place. A no-op re-assign to the SAME agent (e.g. re-saving the
+// dropdown without changing it) touches nothing, same ON CONFLICT DO NOTHING safety claimNdrLead
+// relies on.
+async function assignEscalationOrder(parentOrder, email) {
+  await ensurePgSchema();
+  await pgSql`
+    UPDATE escalation_lead_assignments
+    SET reassigned_away_at = now()
+    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND email <> ${email}
+  `;
+  await pgSql`
+    INSERT INTO escalation_lead_assignments (parent_order, email)
+    VALUES (${parentOrder}, ${email})
+    ON CONFLICT (parent_order) WHERE reassigned_away_at IS NULL DO NOTHING
+  `;
+}
+
+// Clears an order's live assignment (the queue table's "Clear assignment" action) without
+// assigning it to anyone new - closes the live cycle, leaving its history intact.
+async function unassignEscalationOrder(parentOrder) {
+  await ensurePgSchema();
+  await pgSql`
+    UPDATE escalation_lead_assignments
+    SET reassigned_away_at = now()
+    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL
+  `;
+}
+
+// Stamps a resolution onto the SAME live row assignEscalationOrder created - same relationship
+// disposeNdrLead has to claimNdrLead. Silently a no-op if the order was never assigned to
+// anyone (WHERE matches zero rows) - resolving an unassigned order still writes to the sheet
+// (the desk's real source of truth) via updateOrder/batchUpdateOrders; this table is only the
+// durable history side, so having nothing to update here is not an error.
+async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks) {
+  await ensurePgSchema();
+  await pgSql`
+    UPDATE escalation_lead_assignments
+    SET resolved_at = now(), resolution = ${resolution || null}, agent_remarks = ${agentRemarks || null}
+    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL
+  `;
+}
+
+// Full history, newest first. No date filtering here on purpose: "assigned this week" and
+// "resolved this week" are different questions about different timestamps on the same table
+// (same reasoning as getCallingOverviewStats' own per-metric date scoping above) - a single
+// WHERE clause on one timestamp would silently miscount whichever metric doesn't share it.
+// Callers that need date-scoped metrics (AssignmentsPanel) filter each metric by its own
+// timestamp client-side instead. Also doubles as the read side of the live assignment map
+// (api/escalation/[action].js's assign GET filters this down to rows with neither
+// reassignedAwayAt nor resolvedAt set).
+async function getEscalationAssignments() {
+  await ensurePgSchema();
+  const { rows } = await pgSql`
+    SELECT parent_order, email, assigned_at, reassigned_away_at, resolved_at, resolution, agent_remarks
+    FROM escalation_lead_assignments
+    ORDER BY assigned_at DESC
+  `;
+  return rows.map((r) => ({
+    parentOrder: r.parent_order,
+    email: r.email,
+    assignedAt: r.assigned_at,
+    reassignedAwayAt: r.reassigned_away_at,
+    resolvedAt: r.resolved_at,
+    resolution: r.resolution,
+    agentRemarks: r.agent_remarks,
+  }));
 }
 
 // dateFrom/dateTo are inclusive "YYYY-MM-DD" strings (or null for unbounded), interpreted
@@ -1548,4 +1643,5 @@ module.exports = {
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions,
   claimNdrLead, disposeNdrLead,
+  assignEscalationOrder, unassignEscalationOrder, resolveEscalationAssignment, getEscalationAssignments,
 };
