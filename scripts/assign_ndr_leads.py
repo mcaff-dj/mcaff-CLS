@@ -37,8 +37,11 @@ COL_AWB = 4                  # E
 COL_ATTEMPTS = 14            # O - Attempt Count
 COL_LATEST_NDR_DATE = 15     # P - "DD-MM-YYYY", the round-robin's oldest-first sort key
 COL_AGENT = 18               # S - Agent Name - the only column this script writes
+COL_CONNECTED = 19           # T - blank until NdrCallingClient.js's saveNdrDisposition writes
+                              # it; read-only here, needed to tell an agent's still-OPEN leads
+                              # apart from ones they've already disposed (see current_load below)
 COL_AGENT_LETTER = lib.get_column_letter(COL_AGENT)  # "S"
-LAST_COL = COL_AGENT_LETTER  # nothing past Agent Name is read or written here
+LAST_COL = lib.get_column_letter(COL_CONNECTED)  # "T"
 
 STALE_MINUTES = 10  # must match the CRM's own heartbeat cadence - same convention as RTO's
 DEFAULT_QUOTA = 20  # NDR's own fallback, independent of RTO's leadAssignmentRules.json value
@@ -169,7 +172,13 @@ def main():
     for i, row in enumerate(sheet_rows):
         agent = row[COL_AGENT].strip().lower() if len(row) > COL_AGENT and row[COL_AGENT] else ""
         if agent:
-            if agent in current_load:
+            # A disposed lead (Connected already has a value - the same signal
+            # NdrCallingClient.js treats as "worked") must NOT count toward the agent's
+            # quota, or finishing a batch would permanently cap them at zero new leads for
+            # the rest of their tenure - this was exactly that bug: quota is a concurrent-
+            # workload cap, not a lifetime total, same as assign_leads.py's own current_load.
+            connected = row[COL_CONNECTED].strip() if len(row) > COL_CONNECTED and row[COL_CONNECTED] else ""
+            if not connected and agent in current_load:
                 current_load[agent] += 1
         else:
             latest_ndr_date = parse_latest_ndr_date(row[COL_LATEST_NDR_DATE] if len(row) > COL_LATEST_NDR_DATE else "")
