@@ -31,16 +31,18 @@ var NEXT_PAGE_ROUTES = {
 };
 
 // Calling Team has its own nested nav sub-items instead of one blanket "coming soon"
-// card. Only 'overview' and 'rto' get their own sidebar entry - every OTHER calling
-// process (NDR, Detractor, Product KYC) lives entirely behind /rto-crm's own Process
-// switcher instead of getting a sidebar entry of its own, since they're all really the
-// same CRM shell (see callingProcesses.json + RtoCrmClient.js's
-// `!currentProcess.implemented` branch) and don't need a second way in. Access is still
-// enforced inside that switcher via invitedProcessKeys - removing a process from this
-// sidebar list is purely navigational, not a permission change.
+// card. Detractor and Product KYC still have no workspace at all, so they stay behind
+// /rto-crm's own Process switcher (see callingProcesses.json + RtoCrmClient.js's
+// `!currentProcess.implemented` branch) until they get one. NDR has a real, independent
+// workspace and its own sidebar entry, same as RTO - see the plan for splitting Calling
+// processes into their own pages, one folder per process. Access is still enforced
+// server-side via invitedProcessKeys/report_tab_permissions regardless of what's listed
+// here - removing a process from this sidebar list is purely navigational, not a
+// permission change.
 var CALLING_TEAM_SUBITEMS = {
   overview: { label: 'Overview', text: 'Calling Team Overview', url: '/calling-overview' },
-  rto: { label: 'RTO-Calling', text: 'RTO CRM Agent & Refund Portal', url: '/rto-crm' }
+  rto: { label: 'RTO-Calling', text: 'RTO CRM Agent & Refund Portal', url: '/rto-crm' },
+  ndr: { label: 'NDR-Calling', text: 'NDR Calling Agent Portal', url: '/rto-crm?process=ndr' }
 };
 
 function selectCallingTeamView(view) {
@@ -184,7 +186,7 @@ function onBrandChange(brandKey, isUserAction) {
     document.getElementById('loadingOverlay').style.opacity = '0';
     document.getElementById('loadingOverlay').style.visibility = 'hidden';
 
-    var callingViews = ['overview', 'rto'];
+    var callingViews = Object.keys(CALLING_TEAM_SUBITEMS);
     var allowedViews = userTabPerms['calling'];
     if (Array.isArray(allowedViews) && allowedViews.length) {
       var allowedViewSet = {};
