@@ -144,7 +144,7 @@ export default function NdrCallingClient() {
   const {
     googleUser, userRole, sessionIsAdmin, invitedProcessKeys, processPermsLoaded,
     processAgents, isProcessAdmin, saveProcessAgent, savingAgentEmail,
-    agentStatus, showToast,
+    agentStatus, serverPresence, showToast,
   } = session;
 
   const hours = useBusinessHours(PROCESS_KEY, { userRole, isProcessAdmin, showToast });
