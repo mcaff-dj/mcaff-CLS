@@ -541,9 +541,19 @@ async function ensurePgSchema() {
   // lead_assignments_order_id_current_key and NDR's ndr_lead_assignments_awb_current_key.
   // "Live" means neither reassigned nor resolved - reassigned_away_at IS NULL AND
   // resolved_at IS NULL - so a fresh re-escalation after resolution gets a new row, not
-  // a silent conflict with the old one.
-  await pgSql`DROP INDEX IF EXISTS escalation_lead_assignments_parent_order_current_key`;
-  await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS escalation_lead_assignments_parent_order_current_key ON escalation_lead_assignments (parent_order) WHERE reassigned_away_at IS NULL AND resolved_at IS NULL`;
+  // a silent conflict with the old one. Checked via pg_indexes first (not a bare
+  // DROP+CREATE) so this is a true no-op after the first run, same as every other
+  // statement here - an unconditional DROP+CREATE on every cold start would instead leave
+  // a brief window on EVERY container start where the index doesn't exist, and a
+  // concurrent assignEscalationOrder insert landing in that window would fail with
+  // Postgres error 42P10 (no arbiter for its ON CONFLICT target).
+  const { rows: escIdxRows } = await pgSql`
+    SELECT indexdef FROM pg_indexes WHERE indexname = 'escalation_lead_assignments_parent_order_current_key'
+  `;
+  if (escIdxRows.length === 0 || !escIdxRows[0].indexdef.includes('resolved_at IS NULL')) {
+    await pgSql`DROP INDEX IF EXISTS escalation_lead_assignments_parent_order_current_key`;
+    await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS escalation_lead_assignments_parent_order_current_key ON escalation_lead_assignments (parent_order) WHERE reassigned_away_at IS NULL AND resolved_at IS NULL`;
+  }
   } catch (e) {
     // Postgres codes for "already exists" (duplicate_column/duplicate_table/duplicate_object)
     // - a benign race, not a real failure: every statement above is its own ADD COLUMN IF NOT
