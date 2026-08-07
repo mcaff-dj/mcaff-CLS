@@ -3,7 +3,11 @@ name: Sync delivery tickets to Hyphen/mCaff sheets
 on:
   schedule:
     - cron: '0 */2 * * *'   # every 2 hours, on the hour (UTC)
-  workflow_dispatch: {}      # manual "Run workflow" button
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Backfill from this date (YYYY-MM-DD) through today; leave blank for today only"
+        required: false
 
 permissions:
   contents: read
@@ -35,7 +39,7 @@ jobs:
           MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
           MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
           MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
-        run: python scripts/sync_delivery_tickets_to_sheet.py --tab Hyphen
+        run: python scripts/sync_delivery_tickets_to_sheet.py --tab HYPHEN ${{ github.event.inputs.since && format('--since {0}', github.event.inputs.since) || '' }}
 
       - name: Sync mCaff tab
         env:
@@ -45,4 +49,4 @@ jobs:
           MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
           MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
           MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
-        run: python scripts/sync_delivery_tickets_to_sheet.py --tab mCaff
+        run: python scripts/sync_delivery_tickets_to_sheet.py --tab mCaffeine ${{ github.event.inputs.since && format('--since {0}', github.event.inputs.since) || '' }}

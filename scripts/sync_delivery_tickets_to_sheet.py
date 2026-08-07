@@ -1,5 +1,5 @@
 """Pushes today's resolved Delivery-class tickets from PEP_CLS into the
-Hyphen/mCaff tabs of the "Internal Escalation" sheet. Run every 2 hours via
+HYPHEN/mCaffeine tabs of the "Internal Escalation" sheet. Run every 2 hours via
 GitHub Actions (see .github/workflows/sync-delivery-tickets.yml).
 
 Only 11 of the tab's ~25 columns have a source in hyphen_tickets/mcaff_tickets
@@ -24,8 +24,8 @@ SPREADSHEET_ID = "1fopbKSrg-U9ixZi6Tfq13Q7mzRMPtceXkfEuN4Wko-w"
 TICKET_NUMBER_COL = "Z"  # one past the tab's existing 25 columns (A-Y)
 
 TAB_TABLE = {
-    "Hyphen": "hyphen_tickets",
-    "mCaff": "mcaff_tickets",
+    "HYPHEN": "hyphen_tickets",
+    "mCaffeine": "mcaff_tickets",
 }
 
 
