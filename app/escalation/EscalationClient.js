@@ -298,17 +298,16 @@ function OverviewPanel({ overview, agents, loading, resolvedCount }) {
 /* ============================================================
    Sidebar
    ============================================================ */
-function Sidebar({ collapsed, role, pendingCount, view, onViewChange }) {
+function Sidebar({ collapsed, isAdmin, pendingCount, view, onViewChange, user }) {
   const navItems = [
     { id: 'queue',    icon: I.inbox,    label: 'RTO Queue',        badge: pendingCount },
-    ...(role === 'admin' ? [
+    ...(isAdmin ? [
       { id: 'overview', icon: I.zap,     label: 'Overview',         badge: null },
       { id: 'agents',   icon: I.users,   label: 'Agent Management', badge: null },
       { id: 'assigns',  icon: I.assign,  label: 'Assignments',      badge: null },
+      { id: 'settings', icon: I.settings, label: 'Settings',        badge: null },
     ] : []),
-    { id: 'settings', icon: I.settings, label: 'Settings',         badge: null },
   ];
-  const user = USERS[role];
   return (
     <aside className="sidebar">
       <div className="sidebarLogo">
@@ -319,7 +318,7 @@ function Sidebar({ collapsed, role, pendingCount, view, onViewChange }) {
         </div>
       </div>
       <nav className="sidebarNav">
-        {role === 'admin' && <div className="navSection">Admin</div>}
+        {isAdmin && <div className="navSection">Admin</div>}
         {navItems.map((item) => (
           <button
             key={item.id}
@@ -336,10 +335,10 @@ function Sidebar({ collapsed, role, pendingCount, view, onViewChange }) {
       </nav>
       <div className="sidebarFooter">
         <div className="sidebarUser">
-          <div className="userAvatar">{user.avatar}</div>
+          <div className="userAvatar">{initials(user?.name)}</div>
           <div className="userInfo">
-            <div className="userName">{user.name}</div>
-            <div className="userRole">{user.roleLabel}</div>
+            <div className="userName">{user?.name || 'Signed out'}</div>
+            <div className="userRole">{isAdmin ? 'Administrator' : 'Support Agent'}</div>
           </div>
         </div>
       </div>
@@ -719,6 +718,7 @@ function OrderRow({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           rowNumber: order.rowNumber,
+          parentOrder: order.parentOrder,
           newOrderId: needsOrder ? newOrderId.trim() : '-',
           newAwb:     needsAwb   ? newAwb.trim()     : '-',
           newStatus: resType,
@@ -740,16 +740,16 @@ function OrderRow({
 
   async function handleAssign(e) {
     const agentId = e.target.value;
-    const agent = agents.find((a) => a.id === agentId);
+    const agent = agents.find((a) => a.email === agentId);
     setAssigning(true);
     try {
       await fetch('/api/escalation/assign', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rowNumber: order.rowNumber, agentId: agentId || null, agentName: agent?.name || null }),
+        body: JSON.stringify({ rowNumber: order.rowNumber, parentOrder: order.parentOrder, agentId: agentId || null }),
       });
-      onAssign(order.rowNumber, agentId ? { agentId, agentName: agent?.name } : null);
-      onToast('success', agentId ? `Assigned to ${agent?.name}` : 'Assignment cleared');
+      onAssign(order.rowNumber, agentId ? { agentId } : null);
+      onToast('success', agentId ? `Assigned to ${agent?.name || agentId}` : 'Assignment cleared');
     } catch {
       onToast('error', 'Failed to save assignment');
     } finally { setAssigning(false); }
@@ -826,14 +826,14 @@ function OrderRow({
             {assigning ? <span className="spinner spinnerMuted" /> : assignment ? (
               <span className="assignChip">
                 <span className="assignChipAvatar">
-                  {agents.find((a) => a.id === assignment.agentId)?.avatar?.slice(0, 2) || '?'}
+                  {initials(agents.find((a) => a.email === assignment.agentId)?.name)}
                 </span>
-                {assignment.agentName}
+                {agents.find((a) => a.email === assignment.agentId)?.name || assignment.agentId}
               </span>
             ) : (
               <select className="assignDropdown" value="" onChange={handleAssign} aria-label="Assign agent">
                 <option value="">Assign…</option>
-                {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                {agents.map((a) => <option key={a.email} value={a.email}>{a.name}</option>)}
               </select>
             )}
           </td>
@@ -1160,18 +1160,21 @@ export default function EscalationClient() {
 
   /* --- Bulk update --- */
   async function handleBulkApply(status) {
-    const rowNumbers = Array.from(selectedRows);
+    const items = Array.from(selectedRows).map((rowNumber) => ({
+      rowNumber,
+      parentOrder: orders.find((o) => o.rowNumber === rowNumber)?.parentOrder,
+    }));
     setBulkLoading(true);
     try {
       const res = await fetch('/api/escalation/bulk-update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rowNumbers, status }),
+        body: JSON.stringify({ items, status }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Bulk update failed');
       setOrders((p) => p.filter((o) => !selectedRows.has(o.rowNumber)));
-      setResolvedCount((c) => c + rowNumbers.length);
+      setResolvedCount((c) => c + items.length);
       setSelectedRows(new Set());
       showToast('success', `${data.updated} orders marked as "${status}"`);
     } catch (err) {
@@ -1219,26 +1222,25 @@ export default function EscalationClient() {
 
   /* --- Auto-assign --- */
   async function handleAutoAssign() {
-    const user = USERS[role];
-    if (!user.agentId && role !== 'admin') return;
+    if (!isAdmin && !googleUser?.email) return;
 
     setAutoAssigning(true);
     try {
       const unassigned = orders.filter((o) => !assignments[o.rowNumber]);
       if (unassigned.length === 0) { showToast('success', 'All orders already assigned!'); return; }
 
-      if (role === 'agent') {
+      if (!isAdmin) {
         // Assign all unassigned to self
         const updates = unassigned.map((o) =>
           fetch('/api/escalation/assign', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ rowNumber: o.rowNumber, agentId: user.agentId, agentName: user.name }),
+            body: JSON.stringify({ rowNumber: o.rowNumber, parentOrder: o.parentOrder, agentId: googleUser.email }),
           })
         );
         await Promise.all(updates);
         const newMap = {};
-        unassigned.forEach((o) => { newMap[o.rowNumber] = { agentId: user.agentId, agentName: user.name }; });
+        unassigned.forEach((o) => { newMap[o.rowNumber] = { agentId: googleUser.email }; });
         setAssignments((p) => ({ ...p, ...newMap }));
         showToast('success', `Auto-assigned ${unassigned.length} orders to you`);
       } else {
@@ -1249,12 +1251,12 @@ export default function EscalationClient() {
           return fetch('/api/escalation/assign', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ rowNumber: o.rowNumber, agentId: agent.id, agentName: agent.name }),
-          }).then(() => ({ rowNumber: o.rowNumber, agentId: agent.id, agentName: agent.name }));
+            body: JSON.stringify({ rowNumber: o.rowNumber, parentOrder: o.parentOrder, agentId: agent.email }),
+          }).then(() => ({ rowNumber: o.rowNumber, agentId: agent.email }));
         });
         const results = await Promise.all(updates);
         const newMap = {};
-        results.forEach(({ rowNumber, agentId, agentName }) => { newMap[rowNumber] = { agentId, agentName }; });
+        results.forEach(({ rowNumber, agentId }) => { newMap[rowNumber] = { agentId }; });
         setAssignments((p) => ({ ...p, ...newMap }));
         showToast('success', `Auto-assigned ${unassigned.length} orders (round-robin across ${agents.length} agents)`);
       }
@@ -1390,8 +1392,8 @@ export default function EscalationClient() {
     // would stop matching if the two were the same node.
     <div className="escalation-page" data-theme={theme}>
     <div className={`appShell${sidebarCollapsed ? ' sidebarCollapsed' : ''}`}>
-      <Sidebar collapsed={sidebarCollapsed} role={role} pendingCount={totalPending}
-        view={view} onViewChange={setView} />
+      <Sidebar collapsed={sidebarCollapsed} isAdmin={isAdmin} pendingCount={totalPending}
+        view={view} onViewChange={setView} user={googleUser} />
 
       <div className="mainContent">
         {/* Topbar */}
@@ -1408,17 +1410,8 @@ export default function EscalationClient() {
             </div>
           </div>
           <div className="topbarRight">
-            <div className="roleSwitcher" role="group">
-              {['admin', 'agent'].map((r) => (
-                <button key={r} type="button"
-                  className={`roleTab${role === r ? ' active' : ''}`}
-                  onClick={() => setRole(r)}>
-                  {r.charAt(0).toUpperCase() + r.slice(1)}
-                </button>
-              ))}
-            </div>
             {/* Availability status */}
-            <StatusControl status={agentStatus} onChange={setAgentStatus} />
+            <StatusControl status={agentStatus} onChange={setStatus} />
             {/* Theme toggle */}
             <button type="button" className="topbarBtn themeToggle" onClick={toggleTheme}
               title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
@@ -1430,8 +1423,8 @@ export default function EscalationClient() {
                 <Icon path={I.refresh} size={13} />
               </span>
             </button>
-            <div className="userAvatar" style={{ cursor: 'default' }} title={USERS[role].name}>
-              {USERS[role].avatar}
+            <div className="userAvatar" style={{ cursor: 'default' }} title={googleUser?.name}>
+              {initials(googleUser?.name)}
             </div>
           </div>
         </header>
