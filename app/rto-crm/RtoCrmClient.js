@@ -362,12 +362,14 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
         try { localStorage.setItem('rto_active_process', activeProcess); } catch {}
       }, [activeProcess]);
 
-      // NDR Calling moved to its own page (see the plan for splitting Calling processes into
-      // their own pages) - a returning agent whose browser last left off on
-      // ?process=ndr/cached activeProcess='ndr' gets redirected to the real page instead of
-      // landing on a process key this file no longer renders a workspace for.
+      // NDR Calling and Escalation each moved to their own page (see the plan for splitting
+      // Calling processes into their own pages) - a returning agent whose browser last left off
+      // on ?process=ndr / ?process=escalation (or the matching cached activeProcess) gets
+      // redirected to the real page instead of landing on a process key this file no longer
+      // renders a workspace for. Keep in sync with OWN_PAGE_PROCESSES further down.
       useEffect(() => {
-        if (activeProcess === 'ndr') window.location.replace('/ndr-calling');
+        const ownPage = { ndr: '/ndr-calling', escalation: '/escalation' }[activeProcess];
+        if (ownPage) window.location.replace(ownPage);
       }, [activeProcess]);
 
       // Shell-tab navigation for a process that has no workspace yet (see the
@@ -1601,16 +1603,18 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
       // with no per-process rows keep the full list, matching how tabPerms already works for
       // every other report ('' / empty = unrestricted).
       //
-      // NDR is excluded here entirely, not just from the dropdown - it now lives at its own
-      // /ndr-calling page (see the plan for splitting Calling processes into their own pages).
-      // Excluding it from PROCESSES itself, rather than only from processOptions below, means
-      // a stale ?process=ndr or cached activeProcess can never make currentProcess resolve to
-      // it and render RTO's own workspace under NDR's old process key - the redirect effect
-      // near activeProcess's own declaration sends a stale link to the real page instead.
+      // NDR and Escalation are excluded here entirely, not just from the dropdown - each now
+      // lives at its own page (/ndr-calling, /escalation - see the plan for splitting Calling
+      // processes into their own pages). Excluding them from PROCESSES itself, rather than only
+      // from processOptions below, means a stale ?process=ndr / ?process=escalation or cached
+      // activeProcess can never make currentProcess resolve to one of them and render RTO's own
+      // workspace under another process's key - the redirect effect near activeProcess's own
+      // declaration sends a stale link to the real page instead.
+      const OWN_PAGE_PROCESSES = ['ndr', 'escalation'];
       const PROCESSES = ((!invitedProcessKeys || sessionIsAdmin)
         ? ALL_PROCESSES
         : ALL_PROCESSES.filter(p => invitedProcessKeys.includes(p.value))
-      ).filter(p => p.value !== 'ndr');
+      ).filter(p => !OWN_PAGE_PROCESSES.includes(p.value));
       const processOptions = PROCESSES.map(({ value, label, icon }) => ({ value, label, icon }));
       // Falls back to the first PERMITTED process, so a stale localStorage
       // 'rto_active_process' pointing at a process this agent isn't invited to can't pin them

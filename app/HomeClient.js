@@ -33,16 +33,22 @@ var NEXT_PAGE_ROUTES = {
 // Calling Team has its own nested nav sub-items instead of one blanket "coming soon"
 // card. Detractor and Product KYC still have no workspace at all, so they stay behind
 // /rto-crm's own Process switcher (see callingProcesses.json + RtoCrmClient.js's
-// `!currentProcess.implemented` branch) until they get one. NDR has a real, independent
-// workspace and its own sidebar entry, same as RTO - see the plan for splitting Calling
-// processes into their own pages, one folder per process. Access is still enforced
-// server-side via invitedProcessKeys/report_tab_permissions regardless of what's listed
-// here - removing a process from this sidebar list is purely navigational, not a
+// `!currentProcess.implemented` branch) until they get one. NDR and Escalation each have a
+// real, independent workspace and their own sidebar entry, same as RTO - see the plan for
+// splitting Calling processes into their own pages, one folder per process. Access is still
+// enforced server-side via invitedProcessKeys/report_tab_permissions regardless of what's
+// listed here - removing a process from this sidebar list is purely navigational, not a
 // permission change.
+//
+// Escalation is the RTO-confirmed-by-both-courier-and-logistics desk (app/escalation/), ported
+// in from a separately-deployed standalone app. Its source folder is still called "NDR Calling"
+// but it is NOT the NDR process above and shares no data with it - different sheet, different
+// columns, different queue.
 var CALLING_TEAM_SUBITEMS = {
   overview: { label: 'Overview', text: 'Calling Team Overview', url: '/calling-overview' },
   rto: { label: 'RTO-Calling', text: 'RTO CRM Agent & Refund Portal', url: '/rto-crm' },
-  ndr: { label: 'NDR-Calling', text: 'NDR Calling Agent Portal', url: '/ndr-calling' }
+  ndr: { label: 'NDR-Calling', text: 'NDR Calling Agent Portal', url: '/ndr-calling' },
+  escalation: { label: 'Escalation', text: 'Escalation Agent Portal', url: '/escalation' }
 };
 
 function selectCallingTeamView(view) {

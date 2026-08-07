@@ -25,7 +25,9 @@
     "dispositions and data source; none of them share RTO's.",
     "",
     "`implemented: true` does NOT mean the workspace lives in app/rto-crm/RtoCrmClient.js -",
-    "NDR's is its own page/folder (app/ndr-calling/), not a branch of RTO's Process switcher.",
+    "NDR's is its own page/folder (app/ndr-calling/) and Escalation's is app/escalation/, neither",
+    "a branch of RTO's Process switcher. Both are excluded from that switcher's PROCESSES list in",
+    "RtoCrmClient.js, which redirects a stale ?process= link to the real page instead.",
     "See the plan for splitting Calling processes into their own pages, one folder per process."
   ],
 
@@ -49,6 +51,19 @@
       "icon": "🚚",
       "implemented": true,
       "blurb": "Non-delivery-report leads, worked from its own page at /ndr-calling (app/ndr-calling/NdrCallingClient.js) rather than this file's own Process switcher - see the plan for splitting Calling processes into their own pages.",
+      "businessHours": {
+        "timezone": "IST",
+        "days": ["mon", "tue", "wed", "thu", "fri", "sat"],
+        "start": "09:30",
+        "end": "18:30"
+      }
+    },
+    {
+      "key": "escalation",
+      "label": "Escalation",
+      "icon": "🚨",
+      "implemented": true,
+      "blurb": "Orders flagged RTO by BOTH the courier and logistics, worked from its own page at /escalation (app/escalation/EscalationClient.js). Agents record the replacement order id / AWB / status back into the tracking sheet, and tag rows by escalation source (SOS / Social Media / Founder). Ported in from a separately-deployed standalone app; the folder it came from is still named \"NDR Calling\" but the desk is not NDR - see docs and the sheet columns it reads.",
       "businessHours": {
         "timezone": "IST",
         "days": ["mon", "tue", "wed", "thu", "fri", "sat"],

@@ -18,7 +18,10 @@ app.use(async (req, res, next) => {
     res.status(500).json({ error: 'Server not configured: could not load app secrets - ' + (e.message || String(e)) });
   }
 });
-app.use(express.json());
+// 5mb, not the 100kb default: the Escalation desk's `import` action takes a whole pasted CSV
+// as a JSON string body (see api/escalation/[action].js, whose own Vercel-side `config` export
+// sets the same figure). Every other route here sends small JSON and is unaffected.
+app.use(express.json({ limit: '5mb' }));
 
 function mount(method, path, handlerPath, paramName) {
   app[method](path, async (req, res) => {
@@ -47,6 +50,10 @@ mount('post', '/api/refund/gokwik-initiate', '../refund/gokwik-initiate.js');
 mount('all', '/api/rto/sheet', '../rto/sheet.js');
 mount('all', '/api/ndr/sheet', '../ndr/sheet.js');
 mount('post', '/api/ndr/lead-assignment', '../ndr/lead-assignment.js');
+
+// The Escalation desk's whole API surface - one dynamic-segment handler, same shape as the
+// two :action mounts above (agents/orders/assign/update/bulk-update/import/export/sample).
+mount('all', '/api/escalation/:action', '../escalation/[action].js', 'action');
 
 // Registered before the dynamic /api/report/:card route below - Express matches routes
 // in registration order, so these more specific paths have to win the match before
