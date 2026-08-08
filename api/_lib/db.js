@@ -17,25 +17,86 @@ let pool = null;
 // the handful of functions below need a Postgres connection of their own.
 const { Pool: PgPool } = require('pg');
 let pgPool = null;
+
+// Supabase's pooler serves the SAME project on two ports, and which one the URL names decides
+// whether this app can scale at all:
+//   :5432 session mode     - a backend is pinned to a client for that client's whole life, so
+//                            the project's pool_size (15) is a cap on CONCURRENT CLIENTS. The
+//                            16th is refused outright: "(EMAXCONNSESSION) max clients reached
+//                            in session mode".
+//   :6543 transaction mode - a backend is held only for the duration of a statement/
+//                            transaction, so those same 15 backends multiplex across far more
+//                            clients than 15.
+// Lambda has no container cap that corresponds to pool_size - it answers load by adding
+// containers - so session mode's per-client pinning is the actual source of EMAXCONNSESSION,
+// and no `max` value can fix that by itself. Transaction mode is what serverless wants.
+//
+// Rewritten HERE rather than by editing POSTGRES_URL in Secrets Manager so it can't regress:
+// the secret is shared with the cron scripts and re-entered by hand, and a URL that silently
+// reverts to :5432 brings the outage straight back with no trace in the repo.
+//
+// Only ever touches Supabase's own pooler hostname - a direct Postgres host has nothing
+// listening on 6543, so rewriting one would take the app down instead of fixing it, and a URL
+// already naming an explicit non-5432 port is left exactly as written. Port surgery is done by
+// regex on the host segment specifically to avoid a URL parse/serialize round trip, which
+// would re-encode a password containing reserved characters and could change what it means.
+const POOLER_SESSION_PORT = /(@[^/@?]*\.pooler\.supabase\.com)(:5432)?(?=[/?]|$)/i;
+function toTransactionModePooler(conn) {
+  return conn.replace(POOLER_SESSION_PORT, '$1:6543');
+}
+
 function getPgPool() {
   if (pgPool) return pgPool;
-  const conn = process.env.POSTGRES_URL;
-  if (!conn) throw new Error('Missing POSTGRES_URL env var');
-  // Supabase's pooler runs this project in session mode, capped at pool_size: 15 total
-  // concurrent connections - but `pg`'s own default `max` (10) is PER POOL INSTANCE, and this
-  // pool is a per-Lambda-container singleton. Lambda scales by running several concurrent
-  // containers under load, each getting its own pool - a handful of warm containers at the
-  // default max alone exceeds 15 and starts throwing EMAXCONNSESSION. Capped low enough that
-  // even quite a few concurrent containers stay under the ceiling; idleTimeoutMillis releases
-  // a container's connections quickly once traffic quiets down instead of holding them open.
+  const raw = process.env.POSTGRES_URL;
+  if (!raw) throw new Error('Missing POSTGRES_URL env var');
+  const conn = toTransactionModePooler(raw);
+  const transactionMode = conn !== raw || /:6543(?=[/?]|$)/.test(conn);
+  if (conn !== raw) console.error('POSTGRES_URL named the Supabase pooler in session mode (5432); connecting in transaction mode (6543) instead');
+
+  // `pg`'s `max` is PER POOL INSTANCE and this pool is a per-container singleton, so the real
+  // connection footprint is max x (live containers). In transaction mode the pooler multiplexes
+  // and a few connections per container is cheap, which buys back the intra-request parallelism
+  // getCallingOverviewData's Promise.all wants. If the rewrite above did NOT apply - a legacy or
+  // non-Supabase host we must not guess about - we are still on a hard 15-CLIENT ceiling, so
+  // hold each container to a single connection and let ~15 of them fit rather than ~5.
+  // idleTimeoutMillis hands connections back quickly once traffic quiets instead of holding them.
   pgPool = new PgPool({
     connectionString: conn,
     ssl: { rejectUnauthorized: false },
-    max: 3,
+    max: transactionMode ? 3 : 1,
     idleTimeoutMillis: 10000,
   });
   return pgPool;
 }
+
+// The pooler admits a hard-capped number of client connections for the WHOLE project
+// (pool_size: 15) and refuses the next one outright. Lambda concurrency has no matching cap -
+// it just adds containers - so even in transaction mode a burst can still find the door shut.
+//
+// Safe to retry precisely because the refusal happens during CONNECT, before any SQL is
+// sent - the statement provably never reached Postgres, so a retry cannot double-apply a
+// write. That is why this is gated on that one message and nothing else: a genuine query
+// error (constraint violation, syntax, timeout mid-statement) must still propagate
+// untouched, since retrying those could re-run work that already partly happened.
+const PG_CONNECT_RETRIES = 4;
+function isPoolExhausted(e) {
+  return /EMAXCONNSESSION|max clients reached/i.test((e && e.message) || '');
+}
+async function withPgConnectRetry(fn) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (attempt >= PG_CONNECT_RETRIES || !isPoolExhausted(e)) throw e;
+      // Exponential (100/200/400/800ms) plus jitter - a burst of containers all refused at the
+      // same instant would otherwise retry in lockstep and just refuse each other again.
+      const delay = 100 * 2 ** attempt + Math.floor(Math.random() * 100);
+      console.error(`Postgres pool exhausted; retry ${attempt + 1}/${PG_CONNECT_RETRIES} in ${delay}ms`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
 // Same sql`...` tagged-template calling convention every call site below already
 // uses (and the same trick the MySQL sql() shim above plays) - just against a plain
 // `pg` Pool instead of a provider-specific driver, so this works against any
@@ -47,7 +108,7 @@ async function pgSql(strings, ...values) {
     text += s;
     if (i < values.length) text += `$${i + 1}`;
   });
-  const { rows } = await getPgPool().query(text, values);
+  const { rows } = await withPgConnectRetry(() => getPgPool().query(text, values));
   return { rows };
 }
 
@@ -58,7 +119,9 @@ async function pgSql(strings, ...values) {
 // client.query(text, params) with plain $1/$2 placeholders, not the pgSql tagged
 // template (which would grab a DIFFERENT connection and defeat the point).
 async function withPgTransaction(work) {
-  const client = await getPgPool().connect();
+  // Only the checkout retries - never `work` itself, which may already have written by the
+  // time it throws.
+  const client = await withPgConnectRetry(() => getPgPool().connect());
   try {
     await client.query('BEGIN');
     const result = await work(client);
@@ -113,12 +176,22 @@ async function sql(strings, ...values) {
 }
 
 let schemaReady = false;
+let schemaPromise = null;
+
+// Same in-flight deduplication as ensurePgSchema below, for the same reason - see its comment.
+// MySQL is not the database that ran out of connections, but the amplification is identical
+// (api/auth/[action].js fans out to three functions that each land here), and one shared
+// bootstrap run per container is what this always meant to be.
+async function ensureSchema() {
+  if (schemaReady) return;
+  if (!schemaPromise) schemaPromise = bootstrapSchema().finally(() => { schemaPromise = null; });
+  return schemaPromise;
+}
 
 // Idempotent - safe to call on every cold start. Only runs the DDL once per warm instance.
 // This is a fresh schema (PEP_CLS), so unlike the Postgres version, there's no historical
 // ALTER/rename migrations to carry forward - just the final desired shape.
-async function ensureSchema() {
-  if (schemaReady) return;
+async function bootstrapSchema() {
   await sql`
     CREATE TABLE IF NOT EXISTS users (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -173,11 +246,31 @@ async function ensureSchema() {
 }
 
 let pgSchemaReady = false;
+let pgSchemaPromise = null;
+
+// Collapses concurrent first-callers onto ONE bootstrap run. `pgSchemaReady` is only set after
+// the LAST statement below, so it cannot deduplicate callers that are already in flight: on a
+// cold container every function in a Promise.all (getCallingOverviewData fans out to four,
+// each of which awaits this) saw false and each re-ran the whole ~45-statement DDL list. That
+// multiplied both the statement count and - the part that actually broke - the number of
+// connections one container demanded at once, so a handful of containers could exhaust a
+// pool_size the connection settings alone were sized to fit comfortably. It also made every
+// concurrent run race every other one through the duplicate-object window the catch below
+// exists to absorb.
+//
+// Cleared once settled, so a bootstrap that failed for a real reason is retried by the next
+// request instead of leaving the container permanently stuck awaiting a rejected promise. On
+// success `pgSchemaReady` has already been set, so the fast path above short-circuits and this
+// promise is never rebuilt.
+async function ensurePgSchema() {
+  if (pgSchemaReady) return;
+  if (!pgSchemaPromise) pgSchemaPromise = bootstrapPgSchema().finally(() => { pgSchemaPromise = null; });
+  return pgSchemaPromise;
+}
 
 // RTO CRM operational tables - separate Postgres database (see the pgSql setup
 // above), separate idempotent-once-per-warm-instance flag from the MySQL schema.
-async function ensurePgSchema() {
-  if (pgSchemaReady) return;
+async function bootstrapPgSchema() {
   try {
   // Agent online/offline state (replaces the removed Supabase agent_status table) -
   // one row per agent, upserted on every explicit status change and periodic
@@ -1703,4 +1796,6 @@ module.exports = {
   claimNdrLead, disposeNdrLead,
   assignEscalationOrder, unassignEscalationOrder, resolveEscalationAssignment, getEscalationAssignments,
   getLiveEscalationAssignments, resolveEscalationAssignmentsBulk,
+  // Exported for api/_lib/db.retry.test.js only - nothing in the app calls these directly.
+  isPoolExhausted, withPgConnectRetry, toTransactionModePooler,
 };
