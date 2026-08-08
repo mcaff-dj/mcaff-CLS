@@ -67,13 +67,13 @@ async function readAllRows() {
 }
 
 // The queue: RTO per BOTH the courier (statusAsPerAwb, col N) and logistics
-// (updateFromLogistics, col Q), not yet actioned (status, col V, still blank), and TAT (col P)
-// still open - blank, "unresolved", or "#N/A". Column P otherwise holds computed-bucket text
-// (e.g. "Within 48 hrs", "4-8 days", "Forced to be marked as RTO") for rows a TAT calc has
-// already resolved to a bucket - those are excluded here.
-// Once an agent writes V the row drops out on the next load - the sheet is the only store,
-// there's no DB.
-const OPEN_TAT_VALUES = new Set(['', 'unresolved', '#n/a']);
+// (updateFromLogistics, col Q), and not yet actioned (status, col V, still blank). Once an agent
+// writes V the row drops out on the next load - the sheet is the only store, there's no DB.
+//
+// NOT filtered on TAT (col P): every currently-pending RTO row carries "Forced to be marked as
+// RTO" there, not blank/"unresolved"/"#N/A" - that's the courier-RTO equivalent of "still open",
+// so gating on OPEN_TAT_VALUES here zeroed the whole queue out. That rule belongs to Fresh Leads
+// below, which has no RTO-column requirement to begin with.
 async function getEligibleOrders() {
   const rows = await readAllRows();
   return rows
@@ -81,14 +81,13 @@ async function getEligibleOrders() {
     .filter((o) => {
       const n = o.statusAsPerAwb.toLowerCase();
       const q = o.updateFromLogistics.toLowerCase();
-      const tat = o.tat.trim().toLowerCase();
-      return n.includes('rto') && q.includes('rto') && !o.status && OPEN_TAT_VALUES.has(tat);
+      return n.includes('rto') && q.includes('rto') && !o.status;
     });
 }
 
-// Fresh Leads: same open-TAT rule as the RTO queue above, but WITHOUT the RTO-specific
-// statusAsPerAwb/updateFromLogistics check - any not-yet-actioned row whose TAT hasn't landed
-// in a bucket yet, RTO or not.
+// Fresh Leads: not yet actioned (status blank) and TAT (col P) hasn't landed in a computed
+// bucket yet - blank, "unresolved", or "#N/A". No RTO-column requirement, unlike the queue above.
+const OPEN_TAT_VALUES = new Set(['', 'unresolved', '#n/a']);
 async function getFreshLeads() {
   const rows = await readAllRows();
   return rows
