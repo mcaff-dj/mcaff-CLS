@@ -14,7 +14,7 @@
 //   GET    /api/admin/calling-agents?process=rto -> that process's roster + per-process status/quota
 //   POST   /api/admin/calling-agents  -> { processKey, email, status?, maxQuota?, prepaidPct?,
 //                                          priorityRtoReasons?, reassignPaymentMode?,
-//                                          attemptCountFilter? }
+//                                          attemptCountFilter?, ndrReasonFilter? }
 //   DELETE /api/admin/calling-agents  -> revoke ONE process's access for one agent, leaving
 //                                        every other process/card they hold untouched:
 //                                        { processKey, email }
@@ -319,6 +319,7 @@ async function handleCallingAgents(req, res, session) {
           prepaidPct: body.prepaidPct, priorityRtoReasons: body.priorityRtoReasons,
           reassignPaymentMode: body.reassignPaymentMode,
           attemptCountFilter: body.attemptCountFilter,
+          ndrReasonFilter: body.ndrReasonFilter,
         },
         session.email,
       );

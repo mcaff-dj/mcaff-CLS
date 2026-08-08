@@ -420,6 +420,9 @@ export default function NdrCallingClient() {
         email: a.email,
         quota: a.maxQuota != null ? a.maxQuota : 20, // DEFAULT_QUOTA in assign_ndr_leads.py
         filter: (a.attemptCountFilter || '').split(',').map(s => s.trim()).filter(Boolean),
+        // Free-text substrings, case-insensitive - mirrors scripts/assign_ndr_leads.py's
+        // agent_reason_filter/reason_covers exactly (see that script for the canonical version).
+        reasonFilter: (a.ndrReasonFilter || '').split(',').map(s => s.trim()).filter(Boolean),
       }));
     if (!onlineAgents.length) return { rows: [], onlineAgents: [] };
 
@@ -429,6 +432,15 @@ export default function NdrCallingClient() {
       return n <= 3 ? String(n) : 'More than 3';
     };
     const covers = (agent, bucket) => !agent.filter.length || bucket === null || agent.filter.includes(bucket);
+    // Case-insensitive substring match against the lead's own latestNdrReason - an agent with
+    // no reasonFilter values is unrestricted (fails open); an agent WITH filter values excludes
+    // any reason that doesn't contain one of them, including a blank/unreadable reason (this one
+    // does not fail open the way an unparseable attempt bucket does above).
+    const reasonCovers = (agent, latestNdrReason) => {
+      if (!agent.reasonFilter.length) return true;
+      const reason = (latestNdrReason || '').toLowerCase();
+      return agent.reasonFilter.some(r => reason.includes(r.toLowerCase()));
+    };
     // "DD-MM-YYYY" -> a sortable number, undated leads sort last (same convention as
     // scripts/assign_ndr_leads.py's own parse_latest_ndr_date).
     const parseLatestNdrDate = (raw) => {
@@ -451,7 +463,7 @@ export default function NdrCallingClient() {
       let chosen = -1;
       for (let step = 0; step < n; step++) {
         const cand = (idx + step) % n;
-        if (covers(remaining[cand], t.bucket)) { chosen = cand; break; }
+        if (covers(remaining[cand], t.bucket) && reasonCovers(remaining[cand], t.latestNdrReason)) { chosen = cand; break; }
       }
       if (chosen === -1) continue; // no online agent's filter covers this lead's bucket
       const agent = remaining[chosen];
@@ -484,6 +496,25 @@ export default function NdrCallingClient() {
   // processAgents (who's actually invited to this process, per report_tab_permissions),
   // nothing more. Inviting someone new is an Admin -> Permissions action, not a roster-table
   // shortcut, since membership genuinely comes from the database, not a browser-side list.
+  // Free-text hard filter, save-on-blur (unlike the Attempts MultiSelectDropdown, there's no
+  // fixed option list to pick from - courier NDR-reason strings aren't a small enumerable set).
+  // Local draft state so typing doesn't fire a save per keystroke; commits only on blur, and
+  // only if the value actually changed.
+  const NdrReasonFilterInput = ({ value, onSave }) => {
+    const [draft, setDraft] = useState(value || '');
+    useEffect(() => { setDraft(value || ''); }, [value]);
+    return (
+      <input
+        type="text"
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onBlur={() => { if (draft !== (value || '')) onSave(draft); }}
+        placeholder="e.g. Customer not available, Address issue"
+        className="w-56 h-8 px-3 py-1 bg-zinc-900/90 border border-zinc-800 hover:border-zinc-700 rounded-lg text-[13px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+      />
+    );
+  };
+
   const renderNdrRosterTable = () => {
     const rows = (processAgents || []).filter(a => rosterStatusFilter === 'All' || a.status === rosterStatusFilter);
     return (
@@ -508,6 +539,7 @@ export default function NdrCallingClient() {
                 <th className="py-3 px-4 text-left font-medium">Status</th>
                 <th className="py-3 px-4 text-left font-medium">Quota</th>
                 <th className="py-3 px-4 text-left font-medium" title="Hard filter: restricts this agent to leads whose delivery-attempt count falls in the selected bucket(s). No selection = unrestricted.">Attempts</th>
+                <th className="py-3 px-4 text-left font-medium" title="Hard filter: restricts this agent to leads whose Latest NDR Reason contains any of these (case-insensitive), comma-separated. No text = unrestricted.">Latest NDR Reason</th>
                 <th className="py-3 px-4 text-center font-medium" title="Can manage this process's roster, hours, and disposition list - nothing else">Process admin</th>
               </tr></thead>
               <tbody className="divide-y divide-zinc-800/50">
@@ -545,6 +577,12 @@ export default function NdrCallingClient() {
                         options={NDR_ATTEMPT_FILTER_OPTIONS}
                       />
                     </td>
+                    <td className="py-3 px-4">
+                      <NdrReasonFilterInput
+                        value={a.ndrReasonFilter}
+                        onSave={(next) => saveProcessAgent(a.email, { ndrReasonFilter: next })}
+                      />
+                    </td>
                     <td className="py-3 px-4 text-center">
                       {a.isAdmin ? (
                         <span className="text-[11px] text-zinc-500" title="Company-wide admin - already administers every process">all</span>
@@ -562,7 +600,7 @@ export default function NdrCallingClient() {
                   </tr>
                 ))}
                 {rows.length === 0 && (
-                  <tr><td colSpan={5} className="py-8 text-center text-zinc-500">No one invited to NDR Calling yet - grant access from Admin → Permissions.</td></tr>
+                  <tr><td colSpan={6} className="py-8 text-center text-zinc-500">No one invited to NDR Calling yet - grant access from Admin → Permissions.</td></tr>
                 )}
               </tbody>
             </table>

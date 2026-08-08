@@ -36,6 +36,7 @@ SHEET_TAB = "Latest NDR "  # trailing space is part of the real tab name - do no
 COL_AWB = 4                  # E
 COL_ATTEMPTS = 14            # O - Attempt Count
 COL_LATEST_NDR_DATE = 15     # P - "DD-MM-YYYY", the round-robin's oldest-first sort key
+COL_LATEST_NDR_REASON = 16   # Q - free-text courier NDR reason, matched by agent_reason_filter
 COL_AGENT = 18               # S - Agent Name - the only column this script writes
 COL_CONNECTED = 19           # T - blank until NdrCallingClient.js's saveNdrDisposition writes
                               # it; read-only here, needed to tell an agent's still-OPEN leads
@@ -63,6 +64,18 @@ def attempt_bucket(raw):
     return str(n) if n <= 3 else "More than 3"
 
 
+def reason_covers(filt, latest_ndr_reason):
+    """True if this agent's reason filter (a list of substrings, already lowercased) allows a
+    lead with this Latest NDR Reason. An empty/absent filter is unrestricted (fails open), same
+    contract as attempt_bucket's ATTEMPT_BUCKETS check below - but once a filter IS set, a
+    blank/unreadable reason does NOT fail open (it simply matches no substring), unlike an
+    unparseable attempt count."""
+    if not filt:
+        return True
+    reason = str(latest_ndr_reason or "").lower()
+    return any(r in reason for r in filt)
+
+
 def parse_latest_ndr_date(raw):
     """'DD-MM-YYYY' -> datetime, or None if unparseable - sorts to the end (oldest-first
     means an undated lead never jumps the queue, the same "undated sorts last" convention
@@ -74,18 +87,20 @@ def parse_latest_ndr_date(raw):
 
 
 def fetch_online_ndr_agents():
-    """([email, ...] eligible now, {email: max_quota}, {email: [bucket, ...]}). Eligibility is
-    the same intersection RTO's own fetch_online_agents uses: heartbeat-fresh in agent_presence
-    AND marked Online for this process_key in calling_agent_process. A process with no
-    per-process rows set yet falls back to global presence, matching the pre-per-process
-    behaviour. attempt_filters is {email: [bucket, ...]} from attempt_count_filter - an agent
-    absent from it (or with an empty list) is unrestricted, same "absent means no restriction"
-    contract as RTO's reassign_payment_mode. Returns ([], {}, {}) if POSTGRES_URL isn't
-    configured, so a missing secret fails safe - no assignment, not a crash."""
+    """([email, ...] eligible now, {email: max_quota}, {email: [bucket, ...]}, {email: [reason,
+    ...]}). Eligibility is the same intersection RTO's own fetch_online_agents uses: heartbeat-
+    fresh in agent_presence AND marked Online for this process_key in calling_agent_process. A
+    process with no per-process rows set yet falls back to global presence, matching the pre-
+    per-process behaviour. attempt_filters is {email: [bucket, ...]} from attempt_count_filter,
+    reason_filters is {email: [reason substring, ...]} (already lowercased) from
+    ndr_reason_filter - an agent absent from either (or with an empty list) is unrestricted,
+    same "absent means no restriction" contract as RTO's reassign_payment_mode. Returns
+    ([], {}, {}, {}) if POSTGRES_URL isn't configured, so a missing secret fails safe - no
+    assignment, not a crash."""
     conn_str = os.environ.get("POSTGRES_URL")
     if not conn_str:
         print("POSTGRES_URL not configured - cannot determine online agents.")
-        return [], {}, {}
+        return [], {}, {}, {}
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -100,32 +115,36 @@ def fetch_online_ndr_agents():
 
             try:
                 cur.execute(
-                    "SELECT email, status, max_quota, attempt_count_filter "
+                    "SELECT email, status, max_quota, attempt_count_filter, ndr_reason_filter "
                     "FROM calling_agent_process WHERE process_key = %s",
                     (PROCESS_KEY,),
                 )
                 per_process = cur.fetchall()
             except Exception as e:
                 print(f"  (calling_agent_process unavailable: {e} - using global presence)")
-                return sorted(present), {}, {}
+                return sorted(present), {}, {}, {}
 
     if not per_process:
         print(f"  no per-process availability set for '{PROCESS_KEY}' - using global presence")
-        return sorted(present), {}, {}
+        return sorted(present), {}, {}, {}
 
-    online_for_process = {e.lower() for e, status, _, _ in per_process if status == "Online"}
-    quotas = {e.lower(): q for e, _, q, _ in per_process if q is not None}
+    online_for_process = {e.lower() for e, status, _, _, _ in per_process if status == "Online"}
+    quotas = {e.lower(): q for e, _, q, _, _ in per_process if q is not None}
     attempt_filters = {}
-    for e, _, _, filt in per_process:
+    reason_filters = {}
+    for e, _, _, filt, reason_filt in per_process:
         buckets = [b.strip() for b in (filt or "").split(",") if b.strip()]
         if buckets:
             attempt_filters[e.lower()] = buckets
+        reasons = [r.strip().lower() for r in (reason_filt or "").split(",") if r.strip()]
+        if reasons:
+            reason_filters[e.lower()] = reasons
     eligible = sorted(online_for_process & present)
     if online_for_process and not eligible:
         print(f"  {len(online_for_process)} agent(s) marked Online for '{PROCESS_KEY}', but "
               f"none are heartbeat-fresh (within {STALE_MINUTES}m) - nobody is actually at "
               f"their desk.")
-    return eligible, quotas, attempt_filters
+    return eligible, quotas, attempt_filters, reason_filters
 
 
 def record_new_assignments(new_assignments):
@@ -160,7 +179,7 @@ def record_new_assignments(new_assignments):
 
 
 def main():
-    online_agents, quotas, attempt_filters = fetch_online_ndr_agents()
+    online_agents, quotas, attempt_filters, reason_filters = fetch_online_ndr_agents()
     if not online_agents:
         print("No agents online for NDR right now - nothing to assign.")
         return
@@ -168,7 +187,7 @@ def main():
     sheet_rows = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!A2:{LAST_COL}1000000")
 
     current_load = {email: 0 for email in online_agents}
-    unassigned = []  # (row_number, latest_ndr_date, attempt_bucket, awb_number)
+    unassigned = []  # (row_number, latest_ndr_date, attempt_bucket, latest_ndr_reason, awb_number)
     for i, row in enumerate(sheet_rows):
         agent = row[COL_AGENT].strip().lower() if len(row) > COL_AGENT and row[COL_AGENT] else ""
         if agent:
@@ -183,9 +202,10 @@ def main():
         else:
             latest_ndr_date = parse_latest_ndr_date(row[COL_LATEST_NDR_DATE] if len(row) > COL_LATEST_NDR_DATE else "")
             bucket = attempt_bucket(row[COL_ATTEMPTS] if len(row) > COL_ATTEMPTS else "")
+            reason = row[COL_LATEST_NDR_REASON] if len(row) > COL_LATEST_NDR_REASON else ""
             awb = row[COL_AWB] if len(row) > COL_AWB else ""
             if awb:
-                unassigned.append((i + 2, latest_ndr_date, bucket, awb))
+                unassigned.append((i + 2, latest_ndr_date, bucket, reason, awb))
 
     if not unassigned:
         print("No unassigned NDR leads found - nothing to assign.")
@@ -210,20 +230,21 @@ def main():
     assigned_count = {}
     no_agent_for_bucket = 0
     idx = 0
-    for row_num, _, bucket, awb in unassigned:
+    for row_num, _, bucket, reason, awb in unassigned:
         if not remaining_agents:
             break
         n = len(remaining_agents)
         chosen = None
         for step in range(n):
             cand_idx = (idx + step) % n
-            if _covers(remaining_agents[cand_idx], bucket):
+            candidate = remaining_agents[cand_idx]
+            if _covers(candidate, bucket) and reason_covers(reason_filters.get(candidate), reason):
                 chosen = cand_idx
                 break
         if chosen is None:
-            # Every currently-eligible agent's attempt filter excludes this lead's bucket -
-            # hard filter, so it's left unassigned rather than forced onto someone (same
-            # contract as RTO's reassign_payment_mode).
+            # Every currently-eligible agent's attempt/reason filter excludes this lead - hard
+            # filter, so it's left unassigned rather than forced onto someone (same contract as
+            # RTO's reassign_payment_mode).
             no_agent_for_bucket += 1
             continue
         email = remaining_agents[chosen]
@@ -242,7 +263,7 @@ def main():
 
     if not value_ranges:
         print(f"{len(unassigned)} unassigned lead(s) found, but none could be assigned "
-              f"(quota exhausted or no online agent's attempt filter covers them). "
+              f"(quota exhausted, or no online agent's attempt/reason filter covers them). "
               f"Nothing to assign.")
         return
 
@@ -259,7 +280,7 @@ def main():
         print(f"  ({quota_skipped} unassigned lead(s) left over - all eligible agents at quota)")
     if no_agent_for_bucket > 0:
         print(f"  ({no_agent_for_bucket} unassigned lead(s) left over - no online agent's "
-              f"attempt filter covers their bucket)")
+              f"attempt/reason filter covers them)")
 
 
 if __name__ == "__main__":
