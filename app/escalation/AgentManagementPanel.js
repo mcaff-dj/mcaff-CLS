@@ -1,7 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import { Icon, I } from './EscalationClient';
 import { initials } from './escalationHelpers';
 
 // Modeled directly on NDR's renderNdrRosterTable (app/ndr-calling/NdrCallingClient.js) -
@@ -78,6 +77,7 @@ export default function AgentManagementPanel({ session }) {
                   </td>
                   <td>
                     <input
+                      key={`${a.email}-${a.maxQuota ?? 'default'}`}
                       type="number"
                       min="0"
                       className="field"
