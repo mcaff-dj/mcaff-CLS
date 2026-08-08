@@ -1614,6 +1614,8 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
       // with no per-process rows keep the full list, matching how tabPerms already works for
       // every other report ('' / empty = unrestricted).
       //
+      // NDR is excluded here entirely, not just from the dropdown - it now lives at its own page
+      // (/ndr-calling - see the plan for splitting Calling processes into their own pages).
       // NDR and Escalation are excluded here entirely, not just from the dropdown - each now
       // lives at its own page (/ndr-calling, /escalation - see the plan for splitting Calling
       // processes into their own pages). Excluding them from PROCESSES itself, rather than only

@@ -1,12 +1,10 @@
 // GET /api/refund-export - Calling Team's "Exports" tab: a filtered CSV download of
 // PEP_CLS.refund_all_brands (see api/_lib/db.js's own comment above
 // getRefundExportCount/getRefundExportRows for what that table is). Gated the same way as
-// every other Calling desk endpoint - see api/escalation/[action].js's own checkAccess,
-// which this mirrors exactly except for the tab key. PII columns are decided from
-// session.isAdmin ONLY - never from anything the client sends, so there is no query param
-// that can ask for them.
+// every other Calling desk endpoint. PII columns are decided from session.isAdmin ONLY - never
+// from anything the client sends, so there is no query param that can ask for them.
 const { getSession } = require('./_lib/session');
-const { toCSV } = require('./_lib/escalationCsv');
+const { toCSV } = require('./_lib/csv');
 const {
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,

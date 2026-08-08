@@ -1,21 +1,22 @@
 'use client';
 
-// Ported from the separately-deployed standalone app in the top-level "NDR Calling"
-// folder. Despite that folder's name this is the Escalation desk, not NDR Calling -
-// see api/_lib/callingProcesses.json. Changes made while porting:
-//   - client component, mounted ssr:false via EscalationClientLoader.js
-//   - /api/orders/* -> /api/escalation/* (one dynamic-segment handler, session-gated)
-//   - stylesheet scoped under .escalation-page so it cannot bleed into globals.css;
-//     data-theme therefore lives on that wrapper, not document.documentElement, and
-//     keyframes are prefixed esc- (see scripts/scope_escalation_css.js)
+// Escalation's own independent workspace - ported back in from Escalations/ (a standalone app,
+// separately deployed, with no real login of its own) into this app's Calling Team as its own
+// page, same "one folder per process" shape as app/ndr-calling/NdrCallingClient.js.
+//
+// Two things were deliberately changed from the standalone app during the port, not carried
+// over verbatim:
+//  1. Access - the standalone app's Admin/Agent toggle was a plain button anyone could click;
+//     here role/admin status comes from the real signed-in session (useCallingSession, the same
+//     shared hook RTO/NDR use), and every write is re-checked server-side in
+//     api/escalation/[action].js regardless of what this page renders.
+//  2. Assignment/tags - the standalone app kept these in a per-process in-memory object, which
+//     resets unpredictably per Lambda container in this app's deployment. They're written
+//     straight into the tracking sheet instead (see api/_lib/escalationSheet.js), so they
+//     survive exactly as durably as the order data itself does.
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useCallingSession, STATUS_OPTIONS } from '../_calling/useCallingSession';
 import './escalation.css';
-import { useCallingSession } from '../_calling/useCallingSession';
-import { useBusinessHours } from '../_calling/CallingAdminPanel';
-import { initials } from './escalationHelpers';
-import AgentManagementPanel from './AgentManagementPanel';
-import SettingsPanel from './SettingsPanel';
-import AssignmentsPanel from './AssignmentsPanel';
 
 /* ============================================================
    Constants
@@ -62,41 +63,24 @@ const TAG_FILTER_OPTIONS = [
   ...TAGS.map((t) => ({ value: t.key, label: t.label })),
 ];
 
-// Availability states an agent can broadcast — matches useCallingSession's real vocabulary
-// exactly (STATUS_OPTIONS in app/_calling/useCallingSession.js), not an Escalation-local set,
-// since this now writes real presence RTO/NDR's own tooling reads too.
-const AGENT_STATUSES = [
-  { key: 'Online',  label: 'Online',   color: 'success', desc: 'Available for new tickets' },
-  { key: 'OnCall',  label: 'Busy',     color: 'danger',  desc: 'On a call — do not disturb' },
-  { key: 'Busy',    label: 'On Break', color: 'warning', desc: 'Away for a short while' },
-  { key: 'Offline', label: 'Offline',  color: 'muted',   desc: 'Not working right now' },
-];
-const STATUS_BY_KEY = Object.fromEntries(AGENT_STATUSES.map((s) => [s.key, s]));
-
-// Human-readable breadcrumb labels for each internal view.
+// Which of this page's own nav items are admin-only (Overview / Agent Management / Assignments) -
+// same distinction the standalone app drew, just gated on the real session now.
 const VIEW_LABELS = {
-  queue:      'RTO Queue',
-  freshLeads: 'Fresh Leads',
+  queue:    'RTO Queue',
   overview: 'Overview',
   agents:   'Agent Management',
   assigns:  'Assignments',
   settings: 'Settings',
 };
 
-// Both HYPHEN and mCaffeine feed this page's `orders` list side by side, and a bare ticketNumber
-// isn't guaranteed unique across brands - this is the stable, globally-unique row identity for
-// Set/Map keys, React `key`, and DOM ids. ticketNumber is the MySQL ticketing system's own
-// per-row ID, unlike parentOrder, which one order can share across multiple ticket rows.
-function rowKey(o) {
-  return `${o.brand}:${o.ticketNumber}`;
-}
-
-// Never throws, so a non-JSON response body (an API Gateway/CloudFront error page, an empty 502)
-// surfaces as a readable message instead of a "Unexpected token <" parse error that says nothing
-// about the actual request. `_raw` carries a short snippet of whatever the body was.
-async function readJson(res) {
-  const text = await res.text().catch(() => '');
-  try { return JSON.parse(text); } catch { return { _raw: text.slice(0, 200) }; }
+// First letters of up to two words - used for the small round avatar chips throughout this page
+// (signed-in user, roster agents, assignment chips). Ported from the standalone app's own
+// per-user hardcoded avatar strings, generalized to work off any real display name.
+function initials(name) {
+  if (!name) return '?';
+  const parts = name.trim().split(/\s+/).slice(0, 2);
+  const s = parts.map((w) => w[0] || '').join('').toUpperCase();
+  return s || '?';
 }
 
 /* ============================================================
@@ -145,9 +129,7 @@ const I = {
   alert:    'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01',
   assign:   'M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z',
   zap:      'M13 2L3 14h9l-1 8 10-12h-9l1-8z',
-  flag:     'M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1zM4 22v-7',
   check:    'M20 6L9 17l-5-5',
-  sort:     'M3 6h18M7 12h10M11 18h2',
   autoAssign: 'M12 2a5 5 0 1 0 0 10A5 5 0 0 0 12 2zm0 12c-5.33 0-8 2.67-8 4v2h16v-2c0-1.33-2.67-4-8-4z',
   sun:      'M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42M12 6a6 6 0 1 0 0 12 6 6 0 0 0 0-12z',
   moon:     'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z',
@@ -196,19 +178,17 @@ function OverviewPanel({ overview, agents, loading, resolvedCount }) {
         </div>
       </div>
 
-      {/* Summary cards */}
       <div className="statsGrid">
-        <StatCard variant="assigned" icon={<Icon path={I.users} size={16} />} value={loading ? null : assignedTotal}
+        <StatCard variant="assigned" icon="📊" value={loading ? null : assignedTotal}
           label="Assigned Orders" sub={`${agents.length} active agents`} />
-        <StatCard variant="resolved" icon={<Icon path={I.check} size={16} />} value={resolvedCount}
+        <StatCard variant="resolved" icon="✅" value={resolvedCount}
           label="Resolved" sub="This session" />
-        <StatCard variant="pending" icon={<Icon path={I.alert} size={16} />} value={loading ? null : priority.high}
+        <StatCard variant="pending" icon="🚨" value={loading ? null : priority.high}
           label="High Priority" sub="Needs attention" />
-        <StatCard variant="unassigned" icon={<Icon path={I.flag} size={16} />} value={loading ? null : escalations}
+        <StatCard variant="unassigned" icon="⚠️" value={loading ? null : escalations}
           label="Escalations" sub={`${Object.keys(tagCounts).length} tags active`} />
       </div>
 
-      {/* Agent workload table */}
       <div className="overviewSection">
         <div className="overviewSectionHeader">
           <h2 className="overviewSectionTitle">Agent Workload Distribution</h2>
@@ -224,7 +204,7 @@ function OverviewPanel({ overview, agents, loading, resolvedCount }) {
             <div className="emptyState">
               <span className="emptyEmoji">👥</span>
               <div className="emptyTitle">No agents</div>
-              <div className="emptyDesc">Agent data unavailable.</div>
+              <div className="emptyDesc">No one is invited to Escalation yet.</div>
             </div>
           ) : (
             <table className="overviewTable">
@@ -239,11 +219,11 @@ function OverviewPanel({ overview, agents, loading, resolvedCount }) {
               </thead>
               <tbody>
                 {perAgent.map((a) => (
-                  <tr key={a.email}>
+                  <tr key={a.id}>
                     <td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <div className="userAvatar" style={{ fontSize: 10, width: 24, height: 24 }}>
-                          {initials(a.name)}
+                          {a.avatar}
                         </div>
                         <strong>{a.name}</strong>
                       </div>
@@ -264,7 +244,6 @@ function OverviewPanel({ overview, agents, loading, resolvedCount }) {
         </div>
       </div>
 
-      {/* Priority distribution */}
       <div className="overviewSection">
         <div className="overviewSectionHeader">
           <h2 className="overviewSectionTitle">Queue Priority Breakdown</h2>
@@ -288,7 +267,6 @@ function OverviewPanel({ overview, agents, loading, resolvedCount }) {
         </div>
       </div>
 
-      {/* Tag/escalation summary */}
       {Object.keys(tagCounts).length > 0 && (
         <div className="overviewSection">
           <div className="overviewSectionHeader">
@@ -317,38 +295,53 @@ function OverviewPanel({ overview, agents, loading, resolvedCount }) {
 }
 
 /* ============================================================
-   Tab nav (horizontal pill tabs, replaces the old vertical sidebar)
+   Sidebar
    ============================================================ */
-function TabNav({ isAdmin, pendingCount, view, onViewChange }) {
-  // pendingCount is `orders.length` - whichever of the two queues below is currently loaded.
-  // ponytail: badge only shows a count on the active tab (no background fetch of the other
-  // tab's count) - upgrade to two independent counts if both need to be visible at once.
+function Sidebar({ collapsed, isAdmin, googleUser, pendingCount, view, onViewChange }) {
   const navItems = [
-    { id: 'queue',      icon: I.inbox, label: 'RTO Queue',   badge: view === 'queue' ? pendingCount : null },
-    { id: 'freshLeads', icon: I.flag,  label: 'Fresh Leads', badge: view === 'freshLeads' ? pendingCount : null },
+    { id: 'queue',    icon: I.inbox,    label: 'RTO Queue',        badge: pendingCount },
     ...(isAdmin ? [
       { id: 'overview', icon: I.zap,     label: 'Overview',         badge: null },
       { id: 'agents',   icon: I.users,   label: 'Agent Management', badge: null },
       { id: 'assigns',  icon: I.assign,  label: 'Assignments',      badge: null },
-      { id: 'settings', icon: I.settings, label: 'Settings',        badge: null },
     ] : []),
+    { id: 'settings', icon: I.settings, label: 'Settings',         badge: null },
   ];
   return (
-    <nav className="tabNav">
-      {navItems.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          className={`tabPill${view === item.id ? ' active' : ''}`}
-          onClick={() => onViewChange(item.id)}
-          title={item.label}
-        >
-          <Icon path={item.icon} size={14} />
-          <span>{item.label}</span>
-          {item.badge > 0 && <span className="tabPillBadge">{item.badge > 99 ? '99+' : item.badge}</span>}
-        </button>
-      ))}
-    </nav>
+    <aside className="sidebar">
+      <div className="sidebarLogo">
+        <div className="sidebarLogoMark">E</div>
+        <div className="sidebarLogoText">
+          <div className="sidebarLogoTitle">Escalation</div>
+          <div className="sidebarLogoSub">Operations Hub</div>
+        </div>
+      </div>
+      <nav className="sidebarNav">
+        {isAdmin && <div className="navSection">Admin</div>}
+        {navItems.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className={`navItem${view === item.id ? ' active' : ''}`}
+            onClick={() => onViewChange(item.id)}
+            title={item.label}
+          >
+            <span className="navItemIcon"><Icon path={item.icon} size={14} /></span>
+            <span className="navItemLabel">{item.label}</span>
+            {item.badge > 0 && <span className="navBadge">{item.badge > 99 ? '99+' : item.badge}</span>}
+          </button>
+        ))}
+      </nav>
+      <div className="sidebarFooter">
+        <div className="sidebarUser">
+          <div className="userAvatar">{initials(googleUser?.name)}</div>
+          <div className="userInfo">
+            <div className="userName">{googleUser?.name || 'Loading…'}</div>
+            <div className="userRole">{isAdmin ? 'Administrator' : 'Agent'}</div>
+          </div>
+        </div>
+      </div>
+    </aside>
   );
 }
 
@@ -383,12 +376,8 @@ function SkeletonRows({ count = 7 }) {
 /* ============================================================
    Bulk Action Bar
    ============================================================ */
-// Two independent bulk actions on the same selection: set a status, or assign an agent (admins
-// only, matching who gets the per-row Assign dropdown). Each has its own select + button rather
-// than one shared Apply, so picking an agent can't silently also fire a status change.
-function BulkActionBar({ count, onApply, onAssign, onClear, loading, assigning, isAdmin, agents }) {
+function BulkActionBar({ count, onApply, onClear, loading }) {
   const [bulkStatus, setBulkStatus] = useState('');
-  const [bulkAgent,  setBulkAgent]  = useState('');
 
   return (
     <div className="bulkBar">
@@ -398,32 +387,6 @@ function BulkActionBar({ count, onApply, onAssign, onClear, loading, assigning, 
         <span className="bulkHint">Bulk update only works for statuses that need no replacement order.</span>
       </div>
       <div className="bulkBarRight">
-        {isAdmin && (
-          <>
-            <select
-              className="filterSelect"
-              value={bulkAgent}
-              onChange={(e) => setBulkAgent(e.target.value)}
-              style={{ height: 32, fontSize: 12 }}
-              aria-label="Bulk assign agent"
-            >
-              <option value="">Assign to…</option>
-              {agents.map((a) => (
-                <option key={a.email} value={a.email}>{a.name || a.email}</option>
-              ))}
-            </select>
-            <button
-              type="button"
-              className="btn btnSm btnSecondary"
-              disabled={!bulkAgent || assigning}
-              onClick={() => { onAssign(bulkAgent); setBulkAgent(''); }}
-            >
-              {assigning ? <span className="spinner spinnerMuted" /> : <Icon path={I.users} size={12} />}
-              {assigning ? 'Assigning…' : 'Assign'}
-            </button>
-            <span className="bulkDivider" />
-          </>
-        )}
         <select
           className="filterSelect"
           value={bulkStatus}
@@ -578,7 +541,7 @@ function ImportModal({ onClose, onImported, onToast }) {
 /* ============================================================
    Tag Cell — visible on main table for all rows
    ============================================================ */
-function TagCell({ rowKey: rk, tags, onToggle }) {
+function TagCell({ rowNumber, tags, onToggle }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const ref = useRef(null);
 
@@ -624,7 +587,7 @@ function TagCell({ rowKey: rk, tags, onToggle }) {
                 type="button"
                 className={`tagMenuItem${active ? ' tagMenuItemActive' : ''}`}
                 onClick={() => {
-                  onToggle(rk, t.key, !active);
+                  onToggle(rowNumber, t.key, !active);
                   setMenuOpen(false);
                 }}
               >
@@ -644,12 +607,15 @@ function TagCell({ rowKey: rk, tags, onToggle }) {
 }
 
 /* ============================================================
-   Status Control — agent availability picker in the topbar
+   Status Control — agent availability picker in the topbar,
+   backed by the real presence system every Calling page shares.
    ============================================================ */
+const STATUS_TONE = { Online: 'success', Busy: 'warning', OnCall: 'danger', Offline: 'muted' };
+
 function StatusControl({ status, onChange }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
-  const current = STATUS_BY_KEY[status] || AGENT_STATUSES[0];
+  const current = STATUS_OPTIONS.find((s) => s.value === status) || STATUS_OPTIONS[0];
 
   useEffect(() => {
     if (!open) return;
@@ -670,28 +636,27 @@ function StatusControl({ status, onChange }) {
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <span className={`statusDot statusDot--${current.color}`} />
+        <span className={`statusDot statusDot--${STATUS_TONE[current.value] || 'muted'}`} />
         <span className="statusBtnLabel">{current.label}</span>
         <Icon path={I.chevDown} size={11} />
       </button>
       {open && (
         <div className="statusMenu" role="menu">
           <div className="statusMenuHeader">Set your status</div>
-          {AGENT_STATUSES.map((s) => (
+          {STATUS_OPTIONS.map((s) => (
             <button
-              key={s.key}
+              key={s.value}
               type="button"
               role="menuitemradio"
-              aria-checked={s.key === status}
-              className={`statusMenuItem${s.key === status ? ' statusMenuItemActive' : ''}`}
-              onClick={() => { onChange(s.key); setOpen(false); }}
+              aria-checked={s.value === status}
+              className={`statusMenuItem${s.value === status ? ' statusMenuItemActive' : ''}`}
+              onClick={() => { onChange(s.value); setOpen(false); }}
             >
-              <span className={`statusDot statusDot--${s.color}`} />
+              <span className={`statusDot statusDot--${STATUS_TONE[s.value] || 'muted'}`} />
               <span className="statusMenuItemText">
                 <span className="statusMenuItemLabel">{s.label}</span>
-                <span className="statusMenuItemDesc">{s.desc}</span>
               </span>
-              {s.key === status && <Icon path={I.check} size={13} />}
+              {s.value === status && <Icon path={I.check} size={13} />}
             </button>
           ))}
         </div>
@@ -720,7 +685,7 @@ function OrderRow({
   const [error,      setError]      = useState('');
   const [assigning,  setAssigning]  = useState(false);
   const firstRef = useRef(null);
-  const fId = `row-${order.brand}-${order.ticketNumber}`;
+  const fId = `row-${order.rowNumber}`;
 
   const resolveTypeDef = RESOLVE_TYPES.find((t) => t.value === resType);
   const needsOrder = resolveTypeDef?.needsOrder ?? false;
@@ -737,7 +702,6 @@ function OrderRow({
     if (expanded && firstRef.current) firstRef.current.focus();
   }, [expanded]);
 
-  // Reset form when collapsed
   useEffect(() => {
     if (!expanded) {
       setResType(''); setNewOrderId(''); setNewAwb(''); setNotes(''); setError('');
@@ -753,7 +717,7 @@ function OrderRow({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          parentOrder: order.parentOrder,
+          rowNumber: order.rowNumber,
           newOrderId: needsOrder ? newOrderId.trim() : '-',
           newAwb:     needsAwb   ? newAwb.trim()     : '-',
           newStatus: resType,
@@ -763,8 +727,8 @@ function OrderRow({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Save failed');
       setJustSaved(true);
-      onToast('success', `Resolved — ${order.parentOrder || 'row'}`);
-      setTimeout(() => onSaved(rowKey(order), resType), 600);
+      onToast('success', `Resolved — ${order.parentOrder || 'row'} synced to sheet`);
+      setTimeout(() => onSaved(order.rowNumber), 600);
     } catch (err) {
       setError(err.message);
       onToast('error', err.message);
@@ -775,31 +739,27 @@ function OrderRow({
 
   async function handleAssign(e) {
     const agentId = e.target.value;
-    const agent = agents.find((a) => a.email === agentId);
     setAssigning(true);
     try {
-      const res = await fetch('/api/escalation/assign', {
+      await fetch('/api/escalation/assign', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parentOrder: order.parentOrder, agentId: agentId || null }),
+        body: JSON.stringify({ rowNumber: order.rowNumber, agentId: agentId || null }),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Failed to save assignment');
-      onAssign(rowKey(order), agentId ? { agentId } : null);
+      onAssign(order.rowNumber, agentId ? { agentId } : null);
+      const agent = agents.find((a) => a.id === agentId);
       onToast('success', agentId ? `Assigned to ${agent?.name || agentId}` : 'Assignment cleared');
-    } catch (err) {
-      onToast('error', err.message || 'Failed to save assignment');
+    } catch {
+      onToast('error', 'Failed to save assignment');
     } finally { setAssigning(false); }
   }
 
   const loc    = [order.city, order.state].filter(Boolean).join(', ');
-  // `status` is the resolution (api/_lib/db.js's getEscalationOrders maps resolution -> status).
-  // This used to read order.statusAsPerAwb, a field the API has never returned - so the Status
-  // column was blank for every row no matter what the database held.
-  const isRto  = (order.status || '').toLowerCase().includes('rto');
+  const isRto  = (order.statusAsPerAwb || '').toLowerCase().includes('rto');
   const queryCat = order.queryCategory || '';
   const rowTags   = tags || new Set();
   const escalated = rowTags.has('social');
+  const assignedAgent = assignment ? agents.find((a) => a.id === assignment.agentId) : null;
 
   const rowClass = [
     'dataRow',
@@ -812,18 +772,16 @@ function OrderRow({
   return (
     <>
       <tr className={rowClass}>
-        {/* Checkbox */}
         <td className="tdCheck">
           <input
             type="checkbox"
             className="rowCheckbox"
             checked={selected}
-            onChange={(e) => onSelect(rowKey(order), e.target.checked)}
+            onChange={(e) => onSelect(order.rowNumber, e.target.checked)}
             aria-label={`Select order ${order.parentOrder}`}
           />
         </td>
 
-        {/* Order ID */}
         <td className="cellText cellPrimary" title={order.parentOrder}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             {escalated && (
@@ -833,63 +791,57 @@ function OrderRow({
           </div>
         </td>
 
-        {/* Query Category */}
         <td className="cellText" title={queryCat}>
           {queryCat || <span className="muted">—</span>}
         </td>
 
-        {/* Priority */}
         <td><PriorityBadge value={order.totalTimesConsumerReached} /></td>
 
-        {/* Status */}
         <td>
           <span className={`badge${isRto ? ' badgeRto' : ''}`}>
-            {order.status || '—'}
+            {order.statusAsPerAwb || '—'}
           </span>
         </td>
 
-        {/* Tags — visible on the main table for agents and admins */}
         <td>
           <TagCell
-            rowKey={rowKey(order)}
+            rowNumber={order.rowNumber}
             tags={rowTags}
             onToggle={onToggleTag}
           />
         </td>
 
-        {/* Assigned To (admin only) */}
+        <td className="locCell">{loc || <span className="muted">—</span>}</td>
+
         {isAdmin && (
           <td>
             {assigning ? <span className="spinner spinnerMuted" /> : assignment ? (
               <span className="assignChip">
                 <span className="assignChipAvatar">
-                  {initials(agents.find((a) => a.email === assignment.agentId)?.name)}
+                  {initials(assignedAgent?.name || assignment.agentId).slice(0, 2)}
                 </span>
-                {agents.find((a) => a.email === assignment.agentId)?.name || assignment.agentId}
+                {assignedAgent?.name || assignment.agentId}
               </span>
             ) : (
               <select className="assignDropdown" value="" onChange={handleAssign} aria-label="Assign agent">
                 <option value="">Assign…</option>
-                {agents.map((a) => <option key={a.email} value={a.email}>{a.name}</option>)}
+                {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
               </select>
             )}
           </td>
         )}
 
-        {/* Action */}
         <td className="tdAction">
           {justSaved ? (
             <span className="badge badgeSuccess">Resolved ✓</span>
           ) : (
             <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end', alignItems: 'center' }}>
-              {/* Clear assignment (admin) */}
               {isAdmin && assignment && (
                 <button type="button" className="btn btnXs btnGhost"
                   onClick={() => handleAssign({ target: { value: '' } })} title="Clear assignment">
                   <Icon path={I.x} size={11} />
                 </button>
               )}
-              {/* Resolve toggle */}
               <button
                 type="button"
                 className={`btn btnSm ${expanded ? 'btnSecondary' : 'btnPrimary'}`}
@@ -904,12 +856,10 @@ function OrderRow({
         </td>
       </tr>
 
-      {/* Expanded resolve panel */}
       {expanded && !justSaved && (
         <tr className="expandRow">
-          <td colSpan={isAdmin ? 8 : 7}>
+          <td colSpan={isAdmin ? 9 : 8}>
             <div className="resolvePanel">
-              {/* Context strip */}
               <div className="resolveContext">
                 {[
                   ['Order',          order.parentOrder           || '—'],
@@ -946,13 +896,11 @@ function OrderRow({
                 )}
               </div>
 
-              {/* Form section */}
               <div className="resolvePanelHeader">Resolution Details</div>
 
               <form className="resolveForm" onSubmit={handleSubmit}
                 onKeyDown={(e) => e.key === 'Escape' && onToggle(false)}>
 
-                {/* Step 1: Resolution type */}
                 <div className="resolveField resolveFieldType">
                   <label htmlFor={`${fId}-type`}>Resolution Type <span className="reqStar">*</span></label>
                   <select
@@ -976,7 +924,6 @@ function OrderRow({
                   </select>
                 </div>
 
-                {/* Step 2: Conditional fields — only shown when replacement needed */}
                 {needsOrder && (
                   <div className="resolveField">
                     <label htmlFor={`${fId}-order`}>New Order ID <span className="reqStar">*</span></label>
@@ -1005,7 +952,6 @@ function OrderRow({
                   </div>
                 )}
 
-                {/* Delivered message — no extra fields */}
                 {resType === 'Delivered' && (
                   <div className="resolveInfoBox">
                     <Icon path={I.check} size={12} />
@@ -1013,7 +959,6 @@ function OrderRow({
                   </div>
                 )}
 
-                {/* Notes — always optional */}
                 <div className="resolveField resolveFieldNotes">
                   <label htmlFor={`${fId}-notes`}>
                     Notes <span style={{ opacity: 0.45, fontWeight: 400 }}>(optional)</span>
@@ -1057,23 +1002,23 @@ function OrderRow({
    Main Page
    ============================================================ */
 export default function EscalationClient() {
-  const session = useCallingSession('escalation', {});
+  const PROCESS_KEY = 'escalation';
+  const session = useCallingSession(PROCESS_KEY, {});
   const {
-    googleUser, sessionIsAdmin, isProcessAdmin,
-    agentStatus, setStatus,
+    googleUser, sessionIsAdmin, processAgents, isProcessAdmin,
+    agentStatus, setStatus, toast,
   } = session;
   const isAdmin = sessionIsAdmin || isProcessAdmin;
 
-  const [lastSync, setLastSync] = useState('');
-  const [theme,            setTheme]            = useState('light');
-  const [view,             setView]             = useState('queue'); // 'queue' | 'freshLeads' | 'overview' | 'agents' | 'assigns' | 'settings'
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [theme,            setTheme]            = useState('dark');
+  const [view,             setView]             = useState('queue'); // 'queue' | 'overview' | 'agents' | 'assigns' | 'settings'
 
   const [orders,      setOrders]      = useState([]);
   const [loading,     setLoading]     = useState(true);
   const [error,       setError]       = useState('');
   const [toasts,      setToasts]      = useState([]);
 
-  // Filters
   const [search,         setSearch]         = useState('');
   const [filterStatus,   setFilterStatus]   = useState('');
   const [filterPartner,  setFilterPartner]  = useState('');
@@ -1081,219 +1026,123 @@ export default function EscalationClient() {
   const [filterPriority, setFilterPriority] = useState('');
   const [filterTag,      setFilterTag]      = useState('');
 
-  // Sort
-  const [sortDir, setSortDir] = useState('desc'); // 'desc'=high first, 'asc'=low first, null=off
+  const [sortDir, setSortDir] = useState('desc'); // 'desc'=high first, 'asc'=low first
 
-  // Pagination
   const [page,     setPage]     = useState(1);
   const [pageSize, setPageSize] = useState(25);
-  const [rowDensity, setRowDensity] = useState(() => {
-    try { return localStorage.getItem('escalation_row_density') || 'comfortable'; } catch { return 'comfortable'; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem('escalation_row_density', rowDensity); } catch {}
-  }, [rowDensity]);
 
-  // Row state
   const [expandedRow,   setExpandedRow]   = useState(null);
   const [selectedRows,  setSelectedRows]  = useState(new Set());
-  // Tags: Map<rowKey, Set<tagKey>>. Any row carrying the 'social' tag is
-  // also treated as an escalation (keeps the red row accent behaviour).
-  const [taggedRows,    setTaggedRows]    = useState(new Map());
 
-  // Data
-  const [pendingTotal, setPendingTotal] = useState(0);
-  const [agents,       setAgents]       = useState([]);
   const [assignments,  setAssignments]  = useState({});
   const [resolvedCount, setResolvedCount] = useState(0);
 
-  // Theme lives on this page's own wrapper, not document.documentElement — the
-  // stylesheet is scoped under .escalation-page so a root attribute would have
-  // nothing to match, and would leak this page's theme to the rest of the app.
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
+
   function toggleTheme() {
     setTheme((t) => t === 'dark' ? 'light' : 'dark');
   }
 
-  // Bulk
   const [bulkLoading, setBulkLoading] = useState(false);
-
-  // Bulk import / export
   const [showImport, setShowImport] = useState(false);
   const [exporting,  setExporting]  = useState(false);
-
-  // Auto-assign
   const [autoAssigning, setAutoAssigning] = useState(false);
-  const [bulkAssigning, setBulkAssigning] = useState(false);
 
-  /* --- Toasts --- */
   const showToast = useCallback((type, message) => {
     const id = toastIdSeq++;
     setToasts((p) => [...p, { id, type, message }]);
     setTimeout(() => setToasts((p) => p.filter((t) => t.id !== id)), 3500);
   }, []);
 
-  // useBusinessHours' own showToast option is a single-argument callback - adapt it to this
-  // page's two-argument showToast above (the one whose toast stack actually renders in this
-  // page), rather than session.showToast (a different function from useCallingSession, whose
-  // toast this page never renders, which silently dropped the save confirmation before).
-  const hours = useBusinessHours('escalation', {
-    userRole: isAdmin ? 'Admin' : 'Agent',
-    isProcessAdmin,
-    showToast: (msg) => showToast('success', msg),
-  });
+  // Real roster for this process (who's actually invited to Escalation), mapped into the shape
+  // this page's UI already expects - replaces the standalone app's hardcoded AGENTS array.
+  const agents = useMemo(() => (processAgents || []).map((a) => ({
+    id: a.email, name: a.name, email: a.email, avatar: initials(a.name),
+  })), [processAgents]);
 
-  /* --- Load --- */
-  // `orders` is shared between the RTO Queue and Fresh Leads tabs - whichever `view` is active
-  // picks the endpoint, so the rest of the table/filter/assign/resolve code below never has to
-  // know which tab it's rendering.
   const load = useCallback(async () => {
     setLoading(true); setError('');
     try {
-      const ordersUrl = view === 'freshLeads' ? '/api/escalation/orders?type=fresh-leads' : '/api/escalation/orders';
       const [ordersRes, assignRes] = await Promise.all([
-        fetch(ordersUrl),
+        fetch('/api/escalation/orders'),
         fetch('/api/escalation/assign'),
       ]);
-      // Read as text first, then parse: a failure ABOVE the handler (Lambda/API Gateway 502/504,
-      // an HTML error page) has no `error` key - or is not JSON at all - and bare "Failed to load"
-      // hid that. Keep the status code and a snippet of whatever came back instead.
-      const [od, ad] = await Promise.all([readJson(ordersRes), readJson(assignRes)]);
-      if (!ordersRes.ok) throw new Error(od.error || `Failed to load (HTTP ${ordersRes.status}${od._raw ? `: ${od._raw}` : ''})`);
+      const od = await ordersRes.json();
+      const ad = await assignRes.json();
+      if (!ordersRes.ok) throw new Error(od.error || 'Failed to load');
       setOrders(od.orders);
-      // The server caps how many pending orders one response can carry (an uncapped response
-      // exceeds Lambda's 6MB limit and fails before it is ever sent) - `total` is the real count,
-      // so the shortfall gets said out loud rather than looking like an empty tail of the queue.
-      setPendingTotal(typeof od.total === 'number' ? od.total : od.orders.length);
-      // Server now keys assignments by parentOrder (no sheet read needed to translate to a
-      // row number - see api/escalation/[action].js's assign GET) - join against the orders
-      // we already have so the rest of this file can keep working off rowKey.
-      const byParentOrder = ad.assignments || {};
-      const assignmentsByRow = {};
-      od.orders.forEach((o) => {
-        const a = byParentOrder[o.parentOrder];
-        if (a) assignmentsByRow[rowKey(o)] = a;
-      });
-      setAssignments(assignmentsByRow);
-      // Tags come back on the order itself (escalation_lead_assignments.tags) - seeded here so
-      // they survive a reload and are visible to every agent, not just whoever set them.
-      const tagMap = new Map();
-      od.orders.forEach((o) => {
-        if (o.tags && o.tags.length) tagMap.set(rowKey(o), new Set(o.tags));
-      });
-      setTaggedRows(tagMap);
+      setAssignments(ad.assignments || {});
       setSelectedRows(new Set());
-      setLastSync(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
     } catch (err) { setError(err.message); }
     finally { setLoading(false); }
-  }, [view]);
-
-  useEffect(() => {
-    fetch('/api/escalation/agents').then((r) => r.json()).then((d) => setAgents(d.agents || [])).catch(() => {});
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
-  // Overview / Agent Management / Assignments / Settings are admin-only — bounce agents
-  // back to the queue.
   useEffect(() => {
-    if (!isAdmin && (view === 'overview' || view === 'agents' || view === 'assigns' || view === 'settings')) {
+    if (!isAdmin && (view === 'overview' || view === 'agents' || view === 'assigns')) {
       setView('queue');
     }
   }, [isAdmin, view]);
 
-  /* --- Handlers --- */
-  // Every key below is rowKey(order) ("brand:ticketNumber"), not a bare ticketNumber - see
-  // rowKey's own comment for why (HYPHEN and mCaffeine rows are merged into one `orders` list).
-  // Updates the row in place rather than dropping it from the list. RTO Queue now shows resolved
-  // orders too (see getEligibleOrders' includeResolved), so removing a row on save made the lead
-  // vanish out from under whoever just resolved it - and a reload would bring it straight back.
-  // Fresh Leads is still pending-only server-side, so a resolved row there is dropped as before.
-  function handleSaved(key, resolvedStatus) {
-    if (view === 'freshLeads') {
-      setOrders((p) => p.filter((o) => rowKey(o) !== key));
-    } else {
-      setOrders((p) => p.map((o) => (rowKey(o) === key ? { ...o, status: resolvedStatus || o.status } : o)));
-    }
+  function handleSaved(rowNumber) {
+    setOrders((p) => p.filter((o) => o.rowNumber !== rowNumber));
     setExpandedRow(null);
-    setSelectedRows((p) => { const n = new Set(p); n.delete(key); return n; });
+    setSelectedRows((p) => { const n = new Set(p); n.delete(rowNumber); return n; });
     setResolvedCount((c) => c + 1);
   }
 
-  function handleAssign(key, data) {
+  function handleAssign(rowNumber, data) {
     setAssignments((p) => {
       const n = { ...p };
-      if (data) n[key] = data; else delete n[key];
+      if (data) n[rowNumber] = data; else delete n[rowNumber];
       return n;
     });
   }
 
-  function handleSelect(key, checked) {
-    setSelectedRows((p) => { const n = new Set(p); checked ? n.add(key) : n.delete(key); return n; });
+  function handleSelect(rowNumber, checked) {
+    setSelectedRows((p) => { const n = new Set(p); checked ? n.add(rowNumber) : n.delete(rowNumber); return n; });
   }
 
   function handleSelectAll(checked, rows) {
-    setSelectedRows(checked ? new Set(rows.map(rowKey)) : new Set());
+    setSelectedRows(checked ? new Set(rows.map((o) => o.rowNumber)) : new Set());
   }
 
-  // Optimistic: the Map updates immediately, then the same full set is persisted. Tags used to
-  // live ONLY in this state, so every tag vanished on reload and no one else could see it.
-  async function handleToggleTag(key, tagKey, flag) {
-    const order = orders.find((o) => rowKey(o) === key);
-    const before = taggedRows.get(key);
-    const set = new Set(before || []);
-    if (flag) set.add(tagKey); else set.delete(tagKey);
-
-    setTaggedRows((prev) => {
-      const next = new Map(prev);
-      if (set.size) next.set(key, set); else next.delete(key);
-      return next;
-    });
-    if (flag) {
-      const t = TAG_BY_KEY[tagKey];
-      showToast('success', `Tagged ${order?.parentOrder || key} as ${t ? t.label : tagKey}`);
-    }
-    if (!order?.parentOrder) return;
-
-    try {
-      const res = await fetch('/api/escalation/tag', {
+  // Persists straight into the sheet (see api/escalation/[action].js's `tag` action) - unlike
+  // the standalone app, a tag survives a reload instead of living only in React state. Optimistic:
+  // updates the order in place immediately, and best-effort syncs to the server.
+  function handleToggleTag(rowNumber, tagKey, flag) {
+    setOrders((prev) => prev.map((o) => {
+      if (o.rowNumber !== rowNumber) return o;
+      const next = flag ? [...new Set([...(o.tags || []), tagKey])] : (o.tags || []).filter((t) => t !== tagKey);
+      fetch('/api/escalation/tag', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parentOrder: order.parentOrder, tags: Array.from(set) }),
-      });
-      if (!res.ok) throw new Error((await readJson(res)).error || 'Failed to save tag');
-    } catch (err) {
-      // Put the previous set back - a tag that silently failed to save would look applied until
-      // the next reload dropped it, which is exactly the bug this whole change fixes.
-      setTaggedRows((prev) => {
-        const next = new Map(prev);
-        if (before && before.size) next.set(key, before); else next.delete(key);
-        return next;
-      });
-      showToast('error', err.message || 'Failed to save tag');
+        body: JSON.stringify({ rowNumber, tags: next }),
+      }).catch(() => showToast('error', 'Could not save tag'));
+      return { ...o, tags: next };
+    }));
+    if (flag) {
+      const t = TAG_BY_KEY[tagKey];
+      showToast('success', `Tagged ${rowNumber} as ${t ? t.label : tagKey}`);
     }
   }
 
-  /* --- Bulk update --- */
   async function handleBulkApply(status) {
-    const items = Array.from(selectedRows).map((key) => {
-      const o = orders.find((o) => rowKey(o) === key);
-      return { parentOrder: o?.parentOrder };
-    }).filter((i) => i.parentOrder);
+    const rowNumbers = Array.from(selectedRows);
     setBulkLoading(true);
     try {
       const res = await fetch('/api/escalation/bulk-update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items, status }),
+        body: JSON.stringify({ rowNumbers, status }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Bulk update failed');
-      // Same in-place update as handleSaved - see its comment for why resolved rows stay put on
-      // RTO Queue but are still dropped on Fresh Leads.
-      setOrders((p) => (view === 'freshLeads'
-        ? p.filter((o) => !selectedRows.has(rowKey(o)))
-        : p.map((o) => (selectedRows.has(rowKey(o)) ? { ...o, status } : o))));
-      setResolvedCount((c) => c + items.length);
+      setOrders((p) => p.filter((o) => !selectedRows.has(o.rowNumber)));
+      setResolvedCount((c) => c + rowNumbers.length);
       setSelectedRows(new Set());
       showToast('success', `${data.updated} orders marked as "${status}"`);
     } catch (err) {
@@ -1301,11 +1150,10 @@ export default function EscalationClient() {
     } finally { setBulkLoading(false); }
   }
 
-  /* --- Bulk download (CSV export) --- */
   async function handleExport() {
     setExporting(true);
     try {
-      const res = await fetch(view === 'freshLeads' ? '/api/escalation/export?type=fresh-leads' : '/api/escalation/export');
+      const res = await fetch('/api/escalation/export');
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Export failed');
@@ -1325,95 +1173,60 @@ export default function EscalationClient() {
     } finally { setExporting(false); }
   }
 
-  /* --- Bulk upload result --- */
-  // `keys` are "brand:parentOrder" composites (see api/escalation/[action].js's import
-  // response) - a matched CSV row resolves every ticket row sharing that order, same granularity
-  // resolution itself uses, so this filters/deselects by order identity, not by rowKey(o).
-  function handleImported(keys) {
-    if (keys?.length) {
-      const done = new Set(keys);
-      const orderKey = (o) => `${o.brand}:${o.parentOrder}`;
-      // A CSV carries a DIFFERENT status per row, so unlike handleSaved/handleBulkApply there's no
-      // single value to patch in - refetch instead of guessing. Fresh Leads still just drops the
-      // resolved rows (they're gone from its pending-only query anyway).
-      if (view === 'freshLeads') setOrders((p) => p.filter((o) => !done.has(orderKey(o))));
-      else load();
-      setResolvedCount((c) => c + keys.length);
+  function handleImported(rowNumbers) {
+    if (rowNumbers?.length) {
+      const done = new Set(rowNumbers.map(String));
+      setOrders((p) => p.filter((o) => !done.has(String(o.rowNumber))));
+      setResolvedCount((c) => c + rowNumbers.length);
       setSelectedRows((p) => {
         const n = new Set(p);
-        p.forEach((k) => {
-          const o = orders.find((o) => rowKey(o) === k);
-          if (o && done.has(orderKey(o))) n.delete(k);
-        });
+        rowNumbers.forEach((r) => n.delete(r));
         return n;
       });
     }
   }
 
-  /* --- Auto-assign --- */
-  // Assigns every SELECTED row to one agent - same assign-bulk endpoint handleAutoAssign uses,
-  // just an explicit agent over an explicit selection instead of round-robin over the unassigned.
-  async function handleBulkAssign(agentId) {
-    const rows = orders.filter((o) => selectedRows.has(rowKey(o)));
-    if (!rows.length || !agentId) return;
-    setBulkAssigning(true);
-    try {
-      const res = await fetch('/api/escalation/assign-bulk', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          assignments: rows.map((o) => ({ parentOrder: o.parentOrder, agentId })),
-        }),
-      });
-      const data = await readJson(res);
-      if (!res.ok) throw new Error(data.error || 'Bulk assign failed');
-      const newMap = {};
-      rows.forEach((o) => { newMap[rowKey(o)] = { agentId }; });
-      setAssignments((p) => ({ ...p, ...newMap }));
-      const name = agents.find((a) => a.email === agentId)?.name || agentId;
-      showToast('success', `Assigned ${rows.length} order${rows.length === 1 ? '' : 's'} to ${name}`);
-    } catch (err) {
-      showToast('error', err.message || 'Bulk assign failed');
-    } finally { setBulkAssigning(false); }
-  }
-
   async function handleAutoAssign() {
-    if (!isAdmin && !googleUser?.email) return;
+    if (!googleUser?.email) return;
 
     setAutoAssigning(true);
     try {
-      const unassigned = orders.filter((o) => !assignments[rowKey(o)]);
+      const unassigned = orders.filter((o) => !assignments[o.rowNumber]);
       if (unassigned.length === 0) { showToast('success', 'All orders already assigned!'); return; }
 
-      let assignmentPayload;
-      const newMap = {};
       if (!isAdmin) {
-        assignmentPayload = unassigned.map((o) => ({ parentOrder: o.parentOrder, agentId: googleUser.email }));
-        unassigned.forEach((o) => { newMap[rowKey(o)] = { agentId: googleUser.email }; });
+        const updates = unassigned.map((o) =>
+          fetch('/api/escalation/assign', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rowNumber: o.rowNumber, agentId: googleUser.email }),
+          })
+        );
+        await Promise.all(updates);
+        const newMap = {};
+        unassigned.forEach((o) => { newMap[o.rowNumber] = { agentId: googleUser.email }; });
+        setAssignments((p) => ({ ...p, ...newMap }));
+        showToast('success', `Auto-assigned ${unassigned.length} orders to you`);
       } else {
         if (agents.length === 0) { showToast('error', 'No agents available'); return; }
-        assignmentPayload = unassigned.map((o, i) => ({ parentOrder: o.parentOrder, agentId: agents[i % agents.length].email }));
-        unassigned.forEach((o, i) => { newMap[rowKey(o)] = { agentId: agents[i % agents.length].email }; });
+        const updates = unassigned.map((o, i) => {
+          const agent = agents[i % agents.length];
+          return fetch('/api/escalation/assign', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rowNumber: o.rowNumber, agentId: agent.id }),
+          }).then(() => ({ rowNumber: o.rowNumber, agentId: agent.id }));
+        });
+        const results = await Promise.all(updates);
+        const newMap = {};
+        results.forEach(({ rowNumber, agentId }) => { newMap[rowNumber] = { agentId }; });
+        setAssignments((p) => ({ ...p, ...newMap }));
+        showToast('success', `Auto-assigned ${unassigned.length} orders (round-robin across ${agents.length} agents)`);
       }
-
-      const res = await fetch('/api/escalation/assign-bulk', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ assignments: assignmentPayload }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Auto-assign failed');
-
-      setAssignments((p) => ({ ...p, ...newMap }));
-      showToast('success', isAdmin
-        ? `Auto-assigned ${unassigned.length} orders (round-robin across ${agents.length} agents)`
-        : `Auto-assigned ${unassigned.length} orders to you`);
-    } catch (err) {
-      showToast('error', err.message || 'Auto-assign failed');
-    } finally { setAutoAssigning(false); }
+    } catch { showToast('error', 'Auto-assign failed'); }
+    finally { setAutoAssigning(false); }
   }
 
-  /* --- Derived --- */
   const partnerOptions = useMemo(() => {
     const s = new Set(orders.map((o) => o.deliveryPartnerName).filter(Boolean));
     return Array.from(s).sort();
@@ -1427,34 +1240,28 @@ export default function EscalationClient() {
           .filter(Boolean).some((v) => String(v).toLowerCase().includes(q));
         if (!hit) return false;
       }
-      if (filterStatus   && !String(o.status || '').toLowerCase().includes(filterStatus)) return false;
+      if (filterStatus   && !String(o.statusAsPerAwb || '').toLowerCase().includes(filterStatus)) return false;
       if (filterPartner  && o.deliveryPartnerName !== filterPartner) return false;
       if (filterPriority && getPriority(o.totalTimesConsumerReached).level !== filterPriority) return false;
       if (filterAgent) {
-        const asgn = assignments[rowKey(o)];
+        const asgn = assignments[o.rowNumber];
         if (!asgn || asgn.agentId !== filterAgent) return false;
       }
-      if (filterTag) {
-        const tags = taggedRows.get(rowKey(o));
-        if (!tags || !tags.has(filterTag)) return false;
-      }
+      if (filterTag && !(o.tags || []).includes(filterTag)) return false;
       return true;
     });
 
-    // Priority sort — order by the raw call-count so any difference in counts
-    // visibly reorders the table (a 3-bucket rank left most rows tied).
     if (sortDir) {
       list = [...list].sort((a, b) => {
         let diff = callCount(b.totalTimesConsumerReached) - callCount(a.totalTimesConsumerReached);
         if (diff === 0) {
-          // Stable tie-break: keep newest queries first so equal counts still order predictably.
           diff = String(b.queryDate || '').localeCompare(String(a.queryDate || ''));
         }
         return sortDir === 'desc' ? diff : -diff;
       });
     }
     return list;
-  }, [orders, search, filterStatus, filterPartner, filterPriority, filterAgent, filterTag, taggedRows, assignments, sortDir]);
+  }, [orders, search, filterStatus, filterPartner, filterPriority, filterAgent, filterTag, assignments, sortDir]);
 
   useEffect(() => { setPage(1); }, [search, filterStatus, filterPartner, filterPriority, filterAgent, filterTag, pageSize, orders.length]);
 
@@ -1465,55 +1272,46 @@ export default function EscalationClient() {
   const rangeStart = filtered.length === 0 ? 0 : startIdx + 1;
   const rangeEnd   = Math.min(startIdx + pageSize, filtered.length);
 
-  // Stats. Every count here is over the rows actually loaded, so the stat cards keep adding up
-  // (assigned + unassigned = the table) - `pendingTotal` from the server can be larger, and that
-  // gap is reported on its own below rather than smuggled into these numbers.
   const totalPending    = orders.length;
-  const truncated       = pendingTotal > totalPending;
-  const assignedCount   = Object.keys(assignments).filter((k) => orders.some((o) => rowKey(o) === k)).length;
+  const assignedCount   = Object.keys(assignments).filter((k) => orders.some((o) => String(o.rowNumber) === String(k))).length;
   const unassignedCount = totalPending - assignedCount;
   const highCount       = orders.filter((o) => getPriority(o.totalTimesConsumerReached).level === 'high').length;
 
-  const allPageSelected = pageItems.length > 0 && pageItems.every((o) => selectedRows.has(rowKey(o)));
-  const somePageSelected = pageItems.some((o) => selectedRows.has(rowKey(o)));
+  const allPageSelected = pageItems.length > 0 && pageItems.every((o) => selectedRows.has(o.rowNumber));
+  const somePageSelected = pageItems.some((o) => selectedRows.has(o.rowNumber));
 
-  /* --- Overview stats (derived from what we can actually track) --- */
   const overview = useMemo(() => {
-    // Per-agent workload: count live orders currently assigned to each agent.
-    const load = Object.fromEntries(agents.map((a) => [a.email, 0]));
+    const load = Object.fromEntries(agents.map((a) => [a.id, 0]));
     orders.forEach((o) => {
-      const asgn = assignments[rowKey(o)];
+      const asgn = assignments[o.rowNumber];
       if (asgn && load[asgn.agentId] != null) load[asgn.agentId] += 1;
     });
 
-    // Priority distribution across the live queue.
     const priority = { high: 0, medium: 0, low: 0 };
     orders.forEach((o) => {
       const level = getPriority(o.totalTimesConsumerReached).level;
       if (priority[level] != null) priority[level] += 1;
     });
 
-    // Escalation / tag counts across the queue.
     const tagCounts = {};
     let escalations = 0;
-    taggedRows.forEach((set) => {
-      set.forEach((t) => { tagCounts[t] = (tagCounts[t] || 0) + 1; escalations += 1; });
+    orders.forEach((o) => {
+      (o.tags || []).forEach((t) => { tagCounts[t] = (tagCounts[t] || 0) + 1; escalations += 1; });
     });
 
-    const assignedTotal = orders.filter((o) => assignments[rowKey(o)]).length;
+    const assignedTotal = orders.filter((o) => assignments[o.rowNumber]).length;
     const perAgent = agents.map((a) => ({
       ...a,
-      load: load[a.email] || 0,
-      share: assignedTotal ? Math.round(((load[a.email] || 0) / assignedTotal) * 100) : 0,
+      load: load[a.id] || 0,
+      share: assignedTotal ? Math.round(((load[a.id] || 0) / assignedTotal) * 100) : 0,
     })).sort((x, y) => y.load - x.load);
 
     const busiest = perAgent[0] && perAgent[0].load > 0 ? perAgent[0] : null;
     const avgLoad = agents.length ? Math.round((assignedTotal / agents.length) * 10) / 10 : 0;
 
     return { perAgent, priority, tagCounts, escalations, assignedTotal, busiest, avgLoad };
-  }, [agents, orders, assignments, taggedRows]);
+  }, [agents, orders, assignments]);
 
-  // Sort icon — desc = high first, asc = low first
   const SortIcon = () => (
     sortDir === 'asc'
       ? <Icon path={I.chevUp} size={11} />
@@ -1524,13 +1322,12 @@ export default function EscalationClient() {
     setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
   }
 
-  /* --- Active filters (visible + clearable) --- */
   const activeFilters = [];
   if (search.trim())   activeFilters.push({ key: 'search',   label: `Search: "${search.trim()}"`, clear: () => setSearch('') });
   if (filterStatus)    activeFilters.push({ key: 'status',   label: `Status: ${STATUS_FILTER_OPTIONS.find((o) => o.value === filterStatus)?.label || filterStatus}`, clear: () => setFilterStatus('') });
   if (filterPriority)  activeFilters.push({ key: 'priority', label: `Priority: ${PRIORITY_FILTER_OPTIONS.find((o) => o.value === filterPriority)?.label || filterPriority}`, clear: () => setFilterPriority('') });
   if (filterPartner)   activeFilters.push({ key: 'partner',  label: `Partner: ${filterPartner}`, clear: () => setFilterPartner('') });
-  if (filterAgent)     activeFilters.push({ key: 'agent',    label: `Agent: ${agents.find((a) => a.email === filterAgent)?.name || filterAgent}`, clear: () => setFilterAgent('') });
+  if (filterAgent)     activeFilters.push({ key: 'agent',    label: `Agent: ${agents.find((a) => a.id === filterAgent)?.name || filterAgent}`, clear: () => setFilterAgent('') });
   if (filterTag)       activeFilters.push({ key: 'tag',      label: `Tag: ${TAG_BY_KEY[filterTag]?.label || filterTag}`, clear: () => setFilterTag('') });
 
   function clearAllFilters() {
@@ -1538,36 +1335,31 @@ export default function EscalationClient() {
   }
 
   return (
-    // .escalation-page is the scope every rule in escalation.css hangs off. It has to
-    // be its own element wrapping appShell rather than a class merged onto it, because
-    // the stylesheet has other `.escalation-page .x` descendant selectors that would
-    // stop matching if the two were the same node.
-    <div className="escalation-page" data-theme={theme}>
-    <div className="appShell">
-      <div className="mainContent mainContentFull">
-        {/* Topbar */}
+    <div className={`appShell${sidebarCollapsed ? ' sidebarCollapsed' : ''}`}>
+      <Sidebar collapsed={sidebarCollapsed} isAdmin={isAdmin} googleUser={googleUser} pendingCount={totalPending}
+        view={view} onViewChange={setView} />
+
+      <div className="mainContent">
         <header className="topbar">
           <div className="topbarLeft">
-            <div className="topbarMeta">
-              <div className="breadcrumb">
-                <span className="breadcrumbItem">Escalation</span>
-                <span className="breadcrumbSep">/</span>
-                <span className="breadcrumbCurrent">{VIEW_LABELS[view] || 'RTO Queue'}</span>
-              </div>
-              <span className="lastSync">Last sync: {lastSync || '—'}</span>
+            <button type="button" className="collapseBtn"
+              onClick={() => setSidebarCollapsed((c) => !c)} aria-label="Toggle sidebar">
+              <Icon path={I.menu} size={13} />
+            </button>
+            <div className="breadcrumb">
+              <span className="breadcrumbItem">Escalation</span>
+              <span className="breadcrumbSep">/</span>
+              <span className="breadcrumbCurrent">{VIEW_LABELS[view] || 'RTO Queue'}</span>
             </div>
           </div>
           <div className="topbarRight">
-            {/* Availability status */}
             <StatusControl status={agentStatus} onChange={setStatus} />
-            {/* Theme toggle */}
             <button type="button" className="topbarBtn themeToggle" onClick={toggleTheme}
               title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
               <Icon path={theme === 'dark' ? I.sun : I.moon} size={13} />
             </button>
             <button type="button" className="topbarBtn" onClick={load} disabled={loading} title="Refresh">
-              {/* esc-spin, not spin — keyframes are prefixed when the stylesheet is scoped */}
-              <span style={{ display: 'flex', animation: loading ? 'esc-spin 0.8s linear infinite' : 'none' }}>
+              <span style={{ display: 'flex', animation: loading ? 'spin 0.8s linear infinite' : 'none' }}>
                 <Icon path={I.refresh} size={13} />
               </span>
             </button>
@@ -1577,23 +1369,19 @@ export default function EscalationClient() {
           </div>
         </header>
 
-        <TabNav isAdmin={isAdmin} pendingCount={totalPending} view={view} onViewChange={setView} />
-
         <main className="pageBody">
           {view === 'overview' ? (
             <OverviewPanel overview={overview} agents={agents} loading={loading} resolvedCount={resolvedCount} />
-          ) : (view === 'queue' || view === 'freshLeads') ? (
+          ) : view === 'queue' ? (
             <>
-          {/* Page header */}
           <div className="pageHeader">
             <div>
-              <h1 className="pageTitle">{view === 'freshLeads' ? 'Fresh Leads' : 'RTO Action Queue'}</h1>
+              <h1 className="pageTitle">RTO Action Queue</h1>
               <p className="pageSubtitle">
-                Google Sheet-backed resolution · sorted by priority · {truncated ? `${totalPending} of ${pendingTotal}` : totalPending} {view === 'freshLeads' ? 'leads pending' : 'orders (all statuses)'}
+                Google Sheet-backed resolution · sorted by priority · {totalPending} orders pending
               </p>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {/* Bulk download */}
               <button
                 type="button"
                 className="btn btnSecondary"
@@ -1605,7 +1393,6 @@ export default function EscalationClient() {
                 {exporting ? <span className="spinner spinnerMuted" /> : <Icon path={I.download} size={13} />}
                 {exporting ? 'Exporting…' : 'Download CSV'}
               </button>
-              {/* Bulk upload (admin only) */}
               {isAdmin && (
                 <button
                   type="button"
@@ -1619,7 +1406,6 @@ export default function EscalationClient() {
                   Upload CSV
                 </button>
               )}
-              {/* Auto-assign button */}
               <button
                 type="button"
                 className="btn btnSecondary"
@@ -1635,15 +1421,6 @@ export default function EscalationClient() {
                 <span className="pulseDot" />
                 Live
               </div>
-              <button
-                type="button"
-                className="btn btnSecondary"
-                onClick={() => setRowDensity((d) => (d === 'compact' ? 'comfortable' : 'compact'))}
-                title="Toggle row density"
-                style={{ fontSize: 12 }}
-              >
-                {rowDensity === 'compact' ? 'Comfortable rows' : 'Compact rows'}
-              </button>
             </div>
           </div>
 
@@ -1660,24 +1437,14 @@ export default function EscalationClient() {
             </div>
           )}
 
-          {truncated && (
-            <div className="banner bannerError" role="status">
-              <Icon path={I.alert} size={12} />
-              Showing the {totalPending} most recent of {pendingTotal} pending {view === 'freshLeads' ? 'leads' : 'orders'} — one response cannot carry them all. Resolve or filter down the backlog to see the rest.
-            </div>
-          )}
-
-          {/* Stat cards */}
           <div className="statsGrid">
-            <StatCard variant="pending"    icon={<Icon path={I.alert} size={16} />} value={loading ? null : totalPending}    label={view === 'freshLeads' ? 'Total Pending' : 'Total Orders'} sub={view === 'freshLeads' ? 'Needs resolution' : 'All statuses'} />
-            <StatCard variant="unassigned" icon={<Icon path={I.chevDown} size={16} />} value={loading ? null : unassignedCount} label="Unassigned"      sub="No agent yet" />
-            <StatCard variant="assigned"   icon={<Icon path={I.users} size={16} />} value={loading ? null : assignedCount}   label="Assigned"        sub="In progress" />
-            <StatCard variant="resolved"   icon={<Icon path={I.check} size={16} />} value={resolvedCount}                    label="Resolved"        sub="This session" />
+            <StatCard variant="pending"    icon="🚨" value={loading ? null : totalPending}    label="Total Pending"   sub="Needs resolution" />
+            <StatCard variant="unassigned" icon="⏳" value={loading ? null : unassignedCount} label="Unassigned"      sub="No agent yet" />
+            <StatCard variant="assigned"   icon="👤" value={loading ? null : assignedCount}   label="Assigned"        sub="In progress" />
+            <StatCard variant="resolved"   icon="✅" value={resolvedCount}                    label="Resolved"        sub="This session" />
           </div>
 
-          {/* Toolbar */}
           <div className="toolbar">
-            {/* Search */}
             <div className="searchWrap">
               <span className="searchIcon"><Icon path={I.search} size={13} /></span>
               <label htmlFor="order-search" className="srOnly">Search orders</label>
@@ -1689,32 +1456,27 @@ export default function EscalationClient() {
               )}
             </div>
 
-            {/* Status filter */}
             <select className={`filterSelect${filterStatus ? ' filterSelectActive' : ''}`} value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} aria-label="Filter status">
               {STATUS_FILTER_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
 
-            {/* Priority filter */}
             <select className={`filterSelect${filterPriority ? ' filterSelectActive' : ''}`} value={filterPriority} onChange={(e) => setFilterPriority(e.target.value)} aria-label="Filter priority">
               {PRIORITY_FILTER_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
 
-            {/* Tag filter */}
             <select className={`filterSelect${filterTag ? ' filterSelectActive' : ''}`} value={filterTag} onChange={(e) => setFilterTag(e.target.value)} aria-label="Filter tag">
               {TAG_FILTER_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
 
-            {/* Partner filter */}
             <select className={`filterSelect${filterPartner ? ' filterSelectActive' : ''}`} value={filterPartner} onChange={(e) => setFilterPartner(e.target.value)} aria-label="Filter partner">
               <option value="">All Partners</option>
               {partnerOptions.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
 
-            {/* Agent filter (admin) */}
             {isAdmin && agents.length > 0 && (
               <select className={`filterSelect${filterAgent ? ' filterSelectActive' : ''}`} value={filterAgent} onChange={(e) => setFilterAgent(e.target.value)} aria-label="Filter agent">
                 <option value="">All Agents</option>
-                {agents.map((a) => <option key={a.email} value={a.email}>{a.name}</option>)}
+                {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
               </select>
             )}
 
@@ -1729,7 +1491,6 @@ export default function EscalationClient() {
             </span>
           </div>
 
-          {/* Active filter chips */}
           {activeFilters.length > 0 && (
             <div className="filterChips">
               <span className="filterChipsLabel">Filters:</span>
@@ -1745,21 +1506,15 @@ export default function EscalationClient() {
             </div>
           )}
 
-          {/* Bulk action bar */}
           {selectedRows.size > 0 && (
             <BulkActionBar
               count={selectedRows.size}
               onApply={handleBulkApply}
-              onAssign={handleBulkAssign}
               onClear={() => setSelectedRows(new Set())}
               loading={bulkLoading}
-              assigning={bulkAssigning}
-              isAdmin={isAdmin}
-              agents={agents}
             />
           )}
 
-          {/* Table card */}
           <div className="card">
             {loading ? (
               <SkeletonRows count={7} />
@@ -1773,7 +1528,7 @@ export default function EscalationClient() {
               </div>
             ) : (
               <>
-                <div className={`tableWrap${rowDensity === 'compact' ? ' tableWrap--compact' : ''}`}>
+                <div className="tableWrap">
                   <table>
                     <thead>
                       <tr>
@@ -1795,6 +1550,7 @@ export default function EscalationClient() {
                         </th>
                         <th scope="col">Status</th>
                         <th scope="col">Tags</th>
+                        <th scope="col">Location</th>
                         {isAdmin && <th scope="col">Assigned To</th>}
                         <th scope="col" className="thAction">Action</th>
                       </tr>
@@ -1802,19 +1558,19 @@ export default function EscalationClient() {
                     <tbody>
                       {pageItems.map((o) => (
                         <OrderRow
-                          key={rowKey(o)}
+                          key={o.rowNumber}
                           order={o}
-                          expanded={expandedRow === rowKey(o)}
-                          onToggle={(next) => setExpandedRow(next ? rowKey(o) : null)}
+                          expanded={expandedRow === o.rowNumber}
+                          onToggle={(next) => setExpandedRow(next ? o.rowNumber : null)}
                           onSaved={handleSaved}
                           onToast={showToast}
                           isAdmin={isAdmin}
                           agents={agents}
-                          assignment={assignments[rowKey(o)] || null}
+                          assignment={assignments[o.rowNumber] || null}
                           onAssign={handleAssign}
-                          selected={selectedRows.has(rowKey(o))}
+                          selected={selectedRows.has(o.rowNumber)}
                           onSelect={handleSelect}
-                          tags={taggedRows.get(rowKey(o))}
+                          tags={new Set(o.tags || [])}
                           onToggleTag={handleToggleTag}
                         />
                       ))}
@@ -1822,7 +1578,6 @@ export default function EscalationClient() {
                   </table>
                 </div>
 
-                {/* Pagination */}
                 <div className="pagination">
                   <span className="paginationInfo">{rangeStart}–{rangeEnd} of {filtered.length} orders</span>
                   <div className="paginationControls">
@@ -1846,17 +1601,21 @@ export default function EscalationClient() {
             )}
           </div>
             </>
-          ) : view === 'agents' ? (
-            <AgentManagementPanel session={session} />
-          ) : view === 'assigns' ? (
-            <AssignmentsPanel agents={agents} />
-          ) : view === 'settings' ? (
-            <SettingsPanel hours={hours} />
-          ) : null}
+          ) : (
+            <div className="pageHeader">
+              <div>
+                <h1 className="pageTitle">{VIEW_LABELS[view] || 'Coming Soon'}</h1>
+                <p className="pageSubtitle">
+                  {view === 'agents'   && 'Agent roster management — coming soon.'}
+                  {view === 'assigns'  && 'Assignment overview — coming soon.'}
+                  {view === 'settings' && 'Workspace settings — coming soon.'}
+                </p>
+              </div>
+            </div>
+          )}
         </main>
       </div>
 
-      {/* Toasts */}
       <div className="toastStack" role="status" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.id} className={`toast ${t.type === 'success' ? 'toastSuccess' : 'toastError'}`}>
@@ -1867,9 +1626,16 @@ export default function EscalationClient() {
             </div>
           </div>
         ))}
+        {toast && (
+          <div className="toast toastError">
+            <div className="toastIndicator" />
+            <div className="toastBody">
+              <div className="toastMsg">{toast}</div>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Import modal */}
       {showImport && (
         <ImportModal
           onClose={() => setShowImport(false)}
@@ -1877,7 +1643,6 @@ export default function EscalationClient() {
           onToast={showToast}
         />
       )}
-    </div>
     </div>
   );
 }

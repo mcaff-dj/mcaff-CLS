@@ -133,7 +133,6 @@ identical to the MySQL `sql` ones.
 | `1fjrwKgi26…` | mCaffeine ticket dashboard + `Sales per month` | `generate_report.py`, `push_mcaffeine_to_dashboard.py` |
 | `11RM238fAc…` | Hyphen equivalent | same, Hyphen side |
 | `1fpGeg1ErG…` | Raw Flowcall export landing sheet (`hyphen`/`mcaffeine` tabs) | `export_recurring.py`, cleanup/integrity scripts |
-| `1fopbKSrg-…` | "Internal Escalation" sheet | `sync_delivery_tickets_to_sheet.py` |
 | `1OL_Trll9x…` | "Product feedback KYC" workbook | `generate_product_kyc.py` |
 
 Two independent Sheets clients:
@@ -973,7 +972,6 @@ unambiguous format, so [`lib.CREATED_AT_PATTERN`](../scripts/lib.py#L23) is the 
 | [assign-leads.yml](../.github/workflows/assign-leads.yml) | `*/5 * * * *` | Round-robin RTO leads |
 | [refresh.yml](../.github/workflows/refresh.yml) | `30 8` + `30 21` UTC | Regenerate brand reports (3 AM IST run also re-queries NPS) |
 | [export-resolved-tickets.yml](../.github/workflows/export-resolved-tickets.yml) | `30 */2` | Flowcall → sheets → dashboards |
-| [sync-delivery-tickets.yml](../.github/workflows/sync-delivery-tickets.yml) | `0 */2` | Delivery tickets → Internal Escalation sheet |
 | [sync-lead-assignments.yml](../.github/workflows/sync-lead-assignments.yml) | `30 3` (9 AM IST) | CRM Postgres → MySQL archive |
 | [refresh-deepdive.yml](../.github/workflows/refresh-deepdive.yml) | dispatch only | Rebuild Deep Dive |
 | [deploy.yml](../.github/workflows/deploy.yml) | push to `api/**` | Update Lambda |

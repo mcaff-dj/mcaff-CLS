@@ -53,7 +53,7 @@ mount('all', '/api/ndr/sheet', '../ndr/sheet.js');
 mount('post', '/api/ndr/lead-assignment', '../ndr/lead-assignment.js');
 
 // The Escalation desk's whole API surface - one dynamic-segment handler, same shape as the
-// two :action mounts above (agents/orders/assign/update/bulk-update/import/export/sample).
+// two :action mounts above (agents/orders/assign/tag/update/bulk-update/import/export/sample).
 mount('all', '/api/escalation/:action', '../escalation/[action].js', 'action');
 
 // Registered before the dynamic /api/report/:card route below - Express matches routes

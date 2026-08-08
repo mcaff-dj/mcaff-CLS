@@ -1,10 +1,11 @@
 'use client';
 
 // Same reasoning as app/rto-crm/RtoCrmClientLoader.js and app/ndr-calling/NdrCallingClientLoader.js:
-// EscalationClient's first paint depends on browser-only state (it sets its own data-theme and
-// reads window/document in effects), and it is an authenticated internal tool with no SEO or
-// no-JS requirement - so there's nothing to gain from server-rendering it, and a hydration
-// mismatch to lose. ssr:false means it only ever mounts client-side.
+// EscalationClient's very first render depends on localStorage (via useCallingSession's cached
+// role/agent status - see app/_calling/util.js's safeStorage), which doesn't exist during
+// server-side rendering. ssr:false sidesteps the resulting hydration-mismatch class of bug
+// entirely by never rendering this component on the server at all - appropriate here since this
+// is an authenticated internal tool with no SEO/no-JS requirement.
 import dynamic from 'next/dynamic';
 
 const EscalationClient = dynamic(() => import('./EscalationClient'), { ssr: false });

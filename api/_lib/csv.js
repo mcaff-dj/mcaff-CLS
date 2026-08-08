@@ -1,19 +1,6 @@
-// Dependency-free CSV utilities (RFC-4180-ish) backing the Escalation desk's bulk
-// export/template/import round-trip - ported unchanged from the standalone app's lib/csv.js.
+// Dependency-free CSV utilities (RFC-4180-ish), shared by every Calling desk CSV
+// export/import (currently api/refund-export.js and api/escalation/[action].js).
 // Comma or tab delimited (auto-detected on parse), quoted fields supported.
-// Kept here rather than in a shared _lib helper because the header list below IS the file
-// format agents already have saved spreadsheets against.
-
-// Canonical header for the bulk template / round-trip.
-const CSV_HEADERS = [
-  'HYP_Parent_OrderID',
-  'AWB_Number',
-  'Status_1',
-  'New Order ID',
-  'New AWB / Tracking',
-  'Status_2',
-  'Notes',
-];
 
 function detectDelimiter(text) {
   const firstLine = text.split(/\r?\n/, 1)[0] || '';
@@ -78,10 +65,10 @@ function escapeField(v) {
 }
 
 // Build CSV text from an array of objects, using the given header order.
-function toCSV(rows, headers = CSV_HEADERS) {
+function toCSV(rows, headers) {
   const head = headers.map(escapeField).join(',');
   const body = rows.map((row) => headers.map((h) => escapeField(row[h])).join(',')).join('\n');
   return body ? `${head}\n${body}` : head;
 }
 
-module.exports = { CSV_HEADERS, parseCSV, toCSV };
+module.exports = { parseCSV, toCSV };
