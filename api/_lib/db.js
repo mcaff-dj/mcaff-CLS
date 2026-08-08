@@ -1038,6 +1038,19 @@ async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks
   `;
 }
 
+// bulk-update's own equivalent of resolveEscalationAssignment, for many orders sharing the
+// SAME resolution/remarks in one call (that's what a bulk action means) - one UPDATE ...
+// WHERE parent_order = ANY(...) instead of N round-trips for what is logically one operation.
+async function resolveEscalationAssignmentsBulk(parentOrders, resolution) {
+  await ensurePgSchema();
+  if (!parentOrders.length) return;
+  await pgSql`
+    UPDATE escalation_lead_assignments
+    SET resolved_at = now(), resolution = ${resolution || null}
+    WHERE parent_order = ANY(${parentOrders}::text[]) AND reassigned_away_at IS NULL AND resolved_at IS NULL
+  `;
+}
+
 // Full history, newest first. No date filtering here on purpose: "assigned this week" and
 // "resolved this week" are different questions about different timestamps on the same table
 // (same reasoning as getCallingOverviewStats' own per-metric date scoping above) - a single
@@ -1046,12 +1059,17 @@ async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks
 // timestamp client-side instead. Also doubles as the read side of the live assignment map
 // (api/escalation/[action].js's assign GET filters this down to rows with neither
 // reassignedAwayAt nor resolvedAt set).
+// LIMIT is a soft ceiling, not a real solution for unbounded growth - if this desk's history
+// ever exceeds 5000 rows, add either pagination to the Assignments UI or a date-range param
+// here (getLiveEscalationAssignments below covers the actually-common "who's live right now"
+// case without touching history size at all).
 async function getEscalationAssignments() {
   await ensurePgSchema();
   const { rows } = await pgSql`
     SELECT parent_order, email, assigned_at, reassigned_away_at, resolved_at, resolution, agent_remarks
     FROM escalation_lead_assignments
     ORDER BY assigned_at DESC
+    LIMIT 5000
   `;
   return rows.map((r) => ({
     parentOrder: r.parent_order,
@@ -1062,6 +1080,18 @@ async function getEscalationAssignments() {
     resolution: r.resolution,
     agentRemarks: r.agent_remarks,
   }));
+}
+
+// The live-only subset of the above, for callers that just need "who's assigned right now"
+// (the assign GET action) - reading only rows the partial unique index already guarantees are
+// few (at most one per parent_order), instead of the full ever-growing history.
+async function getLiveEscalationAssignments() {
+  await ensurePgSchema();
+  const { rows } = await pgSql`
+    SELECT parent_order, email FROM escalation_lead_assignments
+    WHERE reassigned_away_at IS NULL AND resolved_at IS NULL
+  `;
+  return rows.map((r) => ({ parentOrder: r.parent_order, email: r.email }));
 }
 
 // dateFrom/dateTo are inclusive "YYYY-MM-DD" strings (or null for unbounded), interpreted
@@ -1662,4 +1692,5 @@ module.exports = {
   deleteProcessDisposition, reorderProcessDispositions,
   claimNdrLead, disposeNdrLead,
   assignEscalationOrder, unassignEscalationOrder, resolveEscalationAssignment, getEscalationAssignments,
+  getLiveEscalationAssignments, resolveEscalationAssignmentsBulk,
 };

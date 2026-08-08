@@ -20,6 +20,7 @@ const { CSV_HEADERS, parseCSV, toCSV } = require('../_lib/escalationCsv');
 const {
   getCallingProcessAgents, assignEscalationOrder, unassignEscalationOrder,
   resolveEscalationAssignment, getEscalationAssignments,
+  getLiveEscalationAssignments, resolveEscalationAssignmentsBulk,
 } = require('../_lib/db');
 
 const CARD_KEY = 'calling';
@@ -62,14 +63,9 @@ const handler = async (req, res) => {
 
     if (action === 'assign') {
       if (req.method === 'GET') {
-        const history = await getEscalationAssignments();
-        const { byParent } = await getSheetIndex();
+        const live = await getLiveEscalationAssignments();
         const assignments = {};
-        history.forEach((r) => {
-          if (r.reassignedAwayAt || r.resolvedAt) return; // not a live cycle
-          const rowNumber = byParent.get(String(r.parentOrder).trim().toLowerCase());
-          if (rowNumber != null) assignments[rowNumber] = { agentId: r.email };
-        });
+        live.forEach((r) => { assignments[r.parentOrder] = { agentId: r.email }; });
         return res.status(200).json({ assignments });
       }
       if (req.method === 'POST') {
@@ -113,9 +109,7 @@ const handler = async (req, res) => {
       const updated = await batchUpdateOrders(
         items.map(({ rowNumber }) => ({ rowNumber, newOrderId: '-', newAwb: '-', newStatus: status }))
       );
-      await Promise.all(
-        items.map(({ parentOrder }) => (parentOrder ? resolveEscalationAssignment(parentOrder, status, '') : Promise.resolve()))
-      );
+      await resolveEscalationAssignmentsBulk(items.map((i) => i.parentOrder).filter(Boolean), status);
       return res.status(200).json({ ok: true, updated });
     }
 

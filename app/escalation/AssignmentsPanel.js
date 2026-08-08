@@ -33,8 +33,11 @@ export default function AssignmentsPanel({ agents }) {
 
   useEffect(() => {
     fetch('/api/escalation/assignments')
-      .then((r) => r.json())
-      .then((d) => setHistory(d.assignments || []))
+      .then(async (res) => {
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) { setError(d.error || 'Could not load assignment history'); setHistory([]); return; }
+        setHistory(d.assignments || []);
+      })
       .catch(() => { setError('Could not load assignment history'); setHistory([]); });
   }, []);
 

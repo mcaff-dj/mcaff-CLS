@@ -11,7 +11,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import './escalation.css';
 import { useCallingSession } from '../_calling/useCallingSession';
-import { useBusinessHours, CallingHoursCard } from '../_calling/CallingAdminPanel';
+import { useBusinessHours } from '../_calling/CallingAdminPanel';
 import { initials } from './escalationHelpers';
 import AgentManagementPanel from './AgentManagementPanel';
 import SettingsPanel from './SettingsPanel';
@@ -103,7 +103,7 @@ function callCount(raw) {
 /* ============================================================
    SVG Icon helper
    ============================================================ */
-export function Icon({ path, size = 14 }) {
+function Icon({ path, size = 14 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
       stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"
@@ -113,7 +113,7 @@ export function Icon({ path, size = 14 }) {
   );
 }
 
-export const I = {
+const I = {
   menu:     'M4 6h16M4 12h16M4 18h16',
   search:   'M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z',
   refresh:  'M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15',
@@ -747,15 +747,17 @@ function OrderRow({
     const agent = agents.find((a) => a.email === agentId);
     setAssigning(true);
     try {
-      await fetch('/api/escalation/assign', {
+      const res = await fetch('/api/escalation/assign', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rowNumber: order.rowNumber, parentOrder: order.parentOrder, agentId: agentId || null }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to save assignment');
       onAssign(order.rowNumber, agentId ? { agentId } : null);
       onToast('success', agentId ? `Assigned to ${agent?.name || agentId}` : 'Assignment cleared');
-    } catch {
-      onToast('error', 'Failed to save assignment');
+    } catch (err) {
+      onToast('error', err.message || 'Failed to save assignment');
     } finally { setAssigning(false); }
   }
 
@@ -1027,12 +1029,9 @@ export default function EscalationClient() {
   const session = useCallingSession('escalation', {});
   const {
     googleUser, sessionIsAdmin, isProcessAdmin,
-    processAgents, saveProcessAgent, savingAgentEmail,
-    agentStatus, serverPresence, setStatus, setStatusForAgent,
+    agentStatus, setStatus,
   } = session;
   const isAdmin = sessionIsAdmin || isProcessAdmin;
-
-  const hours = useBusinessHours('escalation', { userRole: isAdmin ? 'Admin' : 'Agent', isProcessAdmin, showToast: session.showToast });
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [theme,            setTheme]            = useState('light');
@@ -1100,6 +1099,16 @@ export default function EscalationClient() {
     setTimeout(() => setToasts((p) => p.filter((t) => t.id !== id)), 3500);
   }, []);
 
+  // useBusinessHours' own showToast option is a single-argument callback - adapt it to this
+  // page's two-argument showToast above (the one whose toast stack actually renders in this
+  // page), rather than session.showToast (a different function from useCallingSession, whose
+  // toast this page never renders, which silently dropped the save confirmation before).
+  const hours = useBusinessHours('escalation', {
+    userRole: isAdmin ? 'Admin' : 'Agent',
+    isProcessAdmin,
+    showToast: (msg) => showToast('success', msg),
+  });
+
   /* --- Load --- */
   const load = useCallback(async () => {
     setLoading(true); setError('');
@@ -1112,7 +1121,16 @@ export default function EscalationClient() {
       const ad = await assignRes.json();
       if (!ordersRes.ok) throw new Error(od.error || 'Failed to load');
       setOrders(od.orders);
-      setAssignments(ad.assignments || {});
+      // Server now keys assignments by parentOrder (no sheet read needed to translate to a
+      // row number - see api/escalation/[action].js's assign GET) - join against the orders
+      // we already have so the rest of this file can keep working off rowNumber.
+      const byParentOrder = ad.assignments || {};
+      const assignmentsByRow = {};
+      od.orders.forEach((o) => {
+        const a = byParentOrder[o.parentOrder];
+        if (a) assignmentsByRow[o.rowNumber] = a;
+      });
+      setAssignments(assignmentsByRow);
       setSelectedRows(new Set());
     } catch (err) { setError(err.message); }
     finally { setLoading(false); }
@@ -1248,6 +1266,8 @@ export default function EscalationClient() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ rowNumber: o.rowNumber, parentOrder: o.parentOrder, agentId: googleUser.email }),
+          }).then(async (res) => {
+            if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || 'Assign failed'); }
           })
         );
         await Promise.all(updates);
@@ -1264,7 +1284,10 @@ export default function EscalationClient() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ rowNumber: o.rowNumber, parentOrder: o.parentOrder, agentId: agent.email }),
-          }).then(() => ({ rowNumber: o.rowNumber, agentId: agent.email }));
+          }).then(async (res) => {
+            if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || 'Assign failed'); }
+            return { rowNumber: o.rowNumber, agentId: agent.email };
+          });
         });
         const results = await Promise.all(updates);
         const newMap = {};

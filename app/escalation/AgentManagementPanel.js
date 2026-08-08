@@ -16,7 +16,7 @@ const HOURS_STATUS_OPTIONS = [
 ];
 
 export default function AgentManagementPanel({ session }) {
-  const { processAgents, saveProcessAgent, savingAgentEmail, sessionIsAdmin, setStatusForAgent } = session;
+  const { processAgents, processAgentsError, saveProcessAgent, savingAgentEmail, sessionIsAdmin, setStatusForAgent } = session;
   const [statusFilter, setStatusFilter] = useState('');
 
   const rows = (processAgents || []).filter((a) => !statusFilter || a.status === statusFilter);
@@ -35,7 +35,13 @@ export default function AgentManagementPanel({ session }) {
       </div>
 
       <div className="card">
-        {processAgents === null ? (
+        {processAgentsError ? (
+          <div className="emptyState">
+            <span className="emptyEmoji">⚠️</span>
+            <div className="emptyTitle">Could not load roster</div>
+            <div className="emptyDesc">{processAgentsError}</div>
+          </div>
+        ) : processAgents === null ? (
           <div className="emptyState"><span className="emptyEmoji">⏳</span><div className="emptyTitle">Loading roster…</div></div>
         ) : rows.length === 0 ? (
           <div className="emptyState">
