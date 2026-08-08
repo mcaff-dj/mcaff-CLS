@@ -1,13 +1,9 @@
 /* ============================================================
    Escalation — scoped build artifact. DO NOT EDIT BY HAND.
 
-   Source of truth is the standalone app's "NDR Calling/styles/globals.css".
-   Edit that, then regenerate:
+   Generated from the standalone app's stylesheet by
+   scripts/scope_escalation_css.js; edit that source and rerun:
      node scripts/scope_escalation_css.js "NDR Calling/styles/globals.css" app/escalation/escalation.css
-
-   (This first copy was transcribed by hand, applying that script's rules,
-   because the shell was unavailable at the time. Rerunning the script
-   overwrites it and is the only supported way to update it.)
 
    Every rule is scoped under .escalation-page and every @keyframes is
    prefixed esc-, because app/layout.js loads app/globals.css on every
@@ -101,6 +97,7 @@
 .escalation-page *,
 .escalation-page *::before,
 .escalation-page *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
 
 .escalation-page {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', system-ui, sans-serif;
@@ -202,7 +199,17 @@
   font-size: 12px; font-weight: 500;
 }
 .escalation-page .navItem:hover { background: var(--bg-hover); color: var(--fg-2); }
-.escalation-page .navItem.active { background: var(--bg-elevated); color: var(--fg); font-weight: 600; }
+.escalation-page .navItem.active { background: var(--bg-elevated); color: var(--fg); font-weight: 600; position: relative; }
+.escalation-page .navItem.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 5px;
+  bottom: 5px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
 .escalation-page .navItemIcon { display: flex; flex-shrink: 0; }
 .escalation-page .navItemLabel { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .escalation-page .navBadge {
@@ -349,10 +356,10 @@
 .escalation-page .statCardValue { font-size: 24px; font-weight: 700; color: var(--fg); line-height: 1; letter-spacing: -0.02em; }
 .escalation-page .statCardTrend { font-size: 10px; color: var(--fg-subtle); margin-top: 4px; }
 
-.escalation-page .statCard--pending    { border-left: 2px solid var(--danger); }
+.escalation-page .statCard--pending { border-left: 2px solid var(--danger); }
 .escalation-page .statCard--unassigned { border-left: 2px solid var(--warning); }
-.escalation-page .statCard--assigned   { border-left: 2px solid var(--accent); }
-.escalation-page .statCard--resolved   { border-left: 2px solid var(--success); }
+.escalation-page .statCard--assigned { border-left: 2px solid var(--accent); }
+.escalation-page .statCard--resolved { border-left: 2px solid var(--success); }
 
 /* ============================================================
    Toolbar
@@ -455,7 +462,22 @@
   overflow: hidden;
 }
 
-.escalation-page .tableWrap { overflow-x: auto; }
+.escalation-page .tableWrap {
+  overflow-x: auto;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.escalation-page .tableWrap table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg-elevated);
+}
+.escalation-page .tableWrap--compact td,
+.escalation-page .tableWrap--compact th {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
 
 .escalation-page table { width: 100%; border-collapse: collapse; }
 
@@ -480,15 +502,15 @@
   animation: esc-fadeIn var(--t-base) var(--ease) both;
   transition: background var(--t-fast) var(--ease);
 }
-.escalation-page tbody tr.dataRow:nth-child(1)  { animation-delay: 0ms;   }
-.escalation-page tbody tr.dataRow:nth-child(2)  { animation-delay: 20ms;  }
-.escalation-page tbody tr.dataRow:nth-child(3)  { animation-delay: 40ms;  }
-.escalation-page tbody tr.dataRow:nth-child(4)  { animation-delay: 60ms;  }
-.escalation-page tbody tr.dataRow:nth-child(5)  { animation-delay: 80ms;  }
-.escalation-page tbody tr.dataRow:nth-child(6)  { animation-delay: 100ms; }
-.escalation-page tbody tr.dataRow:nth-child(7)  { animation-delay: 120ms; }
-.escalation-page tbody tr.dataRow:nth-child(8)  { animation-delay: 140ms; }
-.escalation-page tbody tr.dataRow:nth-child(9)  { animation-delay: 160ms; }
+.escalation-page tbody tr.dataRow:nth-child(1) { animation-delay: 0ms;   }
+.escalation-page tbody tr.dataRow:nth-child(2) { animation-delay: 20ms;  }
+.escalation-page tbody tr.dataRow:nth-child(3) { animation-delay: 40ms;  }
+.escalation-page tbody tr.dataRow:nth-child(4) { animation-delay: 60ms;  }
+.escalation-page tbody tr.dataRow:nth-child(5) { animation-delay: 80ms;  }
+.escalation-page tbody tr.dataRow:nth-child(6) { animation-delay: 100ms; }
+.escalation-page tbody tr.dataRow:nth-child(7) { animation-delay: 120ms; }
+.escalation-page tbody tr.dataRow:nth-child(8) { animation-delay: 140ms; }
+.escalation-page tbody tr.dataRow:nth-child(9) { animation-delay: 160ms; }
 .escalation-page tbody tr.dataRow:nth-child(10) { animation-delay: 180ms; }
 
 .escalation-page tbody tr.dataRow:hover { background: var(--bg-hover); }
@@ -744,8 +766,8 @@
   font-size: 11px; font-weight: 600; line-height: 1.4;
   border: 1px solid transparent; white-space: nowrap;
 }
-.escalation-page .tagBadge--danger  { background: var(--danger-muted);  color: var(--danger);  border-color: rgba(239,68,68,0.22); }
-.escalation-page .tagBadge--accent  { background: var(--accent-muted);  color: var(--accent);  border-color: rgba(59,130,246,0.22); }
+.escalation-page .tagBadge--danger { background: var(--danger-muted);  color: var(--danger);  border-color: rgba(239,68,68,0.22); }
+.escalation-page .tagBadge--accent { background: var(--accent-muted);  color: var(--accent);  border-color: rgba(59,130,246,0.22); }
 .escalation-page .tagBadge--warning { background: var(--warning-muted); color: var(--warning); border-color: rgba(234,179,8,0.28); }
 
 .escalation-page .tagToggle { padding: 3px 5px; }
@@ -956,7 +978,7 @@
   font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: var(--r-sm);
   background: var(--bg-elevated); color: var(--fg-muted); border: 1px solid var(--border-muted);
 }
-.escalation-page .importStatOk   { background: var(--success-muted); color: var(--success); border-color: transparent; }
+.escalation-page .importStatOk { background: var(--success-muted); color: var(--success); border-color: transparent; }
 .escalation-page .importStatSkip { background: var(--warning-muted); color: var(--warning); border-color: transparent; }
 .escalation-page .importErrors {
   max-height: 160px; overflow-y: auto;
@@ -995,9 +1017,9 @@
   background: var(--fg-subtle); box-shadow: 0 0 0 2px var(--bg-surface);
 }
 .escalation-page .statusDot--success { background: var(--success); }
-.escalation-page .statusDot--danger  { background: var(--danger); }
+.escalation-page .statusDot--danger { background: var(--danger); }
 .escalation-page .statusDot--warning { background: var(--warning); }
-.escalation-page .statusDot--muted   { background: var(--fg-subtle); }
+.escalation-page .statusDot--muted { background: var(--fg-subtle); }
 .escalation-page .statusMenu {
   position: absolute; top: calc(100% + 7px); right: 0; z-index: 60;
   width: 244px; padding: 6px;
@@ -1055,9 +1077,9 @@
   background: var(--bg-surface); border: 1px solid var(--border);
   border-left: 2px solid var(--fg-subtle); border-radius: var(--r-md);
 }
-.escalation-page .priorityCard--high   { border-left-color: var(--danger); }
+.escalation-page .priorityCard--high { border-left-color: var(--danger); }
 .escalation-page .priorityCard--medium { border-left-color: var(--warning); }
-.escalation-page .priorityCard--low    { border-left-color: var(--success); }
+.escalation-page .priorityCard--low { border-left-color: var(--success); }
 .escalation-page .priorityCardIcon { grid-row: 1 / span 2; font-size: 18px; line-height: 1; }
 .escalation-page .priorityCardValue { font-size: 20px; line-height: 1.1; font-weight: 700; color: var(--fg); }
 .escalation-page .priorityCardLabel { margin-top: 2px; font-size: 10px; color: var(--fg-muted); }

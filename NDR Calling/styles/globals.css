@@ -179,7 +179,17 @@ button, input, select, textarea { font: inherit; }
   font-size: 12px; font-weight: 500;
 }
 .navItem:hover { background: var(--bg-hover); color: var(--fg-2); }
-.navItem.active { background: var(--bg-elevated); color: var(--fg); font-weight: 600; }
+.navItem.active { background: var(--bg-elevated); color: var(--fg); font-weight: 600; position: relative; }
+.navItem.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 5px;
+  bottom: 5px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
 .navItemIcon { display: flex; flex-shrink: 0; }
 .navItemLabel { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .navBadge {
@@ -432,7 +442,21 @@ button, input, select, textarea { font: inherit; }
   overflow: hidden;
 }
 
-.tableWrap { overflow-x: auto; }
+.tableWrap {
+  overflow-x: auto;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.tableWrap table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg-elevated);
+}
+.tableWrap--compact td, .tableWrap--compact th {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
 
 table { width: 100%; border-collapse: collapse; }
 

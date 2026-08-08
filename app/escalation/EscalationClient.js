@@ -181,13 +181,13 @@ function OverviewPanel({ overview, agents, loading, resolvedCount }) {
 
       {/* Summary cards */}
       <div className="statsGrid">
-        <StatCard variant="assigned" icon="📊" value={loading ? null : assignedTotal}
+        <StatCard variant="assigned" icon={<Icon path={I.users} size={16} />} value={loading ? null : assignedTotal}
           label="Assigned Orders" sub={`${agents.length} active agents`} />
-        <StatCard variant="resolved" icon="✅" value={resolvedCount}
+        <StatCard variant="resolved" icon={<Icon path={I.check} size={16} />} value={resolvedCount}
           label="Resolved" sub="This session" />
-        <StatCard variant="pending" icon="🚨" value={loading ? null : priority.high}
+        <StatCard variant="pending" icon={<Icon path={I.alert} size={16} />} value={loading ? null : priority.high}
           label="High Priority" sub="Needs attention" />
-        <StatCard variant="unassigned" icon="⚠️" value={loading ? null : escalations}
+        <StatCard variant="unassigned" icon={<Icon path={I.flag} size={16} />} value={loading ? null : escalations}
           label="Escalations" sub={`${Object.keys(tagCounts).length} tags active`} />
       </div>
 
@@ -1057,6 +1057,12 @@ export default function EscalationClient() {
   // Pagination
   const [page,     setPage]     = useState(1);
   const [pageSize, setPageSize] = useState(25);
+  const [rowDensity, setRowDensity] = useState(() => {
+    try { return localStorage.getItem('escalation_row_density') || 'comfortable'; } catch { return 'comfortable'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('escalation_row_density', rowDensity); } catch {}
+  }, [rowDensity]);
 
   // Row state
   const [expandedRow,   setExpandedRow]   = useState(null);
@@ -1491,6 +1497,15 @@ export default function EscalationClient() {
                 <span className="pulseDot" />
                 Live
               </div>
+              <button
+                type="button"
+                className="btn btnSecondary"
+                onClick={() => setRowDensity((d) => (d === 'compact' ? 'comfortable' : 'compact'))}
+                title="Toggle row density"
+                style={{ fontSize: 12 }}
+              >
+                {rowDensity === 'compact' ? 'Comfortable rows' : 'Compact rows'}
+              </button>
             </div>
           </div>
 
@@ -1509,10 +1524,10 @@ export default function EscalationClient() {
 
           {/* Stat cards */}
           <div className="statsGrid">
-            <StatCard variant="pending"    icon="🚨" value={loading ? null : totalPending}    label="Total Pending"   sub="Needs resolution" />
-            <StatCard variant="unassigned" icon="⏳" value={loading ? null : unassignedCount} label="Unassigned"      sub="No agent yet" />
-            <StatCard variant="assigned"   icon="👤" value={loading ? null : assignedCount}   label="Assigned"        sub="In progress" />
-            <StatCard variant="resolved"   icon="✅" value={resolvedCount}                    label="Resolved"        sub="This session" />
+            <StatCard variant="pending"    icon={<Icon path={I.alert} size={16} />} value={loading ? null : totalPending}    label="Total Pending"   sub="Needs resolution" />
+            <StatCard variant="unassigned" icon={<Icon path={I.chevDown} size={16} />} value={loading ? null : unassignedCount} label="Unassigned"      sub="No agent yet" />
+            <StatCard variant="assigned"   icon={<Icon path={I.users} size={16} />} value={loading ? null : assignedCount}   label="Assigned"        sub="In progress" />
+            <StatCard variant="resolved"   icon={<Icon path={I.check} size={16} />} value={resolvedCount}                    label="Resolved"        sub="This session" />
           </div>
 
           {/* Toolbar */}
@@ -1609,7 +1624,7 @@ export default function EscalationClient() {
               </div>
             ) : (
               <>
-                <div className="tableWrap">
+                <div className={`tableWrap${rowDensity === 'compact' ? ' tableWrap--compact' : ''}`}>
                   <table>
                     <thead>
                       <tr>
