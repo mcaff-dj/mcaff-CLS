@@ -11,6 +11,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import './escalation.css';
 import { useCallingSession } from '../_calling/useCallingSession';
+import { useBusinessHours, CallingHoursCard } from '../_calling/CallingAdminPanel';
 import { initials } from './escalationHelpers';
 import AgentManagementPanel from './AgentManagementPanel';
 import SettingsPanel from './SettingsPanel';
@@ -1030,6 +1031,8 @@ export default function EscalationClient() {
     agentStatus, serverPresence, setStatus, setStatusForAgent,
   } = session;
   const isAdmin = sessionIsAdmin || isProcessAdmin;
+
+  const hours = useBusinessHours('escalation', { userRole: isAdmin ? 'Admin' : 'Agent', isProcessAdmin, showToast: session.showToast });
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [theme,            setTheme]            = useState('light');
