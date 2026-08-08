@@ -300,9 +300,9 @@ function OverviewPanel({ overview, agents, loading, resolvedCount }) {
 }
 
 /* ============================================================
-   Sidebar
+   Tab nav (horizontal pill tabs, replaces the old vertical sidebar)
    ============================================================ */
-function Sidebar({ collapsed, isAdmin, pendingCount, view, onViewChange, user }) {
+function TabNav({ isAdmin, pendingCount, view, onViewChange }) {
   const navItems = [
     { id: 'queue',    icon: I.inbox,    label: 'RTO Queue',        badge: pendingCount },
     ...(isAdmin ? [
@@ -313,40 +313,21 @@ function Sidebar({ collapsed, isAdmin, pendingCount, view, onViewChange, user })
     ] : []),
   ];
   return (
-    <aside className="sidebar">
-      <div className="sidebarLogo">
-        <div className="sidebarLogoMark">E</div>
-        <div className="sidebarLogoText">
-          <div className="sidebarLogoTitle">Escalation</div>
-          <div className="sidebarLogoSub">Operations Hub</div>
-        </div>
-      </div>
-      <nav className="sidebarNav">
-        {isAdmin && <div className="navSection">Admin</div>}
-        {navItems.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className={`navItem${view === item.id ? ' active' : ''}`}
-            onClick={() => onViewChange(item.id)}
-            title={item.label}
-          >
-            <span className="navItemIcon"><Icon path={item.icon} size={14} /></span>
-            <span className="navItemLabel">{item.label}</span>
-            {item.badge > 0 && <span className="navBadge">{item.badge > 99 ? '99+' : item.badge}</span>}
-          </button>
-        ))}
-      </nav>
-      <div className="sidebarFooter">
-        <div className="sidebarUser">
-          <div className="userAvatar">{initials(user?.name)}</div>
-          <div className="userInfo">
-            <div className="userName">{user?.name || 'Signed out'}</div>
-            <div className="userRole">{isAdmin ? 'Administrator' : 'Support Agent'}</div>
-          </div>
-        </div>
-      </div>
-    </aside>
+    <nav className="tabNav">
+      {navItems.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          className={`tabPill${view === item.id ? ' active' : ''}`}
+          onClick={() => onViewChange(item.id)}
+          title={item.label}
+        >
+          <Icon path={item.icon} size={14} />
+          <span>{item.label}</span>
+          {item.badge > 0 && <span className="tabPillBadge">{item.badge > 99 ? '99+' : item.badge}</span>}
+        </button>
+      ))}
+    </nav>
   );
 }
 
@@ -1033,7 +1014,7 @@ export default function EscalationClient() {
   } = session;
   const isAdmin = sessionIsAdmin || isProcessAdmin;
 
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [lastSync, setLastSync] = useState('');
   const [theme,            setTheme]            = useState('light');
   const [view,             setView]             = useState('queue'); // 'queue' | 'overview' | 'agents' | 'assigns' | 'settings'
 
@@ -1132,6 +1113,7 @@ export default function EscalationClient() {
       });
       setAssignments(assignmentsByRow);
       setSelectedRows(new Set());
+      setLastSync(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
     } catch (err) { setError(err.message); }
     finally { setLoading(false); }
   }, []);
@@ -1423,25 +1405,21 @@ export default function EscalationClient() {
   return (
     // .escalation-page is the scope every rule in escalation.css hangs off. It has to
     // be its own element wrapping appShell rather than a class merged onto it, because
-    // the stylesheet has `.sidebarCollapsed .sidebar`-style descendant selectors that
-    // would stop matching if the two were the same node.
+    // the stylesheet has other `.escalation-page .x` descendant selectors that would
+    // stop matching if the two were the same node.
     <div className="escalation-page" data-theme={theme}>
-    <div className={`appShell${sidebarCollapsed ? ' sidebarCollapsed' : ''}`}>
-      <Sidebar collapsed={sidebarCollapsed} isAdmin={isAdmin} pendingCount={totalPending}
-        view={view} onViewChange={setView} user={googleUser} />
-
-      <div className="mainContent">
+    <div className="appShell">
+      <div className="mainContent mainContentFull">
         {/* Topbar */}
         <header className="topbar">
           <div className="topbarLeft">
-            <button type="button" className="collapseBtn"
-              onClick={() => setSidebarCollapsed((c) => !c)} aria-label="Toggle sidebar">
-              <Icon path={I.menu} size={13} />
-            </button>
-            <div className="breadcrumb">
-              <span className="breadcrumbItem">Escalation</span>
-              <span className="breadcrumbSep">/</span>
-              <span className="breadcrumbCurrent">{VIEW_LABELS[view] || 'RTO Queue'}</span>
+            <div className="topbarMeta">
+              <div className="breadcrumb">
+                <span className="breadcrumbItem">Escalation</span>
+                <span className="breadcrumbSep">/</span>
+                <span className="breadcrumbCurrent">{VIEW_LABELS[view] || 'RTO Queue'}</span>
+              </div>
+              <span className="lastSync">Last sync: {lastSync || '—'}</span>
             </div>
           </div>
           <div className="topbarRight">
@@ -1463,6 +1441,8 @@ export default function EscalationClient() {
             </div>
           </div>
         </header>
+
+        <TabNav isAdmin={isAdmin} pendingCount={totalPending} view={view} onViewChange={setView} />
 
         <main className="pageBody">
           {view === 'overview' ? (

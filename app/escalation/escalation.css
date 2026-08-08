@@ -296,6 +296,38 @@
 .escalation-page .themeToggle { color: var(--fg-muted); }
 .escalation-page .themeToggle:hover { color: var(--warning); }
 
+/* ---- Escalation: horizontal tab nav (replaces vertical sidebar) ---- */
+.escalation-page .topbarMeta { display: flex; flex-direction: column; gap: 1px; }
+.escalation-page .lastSync { font-size: 10px; color: var(--fg-subtle); font-family: ui-monospace, monospace; }
+
+.escalation-page .mainContentFull { margin-left: 0 !important; }
+
+.escalation-page .tabNav {
+  display: flex; align-items: center; gap: 4px;
+  padding: 10px 20px; overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+.escalation-page .tabPill {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 14px; border-radius: var(--r-full);
+  border: 1px solid transparent; background: none; font-family: inherit;
+  color: var(--fg-muted); cursor: pointer; white-space: nowrap;
+  font-size: 12px; font-weight: 500;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.escalation-page .tabPill:hover { background: var(--bg-hover); color: var(--fg-2); }
+.escalation-page .tabPill.active {
+  background: var(--accent); color: var(--accent-fg);
+  font-weight: 600; border-color: var(--accent);
+}
+.escalation-page .tabPillBadge {
+  font-size: 10px; font-weight: 600;
+  background: var(--accent-muted); color: var(--accent);
+  padding: 1px 6px; border-radius: var(--r-full);
+}
+.escalation-page .tabPill.active .tabPillBadge { background: rgba(255,255,255,0.22); color: var(--accent-fg); }
+
 /* ============================================================
    Page Body
    ============================================================ */
