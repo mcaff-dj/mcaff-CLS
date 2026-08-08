@@ -83,6 +83,15 @@ const VIEW_LABELS = {
   settings: 'Settings',
 };
 
+// Both HYPHEN and mCaffeine tabs feed this page's `orders` list side by side, and each restarts
+// its own row numbering at row 2 - rowNumber alone can collide across the two. Anywhere a row
+// needs a stable, globally-unique identity (Set/Map keys, React `key`, DOM ids) use this instead
+// of raw `order.rowNumber`. Sheet-write calls still send the raw rowNumber + sheetTab separately
+// (see api/_lib/escalationSheet.js), which is what actually addresses the write.
+function rowKey(o) {
+  return `${o.sheetTab}:${o.rowNumber}`;
+}
+
 /* ============================================================
    Priority helper
    ============================================================ */
@@ -532,7 +541,7 @@ function ImportModal({ onClose, onImported, onToast }) {
 /* ============================================================
    Tag Cell — visible on main table for all rows
    ============================================================ */
-function TagCell({ rowNumber, tags, onToggle }) {
+function TagCell({ rowKey: rk, tags, onToggle }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const ref = useRef(null);
 
@@ -578,7 +587,7 @@ function TagCell({ rowNumber, tags, onToggle }) {
                 type="button"
                 className={`tagMenuItem${active ? ' tagMenuItemActive' : ''}`}
                 onClick={() => {
-                  onToggle(rowNumber, t.key, !active);
+                  onToggle(rk, t.key, !active);
                   setMenuOpen(false);
                 }}
               >
@@ -674,7 +683,7 @@ function OrderRow({
   const [error,      setError]      = useState('');
   const [assigning,  setAssigning]  = useState(false);
   const firstRef = useRef(null);
-  const fId = `row-${order.rowNumber}`;
+  const fId = `row-${order.sheetTab}-${order.rowNumber}`;
 
   const resolveTypeDef = RESOLVE_TYPES.find((t) => t.value === resType);
   const needsOrder = resolveTypeDef?.needsOrder ?? false;
@@ -708,6 +717,7 @@ function OrderRow({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           rowNumber: order.rowNumber,
+          sheetTab: order.sheetTab,
           parentOrder: order.parentOrder,
           newOrderId: needsOrder ? newOrderId.trim() : '-',
           newAwb:     needsAwb   ? newAwb.trim()     : '-',
@@ -719,7 +729,7 @@ function OrderRow({
       if (!res.ok) throw new Error(data.error || 'Save failed');
       setJustSaved(true);
       onToast('success', `Resolved — ${order.parentOrder || 'row'} synced to sheet`);
-      setTimeout(() => onSaved(order.rowNumber), 600);
+      setTimeout(() => onSaved(rowKey(order)), 600);
     } catch (err) {
       setError(err.message);
       onToast('error', err.message);
@@ -740,7 +750,7 @@ function OrderRow({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Failed to save assignment');
-      onAssign(order.rowNumber, agentId ? { agentId } : null);
+      onAssign(rowKey(order), agentId ? { agentId } : null);
       onToast('success', agentId ? `Assigned to ${agent?.name || agentId}` : 'Assignment cleared');
     } catch (err) {
       onToast('error', err.message || 'Failed to save assignment');
@@ -770,7 +780,7 @@ function OrderRow({
             type="checkbox"
             className="rowCheckbox"
             checked={selected}
-            onChange={(e) => onSelect(order.rowNumber, e.target.checked)}
+            onChange={(e) => onSelect(rowKey(order), e.target.checked)}
             aria-label={`Select order ${order.parentOrder}`}
           />
         </td>
@@ -803,7 +813,7 @@ function OrderRow({
         {/* Tags — visible on the main table for agents and admins */}
         <td>
           <TagCell
-            rowNumber={order.rowNumber}
+            rowKey={rowKey(order)}
             tags={rowTags}
             onToggle={onToggleTag}
           />
@@ -1052,7 +1062,7 @@ export default function EscalationClient() {
   // Row state
   const [expandedRow,   setExpandedRow]   = useState(null);
   const [selectedRows,  setSelectedRows]  = useState(new Set());
-  // Tags: Map<rowNumber, Set<tagKey>>. Any row carrying the 'social' tag is
+  // Tags: Map<rowKey, Set<tagKey>>. Any row carrying the 'social' tag is
   // also treated as an escalation (keeps the red row accent behaviour).
   const [taggedRows,    setTaggedRows]    = useState(new Map());
 
@@ -1113,12 +1123,12 @@ export default function EscalationClient() {
       setOrders(od.orders);
       // Server now keys assignments by parentOrder (no sheet read needed to translate to a
       // row number - see api/escalation/[action].js's assign GET) - join against the orders
-      // we already have so the rest of this file can keep working off rowNumber.
+      // we already have so the rest of this file can keep working off rowKey.
       const byParentOrder = ad.assignments || {};
       const assignmentsByRow = {};
       od.orders.forEach((o) => {
         const a = byParentOrder[o.parentOrder];
-        if (a) assignmentsByRow[o.rowNumber] = a;
+        if (a) assignmentsByRow[rowKey(o)] = a;
       });
       setAssignments(assignmentsByRow);
       setSelectedRows(new Set());
@@ -1142,49 +1152,53 @@ export default function EscalationClient() {
   }, [isAdmin, view]);
 
   /* --- Handlers --- */
-  function handleSaved(rowNumber) {
-    setOrders((p) => p.filter((o) => o.rowNumber !== rowNumber));
+  // Every key below is rowKey(order) ("sheetTab:rowNumber"), not a bare rowNumber - see rowKey's
+  // own comment for why (HYPHEN and mCaffeine rows are merged into one `orders` list and each
+  // tab restarts its row numbering at row 2).
+  function handleSaved(key) {
+    setOrders((p) => p.filter((o) => rowKey(o) !== key));
     setExpandedRow(null);
-    setSelectedRows((p) => { const n = new Set(p); n.delete(rowNumber); return n; });
+    setSelectedRows((p) => { const n = new Set(p); n.delete(key); return n; });
     setResolvedCount((c) => c + 1);
   }
 
-  function handleAssign(rowNumber, data) {
+  function handleAssign(key, data) {
     setAssignments((p) => {
       const n = { ...p };
-      if (data) n[rowNumber] = data; else delete n[rowNumber];
+      if (data) n[key] = data; else delete n[key];
       return n;
     });
   }
 
-  function handleSelect(rowNumber, checked) {
-    setSelectedRows((p) => { const n = new Set(p); checked ? n.add(rowNumber) : n.delete(rowNumber); return n; });
+  function handleSelect(key, checked) {
+    setSelectedRows((p) => { const n = new Set(p); checked ? n.add(key) : n.delete(key); return n; });
   }
 
   function handleSelectAll(checked, rows) {
-    setSelectedRows(checked ? new Set(rows.map((o) => o.rowNumber)) : new Set());
+    setSelectedRows(checked ? new Set(rows.map(rowKey)) : new Set());
   }
 
-  function handleToggleTag(rowNumber, tagKey, flag) {
+  function handleToggleTag(key, tagKey, flag) {
     setTaggedRows((prev) => {
       const next = new Map(prev);
-      const set = new Set(next.get(rowNumber) || []);
+      const set = new Set(next.get(key) || []);
       if (flag) set.add(tagKey); else set.delete(tagKey);
-      if (set.size) next.set(rowNumber, set); else next.delete(rowNumber);
+      if (set.size) next.set(key, set); else next.delete(key);
       return next;
     });
     if (flag) {
       const t = TAG_BY_KEY[tagKey];
-      showToast('success', `Tagged ${rowNumber} as ${t ? t.label : tagKey}`);
+      const parentOrder = orders.find((o) => rowKey(o) === key)?.parentOrder;
+      showToast('success', `Tagged ${parentOrder || key} as ${t ? t.label : tagKey}`);
     }
   }
 
   /* --- Bulk update --- */
   async function handleBulkApply(status) {
-    const items = Array.from(selectedRows).map((rowNumber) => ({
-      rowNumber,
-      parentOrder: orders.find((o) => o.rowNumber === rowNumber)?.parentOrder,
-    }));
+    const items = Array.from(selectedRows).map((key) => {
+      const o = orders.find((o) => rowKey(o) === key);
+      return { rowNumber: o?.rowNumber, sheetTab: o?.sheetTab, parentOrder: o?.parentOrder };
+    }).filter((i) => i.rowNumber && i.sheetTab);
     setBulkLoading(true);
     try {
       const res = await fetch('/api/escalation/bulk-update', {
@@ -1194,7 +1208,7 @@ export default function EscalationClient() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Bulk update failed');
-      setOrders((p) => p.filter((o) => !selectedRows.has(o.rowNumber)));
+      setOrders((p) => p.filter((o) => !selectedRows.has(rowKey(o))));
       setResolvedCount((c) => c + items.length);
       setSelectedRows(new Set());
       showToast('success', `${data.updated} orders marked as "${status}"`);
@@ -1228,14 +1242,16 @@ export default function EscalationClient() {
   }
 
   /* --- Bulk upload result --- */
-  function handleImported(rowNumbers) {
-    if (rowNumbers?.length) {
-      const done = new Set(rowNumbers.map(String));
-      setOrders((p) => p.filter((o) => !done.has(String(o.rowNumber))));
-      setResolvedCount((c) => c + rowNumbers.length);
+  // `keys` are "sheetTab:rowNumber" composites (see api/escalation/[action].js's import
+  // response) - matched against rowKey(o), not a bare rowNumber.
+  function handleImported(keys) {
+    if (keys?.length) {
+      const done = new Set(keys);
+      setOrders((p) => p.filter((o) => !done.has(rowKey(o))));
+      setResolvedCount((c) => c + keys.length);
       setSelectedRows((p) => {
         const n = new Set(p);
-        rowNumbers.forEach((r) => n.delete(r));
+        keys.forEach((k) => n.delete(k));
         return n;
       });
     }
@@ -1247,7 +1263,7 @@ export default function EscalationClient() {
 
     setAutoAssigning(true);
     try {
-      const unassigned = orders.filter((o) => !assignments[o.rowNumber]);
+      const unassigned = orders.filter((o) => !assignments[rowKey(o)]);
       if (unassigned.length === 0) { showToast('success', 'All orders already assigned!'); return; }
 
       if (!isAdmin) {
@@ -1263,7 +1279,7 @@ export default function EscalationClient() {
         );
         await Promise.all(updates);
         const newMap = {};
-        unassigned.forEach((o) => { newMap[o.rowNumber] = { agentId: googleUser.email }; });
+        unassigned.forEach((o) => { newMap[rowKey(o)] = { agentId: googleUser.email }; });
         setAssignments((p) => ({ ...p, ...newMap }));
         showToast('success', `Auto-assigned ${unassigned.length} orders to you`);
       } else {
@@ -1277,12 +1293,12 @@ export default function EscalationClient() {
             body: JSON.stringify({ rowNumber: o.rowNumber, parentOrder: o.parentOrder, agentId: agent.email }),
           }).then(async (res) => {
             if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || 'Assign failed'); }
-            return { rowNumber: o.rowNumber, agentId: agent.email };
+            return { key: rowKey(o), agentId: agent.email };
           });
         });
         const results = await Promise.all(updates);
         const newMap = {};
-        results.forEach(({ rowNumber, agentId }) => { newMap[rowNumber] = { agentId }; });
+        results.forEach(({ key, agentId }) => { newMap[key] = { agentId }; });
         setAssignments((p) => ({ ...p, ...newMap }));
         showToast('success', `Auto-assigned ${unassigned.length} orders (round-robin across ${agents.length} agents)`);
       }
@@ -1308,11 +1324,11 @@ export default function EscalationClient() {
       if (filterPartner  && o.deliveryPartnerName !== filterPartner) return false;
       if (filterPriority && getPriority(o.totalTimesConsumerReached).level !== filterPriority) return false;
       if (filterAgent) {
-        const asgn = assignments[o.rowNumber];
+        const asgn = assignments[rowKey(o)];
         if (!asgn || asgn.agentId !== filterAgent) return false;
       }
       if (filterTag) {
-        const tags = taggedRows.get(o.rowNumber);
+        const tags = taggedRows.get(rowKey(o));
         if (!tags || !tags.has(filterTag)) return false;
       }
       return true;
@@ -1344,19 +1360,19 @@ export default function EscalationClient() {
 
   // Stats
   const totalPending    = orders.length;
-  const assignedCount   = Object.keys(assignments).filter((k) => orders.some((o) => String(o.rowNumber) === String(k))).length;
+  const assignedCount   = Object.keys(assignments).filter((k) => orders.some((o) => rowKey(o) === k)).length;
   const unassignedCount = totalPending - assignedCount;
   const highCount       = orders.filter((o) => getPriority(o.totalTimesConsumerReached).level === 'high').length;
 
-  const allPageSelected = pageItems.length > 0 && pageItems.every((o) => selectedRows.has(o.rowNumber));
-  const somePageSelected = pageItems.some((o) => selectedRows.has(o.rowNumber));
+  const allPageSelected = pageItems.length > 0 && pageItems.every((o) => selectedRows.has(rowKey(o)));
+  const somePageSelected = pageItems.some((o) => selectedRows.has(rowKey(o)));
 
   /* --- Overview stats (derived from what we can actually track) --- */
   const overview = useMemo(() => {
     // Per-agent workload: count live orders currently assigned to each agent.
     const load = Object.fromEntries(agents.map((a) => [a.email, 0]));
     orders.forEach((o) => {
-      const asgn = assignments[o.rowNumber];
+      const asgn = assignments[rowKey(o)];
       if (asgn && load[asgn.agentId] != null) load[asgn.agentId] += 1;
     });
 
@@ -1374,7 +1390,7 @@ export default function EscalationClient() {
       set.forEach((t) => { tagCounts[t] = (tagCounts[t] || 0) + 1; escalations += 1; });
     });
 
-    const assignedTotal = orders.filter((o) => assignments[o.rowNumber]).length;
+    const assignedTotal = orders.filter((o) => assignments[rowKey(o)]).length;
     const perAgent = agents.map((a) => ({
       ...a,
       load: load[a.email] || 0,
@@ -1666,19 +1682,19 @@ export default function EscalationClient() {
                     <tbody>
                       {pageItems.map((o) => (
                         <OrderRow
-                          key={o.rowNumber}
+                          key={rowKey(o)}
                           order={o}
-                          expanded={expandedRow === o.rowNumber}
-                          onToggle={(next) => setExpandedRow(next ? o.rowNumber : null)}
+                          expanded={expandedRow === rowKey(o)}
+                          onToggle={(next) => setExpandedRow(next ? rowKey(o) : null)}
                           onSaved={handleSaved}
                           onToast={showToast}
                           isAdmin={isAdmin}
                           agents={agents}
-                          assignment={assignments[o.rowNumber] || null}
+                          assignment={assignments[rowKey(o)] || null}
                           onAssign={handleAssign}
-                          selected={selectedRows.has(o.rowNumber)}
+                          selected={selectedRows.has(rowKey(o))}
                           onSelect={handleSelect}
-                          tags={taggedRows.get(o.rowNumber)}
+                          tags={taggedRows.get(rowKey(o))}
                           onToggleTag={handleToggleTag}
                         />
                       ))}

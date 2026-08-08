@@ -86,11 +86,11 @@ const handler = async (req, res) => {
 
     if (action === 'update') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-      const { rowNumber, parentOrder, newOrderId, newAwb, newStatus, notes } = body;
-      if (!rowNumber || !newOrderId || !newAwb || !newStatus) {
-        return res.status(400).json({ error: 'rowNumber, newOrderId, newAwb, and newStatus are all required' });
+      const { rowNumber, sheetTab, parentOrder, newOrderId, newAwb, newStatus, notes } = body;
+      if (!rowNumber || !sheetTab || !newOrderId || !newAwb || !newStatus) {
+        return res.status(400).json({ error: 'rowNumber, sheetTab, newOrderId, newAwb, and newStatus are all required' });
       }
-      await updateOrder(rowNumber, { newOrderId, newAwb, newStatus, notes: notes || '' });
+      await updateOrder(rowNumber, sheetTab, { newOrderId, newAwb, newStatus, notes: notes || '' });
       if (parentOrder) await resolveEscalationAssignment(parentOrder, newStatus, notes || '');
       return res.status(200).json({ ok: true });
     }
@@ -107,8 +107,11 @@ const handler = async (req, res) => {
           error: `Bulk update only supports statuses that need no replacement: ${BULK_ALLOWED.join(', ')}`,
         });
       }
+      if (items.some((i) => !i.sheetTab)) {
+        return res.status(400).json({ error: 'Every item requires sheetTab' });
+      }
       const updated = await batchUpdateOrders(
-        items.map(({ rowNumber }) => ({ rowNumber, newOrderId: '-', newAwb: '-', newStatus: status }))
+        items.map(({ rowNumber, sheetTab }) => ({ rowNumber, sheetTab, newOrderId: '-', newAwb: '-', newStatus: status }))
       );
       await resolveEscalationAssignmentsBulk(items.map((i) => i.parentOrder).filter(Boolean), status);
       return res.status(200).json({ ok: true, updated });
@@ -131,7 +134,7 @@ const handler = async (req, res) => {
       const { byParent, byParentAwb } = await getSheetIndex();
       const updates = [];
       const errors = [];
-      const seenRows = new Set();
+      const seenRows = new Set(); // keyed "sheetTab:rowNumber" - a bare rowNumber can collide across tabs
 
       rows.forEach((row, i) => {
         const line = i + 2; // account for the header line
@@ -142,16 +145,19 @@ const handler = async (req, res) => {
         if (!parent) return errors.push({ line, reason: 'Missing HYP_Parent_OrderID' });
         if (!status) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'Missing Status_2 (nothing to write)' });
 
-        // Prefer an exact parent+AWB match, fall back to parent only.
-        let rowNumber = awb ? byParentAwb.get(`${parent}||${awb}`) : undefined;
-        if (rowNumber == null) rowNumber = byParent.get(parent);
+        // Prefer an exact parent+AWB match, fall back to parent only. Both indexes are searched
+        // across every configured tab already (getSheetIndex), so this finds a row regardless of
+        // which brand tab it actually lives in.
+        const ref = (awb && byParentAwb.get(`${parent}||${awb}`)) || byParent.get(parent);
 
-        if (rowNumber == null) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'No matching order in sheet' });
-        if (seenRows.has(rowNumber)) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'Duplicate row in file (skipped)' });
-        seenRows.add(rowNumber);
+        if (ref == null) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'No matching order in sheet' });
+        const seenKey = `${ref.sheetTab}:${ref.rowNumber}`;
+        if (seenRows.has(seenKey)) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'Duplicate row in file (skipped)' });
+        seenRows.add(seenKey);
 
         updates.push({
-          rowNumber,
+          rowNumber: ref.rowNumber,
+          sheetTab: ref.sheetTab,
           newOrderId: String(row['New Order ID'] ?? '').trim() || '-',
           newAwb: String(row['New AWB / Tracking'] ?? '').trim() || '-',
           newStatus: status,
@@ -165,7 +171,10 @@ const handler = async (req, res) => {
         updated,
         skipped: errors.length,
         total: rows.length,
-        rowNumbers: updates.map((u) => u.rowNumber),
+        // "sheetTab:rowNumber" composite - the client matches these against the same composite
+        // it builds from each row's own sheetTab+rowNumber (rowNumber alone isn't unique
+        // across tabs).
+        rowNumbers: updates.map((u) => `${u.sheetTab}:${u.rowNumber}`),
         errors: errors.slice(0, 50), // cap payload
       });
     }

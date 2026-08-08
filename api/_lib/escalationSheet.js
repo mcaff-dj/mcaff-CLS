@@ -22,7 +22,10 @@ const { JWT } = require('google-auth-library');
 // api/ndr/sheet.js hardcodes its own: it pins the blast radius of these credentials to a single
 // known spreadsheet. Overridable by env for staging against a copy.
 const SHEET_ID = process.env.ESCALATION_SHEET_ID || '1fopbKSrg-U9ixZi6Tfq13Q7mzRMPtceXkfEuN4Wko-w';
-const TAB_NAME = process.env.ESCALATION_SHEET_TAB || 'HYPHEN';
+// Both brand tabs, same 26-column layout (verified header-for-header against HYPHEN's own).
+// Overridable by env (comma-separated) for staging against a copy or a single tab.
+const SHEET_TABS = (process.env.ESCALATION_SHEET_TABS || 'HYPHEN,mCaffeine')
+  .split(',').map((t) => t.trim()).filter(Boolean);
 
 let _client = null;
 function getClient() {
@@ -50,20 +53,30 @@ const COLUMNS = [
   'awb', 'status', 'notes', '_v1', '_v2', 'ticketNumber',
 ];
 
-function rowToObject(row, rowNumber) {
-  const obj = { rowNumber };
+// `rowNumber` is only unique WITHIN a tab (both tabs restart at row 2) - `sheetTab` on every
+// row object is what makes a row globally identifiable, and every write path below (update,
+// batchUpdateOrders, getSheetIndex) takes/returns it alongside rowNumber so a write always
+// lands in the tab it was read from, never row N of whichever tab happens to be first.
+function rowToObject(row, rowNumber, sheetTab) {
+  const obj = { rowNumber, sheetTab };
   COLUMNS.forEach((key, i) => { obj[key] = row[i] || ''; });
   return obj;
 }
 
-async function readAllRows() {
+async function readTabRows(tab) {
   const res = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(`${TAB_NAME}!A2:Z`)}?majorDimension=ROWS`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(`${tab}!A2:Z`)}?majorDimension=ROWS`,
     { headers: await authHeader() }
   );
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error?.message || `Sheets read failed (${res.status})`);
-  return data.values || [];
+  if (!res.ok) throw new Error(data.error?.message || `Sheets read failed for ${tab} (${res.status})`);
+  return (data.values || []).map((row, i) => rowToObject(row, i + 2, tab)); // +2: skip the header
+}
+
+// Reads every configured brand tab in parallel and flattens into one row-object array.
+async function readAllRows() {
+  const perTab = await Promise.all(SHEET_TABS.map(readTabRows));
+  return perTab.flat();
 }
 
 // The queue: RTO per BOTH the courier (statusAsPerAwb, col N) and logistics
@@ -76,35 +89,35 @@ async function readAllRows() {
 // below, which has no RTO-column requirement to begin with.
 async function getEligibleOrders() {
   const rows = await readAllRows();
-  return rows
-    .map((row, i) => rowToObject(row, i + 2)) // +2: skip the header, sheet rows are 1-indexed
-    .filter((o) => {
-      const n = o.statusAsPerAwb.toLowerCase();
-      const q = o.updateFromLogistics.toLowerCase();
-      return n.includes('rto') && q.includes('rto') && !o.status;
-    });
+  return rows.filter((o) => {
+    const n = o.statusAsPerAwb.toLowerCase();
+    const q = o.updateFromLogistics.toLowerCase();
+    return n.includes('rto') && q.includes('rto') && !o.status;
+  });
 }
 
-// Fresh Leads: not yet actioned (status blank) and TAT (col P) hasn't landed in a computed
-// bucket yet - blank, "unresolved", or "#N/A". No RTO-column requirement, unlike the queue above.
+// Fresh Leads: TAT (col P) hasn't landed in a computed bucket yet - blank, "unresolved", or
+// "#N/A". Irrespective of status (col V) or the RTO columns - unlike the queue above, an
+// already-actioned row still counts as a fresh lead if its TAT is still open.
 const OPEN_TAT_VALUES = new Set(['', 'unresolved', '#n/a']);
 async function getFreshLeads() {
   const rows = await readAllRows();
-  return rows
-    .map((row, i) => rowToObject(row, i + 2))
-    .filter((o) => !o.status && OPEN_TAT_VALUES.has(o.tat.trim().toLowerCase()));
+  return rows.filter((o) => OPEN_TAT_VALUES.has(o.tat.trim().toLowerCase()));
 }
 
-// Write New Order Id / AWB / Status / Notes into columns T/U/V/W for one row.
-async function updateOrder(rowNumber, { newOrderId, newAwb, newStatus, notes = '' }) {
-  return batchUpdateOrders([{ rowNumber, newOrderId, newAwb, newStatus, notes }]);
+// Write New Order Id / AWB / Status / Notes into columns T/U/V/W for one row of one tab.
+async function updateOrder(rowNumber, sheetTab, { newOrderId, newAwb, newStatus, notes = '' }) {
+  return batchUpdateOrders([{ rowNumber, sheetTab, newOrderId, newAwb, newStatus, notes }]);
 }
 
-// Write many rows in one request (avoids per-row round-trips and Sheets rate limits).
-// updates: [{ rowNumber, newOrderId, newAwb, newStatus, notes }]
+// Write many rows in one request (avoids per-row round-trips and Sheets rate limits). Each
+// update carries its own sheetTab - a batch can freely mix HYPHEN and mCaffeine rows.
+// updates: [{ rowNumber, sheetTab, newOrderId, newAwb, newStatus, notes }]
 async function batchUpdateOrders(updates) {
+  const missingTab = updates.find((u) => !u.sheetTab);
+  if (missingTab) throw new Error(`batchUpdateOrders: missing sheetTab for row ${missingTab.rowNumber}`);
   const data = updates.map((u) => ({
-    range: `${TAB_NAME}!T${u.rowNumber}:W${u.rowNumber}`,
+    range: `${u.sheetTab}!T${u.rowNumber}:W${u.rowNumber}`,
     values: [[u.newOrderId ?? '-', u.newAwb ?? '-', u.newStatus ?? '', u.notes ?? '']],
   }));
   const res = await fetch(
@@ -120,19 +133,22 @@ async function batchUpdateOrders(updates) {
   return updates.length;
 }
 
-// Lookup index for matching imported CSV rows back to sheet rows: keyed by parent order, and by
-// "parentOrder||awb" for an exact match when the file carries an AWB too.
+// Lookup index for matching imported CSV rows back to sheet rows across BOTH tabs: keyed by
+// parent order, and by "parentOrder||awb" for an exact match when the file carries an AWB too.
+// Values carry {rowNumber, sheetTab} - a bare rowNumber can't identify a row once there are two
+// tabs to choose from. Parent order IDs carry a brand-specific prefix in practice, so collisions
+// between tabs are not expected, but the last tab read still wins byParent on a genuine tie.
 async function getSheetIndex() {
   const rows = await readAllRows();
   const byParent = new Map();
   const byParentAwb = new Map();
-  rows.forEach((row, i) => {
-    const o = rowToObject(row, i + 2);
+  rows.forEach((o) => {
     const parent = String(o.parentOrder || '').trim().toLowerCase();
     const awb = String(o.awbNumber || '').trim().toLowerCase();
     if (!parent) return;
-    if (!byParent.has(parent)) byParent.set(parent, o.rowNumber);
-    if (awb) byParentAwb.set(`${parent}||${awb}`, o.rowNumber);
+    const ref = { rowNumber: o.rowNumber, sheetTab: o.sheetTab };
+    if (!byParent.has(parent)) byParent.set(parent, ref);
+    if (awb) byParentAwb.set(`${parent}||${awb}`, ref);
   });
   return { byParent, byParentAwb };
 }
