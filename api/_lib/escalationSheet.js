@@ -67,8 +67,13 @@ async function readAllRows() {
 }
 
 // The queue: RTO per BOTH the courier (statusAsPerAwb, col N) and logistics
-// (updateFromLogistics, col Q), and not yet actioned (status, col V, still blank). Once an agent
-// writes V the row drops out on the next load - the sheet is the only store, there's no DB.
+// (updateFromLogistics, col Q), not yet actioned (status, col V, still blank), and TAT (col P)
+// still open - blank, "unresolved", or "#N/A". Column P otherwise holds computed-bucket text
+// (e.g. "Within 48 hrs", "4-8 days", "Forced to be marked as RTO") for rows a TAT calc has
+// already resolved to a bucket - those are excluded here.
+// Once an agent writes V the row drops out on the next load - the sheet is the only store,
+// there's no DB.
+const OPEN_TAT_VALUES = new Set(['', 'unresolved', '#n/a']);
 async function getEligibleOrders() {
   const rows = await readAllRows();
   return rows
@@ -76,8 +81,19 @@ async function getEligibleOrders() {
     .filter((o) => {
       const n = o.statusAsPerAwb.toLowerCase();
       const q = o.updateFromLogistics.toLowerCase();
-      return n.includes('rto') && q.includes('rto') && !o.status;
+      const tat = o.tat.trim().toLowerCase();
+      return n.includes('rto') && q.includes('rto') && !o.status && OPEN_TAT_VALUES.has(tat);
     });
+}
+
+// Fresh Leads: same open-TAT rule as the RTO queue above, but WITHOUT the RTO-specific
+// statusAsPerAwb/updateFromLogistics check - any not-yet-actioned row whose TAT hasn't landed
+// in a bucket yet, RTO or not.
+async function getFreshLeads() {
+  const rows = await readAllRows();
+  return rows
+    .map((row, i) => rowToObject(row, i + 2))
+    .filter((o) => !o.status && OPEN_TAT_VALUES.has(o.tat.trim().toLowerCase()));
 }
 
 // Write New Order Id / AWB / Status / Notes into columns T/U/V/W for one row.
@@ -122,4 +138,4 @@ async function getSheetIndex() {
   return { byParent, byParentAwb };
 }
 
-module.exports = { getEligibleOrders, updateOrder, batchUpdateOrders, getSheetIndex, COLUMNS };
+module.exports = { getEligibleOrders, getFreshLeads, updateOrder, batchUpdateOrders, getSheetIndex, COLUMNS };

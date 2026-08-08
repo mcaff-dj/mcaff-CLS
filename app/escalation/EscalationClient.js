@@ -75,7 +75,8 @@ const STATUS_BY_KEY = Object.fromEntries(AGENT_STATUSES.map((s) => [s.key, s]));
 
 // Human-readable breadcrumb labels for each internal view.
 const VIEW_LABELS = {
-  queue:    'RTO Queue',
+  queue:      'RTO Queue',
+  freshLeads: 'Fresh Leads',
   overview: 'Overview',
   agents:   'Agent Management',
   assigns:  'Assignments',
@@ -303,8 +304,12 @@ function OverviewPanel({ overview, agents, loading, resolvedCount }) {
    Tab nav (horizontal pill tabs, replaces the old vertical sidebar)
    ============================================================ */
 function TabNav({ isAdmin, pendingCount, view, onViewChange }) {
+  // pendingCount is `orders.length` - whichever of the two queues below is currently loaded.
+  // ponytail: badge only shows a count on the active tab (no background fetch of the other
+  // tab's count) - upgrade to two independent counts if both need to be visible at once.
   const navItems = [
-    { id: 'queue',    icon: I.inbox,    label: 'RTO Queue',        badge: pendingCount },
+    { id: 'queue',      icon: I.inbox, label: 'RTO Queue',   badge: view === 'queue' ? pendingCount : null },
+    { id: 'freshLeads', icon: I.flag,  label: 'Fresh Leads', badge: view === 'freshLeads' ? pendingCount : null },
     ...(isAdmin ? [
       { id: 'overview', icon: I.zap,     label: 'Overview',         badge: null },
       { id: 'agents',   icon: I.users,   label: 'Agent Management', badge: null },
@@ -1016,7 +1021,7 @@ export default function EscalationClient() {
 
   const [lastSync, setLastSync] = useState('');
   const [theme,            setTheme]            = useState('light');
-  const [view,             setView]             = useState('queue'); // 'queue' | 'overview' | 'agents' | 'assigns' | 'settings'
+  const [view,             setView]             = useState('queue'); // 'queue' | 'freshLeads' | 'overview' | 'agents' | 'assigns' | 'settings'
 
   const [orders,      setOrders]      = useState([]);
   const [loading,     setLoading]     = useState(true);
@@ -1091,11 +1096,15 @@ export default function EscalationClient() {
   });
 
   /* --- Load --- */
+  // `orders` is shared between the RTO Queue and Fresh Leads tabs - whichever `view` is active
+  // picks the endpoint, so the rest of the table/filter/assign/resolve code below never has to
+  // know which tab it's rendering.
   const load = useCallback(async () => {
     setLoading(true); setError('');
     try {
+      const ordersUrl = view === 'freshLeads' ? '/api/escalation/orders?type=fresh-leads' : '/api/escalation/orders';
       const [ordersRes, assignRes] = await Promise.all([
-        fetch('/api/escalation/orders'),
+        fetch(ordersUrl),
         fetch('/api/escalation/assign'),
       ]);
       const od = await ordersRes.json();
@@ -1116,7 +1125,7 @@ export default function EscalationClient() {
       setLastSync(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
     } catch (err) { setError(err.message); }
     finally { setLoading(false); }
-  }, []);
+  }, [view]);
 
   useEffect(() => {
     fetch('/api/escalation/agents').then((r) => r.json()).then((d) => setAgents(d.agents || [])).catch(() => {});
@@ -1198,7 +1207,7 @@ export default function EscalationClient() {
   async function handleExport() {
     setExporting(true);
     try {
-      const res = await fetch('/api/escalation/export');
+      const res = await fetch(view === 'freshLeads' ? '/api/escalation/export?type=fresh-leads' : '/api/escalation/export');
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Export failed');
@@ -1447,14 +1456,14 @@ export default function EscalationClient() {
         <main className="pageBody">
           {view === 'overview' ? (
             <OverviewPanel overview={overview} agents={agents} loading={loading} resolvedCount={resolvedCount} />
-          ) : view === 'queue' ? (
+          ) : (view === 'queue' || view === 'freshLeads') ? (
             <>
           {/* Page header */}
           <div className="pageHeader">
             <div>
-              <h1 className="pageTitle">RTO Action Queue</h1>
+              <h1 className="pageTitle">{view === 'freshLeads' ? 'Fresh Leads' : 'RTO Action Queue'}</h1>
               <p className="pageSubtitle">
-                Google Sheet-backed resolution · sorted by priority · {totalPending} orders pending
+                Google Sheet-backed resolution · sorted by priority · {totalPending} {view === 'freshLeads' ? 'leads' : 'orders'} pending
               </p>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

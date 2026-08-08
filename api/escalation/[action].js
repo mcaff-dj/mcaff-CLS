@@ -14,7 +14,7 @@
 // whatever it likes without that being a permission decision.
 const { getSession } = require('../_lib/session');
 const {
-  getEligibleOrders, updateOrder, batchUpdateOrders, getSheetIndex,
+  getEligibleOrders, getFreshLeads, updateOrder, batchUpdateOrders, getSheetIndex,
 } = require('../_lib/escalationSheet');
 const { CSV_HEADERS, parseCSV, toCSV } = require('../_lib/escalationCsv');
 const {
@@ -58,7 +58,8 @@ const handler = async (req, res) => {
 
     if (action === 'orders') {
       if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
-      return res.status(200).json({ orders: await getEligibleOrders() });
+      const orders = req.query.type === 'fresh-leads' ? await getFreshLeads() : await getEligibleOrders();
+      return res.status(200).json({ orders });
     }
 
     if (action === 'assign') {
@@ -181,7 +182,7 @@ const handler = async (req, res) => {
             Status_2: 'Reshipped',
             Notes: 'Customer confirmed new address',
           }]
-        : (await getEligibleOrders()).map((o) => ({
+        : (await (req.query.type === 'fresh-leads' ? getFreshLeads() : getEligibleOrders())).map((o) => ({
             HYP_Parent_OrderID: o.parentOrder,
             AWB_Number: o.awbNumber,
             Status_1: o.statusAsPerAwb,
