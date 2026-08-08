@@ -156,14 +156,18 @@ def set_sheet_values_batch(spreadsheet_id, updates):
     return resp.json()
 
 
-def get_sheet_values(spreadsheet_id, range_, timeout_sec=120):
+def get_sheet_values(spreadsheet_id, range_, timeout_sec=120, value_render_option=None):
+    """value_render_option: pass "FORMULA" to get each cell's formula text
+    (e.g. "=A2-B2") instead of its computed value - needed to discover which
+    columns a tab computes itself before filling formulas down into new rows."""
     encoded = urllib.parse.quote(range_, safe="")
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{encoded}"
+    params = {"valueRenderOption": value_render_option} if value_render_option else None
     last_err = None
     for attempt in range(1, 6):
         try:
             token = get_access_token()
-            resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=timeout_sec)
+            resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=timeout_sec)
             resp.raise_for_status()
             return resp.json().get("values", [])
         except Exception as e:
