@@ -12,6 +12,9 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import './escalation.css';
 import { useCallingSession } from '../_calling/useCallingSession';
 import { initials } from './escalationHelpers';
+import AgentManagementPanel from './AgentManagementPanel';
+import SettingsPanel from './SettingsPanel';
+import AssignmentsPanel from './AssignmentsPanel';
 
 /* ============================================================
    Constants
@@ -99,7 +102,7 @@ function callCount(raw) {
 /* ============================================================
    SVG Icon helper
    ============================================================ */
-function Icon({ path, size = 14 }) {
+export function Icon({ path, size = 14 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
       stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"
@@ -109,7 +112,7 @@ function Icon({ path, size = 14 }) {
   );
 }
 
-const I = {
+export const I = {
   menu:     'M4 6h16M4 12h16M4 18h16',
   search:   'M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z',
   refresh:  'M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15',
@@ -1677,18 +1680,13 @@ export default function EscalationClient() {
             )}
           </div>
             </>
-          ) : (
-            <div className="pageHeader">
-              <div>
-                <h1 className="pageTitle">{VIEW_LABELS[view] || 'Coming Soon'}</h1>
-                <p className="pageSubtitle">
-                  {view === 'agents'   && 'Agent roster management — coming soon.'}
-                  {view === 'assigns'  && 'Assignment overview — coming soon.'}
-                  {view === 'settings' && 'Workspace settings — coming soon.'}
-                </p>
-              </div>
-            </div>
-          )}
+          ) : view === 'agents' ? (
+            <AgentManagementPanel session={session} />
+          ) : view === 'assigns' ? (
+            <AssignmentsPanel agents={agents} />
+          ) : view === 'settings' ? (
+            <SettingsPanel hours={hours} />
+          ) : null}
         </main>
       </div>
 
