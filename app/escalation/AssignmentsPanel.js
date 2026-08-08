@@ -16,6 +16,15 @@ function fmtMinutes(mins) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+// Postgres TIMESTAMPTZ serializes to UTC ISO, but the date picker's value is a plain local
+// (IST) calendar day - see api/_lib/db.js's dateBounds() for the same +05:30 convention on
+// this table's sibling functions. Shift to IST before slicing so a resolution near IST
+// midnight lands on the day the admin actually picked, not the UTC day.
+function toIstDay(iso) {
+  const d = new Date(iso);
+  return new Date(d.getTime() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 export default function AssignmentsPanel({ agents }) {
   const [history, setHistory] = useState(null);
   const [error, setError] = useState('');
@@ -26,12 +35,12 @@ export default function AssignmentsPanel({ agents }) {
     fetch('/api/escalation/assignments')
       .then((r) => r.json())
       .then((d) => setHistory(d.assignments || []))
-      .catch(() => setError('Could not load assignment history'));
+      .catch(() => { setError('Could not load assignment history'); setHistory([]); });
   }, []);
 
   const inRange = (iso) => {
     if (!iso) return false;
-    const day = iso.slice(0, 10);
+    const day = toIstDay(iso);
     if (fromDate && day < fromDate) return false;
     if (toDate && day > toDate) return false;
     return true;
