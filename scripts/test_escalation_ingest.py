@@ -279,6 +279,87 @@ def _():
     assert schema.count_duplicate_keys(rows) == 1
 
 
+# ---------- Task 3: ticket loader ----------
+
+import sync_delivery_tickets_to_bq as loader
+
+
+@test("the loader reuses build_sheet_row's ordering rather than remapping cells")
+def _():
+    import sync_delivery_tickets_to_sheet as tickets
+    import datetime
+    db_row = ["TKT-1", "Delayed Order", "HYP1", "HYP1", "AWB1", "Delhivery",
+              datetime.datetime(2026, 7, 20), datetime.datetime(2026, 8, 1),
+              datetime.datetime(2026, 8, 9), "BLR"]
+    cells = tickets.build_sheet_row(db_row)
+    row = loader.ticket_row_to_bq(cells, "HYPHEN")
+    assert row["parent_order"] == "HYP1"
+    assert row["awb_number"] == "AWB1"
+    assert row["awb_key"] == "awb1"
+    assert row["ticket_number"] == "TKT-1"
+    assert row["query_class"] == "Delivery"
+    assert row["delivery_partner_name"] == "Delhivery"
+    # Sheet-owned and app-owned columns are absent: the loader has no business supplying them.
+    for col in schema.SHEET_COLUMNS + schema.APP_COLUMNS:
+        assert col not in row, f"loader row must not carry {col}"
+
+
+@test("the loader dedups against BigQuery ticket numbers, not the sheet")
+def _():
+    calls = []
+    loader.bq_lib.query_rows = lambda sql, params=None: (
+        calls.append(sql) or [{"ticket_number": "TKT-1"}]
+    )
+    existing = loader.existing_ticket_numbers("HYPHEN")
+    assert existing == {"TKT-1"}
+    assert "assignment_events" not in calls[0]
+    assert "ticket_number" in calls[0]
+
+
+@test("load_brand skips already-loaded tickets and merges the rest in one statement")
+def _():
+    import datetime
+    statements = []
+
+    loader.bq_lib.query_rows = lambda sql, params=None: [{"ticket_number": "TKT-1"}]
+    loader.bq_lib.query = lambda sql, params=None: (
+        statements.append((sql, params)) or {"numDmlAffectedRows": "1"}
+    )
+    loader.schema.create_tables = lambda: None
+    loader.tickets.fetch_today_delivery_tickets = lambda table, since=None: [
+        ["TKT-1", "Delayed Order", "HYP1", "HYP1", "AWB1", "Delhivery",
+         datetime.datetime(2026, 7, 20), datetime.datetime(2026, 8, 1),
+         datetime.datetime(2026, 8, 9), "BLR"],
+        ["TKT-2", "Delayed Order", "HYP2", "HYP2", "AWB2", "Bluedart",
+         datetime.datetime(2026, 7, 21), datetime.datetime(2026, 8, 2),
+         datetime.datetime(2026, 8, 9), "BLR"],
+    ]
+    loader.tickets.fill_missing_awb = lambda rows: None
+
+    out = loader.load_brand("HYPHEN")
+    assert out["fetched"] == 2, out
+    assert out["new"] == 1, "TKT-1 was already in BigQuery"
+    assert len(statements) == 1, "one MERGE for the whole batch, never one per ticket"
+    sql, params = statements[0]
+    assert sql.startswith("MERGE")
+    assert params[0]["parameterValue"]["arrayValues"][0]["structValues"]["ticket_number"]["value"] == "TKT-2"
+
+
+@test("load_brand makes no BigQuery write when every ticket is already loaded")
+def _():
+    loader.bq_lib.query_rows = lambda sql, params=None: [{"ticket_number": "TKT-1"}]
+    loader.bq_lib.query = lambda sql, params=None: (_ for _ in ()).throw(
+        AssertionError("must not write when there is nothing new"))
+    loader.schema.create_tables = lambda: None
+    loader.tickets.fetch_today_delivery_tickets = lambda table, since=None: [
+        ["TKT-1", "x", "HYP1", "HYP1", "AWB1", "D", None, None, None, "BLR"],
+    ]
+    loader.tickets.fill_missing_awb = lambda rows: None
+    out = loader.load_brand("HYPHEN")
+    assert out["new"] == 0
+    assert out["merged"] == 0
+
+
 # ---------- summary ----------
 if __name__ == "__main__":
     print(f"\n{len(PASSED)} passed, {len(FAILED)} failed")
