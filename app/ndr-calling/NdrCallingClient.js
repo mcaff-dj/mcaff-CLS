@@ -78,6 +78,11 @@ async function fetchNdrSheet() {
   return { rows, startRow, totalRows };
 }
 
+// Brand isn't its own sheet column - it's derived from Order ID, same rule
+// scripts/assign_ndr_leads.py's brand_of uses: an order ID starting with "HYP" is Hyphen,
+// everything else (including a blank/unreadable one) is mCaffeine.
+const brandOf = (orderId) => (String(orderId || '').toUpperCase().startsWith('HYP') ? 'Hyphen' : 'mCaffeine');
+
 // Fixed positional layout, not fuzzy header matching - this sheet's own columns are stable
 // (it's someone else's existing, long-running process), so a column-index map is simpler and
 // correct. Only assignedAgent (S, index 18) is ever written by scripts/assign_ndr_leads.py;
@@ -91,9 +96,10 @@ function mapNdrRow(row, rowNum) {
   return {
     id: `${v(4)}-${rowNum}`, rowNum,
     orderId: v(0), customerName: v(1), customerMobile: v(3), awb: v(4), partner: v(5),
-    address: v(6), pincode: v(7), city: v(8), state: v(9), status: v(12), attempts: v(14),
+    address: v(6), pincode: v(7), city: v(8), state: v(9), paymentMode: v(11), status: v(12), attempts: v(14),
     latestNdrDate: v(15), latestNdrReason: v(16), callingDate: v(17), assignedAgent: v(18),
     connected: v(19), outcome: v(20), deliveryAgentCall: v(21), remarks: v(27),
+    brand: brandOf(v(0)),
   };
 }
 
@@ -423,6 +429,9 @@ export default function NdrCallingClient() {
         // Free-text substrings, case-insensitive - mirrors scripts/assign_ndr_leads.py's
         // agent_reason_filter/reason_covers exactly (see that script for the canonical version).
         reasonFilter: (a.ndrReasonFilter || '').split(',').map(s => s.trim()).filter(Boolean),
+        // Fixed value sets, unlike reasonFilter above - '' means unrestricted, same contract.
+        paymentModeFilter: a.ndrPaymentModeFilter || '',
+        brandFilter: a.ndrBrandFilter || '',
       }));
     if (!onlineAgents.length) return { rows: [], onlineAgents: [] };
 
@@ -441,6 +450,14 @@ export default function NdrCallingClient() {
       const reason = (latestNdrReason || '').toLowerCase();
       return agent.reasonFilter.some(r => reason.includes(r.toLowerCase()));
     };
+    // Exact, case-insensitive match - a fixed value set ('Prepaid'/'COD'), unlike reasonCovers'
+    // free-text substrings above.
+    const paymentModeCovers = (agent, paymentMode) =>
+      !agent.paymentModeFilter || String(paymentMode || '').trim().toLowerCase() === agent.paymentModeFilter.toLowerCase();
+    // brand is already normalized to exactly 'Hyphen'/'mCaffeine' by brandOf, same as brandFilter
+    // itself (the roster CustomSelect only ever writes those two strings or ''), so a plain
+    // equality check is enough - no case-folding needed.
+    const brandCovers = (agent, brand) => !agent.brandFilter || brand === agent.brandFilter;
     // "DD-MM-YYYY" -> a sortable number, undated leads sort last (same convention as
     // scripts/assign_ndr_leads.py's own parse_latest_ndr_date).
     const parseLatestNdrDate = (raw) => {
@@ -463,7 +480,8 @@ export default function NdrCallingClient() {
       let chosen = -1;
       for (let step = 0; step < n; step++) {
         const cand = (idx + step) % n;
-        if (covers(remaining[cand], t.bucket) && reasonCovers(remaining[cand], t.latestNdrReason)) { chosen = cand; break; }
+        if (covers(remaining[cand], t.bucket) && reasonCovers(remaining[cand], t.latestNdrReason)
+            && paymentModeCovers(remaining[cand], t.paymentMode) && brandCovers(remaining[cand], t.brand)) { chosen = cand; break; }
       }
       if (chosen === -1) continue; // no online agent's filter covers this lead's bucket
       const agent = remaining[chosen];
@@ -540,6 +558,8 @@ export default function NdrCallingClient() {
                 <th className="py-3 px-4 text-left font-medium">Quota</th>
                 <th className="py-3 px-4 text-left font-medium" title="Hard filter: restricts this agent to leads whose delivery-attempt count falls in the selected bucket(s). No selection = unrestricted.">Attempts</th>
                 <th className="py-3 px-4 text-left font-medium" title="Hard filter: restricts this agent to leads whose Latest NDR Reason contains any of these (case-insensitive), comma-separated. No text = unrestricted.">Latest NDR Reason</th>
+                <th className="py-3 px-4 text-left font-medium" title="Hard filter: restricts this agent to leads of the selected payment mode only. No restriction = unrestricted.">Payment Mode</th>
+                <th className="py-3 px-4 text-left font-medium" title="Hard filter: restricts this agent to leads of the selected brand only (derived from Order ID). No restriction = unrestricted.">Brand</th>
                 <th className="py-3 px-4 text-center font-medium" title="Can manage this process's roster, hours, and disposition list - nothing else">Process admin</th>
               </tr></thead>
               <tbody className="divide-y divide-zinc-800/50">
@@ -583,6 +603,28 @@ export default function NdrCallingClient() {
                         onSave={(next) => saveProcessAgent(a.email, { ndrReasonFilter: next })}
                       />
                     </td>
+                    <td className="py-3 px-4">
+                      <CustomSelect
+                        value={a.ndrPaymentModeFilter || ''}
+                        onChange={(val) => saveProcessAgent(a.email, { ndrPaymentModeFilter: val })}
+                        options={[
+                          { value: '', label: 'No restriction' },
+                          { value: 'Prepaid', label: 'Prepaid only' },
+                          { value: 'COD', label: 'COD only' },
+                        ]}
+                      />
+                    </td>
+                    <td className="py-3 px-4">
+                      <CustomSelect
+                        value={a.ndrBrandFilter || ''}
+                        onChange={(val) => saveProcessAgent(a.email, { ndrBrandFilter: val })}
+                        options={[
+                          { value: '', label: 'No restriction' },
+                          { value: 'Hyphen', label: 'Hyphen only' },
+                          { value: 'mCaffeine', label: 'mCaffeine only' },
+                        ]}
+                      />
+                    </td>
                     <td className="py-3 px-4 text-center">
                       {a.isAdmin ? (
                         <span className="text-[11px] text-zinc-500" title="Company-wide admin - already administers every process">all</span>
@@ -600,7 +642,7 @@ export default function NdrCallingClient() {
                   </tr>
                 ))}
                 {rows.length === 0 && (
-                  <tr><td colSpan={6} className="py-8 text-center text-zinc-500">No one invited to NDR Calling yet - grant access from Admin → Permissions.</td></tr>
+                  <tr><td colSpan={8} className="py-8 text-center text-zinc-500">No one invited to NDR Calling yet - grant access from Admin → Permissions.</td></tr>
                 )}
               </tbody>
             </table>
