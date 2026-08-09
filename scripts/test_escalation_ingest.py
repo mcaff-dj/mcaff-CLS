@@ -140,6 +140,26 @@ def _():
            '"writeDisposition":"WRITE_TRUNCATE"' in body_text, body_text[:300]
 
 
+@test("ensure_dataset posts a datasetReference and tolerates 409 (already exists)")
+def _():
+    calls = []
+    bq_lib.requests.post = lambda url, **kw: calls.append((url, kw)) or FakeResponse({}, status=409)
+    bq_lib.ensure_dataset()  # must not raise
+    assert calls[0][0].endswith("/datasets")
+    assert calls[0][1]["json"]["datasetReference"]["datasetId"] == bq_lib.dataset_id()
+
+
+@test("ensure_dataset raises on a real failure, not just any non-200")
+def _():
+    bq_lib.requests.post = lambda url, **kw: FakeResponse(
+        {"error": {"message": "Permission denied"}}, status=403)
+    try:
+        bq_lib.ensure_dataset()
+        raise AssertionError("expected a failure")
+    except RuntimeError as e:
+        assert "Permission denied" in str(e), e
+
+
 @test("load_ndjson raises when the job finishes with an errorResult")
 def _():
     bq_lib.requests.post = lambda url, **kw: FakeResponse(

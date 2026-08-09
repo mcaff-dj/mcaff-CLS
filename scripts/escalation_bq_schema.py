@@ -160,6 +160,7 @@ def _ddl(table, schema, cluster_by=None):
 def create_tables():
     """Not partitioned: a few thousand rows, where partition metadata costs more than it saves.
     Clustered on the row-key prefix so MERGEs and per-order writes prune."""
+    bq_lib.ensure_dataset()
     bq_lib.query("\n".join([
         _ddl(ORDERS, ORDERS_SCHEMA, "brand, parent_order"),
         _ddl(STAGING, STAGING_SCHEMA),

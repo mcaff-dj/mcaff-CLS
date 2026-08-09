@@ -79,6 +79,27 @@ def struct_array_param(name, fields, rows):
     }
 
 
+def ensure_dataset(location="US"):
+    """Creates the dataset if it doesn't exist yet. BigQuery does NOT auto-create a dataset when
+    a query targets one - CREATE TABLE IF NOT EXISTS only handles tables within an already-real
+    dataset, so a brand-new project needs this run once before create_tables() can succeed.
+    Idempotent: a 409 (already exists) is not an error, matching every other "IF NOT EXISTS"
+    statement in this module.
+    """
+    resp = requests.post(
+        f"{API}/projects/{project_id()}/datasets",
+        headers=_headers(),
+        json={"datasetReference": {"projectId": project_id(), "datasetId": dataset_id()},
+              "location": location},
+        timeout=60,
+    )
+    if resp.status_code == 409:
+        return
+    data = resp.json()
+    if resp.status_code >= 400:
+        raise RuntimeError(data.get("error", {}).get("message", f"BigQuery dataset create failed ({resp.status_code})"))
+
+
 def query(sql, params=None, timeout_sec=180):
     resp = requests.post(
         f"{API}/projects/{project_id()}/queries",
