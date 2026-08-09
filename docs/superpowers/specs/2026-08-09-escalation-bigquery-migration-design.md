@@ -119,6 +119,29 @@ plain column for provenance and debugging.
 for exact matching and documents that "the last tab read still wins byParent on a genuine tie".
 Including `awb_number` makes the key exact.
 
+The key column is `awb_key`, a generated `LOWER(TRIM(COALESCE(awb_number, '')))`, not the raw
+`awb_number`. Two reasons: AWBs arrive from the sheet with inconsistent casing and stray
+whitespace, and rows with a blank AWB must still key deterministically rather than on `NULL`.
+
+Because a blank `awb_key` is possible, two sheet rows can still collide on
+`(sheet_tab, parent_order, awb_key)`. BigQuery rejects that outright — a MERGE whose source
+matches a target row more than once fails with "UPDATE/MERGE must match at most one source row"
+and the whole sync aborts. The `USING` clause therefore deduplicates by keeping the lowest
+`row_number` per key:
+
+```sql
+USING (
+  SELECT * FROM `escalation.orders_staging`
+  WHERE sheet_tab = @tab
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY sheet_tab, parent_order, awb_key ORDER BY row_number
+  ) = 1
+) S
+```
+
+The sync response reports how many rows were dropped as duplicates, so a sheet developing
+genuine key collisions is visible rather than silent.
+
 ### `escalation.orders`
 
 Clustered by `(sheet_tab, parent_order)`. Not partitioned — the table holds a few thousand rows,
@@ -126,7 +149,7 @@ where partition metadata costs more than it saves.
 
 | Group | Columns | Written by |
 |---|---|---|
-| Identity | `sheet_tab STRING NOT NULL`, `parent_order STRING NOT NULL`, `awb_number STRING NOT NULL` | sync (key) |
+| Identity | `sheet_tab STRING NOT NULL`, `parent_order STRING NOT NULL`, `awb_number STRING`, `awb_key STRING NOT NULL` | sync (key) |
 | Sheet-owned (A–S and Z) | `added_date`, `query_class`, `query_category`, `delivery_partner_name`, `order_date`, `order_month`, `query_date`, `query_month`, `wh_name`, `total_times_consumer_reached`, `delivered_date`, `status_as_per_awb`, `solv_date`, `tat`, `update_from_logistics`, `city`, `state`, `ticket_number` — all `STRING`; plus `row_number INT64` | sync only |
 | App-owned | `new_order_id STRING`, `new_awb STRING`, `status STRING`, `notes STRING`, `resolved_at TIMESTAMP`, `resolved_by STRING`, `assigned_to STRING`, `assigned_at TIMESTAMP` | app only |
 | Lifecycle | `synced_at TIMESTAMP`, `deleted_from_sheet_at TIMESTAMP` | sync |
@@ -281,6 +304,14 @@ the queue on the open-TAT values would empty it.
   event insert. Reassignment writes a `reassigned_away` event for the outgoing agent before the
   `assigned` event for the incoming one, preserving the cycle model the Postgres implementation
   uses today.
+- **`assign-bulk`** — a new action, required by Auto-Assign All. The client currently issues one
+  POST per unassigned order in a `Promise.all`, which against BigQuery means thousands of
+  concurrent DML statements and a guaranteed failure. The new action accepts
+  `{ items: [{ sheetTab, parentOrder, awbNumber, agentId }] }` and applies them as one
+  `MERGE … USING UNNEST(@items)` plus one batched event insert. The client calls it once.
+
+Every write path in this desk is therefore bounded to a constant number of BigQuery statements,
+regardless of how many rows the user selected.
 
 Two costs of the row-level UPDATE model, accepted rather than designed around:
 
@@ -298,8 +329,11 @@ Two costs of the row-level UPDATE model, accepted rather than designed around:
 
 - The assign POST currently sends `{ rowNumber, parentOrder, agentId }`. It sends
   `{ sheetTab, parentOrder, awbNumber, agentId }` instead. The row object rendered in the queue
-  already carries both new fields.
+  already carries both new fields. `bulk-update` items gain `awbNumber` for the same reason.
+- Auto-Assign All stops issuing one request per row and makes a single `assign-bulk` call.
 - Write actions apply optimistically and revert on error, to absorb BigQuery write latency.
+- Resolution copy changes: the success toast currently reads "synced to sheet", which stops
+  being true.
 
 ## Migration
 
