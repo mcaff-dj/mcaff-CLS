@@ -360,6 +360,75 @@ def _():
     assert out["merged"] == 0
 
 
+# ---------- Task 4: sheet sweep ----------
+
+import sync_escalation_sheet_to_bq as sweep
+
+
+@test("sweep_brand rejects a brand outside the allowlist")
+def _():
+    for bad in ["Sheet1", "../HYPHEN", ""]:
+        try:
+            sweep.sweep_brand(bad)
+            raise AssertionError(f"expected {bad!r} to be rejected")
+        except ValueError as e:
+            assert "Unknown brand" in str(e), e
+
+
+@test("sweep_brand numbers rows from 2 and reports duplicate keys")
+def _():
+    loaded = {}
+    sweep.lib.get_sheet_values = lambda sid, rng, **kw: [
+        ["Aug 9", "Delivery", "Delayed", "HYP1", "AWB1"],
+        ["Aug 9", "Delivery", "Delayed", "HYP1", " awb1 "],
+        ["Aug 9", "Delivery", "Delayed", "HYP2", "AWB2"],
+    ]
+    sweep.bq_lib.load_ndjson = lambda table, ndjson, fields: (
+        loaded.update({"ndjson": ndjson, "table": table}) or 3
+    )
+    sweep.bq_lib.query = lambda sql, params=None: {"numDmlAffectedRows": "2"}
+    sweep.schema.create_tables = lambda: None
+
+    out = sweep.sweep_brand("HYPHEN")
+    assert out["read"] == 3, out
+    assert out["loaded"] == 3
+    assert out["duplicates"] == 1, "the two AWB1 rows collapse to one key"
+
+    lines = [json.loads(line) for line in loaded["ndjson"].strip().split("\n")]
+    assert lines[0]["row_number"] == 2, "the sheet's first data row is row 2"
+    assert lines[2]["row_number"] == 4
+    assert lines[1]["awb_key"] == "awb1", "awb_key is normalised before upload"
+    assert loaded["table"] == schema.STAGING
+
+
+@test("sweep_brand passes the brand to the MERGE, not a hardcoded tab")
+def _():
+    captured = {}
+    sweep.lib.get_sheet_values = lambda sid, rng, **kw: [["", "", "", "MC1", "AWB9"]]
+    sweep.bq_lib.load_ndjson = lambda table, ndjson, fields: 1
+    sweep.bq_lib.query = lambda sql, params=None: (
+        captured.update({"sql": sql, "params": params}) or {"numDmlAffectedRows": "1"}
+    )
+    sweep.schema.create_tables = lambda: None
+    sweep.sweep_brand("mCaffeine")
+    assert captured["params"] == [
+        {"name": "brand", "parameterType": {"type": "STRING"},
+         "parameterValue": {"value": "mCaffeine"}}
+    ]
+    assert captured["sql"].startswith("MERGE")
+
+
+@test("sweep_brand reads the whole tab, A2:Z")
+def _():
+    ranges = []
+    sweep.lib.get_sheet_values = lambda sid, rng, **kw: ranges.append(rng) or []
+    sweep.bq_lib.load_ndjson = lambda table, ndjson, fields: 0
+    sweep.bq_lib.query = lambda sql, params=None: {"numDmlAffectedRows": "0"}
+    sweep.schema.create_tables = lambda: None
+    sweep.sweep_brand("HYPHEN")
+    assert ranges == ["'HYPHEN'!A2:Z"], ranges
+
+
 # ---------- summary ----------
 if __name__ == "__main__":
     print(f"\n{len(PASSED)} passed, {len(FAILED)} failed")
