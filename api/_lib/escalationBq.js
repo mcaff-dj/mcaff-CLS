@@ -1,5 +1,5 @@
-// The Escalation desk's data layer, on BigQuery. Replaces api/_lib/escalationSheet.js and the
-// escalation_* functions in api/_lib/db.js.
+// The Escalation desk's data layer, on BigQuery. Replaces the desk's former Google-Sheet-backed
+// data module (deleted in this migration) and the escalation_* functions in api/_lib/db.js.
 //
 // READS AND WRITES ONLY. Ingest is Python (scripts/sync_delivery_tickets_to_bq.py and
 // scripts/sync_escalation_sheet_to_bq.py) and the tables are created by
@@ -124,7 +124,7 @@ async function getEscalationAssignments() {
   }));
 }
 
-// Replaces escalationSheet.getSheetIndex - same two maps and the same "prefer an exact
+// Replaces the old sheet-backed order index - same two maps and the same "prefer an exact
 // parent+AWB match, fall back to parent only" contract the CSV import depends on, but read from
 // BigQuery instead of re-reading both sheet tabs. Values carry the write key, not a row number.
 async function getOrderIndex() {

@@ -309,6 +309,56 @@ testAsync('re-assigning to the same agent writes no reassigned_away event', asyn
   assert.strictEqual(inserts.length, 1, 'only the assigned event');
 });
 
+/* ---------- Task 9: handler wiring ---------- */
+
+const fs = require('fs');
+const path = require('path');
+const repo = (p) => path.join(__dirname, '..', p);
+const handlerSrc = fs.readFileSync(repo('api/escalation/[action].js'), 'utf8');
+const dbSrc = fs.readFileSync(repo('api/_lib/db.js'), 'utf8');
+
+test('api/_lib/escalationSheet.js is gone', () => {
+  assert.ok(!fs.existsSync(repo('api/_lib/escalationSheet.js')),
+    'the API no longer touches the sheet at all');
+});
+
+test('nothing under api/ imports escalationSheet or calls the Sheets API', () => {
+  const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(path.join(dir, e.name))
+      : e.name.endsWith('.js') ? [path.join(dir, e.name)] : []);
+  walk(repo('api')).forEach((file) => {
+    const src = fs.readFileSync(file, 'utf8');
+    assert.ok(!/escalationSheet/.test(src), `${file} still references escalationSheet`);
+  });
+});
+
+test('the handler imports the BigQuery data layer', () => {
+  assert.match(handlerSrc, /require\('\.\.\/_lib\/escalationBq'\)/);
+});
+
+test('the handler has no sync route and no shared secret', () => {
+  assert.ok(!/ESCALATION_SYNC_SECRET/.test(handlerSrc), 'ingest is Python; no secret is needed');
+  assert.ok(!/action === 'sync'/.test(handlerSrc), 'the API does not ingest');
+});
+
+test('assign-bulk exists and sits behind the session gate', () => {
+  assert.match(handlerSrc, /action === 'assign-bulk'/);
+  assert.ok(
+    handlerSrc.indexOf("action === 'assign-bulk'") > handlerSrc.indexOf('const denied = checkAccess(session)'),
+    'assign-bulk must be session-gated'
+  );
+});
+
+test('db.js drops the escalation functions and exports pgSql', () => {
+  const exportBlock = dbSrc.slice(dbSrc.lastIndexOf('module.exports'));
+  [
+    'assignEscalationOrder', 'unassignEscalationOrder', 'resolveEscalationAssignment',
+    'resolveEscalationAssignmentsBulk', 'getEscalationAssignments', 'getLiveEscalationAssignments',
+  ].forEach((fn) => assert.ok(!new RegExp(`\\b${fn}\\b`).test(exportBlock),
+    `${fn} must be removed from exports`));
+  assert.match(exportBlock, /\bpgSql\b/, 'the migration script needs pgSql exported');
+});
+
 /* ---------- summary ---------- */
 runAsyncTests().then(() => {
   console.log(`\n${passed} passed${process.exitCode ? ', FAILURES ABOVE' : ''}`);
