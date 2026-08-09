@@ -153,6 +153,132 @@ def _():
         assert "schema mismatch" in str(e), e
 
 
+# ---------- Task 2: schema ----------
+
+import escalation_bq_schema as schema
+
+
+@test("column ownership groups do not overlap")
+def _():
+    groups = {
+        "identity": set(schema.IDENTITY_COLUMNS),
+        "ticket": set(schema.TICKET_COLUMNS),
+        "sheet": set(schema.SHEET_COLUMNS),
+        "app": set(schema.APP_COLUMNS),
+        "lifecycle": set(schema.LIFECYCLE_COLUMNS),
+    }
+    names = list(groups)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            overlap = groups[a] & groups[b]
+            assert not overlap, f"{a} and {b} both claim {overlap}"
+
+
+@test("the sheet index table covers every column the tabs carry")
+def _():
+    # 26 cells (A..Z); X and Y are unused and deliberately absent.
+    mapped = schema.SHEET_INDEX_TO_COLUMN
+    assert mapped[0] == "added_date"
+    assert mapped[3] == "parent_order"
+    assert mapped[4] == "awb_number"
+    assert mapped[13] == "status_as_per_awb"
+    assert mapped[15] == "tat"
+    assert mapped[16] == "update_from_logistics"
+    assert mapped[21] == "status"
+    assert mapped[25] == "ticket_number"
+    assert 23 not in mapped and 24 not in mapped, "columns X and Y are not carried across"
+
+
+@test("awb_key trims and lowercases, and turns blank into empty string")
+def _():
+    assert schema.awb_key(" AWB123 ") == "awb123"
+    assert schema.awb_key("") == ""
+    assert schema.awb_key(None) == ""
+
+
+@test("sheet_row_to_bq maps a padded sheet row and derives the key")
+def _():
+    cells = [""] * 26
+    cells[0] = "Aug 9, 2026"
+    cells[3] = "HYP32557370"
+    cells[4] = " AWB1 "
+    cells[13] = "RTO"
+    cells[15] = "Forced to be marked as RTO"
+    cells[25] = "TKT-9"
+    row = schema.sheet_row_to_bq(cells, "HYPHEN", row_number=42)
+    assert row["brand"] == "HYPHEN"
+    assert row["parent_order"] == "HYP32557370"
+    assert row["awb_number"] == " AWB1 "
+    assert row["awb_key"] == "awb1"
+    assert row["row_number"] == 42
+    assert row["status_as_per_awb"] == "RTO"
+    assert row["ticket_number"] == "TKT-9"
+
+
+@test("sheet_row_to_bq tolerates a short row, as the Sheets API returns them")
+def _():
+    row = schema.sheet_row_to_bq(["Aug 9, 2026", "Delivery", "", "HYP1"], "mCaffeine")
+    assert row["parent_order"] == "HYP1"
+    assert row["awb_number"] == ""
+    assert row["awb_key"] == ""
+    assert row["tat"] == ""
+
+
+@test("the sweep MERGE's matched arm writes sheet columns only")
+def _():
+    sql = schema.build_sweep_merge()
+    matched = sql[sql.index("WHEN MATCHED"):sql.index("WHEN NOT MATCHED BY TARGET")]
+    for col in schema.TICKET_COLUMNS + schema.APP_COLUMNS:
+        assert f" {col} =" not in matched, \
+            f"sweep must not overwrite {col} - it belongs to another writer"
+    for col in schema.SHEET_COLUMNS:
+        assert f" {col} =" in matched, f"sweep is missing sheet column {col}"
+
+
+@test("the sweep MERGE inserts full rows for orders the loader has not seen")
+def _():
+    sql = schema.build_sweep_merge()
+    insert = sql[sql.index("WHEN NOT MATCHED BY TARGET"):sql.index("WHEN NOT MATCHED BY SOURCE")]
+    for col in schema.TICKET_COLUMNS:
+        assert col in insert, f"legacy sheet rows need {col} on insert"
+
+
+@test("the sweep MERGE soft-deletes, scoped to the brand being swept")
+def _():
+    sql = schema.build_sweep_merge()
+    arm = sql[sql.index("WHEN NOT MATCHED BY SOURCE"):]
+    assert "T.brand = @brand" in arm, \
+        "without this guard, sweeping HYPHEN soft-deletes every mCaffeine row"
+    assert "deleted_from_sheet_at = CURRENT_TIMESTAMP()" in arm
+    assert "DELETE" not in arm, "rows are soft-deleted, never hard-deleted"
+
+
+@test("the sweep MERGE deduplicates its source")
+def _():
+    sql = schema.build_sweep_merge()
+    assert "QUALIFY ROW_NUMBER() OVER" in sql
+    assert "PARTITION BY brand, parent_order, awb_key ORDER BY row_number" in sql
+
+
+@test("the ticket MERGE writes ticket columns only")
+def _():
+    sql = schema.build_ticket_merge()
+    for col in schema.SHEET_COLUMNS + schema.APP_COLUMNS:
+        assert f" {col} =" not in sql, f"loader must not touch {col}"
+    for col in schema.TICKET_COLUMNS:
+        assert f" {col} =" in sql, f"loader is missing ticket column {col}"
+
+
+@test("count_duplicate_keys counts collisions on the row key")
+def _():
+    rows = [
+        {"brand": "HYPHEN", "parent_order": "HYP1", "awb_key": "awb1"},
+        {"brand": "HYPHEN", "parent_order": "HYP1", "awb_key": "awb1"},
+        {"brand": "HYPHEN", "parent_order": "HYP2", "awb_key": "awb2"},
+    ]
+    assert schema.count_duplicate_keys(rows) == 1
+
+
 # ---------- summary ----------
 if __name__ == "__main__":
     print(f"\n{len(PASSED)} passed, {len(FAILED)} failed")
