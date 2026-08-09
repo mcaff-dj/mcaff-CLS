@@ -83,13 +83,15 @@ const VIEW_LABELS = {
   settings: 'Settings',
 };
 
-// Both HYPHEN and mCaffeine tabs feed this page's `orders` list side by side, and each restarts
-// its own row numbering at row 2 - rowNumber alone can collide across the two. Anywhere a row
-// needs a stable, globally-unique identity (Set/Map keys, React `key`, DOM ids) use this instead
-// of raw `order.rowNumber`. Sheet-write calls still send the raw rowNumber + sheetTab separately
-// (see api/_lib/escalationSheet.js), which is what actually addresses the write.
+// Both HYPHEN and mCaffeine feed this page's `orders` list side by side, so a bare parentOrder
+// isn't guaranteed globally unique either - this pairs it with the brand. NOT keyed on rowNumber
+// any more: that's a sheet-sweep artifact, null on every order the ticket loader has written but
+// the sweep hasn't reached yet, so multiple such rows in the same tab would all collide on the
+// same key. Anywhere a row needs a stable, globally-unique identity (Set/Map keys, React `key`,
+// DOM ids) use this. api/escalation/[action].js's import response returns this same
+// "sheetTab:parentOrder" composite, so it matches straight against rowKey(o) with no translation.
 function rowKey(o) {
-  return `${o.sheetTab}:${o.rowNumber}`;
+  return `${o.sheetTab}:${o.parentOrder}`;
 }
 
 /* ============================================================
@@ -683,7 +685,7 @@ function OrderRow({
   const [error,      setError]      = useState('');
   const [assigning,  setAssigning]  = useState(false);
   const firstRef = useRef(null);
-  const fId = `row-${order.sheetTab}-${order.rowNumber}`;
+  const fId = `row-${rowKey(order).replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 
   const resolveTypeDef = RESOLVE_TYPES.find((t) => t.value === resType);
   const needsOrder = resolveTypeDef?.needsOrder ?? false;
@@ -716,9 +718,9 @@ function OrderRow({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          rowNumber: order.rowNumber,
           sheetTab: order.sheetTab,
           parentOrder: order.parentOrder,
+          awbNumber: order.awbNumber || '',
           newOrderId: needsOrder ? newOrderId.trim() : '-',
           newAwb:     needsAwb   ? newAwb.trim()     : '-',
           newStatus: resType,
@@ -728,7 +730,7 @@ function OrderRow({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Save failed');
       setJustSaved(true);
-      onToast('success', `Resolved — ${order.parentOrder || 'row'} synced to sheet`);
+      onToast('success', `Resolved — ${order.parentOrder || 'row'} saved`);
       setTimeout(() => onSaved(rowKey(order)), 600);
     } catch (err) {
       setError(err.message);
@@ -741,18 +743,26 @@ function OrderRow({
   async function handleAssign(e) {
     const agentId = e.target.value;
     const agent = agents.find((a) => a.email === agentId);
+    const previous = assignment; // OrderRow already receives this prop — see its signature
     setAssigning(true);
+    // Optimistic, reverted below if the write fails.
+    onAssign(rowKey(order), agentId ? { agentId } : null);
     try {
       const res = await fetch('/api/escalation/assign', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rowNumber: order.rowNumber, parentOrder: order.parentOrder, agentId: agentId || null }),
+        body: JSON.stringify({
+          sheetTab: order.sheetTab,
+          parentOrder: order.parentOrder,
+          awbNumber: order.awbNumber || '',
+          agentId: agentId || null,
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Failed to save assignment');
-      onAssign(rowKey(order), agentId ? { agentId } : null);
       onToast('success', agentId ? `Assigned to ${agent?.name || agentId}` : 'Assignment cleared');
     } catch (err) {
+      onAssign(rowKey(order), previous);
       onToast('error', err.message || 'Failed to save assignment');
     } finally { setAssigning(false); }
   }
@@ -1152,9 +1162,8 @@ export default function EscalationClient() {
   }, [isAdmin, view]);
 
   /* --- Handlers --- */
-  // Every key below is rowKey(order) ("sheetTab:rowNumber"), not a bare rowNumber - see rowKey's
-  // own comment for why (HYPHEN and mCaffeine rows are merged into one `orders` list and each
-  // tab restarts its row numbering at row 2).
+  // Every key below is rowKey(order) ("sheetTab:parentOrder") - see rowKey's own comment for why
+  // (HYPHEN and mCaffeine rows are merged into one `orders` list).
   function handleSaved(key) {
     setOrders((p) => p.filter((o) => rowKey(o) !== key));
     setExpandedRow(null);
@@ -1197,8 +1206,8 @@ export default function EscalationClient() {
   async function handleBulkApply(status) {
     const items = Array.from(selectedRows).map((key) => {
       const o = orders.find((o) => rowKey(o) === key);
-      return { rowNumber: o?.rowNumber, sheetTab: o?.sheetTab, parentOrder: o?.parentOrder };
-    }).filter((i) => i.rowNumber && i.sheetTab);
+      return { sheetTab: o?.sheetTab, parentOrder: o?.parentOrder, awbNumber: o?.awbNumber || '' };
+    }).filter((i) => i.sheetTab && i.parentOrder);
     setBulkLoading(true);
     try {
       const res = await fetch('/api/escalation/bulk-update', {
@@ -1242,8 +1251,8 @@ export default function EscalationClient() {
   }
 
   /* --- Bulk upload result --- */
-  // `keys` are "sheetTab:rowNumber" composites (see api/escalation/[action].js's import
-  // response) - matched against rowKey(o), not a bare rowNumber.
+  // `keys` are "sheetTab:parentOrder" composites (see api/escalation/[action].js's import
+  // response) - the same format rowKey(o) computes, so they match directly.
   function handleImported(keys) {
     if (keys?.length) {
       const done = new Set(keys);
@@ -1265,44 +1274,32 @@ export default function EscalationClient() {
     try {
       const unassigned = orders.filter((o) => !assignments[rowKey(o)]);
       if (unassigned.length === 0) { showToast('success', 'All orders already assigned!'); return; }
+      if (isAdmin && agents.length === 0) { showToast('error', 'No agents available'); return; }
 
-      if (!isAdmin) {
-        // Assign all unassigned to self
-        const updates = unassigned.map((o) =>
-          fetch('/api/escalation/assign', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ rowNumber: o.rowNumber, parentOrder: o.parentOrder, agentId: googleUser.email }),
-          }).then(async (res) => {
-            if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || 'Assign failed'); }
-          })
-        );
-        await Promise.all(updates);
-        const newMap = {};
-        unassigned.forEach((o) => { newMap[rowKey(o)] = { agentId: googleUser.email }; });
-        setAssignments((p) => ({ ...p, ...newMap }));
-        showToast('success', `Auto-assigned ${unassigned.length} orders to you`);
-      } else {
-        // Admin: round-robin across all agents
-        if (agents.length === 0) { showToast('error', 'No agents available'); return; }
-        const updates = unassigned.map((o, i) => {
-          const agent = agents[i % agents.length];
-          return fetch('/api/escalation/assign', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ rowNumber: o.rowNumber, parentOrder: o.parentOrder, agentId: agent.email }),
-          }).then(async (res) => {
-            if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || 'Assign failed'); }
-            return { key: rowKey(o), agentId: agent.email };
-          });
-        });
-        const results = await Promise.all(updates);
-        const newMap = {};
-        results.forEach(({ key, agentId }) => { newMap[key] = { agentId }; });
-        setAssignments((p) => ({ ...p, ...newMap }));
-        showToast('success', `Auto-assigned ${unassigned.length} orders (round-robin across ${agents.length} agents)`);
-      }
-    } catch { showToast('error', 'Auto-assign failed'); }
+      // One request for the whole queue. This used to be one fetch per order in a Promise.all -
+      // fine against Postgres, fatal against BigQuery, where it becomes one DML statement per row.
+      const items = unassigned.map((o, i) => ({
+        sheetTab: o.sheetTab,
+        parentOrder: o.parentOrder,
+        awbNumber: o.awbNumber || '',
+        agentId: isAdmin ? agents[i % agents.length].email : googleUser.email,
+      }));
+
+      const res = await fetch('/api/escalation/assign-bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Auto-assign failed');
+
+      const newMap = {};
+      unassigned.forEach((o, i) => { newMap[rowKey(o)] = { agentId: items[i].agentId }; });
+      setAssignments((p) => ({ ...p, ...newMap }));
+      showToast('success', isAdmin
+        ? `Auto-assigned ${unassigned.length} orders (round-robin across ${agents.length} agents)`
+        : `Auto-assigned ${unassigned.length} orders to you`);
+    } catch (err) { showToast('error', err.message || 'Auto-assign failed'); }
     finally { setAutoAssigning(false); }
   }
 

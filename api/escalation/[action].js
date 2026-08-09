@@ -2,7 +2,13 @@
 // one dynamic-segment handler, matching this repo's own api/auth/[action].js and
 // api/admin/[action].js convention (and keeping api/_lambda/app.js to a single mount).
 //
-// Actions: agents | orders | assign | update | bulk-update | import | export | sample
+// Actions: agents | orders | assign | assign-bulk | assignments | update | bulk-update | import |
+// export | sample
+//
+// STORE: BigQuery, exclusively. All reads and writes here go through api/_lib/escalationBq.js.
+// Ingest (MySQL -> BigQuery, sheet -> BigQuery) lives entirely in scripts/ and runs outside this
+// API - see scripts/sync_delivery_tickets_to_bq.py and scripts/sync_escalation_sheet_to_bq.py.
+// Nothing in this file reads or writes the Google Sheet.
 //
 // SECURITY - the substantive change from the standalone app. That app was a private,
 // separately-deployed tool with NO auth on any route: /api/orders returned the whole RTO queue
@@ -14,14 +20,12 @@
 // whatever it likes without that being a permission decision.
 const { getSession } = require('../_lib/session');
 const {
-  getEligibleOrders, getFreshLeads, updateOrder, batchUpdateOrders, getSheetIndex,
-} = require('../_lib/escalationSheet');
+  getEligibleOrders, getFreshLeads, updateOrder, batchUpdateOrders, getOrderIndex,
+  assignEscalationOrder, unassignEscalationOrder, assignEscalationOrdersBulk,
+  getEscalationAssignments, getLiveEscalationAssignments,
+} = require('../_lib/escalationBq');
 const { CSV_HEADERS, parseCSV, toCSV } = require('../_lib/escalationCsv');
-const {
-  getCallingProcessAgents, assignEscalationOrder, unassignEscalationOrder,
-  resolveEscalationAssignment, getEscalationAssignments,
-  getLiveEscalationAssignments, resolveEscalationAssignmentsBulk,
-} = require('../_lib/db');
+const { getCallingProcessAgents } = require('../_lib/db');
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'escalation';
@@ -70,13 +74,26 @@ const handler = async (req, res) => {
         return res.status(200).json({ assignments });
       }
       if (req.method === 'POST') {
-        const { rowNumber, parentOrder, agentId } = body;
-        if (!rowNumber || !parentOrder) return res.status(400).json({ error: 'rowNumber and parentOrder are required' });
-        if (!agentId) await unassignEscalationOrder(parentOrder);
-        else await assignEscalationOrder(parentOrder, agentId);
+        const { sheetTab, parentOrder, awbNumber, agentId } = body;
+        if (!sheetTab || !parentOrder) return res.status(400).json({ error: 'sheetTab and parentOrder are required' });
+        const key = { sheetTab, parentOrder, awbNumber: awbNumber || '' };
+        if (!agentId) await unassignEscalationOrder(key);
+        else await assignEscalationOrder(key, agentId);
         return res.status(200).json({ ok: true });
       }
       return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    // Auto-Assign All's endpoint. One MERGE for the whole selection - the client used to fire one
+    // request per order, which against BigQuery is thousands of concurrent DML statements.
+    if (action === 'assign-bulk') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+      const { items } = body;
+      if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'items array is required' });
+      if (items.some((i) => !i.sheetTab || !i.parentOrder || !i.agentId)) {
+        return res.status(400).json({ error: 'Every item requires sheetTab, parentOrder and agentId' });
+      }
+      return res.status(200).json({ ok: true, assigned: await assignEscalationOrdersBulk(items) });
     }
 
     if (action === 'assignments') {
@@ -86,12 +103,14 @@ const handler = async (req, res) => {
 
     if (action === 'update') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-      const { rowNumber, sheetTab, parentOrder, newOrderId, newAwb, newStatus, notes } = body;
-      if (!rowNumber || !sheetTab || !newOrderId || !newAwb || !newStatus) {
-        return res.status(400).json({ error: 'rowNumber, sheetTab, newOrderId, newAwb, and newStatus are all required' });
+      const { sheetTab, parentOrder, awbNumber, newOrderId, newAwb, newStatus, notes } = body;
+      if (!sheetTab || !parentOrder || !newOrderId || !newAwb || !newStatus) {
+        return res.status(400).json({ error: 'sheetTab, parentOrder, newOrderId, newAwb, and newStatus are all required' });
       }
-      await updateOrder(rowNumber, sheetTab, { newOrderId, newAwb, newStatus, notes: notes || '' });
-      if (parentOrder) await resolveEscalationAssignment(parentOrder, newStatus, notes || '');
+      await updateOrder(
+        { sheetTab, parentOrder, awbNumber: awbNumber || '' },
+        { newOrderId, newAwb, newStatus, notes: notes || '', resolvedBy: session.email }
+      );
       return res.status(200).json({ ok: true });
     }
 
@@ -107,13 +126,15 @@ const handler = async (req, res) => {
           error: `Bulk update only supports statuses that need no replacement: ${BULK_ALLOWED.join(', ')}`,
         });
       }
-      if (items.some((i) => !i.sheetTab)) {
-        return res.status(400).json({ error: 'Every item requires sheetTab' });
+      if (items.some((i) => !i.sheetTab || !i.parentOrder)) {
+        return res.status(400).json({ error: 'Every item requires sheetTab and parentOrder' });
       }
       const updated = await batchUpdateOrders(
-        items.map(({ rowNumber, sheetTab }) => ({ rowNumber, sheetTab, newOrderId: '-', newAwb: '-', newStatus: status }))
+        items.map(({ sheetTab, parentOrder, awbNumber }) => ({
+          sheetTab, parentOrder, awbNumber: awbNumber || '',
+          newOrderId: '-', newAwb: '-', newStatus: status, notes: '', resolvedBy: session.email,
+        }))
       );
-      await resolveEscalationAssignmentsBulk(items.map((i) => i.parentOrder).filter(Boolean), status);
       return res.status(200).json({ ok: true, updated });
     }
 
@@ -131,10 +152,10 @@ const handler = async (req, res) => {
       if (!rows.length) return res.status(400).json({ error: 'No data rows found in the CSV' });
 
       const norm = (v) => String(v ?? '').trim().toLowerCase();
-      const { byParent, byParentAwb } = await getSheetIndex();
+      const { byParent, byParentAwb } = await getOrderIndex();
       const updates = [];
       const errors = [];
-      const seenRows = new Set(); // keyed "sheetTab:rowNumber" - a bare rowNumber can collide across tabs
+      const seenRows = new Set(); // keyed "sheetTab:parentOrder:awbNumber" - the write key, not a row number
 
       rows.forEach((row, i) => {
         const line = i + 2; // account for the header line
@@ -146,22 +167,24 @@ const handler = async (req, res) => {
         if (!status) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'Missing Status_2 (nothing to write)' });
 
         // Prefer an exact parent+AWB match, fall back to parent only. Both indexes are searched
-        // across every configured tab already (getSheetIndex), so this finds a row regardless of
-        // which brand tab it actually lives in.
+        // across every configured brand already (getOrderIndex), so this finds a row regardless
+        // of which brand it actually lives in.
         const ref = (awb && byParentAwb.get(`${parent}||${awb}`)) || byParent.get(parent);
 
-        if (ref == null) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'No matching order in sheet' });
-        const seenKey = `${ref.sheetTab}:${ref.rowNumber}`;
+        if (ref == null) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'No matching order in BigQuery' });
+        const seenKey = `${ref.sheetTab}:${ref.parentOrder}:${ref.awbNumber}`;
         if (seenRows.has(seenKey)) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'Duplicate row in file (skipped)' });
         seenRows.add(seenKey);
 
         updates.push({
-          rowNumber: ref.rowNumber,
           sheetTab: ref.sheetTab,
+          parentOrder: ref.parentOrder,
+          awbNumber: ref.awbNumber,
           newOrderId: String(row['New Order ID'] ?? '').trim() || '-',
           newAwb: String(row['New AWB / Tracking'] ?? '').trim() || '-',
           newStatus: status,
           notes: String(row.Notes ?? '').trim(),
+          resolvedBy: session.email,
         });
       });
 
@@ -171,10 +194,9 @@ const handler = async (req, res) => {
         updated,
         skipped: errors.length,
         total: rows.length,
-        // "sheetTab:rowNumber" composite - the client matches these against the same composite
-        // it builds from each row's own sheetTab+rowNumber (rowNumber alone isn't unique
-        // across tabs).
-        rowNumbers: updates.map((u) => `${u.sheetTab}:${u.rowNumber}`),
+        // "sheetTab:parentOrder" composite - the client matches these against the same composite
+        // it builds from each row's own sheetTab+parentOrder.
+        rowNumbers: updates.map((u) => `${u.sheetTab}:${u.parentOrder}`),
         errors: errors.slice(0, 50), // cap payload
       });
     }
