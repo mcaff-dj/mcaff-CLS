@@ -144,8 +144,175 @@ async function getOrderIndex() {
   return { byParent, byParentAwb };
 }
 
+function keyParams({ sheetTab, parentOrder, awbNumber }) {
+  return [
+    bq.strParam('brand', sheetTab),
+    bq.strParam('parent_order', parentOrder),
+    bq.strParam('awb_key', awbKeyOf(awbNumber)),
+  ];
+}
+
+const KEY_WHERE = 'brand = @brand AND parent_order = @parent_order AND awb_key = @awb_key';
+
+// One row per agent action. Append-only: this is the history AssignmentsPanel reads, and the
+// reason a current-state-only orders table isn't enough on its own.
+async function insertEvent(key, event, { email = null, resolution = null, agentRemarks = null } = {}) {
+  await bq.query(
+    `INSERT INTO \`${EVENTS}\` (parent_order, brand, awb_key, email, event, resolution, agent_remarks, ts)
+     VALUES (@parent_order, @brand, @awb_key, @email, @event, @resolution, @agent_remarks, CURRENT_TIMESTAMP())`,
+    [
+      ...keyParams(key),
+      bq.strParam('email', email),
+      bq.strParam('event', event),
+      bq.strParam('resolution', resolution),
+      bq.strParam('agent_remarks', agentRemarks),
+    ],
+    { useQueryCache: false }
+  );
+}
+
+const KEY_FIELDS = ['brand', 'parent_order', 'awb_key'];
+const BULK_UPDATE_FIELDS = [...KEY_FIELDS, 'new_order_id', 'new_awb', 'status', 'notes', 'resolved_by'];
+const BULK_ASSIGN_FIELDS = [...KEY_FIELDS, 'assigned_to'];
+
+const BULK_KEY_JOIN = 'ON  T.brand = S.brand AND T.parent_order = S.parent_order AND T.awb_key = S.awb_key';
+
+function buildBulkUpdateMerge() {
+  return `MERGE \`${ORDERS}\` T
+USING UNNEST(@items) S
+${BULK_KEY_JOIN}
+WHEN MATCHED THEN UPDATE SET
+  new_order_id = S.new_order_id,
+  new_awb = S.new_awb,
+  status = S.status,
+  notes = S.notes,
+  resolved_at = CURRENT_TIMESTAMP(),
+  resolved_by = S.resolved_by`;
+}
+
+function buildBulkAssignMerge() {
+  return `MERGE \`${ORDERS}\` T
+USING UNNEST(@items) S
+${BULK_KEY_JOIN}
+WHEN MATCHED THEN UPDATE SET
+  assigned_to = S.assigned_to,
+  assigned_at = CURRENT_TIMESTAMP()`;
+}
+
+function bulkKeyOf(i) {
+  return { brand: i.sheetTab, parent_order: i.parentOrder, awb_key: awbKeyOf(i.awbNumber) };
+}
+
+async function updateOrder(key, { newOrderId, newAwb, newStatus, notes = '', resolvedBy = null }) {
+  const { affectedRows } = await bq.query(
+    `UPDATE \`${ORDERS}\` SET
+       new_order_id = @new_order_id,
+       new_awb = @new_awb,
+       status = @status,
+       notes = @notes,
+       resolved_at = CURRENT_TIMESTAMP(),
+       resolved_by = @resolved_by
+     WHERE ${KEY_WHERE}`,
+    [
+      ...keyParams(key),
+      bq.strParam('new_order_id', newOrderId == null ? '-' : newOrderId),
+      bq.strParam('new_awb', newAwb == null ? '-' : newAwb),
+      bq.strParam('status', newStatus),
+      bq.strParam('notes', notes),
+      bq.strParam('resolved_by', resolvedBy),
+    ],
+    { useQueryCache: false }
+  );
+  await insertEvent(key, 'resolved', { email: resolvedBy, resolution: newStatus, agentRemarks: notes });
+  return affectedRows;
+}
+
+// One MERGE, never a loop: bulk-update and CSV import can carry thousands of rows, and thousands
+// of individual UPDATE statements would exhaust BigQuery's DML queue.
+async function batchUpdateOrders(items) {
+  if (!items.length) return 0;
+  const rows = items.map((i) => ({
+    ...bulkKeyOf(i),
+    new_order_id: i.newOrderId == null ? '-' : i.newOrderId,
+    new_awb: i.newAwb == null ? '-' : i.newAwb,
+    status: i.newStatus,
+    notes: i.notes == null ? '' : i.notes,
+    resolved_by: i.resolvedBy == null ? '' : i.resolvedBy,
+  }));
+  const { affectedRows } = await bq.query(
+    buildBulkUpdateMerge(),
+    [bq.structArrayParam('items', BULK_UPDATE_FIELDS, rows)],
+    { useQueryCache: false }
+  );
+  await bq.query(
+    `INSERT INTO \`${EVENTS}\` (parent_order, brand, awb_key, email, event, resolution, agent_remarks, ts)
+     SELECT parent_order, brand, awb_key, resolved_by, 'resolved', status, notes, CURRENT_TIMESTAMP()
+     FROM UNNEST(@items)`,
+    [bq.structArrayParam('items', BULK_UPDATE_FIELDS, rows)],
+    { useQueryCache: false }
+  );
+  return affectedRows;
+}
+
+async function currentAssignee(key) {
+  const { rows } = await bq.query(
+    `SELECT assigned_to FROM \`${ORDERS}\` WHERE ${KEY_WHERE} AND resolved_at IS NULL`,
+    keyParams(key),
+    { useQueryCache: false }
+  );
+  return rows.length ? rows[0].assigned_to : null;
+}
+
+// Mirrors the Postgres cycle model: a different agent's live assignment is closed with a
+// reassigned_away event before the new one opens, so history is preserved rather than
+// overwritten. Re-assigning to the SAME agent closes nothing.
+async function assignEscalationOrder(key, email) {
+  const previous = await currentAssignee(key);
+  if (previous && previous !== email) await insertEvent(key, 'reassigned_away', { email: previous });
+  await bq.query(
+    `UPDATE \`${ORDERS}\` SET assigned_to = @assigned_to, assigned_at = CURRENT_TIMESTAMP()
+     WHERE ${KEY_WHERE}`,
+    [...keyParams(key), bq.strParam('assigned_to', email)],
+    { useQueryCache: false }
+  );
+  await insertEvent(key, 'assigned', { email });
+}
+
+async function unassignEscalationOrder(key) {
+  const previous = await currentAssignee(key);
+  await bq.query(
+    `UPDATE \`${ORDERS}\` SET assigned_to = NULL, assigned_at = NULL
+     WHERE ${KEY_WHERE} AND resolved_at IS NULL`,
+    keyParams(key),
+    { useQueryCache: false }
+  );
+  await insertEvent(key, 'unassigned', { email: previous });
+}
+
+// Auto-Assign All's write path. The client used to fire one request per unassigned order; against
+// BigQuery that is thousands of concurrent DML statements and a guaranteed failure.
+async function assignEscalationOrdersBulk(items) {
+  if (!items.length) return 0;
+  const rows = items.map((i) => ({ ...bulkKeyOf(i), assigned_to: i.agentId }));
+  const { affectedRows } = await bq.query(
+    buildBulkAssignMerge(),
+    [bq.structArrayParam('items', BULK_ASSIGN_FIELDS, rows)],
+    { useQueryCache: false }
+  );
+  await bq.query(
+    `INSERT INTO \`${EVENTS}\` (parent_order, brand, awb_key, email, event, resolution, agent_remarks, ts)
+     SELECT parent_order, brand, awb_key, assigned_to, 'assigned', NULL, NULL, CURRENT_TIMESTAMP()
+     FROM UNNEST(@items)`,
+    [bq.structArrayParam('items', BULK_ASSIGN_FIELDS, rows)],
+    { useQueryCache: false }
+  );
+  return affectedRows;
+}
+
 module.exports = {
   ORDERS, EVENTS, awbKeyOf, buildQueueQuery,
   getEligibleOrders, getFreshLeads,
   getLiveEscalationAssignments, getEscalationAssignments, getOrderIndex,
+  updateOrder, batchUpdateOrders, assignEscalationOrder, unassignEscalationOrder,
+  assignEscalationOrdersBulk, buildBulkUpdateMerge, buildBulkAssignMerge,
 };

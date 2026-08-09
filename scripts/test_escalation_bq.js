@@ -15,9 +15,20 @@ function test(name, fn) {
   try { fn(); passed++; console.log(`  ok  ${name}`); }
   catch (e) { console.error(`FAIL  ${name}\n      ${e.message}`); process.exitCode = 1; }
 }
-async function testAsync(name, fn) {
-  try { await fn(); passed++; console.log(`  ok  ${name}`); }
-  catch (e) { console.error(`FAIL  ${name}\n      ${e.message}`); process.exitCode = 1; }
+// Async tests are QUEUED, not run inline. Each one stubs globalThis.fetch for the whole test -
+// tests spanning more than one fetch call (updateOrder's UPDATE + event insert, a reassignment's
+// several calls) suspend between calls, and running two such tests "concurrently" (unawaited at
+// module scope) lets a later test's stubFetch overwrite an earlier test's still-pending queue
+// mid-flight. Queuing and awaiting them one at a time below removes the race entirely.
+const asyncTests = [];
+function testAsync(name, fn) {
+  asyncTests.push({ name, fn });
+}
+async function runAsyncTests() {
+  for (const { name, fn } of asyncTests) {
+    try { await fn(); passed++; console.log(`  ok  ${name}`); }
+    catch (e) { console.error(`FAIL  ${name}\n      ${e.message}`); process.exitCode = 1; }
+  }
 }
 
 function stubFetch(responses) {
@@ -193,7 +204,112 @@ test('the data layer creates no tables', () => {
   assert.ok(!/CREATE TABLE/i.test(src), 'DDL belongs to scripts/escalation_bq_schema.py only');
 });
 
+/* ---------- Task 8: writes ---------- */
+
+// The column groups the app must never write. Kept in sync with
+// scripts/escalation_bq_schema.py's TICKET_COLUMNS and SHEET_COLUMNS by these tests failing loudly
+// if a write statement ever names one.
+const TICKET_COLUMNS = [
+  'added_date', 'query_class', 'query_category', 'delivery_partner_name', 'order_date',
+  'order_month', 'query_date', 'query_month', 'wh_name', 'ticket_number',
+];
+const SHEET_OWNED_COLUMNS = [
+  'total_times_consumer_reached', 'delivered_date', 'status_as_per_awb', 'solv_date',
+  'tat', 'update_from_logistics', 'city', 'state',
+];
+
+test('write statements never name a column owned by an ingest path', () => {
+  const statements = [ebq.buildBulkUpdateMerge(), ebq.buildBulkAssignMerge()];
+  statements.forEach((sql) => {
+    [...TICKET_COLUMNS, ...SHEET_OWNED_COLUMNS].forEach((c) => {
+      assert.ok(!new RegExp(`\\b${c}\\b`).test(sql),
+        `write statement must not touch ingest-owned "${c}"`);
+    });
+  });
+});
+
+testAsync('updateOrder issues one UPDATE on the row key, plus one event', async () => {
+  const calls = stubFetch([
+    { body: { jobComplete: true, numDmlAffectedRows: '1' } },
+    { body: { jobComplete: true, numDmlAffectedRows: '1' } },
+  ]);
+  const affected = await ebq.updateOrder(
+    { sheetTab: 'HYPHEN', parentOrder: 'HYP1', awbNumber: ' AWB1 ' },
+    { newOrderId: 'HYP2', newAwb: 'AWB9', newStatus: 'Reshipped', notes: 'done', resolvedBy: 'a@x.com' }
+  );
+  assert.strictEqual(affected, 1);
+  const update = JSON.parse(calls[0].init.body);
+  assert.match(update.query, /^UPDATE/);
+  assert.match(update.query, /brand\s*=\s*@brand/);
+  assert.match(update.query, /awb_key\s*=\s*@awb_key/);
+  assert.strictEqual(update.queryParameters.find((p) => p.name === 'brand').parameterValue.value, 'HYPHEN');
+  assert.strictEqual(update.queryParameters.find((p) => p.name === 'awb_key').parameterValue.value, 'awb1');
+  const event = JSON.parse(calls[1].init.body);
+  assert.match(event.query, /INSERT INTO `assignment_events`/);
+  assert.strictEqual(event.queryParameters.find((p) => p.name === 'event').parameterValue.value, 'resolved');
+});
+
+testAsync('batchUpdateOrders compiles N items into ONE statement', async () => {
+  const calls = stubFetch([
+    { body: { jobComplete: true, numDmlAffectedRows: '3' } },
+    { body: { jobComplete: true, numDmlAffectedRows: '3' } },
+  ]);
+  const items = ['HYP1', 'HYP2', 'HYP3'].map((p) => ({
+    sheetTab: 'HYPHEN', parentOrder: p, awbNumber: `awb-${p}`,
+    newOrderId: '-', newAwb: '-', newStatus: 'Delivered', notes: '', resolvedBy: 'a@x.com',
+  }));
+  assert.strictEqual(await ebq.batchUpdateOrders(items), 3);
+  assert.strictEqual(calls.length, 2, 'one MERGE and one event insert, never one per item');
+  assert.match(JSON.parse(calls[0].init.body).query, /UNNEST\(@items\)/);
+});
+
+testAsync('batchUpdateOrders with an empty list makes no BigQuery calls', async () => {
+  const calls = stubFetch([]);
+  assert.strictEqual(await ebq.batchUpdateOrders([]), 0);
+  assert.strictEqual(calls.length, 0);
+});
+
+testAsync('assignEscalationOrdersBulk compiles 4048 assignments into ONE statement', async () => {
+  const calls = stubFetch([
+    { body: { jobComplete: true, numDmlAffectedRows: '4048' } },
+    { body: { jobComplete: true, numDmlAffectedRows: '4048' } },
+  ]);
+  const items = Array.from({ length: 4048 }, (_, i) => ({
+    sheetTab: 'HYPHEN', parentOrder: `HYP${i}`, awbNumber: `AWB${i}`, agentId: 'a@x.com',
+  }));
+  assert.strictEqual(await ebq.assignEscalationOrdersBulk(items), 4048);
+  assert.strictEqual(calls.length, 2, '4048 rows must not become 4048 DML statements');
+});
+
+testAsync('reassignment closes the previous cycle before opening the new one', async () => {
+  const calls = stubFetch([
+    { body: { jobComplete: true, schema: { fields: [{ name: 'assigned_to' }] }, rows: [{ f: [{ v: 'old@x.com' }] }] } },
+    { body: { jobComplete: true, numDmlAffectedRows: '1' } },
+    { body: { jobComplete: true, numDmlAffectedRows: '1' } },
+    { body: { jobComplete: true, numDmlAffectedRows: '1' } },
+  ]);
+  await ebq.assignEscalationOrder({ sheetTab: 'HYPHEN', parentOrder: 'HYP1', awbNumber: 'AWB1' }, 'new@x.com');
+  const away = JSON.parse(calls[1].init.body);
+  assert.strictEqual(away.queryParameters.find((p) => p.name === 'event').parameterValue.value, 'reassigned_away');
+  assert.strictEqual(away.queryParameters.find((p) => p.name === 'email').parameterValue.value, 'old@x.com');
+  const assigned = JSON.parse(calls[3].init.body);
+  assert.strictEqual(assigned.queryParameters.find((p) => p.name === 'event').parameterValue.value, 'assigned');
+});
+
+testAsync('re-assigning to the same agent writes no reassigned_away event', async () => {
+  const calls = stubFetch([
+    { body: { jobComplete: true, schema: { fields: [{ name: 'assigned_to' }] }, rows: [{ f: [{ v: 'same@x.com' }] }] } },
+    { body: { jobComplete: true, numDmlAffectedRows: '1' } },
+    { body: { jobComplete: true, numDmlAffectedRows: '1' } },
+  ]);
+  await ebq.assignEscalationOrder({ sheetTab: 'HYPHEN', parentOrder: 'HYP1', awbNumber: 'AWB1' }, 'same@x.com');
+  const inserts = calls
+    .map((c) => JSON.parse(c.init.body).query)
+    .filter((q) => /INSERT INTO/.test(q));
+  assert.strictEqual(inserts.length, 1, 'only the assigned event');
+});
+
 /* ---------- summary ---------- */
-process.on('exit', () => {
+runAsyncTests().then(() => {
   console.log(`\n${passed} passed${process.exitCode ? ', FAILURES ABOVE' : ''}`);
 });
