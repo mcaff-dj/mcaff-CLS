@@ -491,6 +491,17 @@ async function bootstrapPgSchema() {
   // scripts/assign_ndr_leads.py's agent_reason_filter - a lead whose reason no online agent's
   // filter matches is left unassigned rather than forced onto someone.
   await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS ndr_reason_filter TEXT`;
+  // Hard filter on a lead's Payment Mode (NDR Calling only, sheet column L) - same "'' = no
+  // restriction" contract as attempt_count_filter/ndr_reason_filter above, applied to EVERY
+  // lead (unlike RTO's reassign_payment_mode, which only ever gates reassignments). Exact,
+  // case-insensitive match against 'Prepaid' or 'COD' - a fixed, controlled value set, unlike
+  // the free-text ndr_reason_filter. See scripts/assign_ndr_leads.py's agent_payment_mode_filter.
+  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS ndr_payment_mode_filter TEXT`;
+  // Hard filter on a lead's Brand - derived from Order ID (sheet column A), not a sheet column
+  // of its own: an order ID starting with "HYP" is Hyphen, everything else is mCaffeine. Same
+  // "'' = no restriction" contract as the filters above. See scripts/assign_ndr_leads.py's
+  // brand_of/agent_brand_filter.
+  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS ndr_brand_filter TEXT`;
   // A process's own admin-defined disposition list - e.g. NDR Calling's Admin Panel, where
   // (unlike RTO) there is no hardcoded disposition set in RtoCrmClient.js to fall back to, so
   // an admin has to be able to build one from scratch. Deliberately per-process (process_key,
@@ -1320,7 +1331,8 @@ async function getCallingProcessAgents(processKey) {
   `;
   const { rows: state } = await pgSql`
     SELECT email, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons,
-           reassign_payment_mode, attempt_count_filter, ndr_reason_filter, updated_at, updated_by
+           reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter,
+           ndr_brand_filter, updated_at, updated_by
     FROM calling_agent_process WHERE process_key = ${processKey}
   `;
   const byEmail = {};
@@ -1339,6 +1351,8 @@ async function getCallingProcessAgents(processKey) {
       reassignPaymentMode: (s && s.reassign_payment_mode) || '',
       attemptCountFilter: (s && s.attempt_count_filter) || '',
       ndrReasonFilter: (s && s.ndr_reason_filter) || '',
+      ndrPaymentModeFilter: (s && s.ndr_payment_mode_filter) || '',
+      ndrBrandFilter: (s && s.ndr_brand_filter) || '',
       updatedAt: (s && s.updated_at) || null,
       updatedBy: (s && s.updated_by) || null,
     };
@@ -1347,7 +1361,7 @@ async function getCallingProcessAgents(processKey) {
 
 // Upserts one agent's status and/or quota for one process. Either field may be omitted, so an
 // agent flipping their own status can't accidentally reset a quota an admin set.
-async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons, reassignPaymentMode, attemptCountFilter, ndrReasonFilter } = {}, updatedBy) {
+async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons, reassignPaymentMode, attemptCountFilter, ndrReasonFilter, ndrPaymentModeFilter, ndrBrandFilter } = {}, updatedBy) {
   await ensurePgSchema();
   const key = String(email || '').trim().toLowerCase();
   if (!processKey || !key) throw new Error('processKey and email are required');
@@ -1394,9 +1408,22 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
   const attemptFilterText = attemptCountFilter === undefined ? null : String(attemptCountFilter || '').trim();
   // Same "'' is a real, distinct-from-NULL value" contract as attemptFilterText above.
   const ndrReasonFilterText = ndrReasonFilter === undefined ? null : String(ndrReasonFilter || '').trim();
+  // Fixed, controlled value set (unlike ndrReasonFilter's free text) - same validation shape as
+  // reassignPaymentMode above, but this one gates every NDR lead, not just reassignments.
+  if (ndrPaymentModeFilter !== undefined && ndrPaymentModeFilter !== '' &&
+      ndrPaymentModeFilter !== 'Prepaid' && ndrPaymentModeFilter !== 'COD') {
+    throw new Error("ndrPaymentModeFilter must be '', 'Prepaid', or 'COD'");
+  }
+  const ndrPaymentModeFilterText = ndrPaymentModeFilter === undefined ? null : String(ndrPaymentModeFilter || '').trim();
+  // Same fixed-value-set validation as ndrPaymentModeFilter above.
+  if (ndrBrandFilter !== undefined && ndrBrandFilter !== '' &&
+      ndrBrandFilter !== 'Hyphen' && ndrBrandFilter !== 'mCaffeine') {
+    throw new Error("ndrBrandFilter must be '', 'Hyphen', or 'mCaffeine'");
+  }
+  const ndrBrandFilterText = ndrBrandFilter === undefined ? null : String(ndrBrandFilter || '').trim();
   await pgSql`
-    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, reassign_payment_mode, attempt_count_filter, ndr_reason_filter, updated_at, updated_by)
-    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, ${reassignModeText || ''}, ${attemptFilterText || ''}, ${ndrReasonFilterText || ''}, now(), ${updatedBy || null})
+    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter, ndr_brand_filter, updated_at, updated_by)
+    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, ${reassignModeText || ''}, ${attemptFilterText || ''}, ${ndrReasonFilterText || ''}, ${ndrPaymentModeFilterText || ''}, ${ndrBrandFilterText || ''}, now(), ${updatedBy || null})
     ON CONFLICT (email, process_key) DO UPDATE
       SET status = COALESCE(${status || null}, calling_agent_process.status),
           max_quota = COALESCE(${quota}, calling_agent_process.max_quota),
@@ -1406,6 +1433,8 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
           reassign_payment_mode = COALESCE(${reassignModeText}, calling_agent_process.reassign_payment_mode),
           attempt_count_filter = COALESCE(${attemptFilterText}, calling_agent_process.attempt_count_filter),
           ndr_reason_filter = COALESCE(${ndrReasonFilterText}, calling_agent_process.ndr_reason_filter),
+          ndr_payment_mode_filter = COALESCE(${ndrPaymentModeFilterText}, calling_agent_process.ndr_payment_mode_filter),
+          ndr_brand_filter = COALESCE(${ndrBrandFilterText}, calling_agent_process.ndr_brand_filter),
           updated_at = now(),
           updated_by = ${updatedBy || null}
   `;
