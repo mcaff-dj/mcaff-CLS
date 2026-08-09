@@ -84,9 +84,11 @@ def backfill_assignments():
         raise
 
     import os
-    conn_str = os.environ.get("DATABASE_URL")
+    # Same env var api/_lib/db.js's getPgPool() reads (POSTGRES_URL, the Supabase pooler) - not
+    # DATABASE_URL, which this repo does not use.
+    conn_str = os.environ.get("POSTGRES_URL")
     if not conn_str:
-        raise RuntimeError("DATABASE_URL is not set - cannot read escalation_lead_assignments.")
+        raise RuntimeError("POSTGRES_URL is not set - cannot read escalation_lead_assignments.")
 
     import lib
     with lib.get_pg_connection(conn_str) as conn:
