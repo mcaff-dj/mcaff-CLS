@@ -90,6 +90,109 @@ test('the transport exposes no ingest surface', () => {
   assert.strictEqual(bq.loadNdjson, undefined, 'ingest belongs to Python, not the request path');
 });
 
+/* ---------- Task 7: reads ---------- */
+
+const ebq = require('../api/_lib/escalationBq');
+
+test('the queue predicate matches the old JS filter, including the forced-RTO TAT case', () => {
+  const sql = ebq.buildQueueQuery('queue');
+  assert.match(sql, /LOWER\(status_as_per_awb\)\s+LIKE\s+'%rto%'/);
+  assert.match(sql, /LOWER\(update_from_logistics\)\s+LIKE\s+'%rto%'/);
+  assert.match(sql, /COALESCE\(status,\s*''\)\s*=\s*''/);
+  assert.match(sql, /deleted_from_sheet_at IS NULL/);
+  // Deliberately NOT filtered on tat: every pending RTO row carries "Forced to be marked as
+  // RTO" there, so gating the queue on the open-TAT values empties it.
+  assert.ok(!/\btat\b/.test(sql.slice(sql.indexOf('WHERE'))), 'queue must not filter on tat');
+});
+
+test('the fresh-leads predicate filters on tat alone', () => {
+  const sql = ebq.buildQueueQuery('freshLeads');
+  assert.match(sql, /LOWER\(TRIM\(COALESCE\(tat,\s*''\)\)\)\s+IN\s+\('',\s*'unresolved',\s*'#n\/a'\)/);
+  const where = sql.slice(sql.indexOf('WHERE'));
+  assert.ok(!/status_as_per_awb/.test(where), 'fresh leads ignore the RTO columns');
+  assert.ok(!/COALESCE\(status,/.test(where), 'fresh leads ignore resolution status');
+});
+
+testAsync('order objects expose brand as sheetTab so the client is unchanged', async () => {
+  stubFetch([{ body: {
+    jobComplete: true,
+    schema: { fields: [
+      { name: 'brand' }, { name: 'parent_order' }, { name: 'awb_number' },
+      { name: 'status_as_per_awb' }, { name: 'query_category' }, { name: 'row_number' },
+      { name: 'ticket_number' },
+    ] },
+    rows: [{ f: [
+      { v: 'HYPHEN' }, { v: 'HYP32557370' }, { v: 'AWB1' }, { v: 'RTO' },
+      { v: 'Delayed Order' }, { v: '2' }, { v: 'TKT-9' },
+    ] }],
+  } }]);
+  const [order] = await ebq.getEligibleOrders();
+  assert.strictEqual(order.sheetTab, 'HYPHEN', 'brand is surfaced under the key rowKey() uses');
+  assert.strictEqual(order.parentOrder, 'HYP32557370');
+  assert.strictEqual(order.awbNumber, 'AWB1');
+  assert.strictEqual(order.statusAsPerAwb, 'RTO');
+  assert.strictEqual(order.rowNumber, 2, 'row_number comes back as a number');
+  assert.strictEqual(order.ticketNumber, 'TKT-9');
+});
+
+testAsync('getLiveEscalationAssignments reads orders, not the event log', async () => {
+  const calls = stubFetch([{ body: {
+    jobComplete: true,
+    schema: { fields: [{ name: 'parent_order' }, { name: 'assigned_to' }] },
+    rows: [{ f: [{ v: 'HYP1' }, { v: 'a@x.com' }] }],
+  } }]);
+  const live = await ebq.getLiveEscalationAssignments();
+  assert.deepStrictEqual(live, [{ parentOrder: 'HYP1', email: 'a@x.com' }]);
+  const sql = JSON.parse(calls[0].init.body).query;
+  assert.ok(!/assignment_events/.test(sql), 'the live map must not scan the event log');
+  assert.match(sql, /assigned_to IS NOT NULL/);
+  assert.match(sql, /resolved_at IS NULL/);
+});
+
+testAsync('getEscalationAssignments pivots events into assignment cycles', async () => {
+  const calls = stubFetch([{ body: {
+    jobComplete: true,
+    schema: { fields: [
+      { name: 'parent_order' }, { name: 'email' }, { name: 'assigned_at' },
+      { name: 'reassigned_away_at' }, { name: 'resolved_at' }, { name: 'resolution' },
+      { name: 'agent_remarks' },
+    ] },
+    rows: [{ f: [
+      { v: 'HYP1' }, { v: 'a@x.com' }, { v: '2026-08-09T05:00:00Z' },
+      { v: null }, { v: '2026-08-09T06:00:00Z' }, { v: 'Delivered' }, { v: 'ok' },
+    ] }],
+  } }]);
+  const [row] = await ebq.getEscalationAssignments();
+  assert.deepStrictEqual(row, {
+    parentOrder: 'HYP1', email: 'a@x.com', assignedAt: '2026-08-09T05:00:00Z',
+    reassignedAwayAt: null, resolvedAt: '2026-08-09T06:00:00Z',
+    resolution: 'Delivered', agentRemarks: 'ok',
+  });
+  assert.match(JSON.parse(calls[0].init.body).query, /LIMIT 5000/);
+});
+
+testAsync('getOrderIndex builds the parent and parent+awb maps the CSV import needs', async () => {
+  stubFetch([{ body: {
+    jobComplete: true,
+    schema: { fields: [{ name: 'brand' }, { name: 'parent_order' }, { name: 'awb_number' }, { name: 'awb_key' }] },
+    rows: [
+      { f: [{ v: 'HYPHEN' }, { v: 'HYP1' }, { v: 'AWB1' }, { v: 'awb1' }] },
+      { f: [{ v: 'HYPHEN' }, { v: 'HYP1' }, { v: 'AWB9' }, { v: 'awb9' }] },
+    ],
+  } }]);
+  const { byParent, byParentAwb } = await ebq.getOrderIndex();
+  assert.deepStrictEqual(byParent.get('hyp1'),
+    { sheetTab: 'HYPHEN', parentOrder: 'HYP1', awbNumber: 'AWB1' });
+  assert.strictEqual(byParentAwb.get('hyp1||awb9').awbNumber, 'AWB9',
+    'the exact key still resolves the second row');
+});
+
+test('the data layer creates no tables', () => {
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, '../api/_lib/escalationBq.js'), 'utf8');
+  assert.ok(!/CREATE TABLE/i.test(src), 'DDL belongs to scripts/escalation_bq_schema.py only');
+});
+
 /* ---------- summary ---------- */
 process.on('exit', () => {
   console.log(`\n${passed} passed${process.exitCode ? ', FAILURES ABOVE' : ''}`);
