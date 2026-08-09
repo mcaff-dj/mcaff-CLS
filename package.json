@@ -5,7 +5,8 @@
   "description": "Next.js frontend (app/) + access-gated report serving API (api/, deployed to Lambda).",
   "scripts": {
     "dev": "next dev",
-    "build": "next build"
+    "build": "next build",
+    "test:escalation": "node scripts/test_escalation_bq.js"
   },
   "dependencies": {
     "mysql2": "^3.11.0",
