@@ -535,19 +535,23 @@ def _nps_month_label(ym):
     return pretty_month(nps_month_label(yr, mo))
 
 
-def _prodwise_sparkline(months):
-    """Inline SVG sparkline of NPS% over sorted months + directional arrow.
+def _prodwise_sparkline(months, value_fn=None):
+    """Inline SVG sparkline over sorted months + directional arrow.
+    value_fn(month_dict) -> float|None; defaults to nps_pct.
     Returns (svg_html, spark_json_str): svg_html is the initial full-range render;
-    spark_json_str is {"YYYY-MM": nps_pct_or_null} for the data-spark attribute so the
+    spark_json_str is {"YYYY-MM": value_or_null} for a data-* attribute so the
     Year-filter JS can redraw filtered to active years only."""
+    if value_fn is None:
+        value_fn = lambda m: m["nps_pct"]
     pts = sorted(
-        ((ym, m["nps_pct"]) for ym, m in months.items() if m["nps_pct"] is not None),
+        ((ym, value_fn(m)) for ym, m in months.items() if value_fn(m) is not None),
         key=lambda t: t[0],
     )
-    spark_json = "{" + ",".join(
-        f'"{ym}":{m["nps_pct"] if m["nps_pct"] is not None else "null"}'
-        for ym, m in sorted(months.items())
-    ) + "}"
+    json_parts = []
+    for ym, m in sorted(months.items()):
+        v = value_fn(m)
+        json_parts.append(f'"{ym}":{v if v is not None else "null"}')
+    spark_json = "{" + ",".join(json_parts) + "}"
     if len(pts) < 2:
         return ("", spark_json)
     vals = [v for _, v in pts]
@@ -639,7 +643,12 @@ def _build_prodwise_heatmap(capped):
             label = fnum(avg) if avg is not None else "&ndash;"
             title = f" title='{h_enc(r['product'])} &middot; {h_enc(_nps_month_label(ym))}: {n0(m['responses'])} responses'" if m else ""
             cells.append(f"<td class='num hm-cell' data-yr='{ym[:4]}'{cell_style(avg)}{title}>{label}</td>")
-        body_rows.append(f"<tr class='{z}'><td class='rowlabel'>{h_enc(r['product'])}</td>{''.join(cells)}</tr>")
+        spark_svg, spark_json = _prodwise_sparkline(r["months"], value_fn=_avg_nps)
+        body_rows.append(
+            f"<tr class='{z}' data-hm-spark='{spark_json}'>"
+            f"<td class='rowlabel'>{h_enc(r['product'])}</td>{''.join(cells)}"
+            f"<td class='num' style='min-width:80px'>{spark_svg}</td></tr>"
+        )
 
     legend = (
         "<div class='legend-row' style='justify-content:center;gap:10px;'>"
@@ -654,7 +663,7 @@ def _build_prodwise_heatmap(capped):
         "<p class='desc'>Avg NPS score (1&ndash;10) per product per month. "
         "Color midpoint is 7 (promoter threshold); blank cells had no survey responses that month.</p>"
         f"{legend}<div class='pivot-scroll'><table class='pivot-table'><thead><tr>"
-        f"<th class='corner'>Product</th>{head_cells}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
+        f"<th class='corner'>Product</th>{head_cells}<th>Trend</th></tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
     )
 
 
@@ -760,6 +769,12 @@ def build_product_wise_nps_panel(ctx):
           .sort().map(function(ym){ return [ym, sm[ym]]; });
         drawSpark(c[8], pts);
       }
+    });
+    document.querySelectorAll('#panel-prodwisenps tr[data-hm-spark]').forEach(function(tr){
+      var sm = JSON.parse(tr.getAttribute('data-hm-spark'));
+      var pts = Object.keys(sm).filter(function(ym){ return sm[ym] !== null && activeYears.has(ym.slice(0,4)); })
+        .sort().map(function(ym){ return [ym, sm[ym]]; });
+      drawSpark(tr.lastElementChild, pts);
     });
   });
 })();
