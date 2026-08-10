@@ -181,6 +181,7 @@ def fetch_product_wise_nps(mysql_brand):
                SUM(nps_category = "Detractor") AS detractors
         FROM nps_product
         WHERE brand = %s AND product_name IS NOT NULL AND TRIM(product_name) NOT IN ('', 'NA')
+          AND STR_TO_DATE(submitted_date, '%%d/%%m/%%Y') >= '2025-04-01'
         GROUP BY product_name, ym
         ORDER BY product_name, ym
         """,

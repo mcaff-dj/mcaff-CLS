@@ -233,8 +233,11 @@ def main():
         prodwise_nps = nps_cache.get("prodwise_nps")
         if prodwise_nps and "months" not in prodwise_nps[0]:
             prodwise_nps = None
+        # Cache built before the Apr-2025 cutoff will have pre-2025-04 month keys - re-query.
+        if prodwise_nps and any(ym < "2025-04" for r in prodwise_nps for ym in r.get("months", {})):
+            prodwise_nps = None
         if prodwise_nps is None:
-            print(f"[{b['brand']}] no cached product-wise NPS (or missing monthly breakdown) yet, querying...")
+            print(f"[{b['brand']}] no cached product-wise NPS (or stale pre-Apr-2025 cache) yet, querying...")
             prodwise_nps = nps_source.fetch_product_wise_nps(b["nps_mysql_brand"])
             nps_cache["prodwise_nps"] = prodwise_nps
             with open(nps_cache_path, "w", encoding="utf-8") as f:
