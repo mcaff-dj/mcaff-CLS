@@ -96,13 +96,19 @@ def ensure_table(project, dataset, table, schema_fields):
     resp.raise_for_status()
 
 
-def load_ndjson(project, dataset, table, rows, timeout_sec=180):
-    """Appends rows via a load job (NEWLINE_DELIMITED_JSON, WRITE_APPEND),
-    uploaded as a multipart request (job config JSON + ndjson body) since
-    there's no google-cloud-bigquery client here to build one. Dedup is the
-    caller's job (query BigQuery for known keys before calling this) - a load
-    job has no per-row insertId dedup the way streaming inserts do, but this
-    project can't stream anyway (see module docstring)."""
+def load_ndjson(project, dataset, table, rows, timeout_sec=180, write_disposition="WRITE_APPEND"):
+    """Loads rows via a load job (NEWLINE_DELIMITED_JSON), uploaded as a
+    multipart request (job config JSON + ndjson body) since there's no
+    google-cloud-bigquery client here to build one. Dedup is the caller's job
+    (query BigQuery for known keys before calling this) - a load job has no
+    per-row insertId dedup the way streaming inserts do, but this project
+    can't stream anyway (see module docstring).
+
+    write_disposition="WRITE_TRUNCATE" replaces the whole table atomically on
+    job success (a failed job leaves the existing table untouched) - the only
+    way to correct already-loaded rows in this Sandbox project, since DML
+    (UPDATE/MERGE/DELETE) is billing-gated ("DML queries are not allowed in
+    the free tier") the same way streaming inserts are."""
     if not rows:
         return 0
     ndjson = "\n".join(json.dumps(r) for r in rows)
@@ -111,7 +117,7 @@ def load_ndjson(project, dataset, table, rows, timeout_sec=180):
             "load": {
                 "destinationTable": {"projectId": project, "datasetId": dataset, "tableId": table},
                 "sourceFormat": "NEWLINE_DELIMITED_JSON",
-                "writeDisposition": "WRITE_APPEND",
+                "writeDisposition": write_disposition,
             }
         }
     }
