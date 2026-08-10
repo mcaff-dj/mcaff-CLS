@@ -99,6 +99,19 @@ def fetch_today_delivery_tickets(table, since=None):
     return rows
 
 
+MCAFF_ORDER_PREFIX = "MCaff"
+
+
+def _awb_lookup_key(parent_order):
+    """Item_level_data.Display_Order_Code drops the 'MCaff' brand prefix for
+    mCaffeine orders - MCaff9097914 is stored there as plain 9097914 - while
+    HYPHEN/Fien orders keep their prefix as-is. Strip it here, at the query
+    boundary, so callers/output still key off the ticket's own parent_order."""
+    if parent_order.startswith(MCAFF_ORDER_PREFIX):
+        return parent_order[len(MCAFF_ORDER_PREFIX):]
+    return parent_order
+
+
 def fetch_awb_by_order(parent_orders):
     """Display_Order_Code -> Tracking_Number, for orders whose ticket-level AWB is blank.
     Item_level_data has one row per order item/sync channel, so an order can map to more
@@ -106,17 +119,19 @@ def fetch_awb_by_order(parent_orders):
     "first row seen per order wins" below picks the latest one."""
     if not parent_orders:
         return {}
-    placeholders = ",".join(["%s"] * len(parent_orders))
+    key_by_order = {order: _awb_lookup_key(order) for order in parent_orders}
+    lookup_keys = sorted(set(key_by_order.values()))
+    placeholders = ",".join(["%s"] * len(lookup_keys))
     rows = mysql_lib.query(
         f"SELECT Display_Order_Code, Tracking_Number FROM Item_level_data "
         f"WHERE Display_Order_Code IN ({placeholders}) AND Tracking_Number IS NOT NULL AND Tracking_Number != '' "
         f"ORDER BY Created DESC",
-        tuple(parent_orders), database="mcaff_prod",
+        tuple(lookup_keys), database="mcaff_prod",
     )
-    out = {}
+    awb_by_key = {}
     for order_code, tracking in (rows or []):
-        out.setdefault(order_code, tracking)
-    return out
+        awb_by_key.setdefault(order_code, tracking)
+    return {order: awb_by_key[key] for order, key in key_by_order.items() if key in awb_by_key}
 
 
 def fill_missing_awb(rows):
@@ -267,6 +282,9 @@ def self_check():
     assert pick_formula_sources(block) == {11: 3}, pick_formula_sources(block)
     # Literal values are not formulas.
     assert pick_formula_sources([["RTO", "12"]]) == {}
+    # MCaff-prefixed orders look up by their bare numeric ID; other brands keep their prefix.
+    assert _awb_lookup_key("MCaff9097914") == "9097914"
+    assert _awb_lookup_key("HYP37526450") == "HYP37526450"
     print("self-check ok")
 
 
