@@ -108,7 +108,15 @@ def load_ndjson(project, dataset, table, rows, timeout_sec=180, write_dispositio
     job success (a failed job leaves the existing table untouched) - the only
     way to correct already-loaded rows in this Sandbox project, since DML
     (UPDATE/MERGE/DELETE) is billing-gated ("DML queries are not allowed in
-    the free tier") the same way streaming inserts are."""
+    the free tier") the same way streaming inserts are.
+
+    autodetect=True: a load job with NO explicit schema and NO autodetect
+    fails outright ("No schema specified on job or table") the first time it
+    targets a table that doesn't exist yet - there is no implicit "infer from
+    the payload" fallback the way CSV loads have. This was masked for
+    Delivery_escalation, whose schema was defined once via the (now-deleted)
+    ensure_table call before rebuild_table ever ran; a genuinely first-run
+    table like orders_sheet_columns has no such head start."""
     if not rows:
         return 0
     ndjson = "\n".join(json.dumps(r) for r in rows)
@@ -118,6 +126,7 @@ def load_ndjson(project, dataset, table, rows, timeout_sec=180, write_dispositio
                 "destinationTable": {"projectId": project, "datasetId": dataset, "tableId": table},
                 "sourceFormat": "NEWLINE_DELIMITED_JSON",
                 "writeDisposition": write_disposition,
+                "autodetect": True,
             }
         }
     }
