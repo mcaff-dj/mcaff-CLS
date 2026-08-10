@@ -19,6 +19,7 @@ from gen_insights import build_insights_card, get_category_insight_items, get_de
 from gen_weekly import build_weekly_class_block, build_weekly_delivery_block, get_week_num, is_partial_week, week_col_header
 from gen_monthly import build_monthly_analysis_panel
 from gen_raw_export import raw_download_link
+from nps_source import _month_label as nps_month_label
 from report_context import ci_key, fnum, h_enc, j_enc, n0, pretty_month, round1, sort_keys_by_last_period, year_of
 
 
@@ -527,12 +528,116 @@ def build_csat_panel(ctx):
             f'<p class="desc">Monthly survey responses (bars, right axis) against CSAT out of 5 (line, left axis).</p>{a}</section><section>{i}</section>{insights}</div>')
 
 
+def _nps_month_label(ym):
+    """'2026-07' -> "7_Jul'26" (nps_source._month_label's sheet-style shape) -> "Jul '26"
+    (pretty_month's display shape), matching every other month label on the page."""
+    yr, mo = int(ym[:4]), int(ym[5:7])
+    return pretty_month(nps_month_label(yr, mo))
+
+
+def _prodwise_year_json(months, years):
+    """months: ym ('YYYY-MM') -> per-month stats dict (see nps_source.fetch_product_wise_nps).
+    Returns a compact {"<year>":[responses,sum_overall,cnt_overall,sum_packaging,cnt_packaging,
+    promoters,passives,detractors]} JSON object (plain numbers only, safe unescaped inside a
+    single-quoted HTML attribute) - the client-side recompute in build_product_wise_nps_panel's
+    <script> re-sums these per the active Year chips so the summary table's averages stay exact
+    weighted averages rather than an average-of-averages.
+
+    `years` is ctx.distinct_years - derived from the ticket sheet's own month range, which may
+    not span every year nps_product happens to have rows for (its docstring notes MySQL carries
+    NPS history the sheet itself never had). Any month whose year isn't one of the toggleable
+    Year chips falls into "_other" instead of being silently dropped - the JS below always
+    includes "_other" unconditionally (there's no chip to filter it by anyway), so the
+    default "every chip active" view still adds up to the exact same lifetime total this table
+    showed before the Year filter was wired in here."""
+    buckets = {yr: [0, 0.0, 0, 0.0, 0, 0, 0, 0] for yr in years}
+    other = [0, 0.0, 0, 0.0, 0, 0, 0, 0]
+    for ym, m in months.items():
+        b = buckets.get(ym[:4], other)
+        b[0] += m["responses"]; b[1] += m["sum_overall"]; b[2] += m["cnt_overall"]
+        b[3] += m["sum_packaging"]; b[4] += m["cnt_packaging"]
+        b[5] += m["promoters"]; b[6] += m["passives"]; b[7] += m["detractors"]
+    parts = [f'"{yr}":[{v[0]},{round(v[1], 2)},{v[2]},{round(v[3], 2)},{v[4]},{v[5]},{v[6]},{v[7]}]' for yr, v in buckets.items()]
+    if any(other):
+        parts.append(f'"_other":[{other[0]},{round(other[1], 2)},{other[2]},{round(other[3], 2)},{other[4]},{other[5]},{other[6]},{other[7]}]')
+    return "{" + ",".join(parts) + "}"
+
+
+def _build_prodwise_heatmap(capped):
+    """Product x month NPS% heatmap for the same capped (top-N by volume) product set as the
+    summary table above. NPS% = (Promoters - Detractors) / Responses * 100 per (product, month)
+    - the same standard NPS definition the NPS - Overall/Product charts already use (build_combo2),
+    not the raw 0-10 "Avg NPS" score column the summary table shows - that score has no natural
+    zero-centered polarity, so it doesn't make a sensible diverging heatmap value.
+
+    Colored with this report's own established good/bad convention (--s2 aqua / --s6 red, see
+    gen_insights.py's "good"/"crit" tags) via CSS color-mix() against the neutral --grid token,
+    so it stays theme-aware for free with zero JS. Month columns/cells carry the standard
+    data-yr attribute, so the existing Year-chip sweep (gen_panels.py's toggleYearChip) hides
+    out-of-year columns with no extra JS - just like every category pivot table."""
+    all_yms = sorted({ym for r in capped for ym in r["months"]})
+    if not all_yms:
+        return ""
+
+    all_vals = [m["nps_pct"] for r in capped for m in r["months"].values() if m["nps_pct"] is not None]
+    # ponytail: domain is the plain +-max(|actual value|) spread (floor 10 so a razor-flat
+    # month doesn't divide by ~0), not percentile-clipped - a single outlier month/product
+    # would wash out the rest of the scale's contrast; re-clip to e.g. p5/p95 if that shows up.
+    domain = max(10.0, max((abs(v) for v in all_vals), default=0.0))
+
+    def cell_style(pct):
+        if pct is None:
+            return ""
+        t = max(-1.0, min(1.0, pct / domain))
+        slot = "--s2" if t >= 0 else "--s6"
+        mix = round(abs(t) * 70)  # capped at 70% tint so the number stays legible at the extremes
+        return f" style=\"background:color-mix(in oklab, var(--grid) {100 - mix}%, var({slot}) {mix}%)\""
+
+    head_cells = "".join(f"<th class='month-hdr' data-yr='{ym[:4]}'>{h_enc(_nps_month_label(ym))}</th>" for ym in all_yms)
+
+    body_rows = []
+    for i, r in enumerate(capped):
+        z = "zebra" if i % 2 == 1 else ""
+        cells = []
+        for ym in all_yms:
+            m = r["months"].get(ym)
+            pct = m["nps_pct"] if m else None
+            label = f"{fnum(pct)}%" if pct is not None else "&ndash;"
+            title = f" title='{h_enc(r['product'])} &middot; {h_enc(_nps_month_label(ym))}: {n0(m['responses'])} responses'" if m else ""
+            cells.append(f"<td class='num hm-cell' data-yr='{ym[:4]}'{cell_style(pct)}{title}>{label}</td>")
+        body_rows.append(f"<tr class='{z}'><td class='rowlabel'>{h_enc(r['product'])}</td>{''.join(cells)}</tr>")
+
+    legend = (
+        "<div class='legend-row' style='justify-content:center;gap:10px;'>"
+        f"<span class='lname'>Detractor-heavy (&minus;{n0(domain)}%)</span>"
+        "<span style='display:inline-block;width:140px;height:10px;border-radius:5px;"
+        "background:linear-gradient(to right, var(--s6), var(--grid), var(--s2));'></span>"
+        f"<span class='lname'>Promoter-heavy (+{n0(domain)}%)</span></div>"
+    )
+
+    return (
+        "<div class='pivot-wrap'><div class='pivot-title'>Product wise NPS &mdash; Monthly Heatmap</div>"
+        "<p class='desc'>NPS% ((Promoters &minus; Detractors) &divide; Responses) per product per month. "
+        "Colored relative to this table's own range; blank cells had no survey responses that month.</p>"
+        f"{legend}<div class='pivot-scroll'><table class='pivot-table'><thead><tr>"
+        f"<th class='corner'>Product</th>{head_cells}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
+    )
+
+
 def build_product_wise_nps_panel(ctx):
     """Product wise NPS: nps_product grouped by product name (ctx.prodwise_nps, see
     nps_source.fetch_product_wise_nps) - a plain read-through table like RTO-Conversion's,
     not derived from ticket rows. Capped to the top PRODWISE_NPS_CAP products by response
     volume (already sorted desc by the query) so a long tail of 1-response products doesn't
-    turn this into an unusable wall of rows."""
+    turn this into an unusable wall of rows.
+
+    The summary table's Responses/Avg NPS/.../Detractor% are lifetime-per-product aggregates,
+    so unlike the category-pivot tables (which just hide month *columns*) there's no column to
+    hide for the Year filter - each row's per-year sums are embedded instead (data-py, see
+    _prodwise_year_json) and a small script re-derives every visible number from only the active
+    years, registered via window.registerYearChart so it reacts to the same Year chips as every
+    other table/chart on the page. Weekly stays out of scope here, same as NPS/CSAT above (no
+    .gran-weekly wiring) - survey responses have no meaningful weekly bucket to show."""
     rows = ctx.prodwise_nps or []
     if not rows:
         return ('  <div class="tab-panel" id="panel-prodwisenps"><section><h2>Product wise NPS</h2>'
@@ -549,11 +654,14 @@ def build_product_wise_nps_panel(ctx):
     def fmt_pct(v):
         return f"{fnum(v)}%" if v is not None else "&ndash;"
 
+    year_aware = len(ctx.distinct_years) > 1
+
     body_rows = []
     for i, r in enumerate(capped):
         z = "zebra" if i % 2 == 1 else ""
+        py_attr = f" data-py='{_prodwise_year_json(r['months'], ctx.distinct_years)}'" if year_aware else ""
         body_rows.append(
-            f"<tr class='{z}'><td class='rowlabel'>{h_enc(r['product'])}</td>"
+            f"<tr class='{z}'{py_attr}><td class='rowlabel'>{h_enc(r['product'])}</td>"
             f"<td class='num'>{n0(r['responses'])}</td><td class='num'>{fmt_score(r['avg_overall_nps'])}</td>"
             f"<td class='num'>{fmt_score(r['avg_packaging_score'])}</td><td class='num'>{n0(r['promoters'])}</td>"
             f"<td class='num'>{n0(r['passives'])}</td><td class='num'>{n0(r['detractors'])}</td>"
@@ -565,12 +673,46 @@ def build_product_wise_nps_panel(ctx):
              "<th>Avg NPS</th><th>Avg Packaging Score</th><th>Promoters</th><th>Passives</th><th>Detractors</th>"
              f"<th>Detractor %</th></tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>")
 
+    year_script = ""
+    if year_aware:
+        year_script = """<script>
+(function(){
+  function fmt1(v){ if(v==null) return '–'; v = Math.round(v*10)/10; return (v===Math.trunc(v)) ? String(v) : v.toFixed(1); }
+  window.registerYearChart(function(){
+    var activeYears = window.REPORT_ACTIVE_YEARS; if(!activeYears) return;
+    document.querySelectorAll('#panel-prodwisenps table.pivot-table > tbody > tr[data-py]').forEach(function(tr){
+      var py = JSON.parse(tr.getAttribute('data-py'));
+      var resp=0,sumO=0,cntO=0,sumP=0,cntP=0,prom=0,pas=0,det=0;
+      Object.keys(py).forEach(function(yr){
+        if(yr !== '_other' && !activeYears.has(yr)) return;
+        var a = py[yr];
+        resp+=a[0]; sumO+=a[1]; cntO+=a[2]; sumP+=a[3]; cntP+=a[4]; prom+=a[5]; pas+=a[6]; det+=a[7];
+      });
+      var c = tr.children;
+      c[1].textContent = window.fmtN0(resp);
+      c[2].textContent = cntO ? fmt1(sumO/cntO) : '–';
+      c[3].textContent = cntP ? fmt1(sumP/cntP) : '–';
+      c[4].textContent = window.fmtN0(prom);
+      c[5].textContent = window.fmtN0(pas);
+      c[6].textContent = window.fmtN0(det);
+      c[7].textContent = resp ? (fmt1(det/resp*100)+'%') : '–';
+    });
+  });
+})();
+</script>"""
+
+    heatmap = _build_prodwise_heatmap(capped)
+
     return f"""  <div class="tab-panel" id="panel-prodwisenps">
     <section>
       <h2>Product wise NPS</h2>
-      <p class="desc">Per-product NPS breakdown from survey responses (nps_product), not tied to complaint tickets.</p>
+      <p class="desc">Per-product NPS breakdown from survey responses (nps_product), not tied to complaint tickets.{' Reacts to the Year filter above; not available in Weekly view (see note).' if year_aware else ''}</p>
       {cap_note}
       {table}
+      {year_script}
+    </section>
+    <section>
+      {heatmap}
     </section>
   </div>"""
 
@@ -1314,7 +1456,7 @@ def assemble_report(ctx, here_dir):
     <span class="gran-note" style="font-weight:600;">Month</span>
     {''.join(month_chips)}
   </div>
-  <span class="gran-note">Weekly applies to Overview and every complaint-category tab, including the category breakdown on Delivery/Technical/Warehouse/Product/Suggestion &mdash; but their second-dimension breakdown (partner/platform/facility/product name) and click-to-cross-filter stay monthly-only. Not available on NPS/CSAT or the separate Product &amp; Packaging wrt Sales tab. Pick multiple months to see them side by side, split out by week (e.g. Jun W1, Jul W1, Jun W2, Jul W2, ...); the Year filter below also narrows which months are offered here.</span>
+  <span class="gran-note">Weekly applies to Overview and every complaint-category tab, including the category breakdown on Delivery/Technical/Warehouse/Product/Suggestion &mdash; but their second-dimension breakdown (partner/platform/facility/product name) and click-to-cross-filter stay monthly-only. Not available on NPS/CSAT, Product wise NPS, or the separate Product &amp; Packaging wrt Sales tab. Pick multiple months to see them side by side, split out by week (e.g. Jun W1, Jul W1, Jun W2, Jul W2, ...); the Year filter below also narrows which months are offered here.</span>
 </div>
 <script>
 (function(){{

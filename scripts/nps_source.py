@@ -161,37 +161,67 @@ def fetch_product_wise_nps(mysql_brand):
     person for the monthly "NPS - Product" trend), this groups nps_product BY PRODUCT NAME
     instead of by month - each (response_id, product_slot) row IS one product rating, so no
     response_id dedup applies here. Returns one dict per product, sorted by response volume
-    (highest first) - same brand values as fetch_product_nps (brands.py's nps_mysql_brand)."""
+    (highest first) - same brand values as fetch_product_nps (brands.py's nps_mysql_brand).
+
+    Also grouped by month (same submitted_date parsing as fetch_delivery_nps/fetch_product_nps
+    above) so callers can respect the report's Year filter and render a product x month NPS%
+    heatmap - see each row's "months" dict (ym "YYYY-MM" -> stats). SUM/COUNT are fetched
+    instead of AVG so the per-product top-level averages below AND any client-side re-aggregation
+    over a subset of months (e.g. one year) are both exact weighted averages, not an average-of-
+    averages."""
     rows = mysql_lib.query(
         """
         SELECT product_name,
+               DATE_FORMAT(STR_TO_DATE(submitted_date, "%%d/%%m/%%Y"), "%%Y-%%m") AS ym,
                COUNT(*) AS responses,
-               AVG(overall_nps_score) AS avg_overall,
-               AVG(packaging) AS avg_packaging,
-               AVG(product_nps) AS avg_product_nps,
+               SUM(overall_nps_score) AS sum_overall, COUNT(overall_nps_score) AS cnt_overall,
+               SUM(packaging) AS sum_packaging, COUNT(packaging) AS cnt_packaging,
                SUM(nps_category = "Promoter") AS promoters,
                SUM(nps_category = "Passive") AS passives,
                SUM(nps_category = "Detractor") AS detractors
         FROM nps_product
         WHERE brand = %s AND product_name IS NOT NULL AND TRIM(product_name) NOT IN ('', 'NA')
-        GROUP BY product_name
-        ORDER BY responses DESC
+        GROUP BY product_name, ym
+        ORDER BY product_name, ym
         """,
         params=(mysql_brand,),
         database=DWH_DATABASE,
     )
     if rows is None:
         raise RuntimeError("MySQL credentials not configured - set MYSQL_HOST/USER/PASSWORD/DATABASE (or .env.local).")
+
+    by_product = {}
+    order = []
+    for product_name, ym, responses, sum_overall, cnt_overall, sum_packaging, cnt_packaging, promoters, passives, detractors in rows:
+        if product_name not in by_product:
+            by_product[product_name] = {}
+            order.append(product_name)
+        responses, promoters, passives, detractors = int(responses), int(promoters), int(passives), int(detractors)
+        by_product[product_name][ym] = {
+            "responses": responses,
+            "sum_overall": float(sum_overall) if sum_overall is not None else 0.0, "cnt_overall": int(cnt_overall),
+            "sum_packaging": float(sum_packaging) if sum_packaging is not None else 0.0, "cnt_packaging": int(cnt_packaging),
+            "promoters": promoters, "passives": passives, "detractors": detractors,
+            "nps_pct": round((promoters - detractors) / responses * 100, 1) if responses else None,
+        }
+
     out = []
-    for product_name, responses, avg_overall, avg_packaging, avg_product_nps, promoters, passives, detractors in rows:
-        responses = int(responses)
+    for product_name in order:
+        months = by_product[product_name]
+        responses = sum(m["responses"] for m in months.values())
+        cnt_overall = sum(m["cnt_overall"] for m in months.values())
+        cnt_packaging = sum(m["cnt_packaging"] for m in months.values())
+        promoters = sum(m["promoters"] for m in months.values())
+        passives = sum(m["passives"] for m in months.values())
+        detractors = sum(m["detractors"] for m in months.values())
         out.append({
             "product": product_name,
             "responses": responses,
-            "avg_overall_nps": round(float(avg_overall), 1) if avg_overall is not None else None,
-            "avg_packaging_score": round(float(avg_packaging), 1) if avg_packaging is not None else None,
-            "avg_product_nps": round(float(avg_product_nps), 1) if avg_product_nps is not None else None,
-            "promoters": int(promoters), "passives": int(passives), "detractors": int(detractors),
-            "detractor_rate_pct": round(int(detractors) / responses * 100, 1) if responses else None,
+            "avg_overall_nps": round(sum(m["sum_overall"] for m in months.values()) / cnt_overall, 1) if cnt_overall else None,
+            "avg_packaging_score": round(sum(m["sum_packaging"] for m in months.values()) / cnt_packaging, 1) if cnt_packaging else None,
+            "promoters": promoters, "passives": passives, "detractors": detractors,
+            "detractor_rate_pct": round(detractors / responses * 100, 1) if responses else None,
+            "months": months,
         })
+    out.sort(key=lambda r: r["responses"], reverse=True)
     return out

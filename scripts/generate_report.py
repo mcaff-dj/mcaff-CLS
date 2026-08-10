@@ -227,9 +227,14 @@ def main():
         mom, prodnps = nps_cache["mom"], nps_cache["prodnps"]
         # Older caches predate the "Product wise NPS" tab and won't have this key yet -
         # backfill just that piece rather than forcing a full re-query of mom/prodnps too.
+        # Caches from before the per-month breakdown (Year filter + heatmap) also lack each
+        # row's "months" dict - re-query on those too, since there's no way to derive the
+        # month-level split back out of the old lifetime-only aggregate.
         prodwise_nps = nps_cache.get("prodwise_nps")
+        if prodwise_nps and "months" not in prodwise_nps[0]:
+            prodwise_nps = None
         if prodwise_nps is None:
-            print(f"[{b['brand']}] no cached product-wise NPS yet, querying...")
+            print(f"[{b['brand']}] no cached product-wise NPS (or missing monthly breakdown) yet, querying...")
             prodwise_nps = nps_source.fetch_product_wise_nps(b["nps_mysql_brand"])
             nps_cache["prodwise_nps"] = prodwise_nps
             with open(nps_cache_path, "w", encoding="utf-8") as f:
