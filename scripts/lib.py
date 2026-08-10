@@ -25,6 +25,27 @@ CREATED_AT_PATTERN = re.compile(
 )
 
 
+def get_pg_connection(conn_str, retries=5, **kwargs):
+    """psycopg.connect with retry/backoff - Supabase's pooler runs this project in
+    session mode (pool_size 15, shared with the Lambda app's own connections, see
+    api/_lib/db.js's getPgPool comment), so a script and a Lambda traffic burst can
+    transiently collide and get EMAXCONNSESSION even though neither is actually
+    misbehaving. Only psycopg.OperationalError is retried - a bad conn string or
+    auth failure won't be fixed by waiting, so those still raise immediately. Same
+    backoff shape as copy_paste_column above. Imports psycopg lazily so importing
+    this module doesn't require it - requirements-report.txt deliberately excludes
+    that wheel for scripts that never touch Postgres."""
+    import psycopg
+    for attempt in range(1, retries + 1):
+        try:
+            return psycopg.connect(conn_str, **kwargs)
+        except psycopg.OperationalError as e:
+            print(f"  Postgres connect attempt {attempt} failed: {e}")
+            if attempt == retries:
+                raise
+            time.sleep(5 * attempt)
+
+
 def get_sa_credential():
     """Credential resolution order: GOOGLE_SA_KEY_JSON env (full JSON text) ->
     GOOGLE_SA_KEY_FILE env (path) -> hardcoded fallback path."""
@@ -371,6 +392,9 @@ def ensure_grid_size(spreadsheet_id, sheet_name, min_rows, min_cols):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }, json=body, timeout=60)
+    if not resp.ok:
+        print(f"  ensure_grid_size('{sheet_name}' -> {new_rows}x{new_cols}) failed: {resp.status_code}")
+        print(f"    response body: {resp.text}")
     resp.raise_for_status()
     print(f"  grew '{sheet_name}' grid to {new_rows} rows x {new_cols} cols (was {cur_rows} x {cur_cols})")
 
