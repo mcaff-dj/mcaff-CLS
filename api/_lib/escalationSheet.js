@@ -1,5 +1,6 @@
-// Sheets access for the Escalation desk (app/escalation/) - ported from the standalone app's
-// own lib/sheets.js. Two deliberate changes were made in the port:
+// Sheets WRITE access for the Escalation desk (app/escalation/) - reads moved to
+// api/_lib/escalationBq.js (BigQuery), this file now only writes the dual-write T:W columns.
+// Ported from the standalone app's own lib/sheets.js. Two deliberate changes were made in the port:
 //
 //  1. googleapis -> google-auth-library + the REST endpoint directly. The standalone app
 //     depended on `googleapis`; this repo already ships `google-auth-library` and talks to
@@ -53,58 +54,6 @@ const COLUMNS = [
   'awb', 'status', 'notes', '_v1', '_v2', 'ticketNumber',
 ];
 
-// `rowNumber` is only unique WITHIN a tab (both tabs restart at row 2) - `sheetTab` on every
-// row object is what makes a row globally identifiable, and every write path below (update,
-// batchUpdateOrders, getSheetIndex) takes/returns it alongside rowNumber so a write always
-// lands in the tab it was read from, never row N of whichever tab happens to be first.
-function rowToObject(row, rowNumber, sheetTab) {
-  const obj = { rowNumber, sheetTab };
-  COLUMNS.forEach((key, i) => { obj[key] = row[i] || ''; });
-  return obj;
-}
-
-async function readTabRows(tab) {
-  const res = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(`${tab}!A2:Z`)}?majorDimension=ROWS`,
-    { headers: await authHeader() }
-  );
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error?.message || `Sheets read failed for ${tab} (${res.status})`);
-  return (data.values || []).map((row, i) => rowToObject(row, i + 2, tab)); // +2: skip the header
-}
-
-// Reads every configured brand tab in parallel and flattens into one row-object array.
-async function readAllRows() {
-  const perTab = await Promise.all(SHEET_TABS.map(readTabRows));
-  return perTab.flat();
-}
-
-// The queue: RTO per BOTH the courier (statusAsPerAwb, col N) and logistics
-// (updateFromLogistics, col Q), and not yet actioned (status, col V, still blank). Once an agent
-// writes V the row drops out on the next load - the sheet is the only store, there's no DB.
-//
-// NOT filtered on TAT (col P): every currently-pending RTO row carries "Forced to be marked as
-// RTO" there, not blank/"unresolved"/"#N/A" - that's the courier-RTO equivalent of "still open",
-// so gating on OPEN_TAT_VALUES here zeroed the whole queue out. That rule belongs to Fresh Leads
-// below, which has no RTO-column requirement to begin with.
-async function getEligibleOrders() {
-  const rows = await readAllRows();
-  return rows.filter((o) => {
-    const n = o.statusAsPerAwb.toLowerCase();
-    const q = o.updateFromLogistics.toLowerCase();
-    return n.includes('rto') && q.includes('rto') && !o.status;
-  });
-}
-
-// Fresh Leads: TAT (col P) hasn't landed in a computed bucket yet - blank, "unresolved", or
-// "#N/A". Irrespective of status (col V) or the RTO columns - unlike the queue above, an
-// already-actioned row still counts as a fresh lead if its TAT is still open.
-const OPEN_TAT_VALUES = new Set(['', 'unresolved', '#n/a']);
-async function getFreshLeads() {
-  const rows = await readAllRows();
-  return rows.filter((o) => OPEN_TAT_VALUES.has(o.tat.trim().toLowerCase()));
-}
-
 // Write New Order Id / AWB / Status / Notes into columns T/U/V/W for one row of one tab.
 async function updateOrder(rowNumber, sheetTab, { newOrderId, newAwb, newStatus, notes = '' }) {
   return batchUpdateOrders([{ rowNumber, sheetTab, newOrderId, newAwb, newStatus, notes }]);
@@ -133,24 +82,4 @@ async function batchUpdateOrders(updates) {
   return updates.length;
 }
 
-// Lookup index for matching imported CSV rows back to sheet rows across BOTH tabs: keyed by
-// parent order, and by "parentOrder||awb" for an exact match when the file carries an AWB too.
-// Values carry {rowNumber, sheetTab} - a bare rowNumber can't identify a row once there are two
-// tabs to choose from. Parent order IDs carry a brand-specific prefix in practice, so collisions
-// between tabs are not expected, but the last tab read still wins byParent on a genuine tie.
-async function getSheetIndex() {
-  const rows = await readAllRows();
-  const byParent = new Map();
-  const byParentAwb = new Map();
-  rows.forEach((o) => {
-    const parent = String(o.parentOrder || '').trim().toLowerCase();
-    const awb = String(o.awbNumber || '').trim().toLowerCase();
-    if (!parent) return;
-    const ref = { rowNumber: o.rowNumber, sheetTab: o.sheetTab };
-    if (!byParent.has(parent)) byParent.set(parent, ref);
-    if (awb) byParentAwb.set(`${parent}||${awb}`, ref);
-  });
-  return { byParent, byParentAwb };
-}
-
-module.exports = { getEligibleOrders, getFreshLeads, updateOrder, batchUpdateOrders, getSheetIndex, COLUMNS };
+module.exports = { updateOrder, batchUpdateOrders, COLUMNS };
