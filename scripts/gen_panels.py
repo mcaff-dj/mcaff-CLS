@@ -564,33 +564,29 @@ def _prodwise_year_json(months, years):
 
 
 def _build_prodwise_heatmap(capped):
-    """Product x month NPS% heatmap for the same capped (top-N by volume) product set as the
-    summary table above. NPS% = (Promoters - Detractors) / Responses * 100 per (product, month)
-    - the same standard NPS definition the NPS - Overall/Product charts already use (build_combo2),
-    not the raw 0-10 "Avg NPS" score column the summary table shows - that score has no natural
-    zero-centered polarity, so it doesn't make a sensible diverging heatmap value.
-
-    Colored with this report's own established good/bad convention (--s2 aqua / --s6 red, see
-    gen_insights.py's "good"/"crit" tags) via CSS color-mix() against the neutral --grid token,
-    so it stays theme-aware for free with zero JS. Month columns/cells carry the standard
-    data-yr attribute, so the existing Year-chip sweep (gen_panels.py's toggleYearChip) hides
-    out-of-year columns with no extra JS - just like every category pivot table."""
+    """Product x month avg NPS score (1-10) heatmap. Color midpoint is 7.0 (NPS promoter
+    threshold): below = red (--s6), above = aqua (--s2), normalized against the actual data
+    spread (floor 1.0 so a flat dataset still shows some color contrast). Month columns carry
+    data-yr so the Year-chip sweep hides out-of-range columns with no extra JS."""
     all_yms = sorted({ym for r in capped for ym in r["months"]})
     if not all_yms:
         return ""
 
-    all_vals = [m["nps_pct"] for r in capped for m in r["months"].values() if m["nps_pct"] is not None]
-    # ponytail: domain is the plain +-max(|actual value|) spread (floor 10 so a razor-flat
-    # month doesn't divide by ~0), not percentile-clipped - a single outlier month/product
-    # would wash out the rest of the scale's contrast; re-clip to e.g. p5/p95 if that shows up.
-    domain = max(10.0, max((abs(v) for v in all_vals), default=0.0))
+    NPS_MID = 7.0  # scores >= 7 are passive/promoter range
 
-    def cell_style(pct):
-        if pct is None:
+    def _avg_nps(m):
+        return round(m["sum_overall"] / m["cnt_overall"], 1) if m and m["cnt_overall"] else None
+
+    all_vals = [_avg_nps(m) for r in capped for m in r["months"].values() if m["cnt_overall"]]
+    # ponytail: domain = max deviation from midpoint in the data (floor 1.0)
+    domain = max(1.0, max((abs(v - NPS_MID) for v in all_vals if v is not None), default=0.0))
+
+    def cell_style(avg):
+        if avg is None:
             return ""
-        t = max(-1.0, min(1.0, pct / domain))
+        t = max(-1.0, min(1.0, (avg - NPS_MID) / domain))
         slot = "--s2" if t >= 0 else "--s6"
-        mix = round(abs(t) * 70)  # capped at 70% tint so the number stays legible at the extremes
+        mix = round(abs(t) * 70)
         return f" style=\"background:color-mix(in oklab, var(--grid) {100 - mix}%, var({slot}) {mix}%)\""
 
     head_cells = "".join(f"<th class='month-hdr' data-yr='{ym[:4]}'>{h_enc(_nps_month_label(ym))}</th>" for ym in all_yms)
@@ -601,24 +597,24 @@ def _build_prodwise_heatmap(capped):
         cells = []
         for ym in all_yms:
             m = r["months"].get(ym)
-            pct = m["nps_pct"] if m else None
-            label = f"{fnum(pct)}%" if pct is not None else "&ndash;"
+            avg = _avg_nps(m)
+            label = fnum(avg) if avg is not None else "&ndash;"
             title = f" title='{h_enc(r['product'])} &middot; {h_enc(_nps_month_label(ym))}: {n0(m['responses'])} responses'" if m else ""
-            cells.append(f"<td class='num hm-cell' data-yr='{ym[:4]}'{cell_style(pct)}{title}>{label}</td>")
+            cells.append(f"<td class='num hm-cell' data-yr='{ym[:4]}'{cell_style(avg)}{title}>{label}</td>")
         body_rows.append(f"<tr class='{z}'><td class='rowlabel'>{h_enc(r['product'])}</td>{''.join(cells)}</tr>")
 
     legend = (
         "<div class='legend-row' style='justify-content:center;gap:10px;'>"
-        f"<span class='lname'>Detractor-heavy (&minus;{n0(domain)}%)</span>"
+        f"<span class='lname'>Low (&lt;{NPS_MID})</span>"
         "<span style='display:inline-block;width:140px;height:10px;border-radius:5px;"
         "background:linear-gradient(to right, var(--s6), var(--grid), var(--s2));'></span>"
-        f"<span class='lname'>Promoter-heavy (+{n0(domain)}%)</span></div>"
+        f"<span class='lname'>High (&gt;{NPS_MID})</span></div>"
     )
 
     return (
         "<div class='pivot-wrap'><div class='pivot-title'>Product wise NPS &mdash; Monthly Heatmap</div>"
-        "<p class='desc'>NPS% ((Promoters &minus; Detractors) &divide; Responses) per product per month. "
-        "Colored relative to this table's own range; blank cells had no survey responses that month.</p>"
+        "<p class='desc'>Avg NPS score (1&ndash;10) per product per month. "
+        "Color midpoint is 7 (promoter threshold); blank cells had no survey responses that month.</p>"
         f"{legend}<div class='pivot-scroll'><table class='pivot-table'><thead><tr>"
         f"<th class='corner'>Product</th>{head_cells}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
     )
