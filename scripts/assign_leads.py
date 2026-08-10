@@ -77,10 +77,10 @@ import sys
 import threading
 import zlib
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import psycopg
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -361,80 +361,117 @@ def resolve_refund_statuses(order_ids, dirty):
     return results
 
 
-def fetch_gokwik_refund_cache():
+@contextmanager
+def _pg_cursor(conn_str, conn):
+    """Cursor over `conn` if the caller already has one open (main()'s single connection
+    shared across the whole run - see its own comment for why), else a one-off connection
+    opened and closed just for this block, unchanged from how every function here used to
+    behave on its own. Kept as a context manager, not a plain helper returning a cursor, so
+    the "open my own, then close it" case still can't leak a connection on an exception.
+
+    Every caller must still `except` around its own `with _pg_cursor(...) as cur:` block and
+    roll back a SHARED conn there (see the shared-connection comment in main()) - a failed
+    statement leaves Postgres refusing every later command on that same connection
+    ("current transaction is aborted") until something rolls it back, and only the caller
+    knows whether the exception was one it's fail-opening past."""
+    if conn is not None:
+        with conn.cursor() as cur:
+            yield cur
+        return
+    with lib.get_pg_connection(conn_str) as owned_conn:
+        with owned_conn.cursor() as cur:
+            yield cur
+
+
+def fetch_gokwik_refund_cache(conn=None):
     """{order_id: (refunded, checked_at)} for every lead ever checked - one bulk read per run,
     same pattern as fetch_reassignment_attempts, so consulting it per-lead in the main loop is
     a dict lookup, not a network call. Creates the table itself (idempotent) rather than
     depending on api/_lib/db.js's ensurePgSchema, since this is Python-only and the whole
     point is not to wait on anything else to take effect. Returns {} (never raises) if
     POSTGRES_URL isn't configured or the query fails - every lead just gets live-checked this
-    run, same as before this cache existed."""
+    run, same as before this cache existed.
+
+    conn: reuse main()'s already-open connection instead of opening a new one - see
+    _pg_cursor. Optional so this stays directly callable on its own (REPL, one-off script)."""
     conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str:
+    if not conn_str and conn is None:
         return {}
     try:
-        with psycopg.connect(conn_str) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS gokwik_refund_checks (
-                        order_id TEXT PRIMARY KEY,
-                        refunded BOOLEAN NOT NULL,
-                        checked_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                    )
-                    """
+        with _pg_cursor(conn_str, conn) as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS gokwik_refund_checks (
+                    order_id TEXT PRIMARY KEY,
+                    refunded BOOLEAN NOT NULL,
+                    checked_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
-                cur.execute("SELECT order_id, refunded, checked_at FROM gokwik_refund_checks")
-                rows = cur.fetchall()
+                """
+            )
+            cur.execute("SELECT order_id, refunded, checked_at FROM gokwik_refund_checks")
+            rows = cur.fetchall()
+        if conn is not None:
+            conn.commit()  # DDL/read on the shared connection - commit so it isn't left open
     except Exception as e:
         print(f"  (gokwik_refund_checks fetch failed: {e} - every lead will be live-checked this run)")
+        if conn is not None:
+            conn.rollback()
         return {}
     return {order_id: (refunded, checked_at) for order_id, refunded, checked_at in rows}
 
 
-def flush_gokwik_refund_cache(dirty):
+def flush_gokwik_refund_cache(dirty, conn=None):
     """One batched upsert for every result computed this run - not one write per lead, which
     would defeat the point of caching by adding back a per-lead network round-trip. Best
-    effort: a failure here just means those results get live-checked again next run."""
+    effort: a failure here just means those results get live-checked again next run.
+
+    conn: see fetch_gokwik_refund_cache - reuse main()'s connection when given."""
     if not dirty:
         return
     conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str:
+    if not conn_str and conn is None:
         return
     try:
-        with psycopg.connect(conn_str) as conn:
-            with conn.cursor() as cur:
-                cur.executemany(
-                    """
-                    INSERT INTO gokwik_refund_checks (order_id, refunded, checked_at)
-                    VALUES (%s, %s, now())
-                    ON CONFLICT (order_id) DO UPDATE SET
-                        refunded = EXCLUDED.refunded, checked_at = now()
-                    """,
-                    list(dirty.items()),
-                )
+        with _pg_cursor(conn_str, conn) as cur:
+            cur.executemany(
+                """
+                INSERT INTO gokwik_refund_checks (order_id, refunded, checked_at)
+                VALUES (%s, %s, now())
+                ON CONFLICT (order_id) DO UPDATE SET
+                    refunded = EXCLUDED.refunded, checked_at = now()
+                """,
+                list(dirty.items()),
+            )
+        if conn is not None:
+            conn.commit()
     except Exception as e:
         print(f"  (failed to save {len(dirty)} gokwik_refund_checks entries: {e})")
+        if conn is not None:
+            conn.rollback()
 
 
-def fetch_reassignment_attempts():
+def fetch_reassignment_attempts(conn=None):
     """{order_id: {emails}} of every agent a lead has ever been reassigned AWAY from - the
     rows lead_assignments keeps with reassigned_away_at set (see api/_lib/db.js's
     ensurePgSchema: reassigning stamps the old agent's row rather than overwriting it, so
     that table holds one row per agent who ever tried a lead, not just its current one).
     Returns {} (never raises) if POSTGRES_URL isn't configured or the query fails - a lookup
     failure here should fail open (treat every lead as having no reassignment history yet,
-    exactly the pre-this-feature behavior) rather than block the whole run."""
+    exactly the pre-this-feature behavior) rather than block the whole run.
+
+    conn: reuse main()'s already-open connection instead of opening a new one - see
+    _pg_cursor. Optional so this stays directly callable on its own (REPL, one-off script)."""
     conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str:
+    if not conn_str and conn is None:
         return {}
     try:
-        with psycopg.connect(conn_str) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT order_id, email FROM lead_assignments WHERE reassigned_away_at IS NOT NULL")
-                rows = cur.fetchall()
+        with _pg_cursor(conn_str, conn) as cur:
+            cur.execute("SELECT order_id, email FROM lead_assignments WHERE reassigned_away_at IS NOT NULL")
+            rows = cur.fetchall()
     except Exception as e:
         print(f"  (lead_assignments reassignment-history fetch failed: {e} - treating as no prior attempts)")
+        if conn is not None:
+            conn.rollback()
         return {}
     attempts_by_order = {}
     for order_id, email in rows:
@@ -442,7 +479,7 @@ def fetch_reassignment_attempts():
     return attempts_by_order
 
 
-def fetch_current_assignment_times():
+def fetch_current_assignment_times(conn=None):
     """{order_id: assigned_at} (naive UTC datetime) for every lead's CURRENT live assignment
     cycle - the lead_assignments row with reassigned_away_at IS NULL (see api/_lib/db.js's
     ensurePgSchema: exactly one such row can exist per order_id at a time). Used only to hold a
@@ -451,24 +488,27 @@ def fetch_current_assignment_times():
     reassigned minutes after its original assignment, before the agent ever had a fair shot.
     Same fail-open contract as fetch_reassignment_attempts: {} (never raises) if POSTGRES_URL
     isn't configured or the query fails, so a lookup problem here never blocks the whole run -
-    it just means the hold can't be enforced this run, same as before this existed."""
+    it just means the hold can't be enforced this run, same as before this existed.
+
+    conn: see fetch_reassignment_attempts - reuse main()'s connection when given."""
     conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str:
+    if not conn_str and conn is None:
         return {}
     try:
-        with psycopg.connect(conn_str) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT order_id, assigned_at FROM lead_assignments WHERE reassigned_away_at IS NULL")
-                rows = cur.fetchall()
+        with _pg_cursor(conn_str, conn) as cur:
+            cur.execute("SELECT order_id, assigned_at FROM lead_assignments WHERE reassigned_away_at IS NULL")
+            rows = cur.fetchall()
     except Exception as e:
         print(f"  (lead_assignments current-assignment-time fetch failed: {e} - treating as no hold)")
+        if conn is not None:
+            conn.rollback()
         return {}
     # assigned_at comes back tz-aware (TIMESTAMPTZ) - kept that way, same as checked_at in
     # _cached_refund_status above, so it compares directly against datetime.now(timezone.utc).
     return dict(rows)
 
 
-def fetch_online_agents(process_key=None):
+def fetch_online_agents(process_key=None, conn=None):
     """(emails, quotas, prepaid_targets, specializations, reassign_payment_modes) of the agents
     eligible for this process's leads right now.
 
@@ -498,38 +538,42 @@ def fetch_online_agents(process_key=None):
 
     Returns ([], {}, {}, {}, {}) (not an error) if POSTGRES_URL isn't configured, so a missing
     secret fails safe - no assignment - rather than crashing the whole run.
+
+    conn: reuse main()'s already-open connection instead of opening a new one - see
+    _pg_cursor. Optional so this stays directly callable on its own (REPL, one-off script).
     """
     conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str:
+    if not conn_str and conn is None:
         print("POSTGRES_URL not configured - cannot determine online agents.")
         return [], {}, {}, {}, {}
-    with psycopg.connect(conn_str) as conn:
-        with conn.cursor() as cur:
+    with _pg_cursor(conn_str, conn) as cur:
+        cur.execute(
+            """
+            SELECT email FROM agent_presence
+            WHERE status = 'Online' AND updated_at >= now() - interval '%s minutes'
+            ORDER BY email
+            """,
+            (STALE_MINUTES,),
+        )
+        present = [row[0].lower() for row in cur.fetchall()]
+
+        if not process_key:
+            return present, {}, {}, {}, {}
+
+        try:
             cur.execute(
-                """
-                SELECT email FROM agent_presence
-                WHERE status = 'Online' AND updated_at >= now() - interval '%s minutes'
-                ORDER BY email
-                """,
-                (STALE_MINUTES,),
+                "SELECT email, status, max_quota, prepaid_pct, priority_rto_reasons, "
+                "reassign_payment_mode FROM calling_agent_process WHERE process_key = %s",
+                (process_key,),
             )
-            present = [row[0].lower() for row in cur.fetchall()]
-
-            if not process_key:
-                return present, {}, {}, {}, {}
-
-            try:
-                cur.execute(
-                    "SELECT email, status, max_quota, prepaid_pct, priority_rto_reasons, "
-                    "reassign_payment_mode FROM calling_agent_process WHERE process_key = %s",
-                    (process_key,),
-                )
-                per_process = cur.fetchall()
-            except Exception as e:
-                # Table not created yet (no admin has opened the panel) - fall back rather than
-                # refuse to assign, which would stop the queue over a missing config table.
-                print(f"  (calling_agent_process unavailable: {e} - using global presence)")
-                return present, {}, {}, {}, {}
+            per_process = cur.fetchall()
+        except Exception as e:
+            # Table not created yet (no admin has opened the panel) - fall back rather than
+            # refuse to assign, which would stop the queue over a missing config table.
+            print(f"  (calling_agent_process unavailable: {e} - using global presence)")
+            if conn is not None:
+                conn.rollback()
+            return present, {}, {}, {}, {}
 
     if not per_process:
         print(f"  no per-process availability set for '{process_key}' - using global presence")
@@ -552,7 +596,7 @@ def fetch_online_agents(process_key=None):
 
 
 def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
-                            reassign_info_by_row):
+                            reassign_info_by_row, conn=None):
     """Stamps assigned_at=now() for every lead just assigned, keyed by the sheet's own Order
     ID, so rto-crm.html's resetStalePendingLeads() can tell a fresh assignment apart from a
     genuinely stale one (the lead's own Calling Date can't do this - the backlog this script
@@ -591,9 +635,16 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
     lead_priority.prefix_rule_partner - the same rule api/_lib/db.js's JS mirror uses for
     leads recorded via the disposal path instead) so downstream reporting
     (scripts/sync_lead_assignments_to_mysql.py) can key on any of them without a separate
-    sheet lookup."""
+    sheet lookup.
+
+    conn: reuse main()'s already-open connection instead of opening a new one - see
+    _pg_cursor's comment on why every caller sharing it must roll back on failure. This one
+    still commits/rolls back explicitly itself either way (rather than leaning on a bare
+    `with` exit like the read-only fetch_* functions above) because on a shared conn the
+    caller keeps using that connection afterwards, so leaving it mid-transaction on the way
+    out isn't an option."""
     conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str or not assignments:
+    if (not conn_str and conn is None) or not assignments:
         return
     order_id_by_row = {row_index: order_id for row_index, _rto_initiated_date, order_id, _tier in unassigned_pending}
     rows = [
@@ -615,7 +666,10 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
         for row_index, (_old_agent, order_id) in reassign_info_by_row.items()
         if row_index in assignments
     ]
-    with psycopg.connect(conn_str) as conn:
+    owns_conn = conn is None
+    if owns_conn:
+        conn = lib.get_pg_connection(conn_str)
+    try:
         with conn.cursor() as cur:
             if retiring:
                 cur.executemany(
@@ -639,6 +693,12 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
                 rows,
             )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        if owns_conn:
+            conn.close()
 
 
 PROCESS_KEY = "rto"  # this script assigns the RTO process's leads; see callingProcesses.json
@@ -659,16 +719,19 @@ def _default_week(process_key):
     return {d: ((bh.get("start"), bh.get("end")) if d in days else (None, None)) for d in DAY_KEYS}
 
 
-def _saved_week(process_key):
+def _saved_week(process_key, conn=None):
     """This process's week as saved by an admin: {day: (open, close)}. Days with no row are
     absent, and a row with either time NULL/'' means explicitly CLOSED that day. Returns {} if
     the table isn't reachable/doesn't exist yet, so a fresh environment still runs on defaults
-    rather than refusing to assign anything."""
+    rather than refusing to assign anything.
+
+    conn: reuse main()'s already-open connection instead of opening a new one - see
+    _pg_cursor. Optional so this stays directly callable on its own (REPL, one-off script)."""
     dsn = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
-    if not dsn:
+    if not dsn and conn is None:
         return {}
     try:
-        with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        with _pg_cursor(dsn, conn) as cur:
             cur.execute(
                 "SELECT day, open_time, close_time FROM calling_business_hours WHERE process_key = %s",
                 (process_key,),
@@ -676,10 +739,12 @@ def _saved_week(process_key):
             return {d: (o or None, c or None) for d, o, c in cur.fetchall()}
     except Exception as e:
         print(f"  (could not read calling_business_hours: {e} - falling back to defaults)")
+        if conn is not None:
+            conn.rollback()
         return {}
 
 
-def within_business_hours(process_key=PROCESS_KEY, now_utc=None):
+def within_business_hours(process_key=PROCESS_KEY, now_utc=None, conn=None):
     """(allowed: bool, explanation: str) for a process's own business-hours window.
 
     Hours are per process AND per weekday, so Friday can close early and Sunday can be closed
@@ -695,7 +760,7 @@ def within_business_hours(process_key=PROCESS_KEY, now_utc=None):
     they already hold outside these hours - a call that already happened has to be recordable.
     """
     week = _default_week(process_key)
-    week.update(_saved_week(process_key))
+    week.update(_saved_week(process_key, conn=conn))
 
     now = (now_utc or datetime.now(timezone.utc)) + timedelta(hours=5, minutes=30)
     day = DAY_KEYS[now.weekday()]
@@ -720,7 +785,22 @@ def within_business_hours(process_key=PROCESS_KEY, now_utc=None):
 
 
 def main():
-    allowed, why = within_business_hours()
+    # One Postgres connection for the whole run, threaded through every call below instead of
+    # each fetch/record opening (and Supabase-pooler-contending for) its own - this used to be
+    # up to 7 separate connections per 5-minute cron run. Opened here rather than inside
+    # within_business_hours (the first thing that needs it) so there is exactly one place that
+    # owns closing it, on every exit path including the early `return`s below - see _main.
+    conn_str = os.environ.get("POSTGRES_URL") or os.environ.get("DATABASE_URL")
+    conn = lib.get_pg_connection(conn_str) if conn_str else None
+    try:
+        _main(conn)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _main(conn):
+    allowed, why = within_business_hours(conn=conn)
     print(f"Business hours ({PROCESS_KEY}): {why}")
     if not allowed:
         # Not an error: this job runs every 5 minutes around the clock, so most of its runs
@@ -729,7 +809,7 @@ def main():
         return
 
     print(f"Fetching agents available for '{PROCESS_KEY}' from Postgres...")
-    online_agents, agent_quotas, agent_prepaid_targets, agent_specializations, agent_reassign_payment_modes = fetch_online_agents(PROCESS_KEY)
+    online_agents, agent_quotas, agent_prepaid_targets, agent_specializations, agent_reassign_payment_modes = fetch_online_agents(PROCESS_KEY, conn=conn)
     if not online_agents:
         print("No agents currently online - nothing to assign. Exiting.")
         return
@@ -744,11 +824,11 @@ def main():
     print(f"  {len(rows)} data rows")
 
     print("Fetching prior Connected=No reassignment history from Postgres...")
-    attempts_by_order = fetch_reassignment_attempts()
-    current_assigned_at_by_order = fetch_current_assignment_times()
+    attempts_by_order = fetch_reassignment_attempts(conn=conn)
+    current_assigned_at_by_order = fetch_current_assignment_times(conn=conn)
 
     print("Fetching cached GoKwik refund-check results from Postgres...")
-    gokwik_cache = fetch_gokwik_refund_cache()
+    gokwik_cache = fetch_gokwik_refund_cache(conn=conn)
     gokwik_dirty = {}  # order_id -> refunded, for every result computed live this run
 
     # current_load: how many pending (undisposed) leads each eligible agent already holds -
@@ -936,7 +1016,7 @@ def main():
         print(f"  Caching {len(gokwik_dirty)} GoKwik refund-check result(s) - {confirmed} refunded "
               f"(kept permanently), {len(gokwik_dirty) - confirmed} not (re-checked after "
               f"{GOKWIK_CACHE_TTL} + jitter)...")
-        flush_gokwik_refund_cache(gokwik_dirty)
+        flush_gokwik_refund_cache(gokwik_dirty, conn=conn)
 
     if not unassigned_pending:
         print("No unassigned pending leads found - nothing to assign.")
@@ -983,7 +1063,7 @@ def main():
     # reassignment (retire the old agent's cycle, record the new one) happen inside this one
     # call, in one transaction - see its docstring for why they can't be separated.
     record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
-                            reassign_info_by_row)
+                            reassign_info_by_row, conn=conn)
 
     per_agent = {}
     for email in assignments.values():

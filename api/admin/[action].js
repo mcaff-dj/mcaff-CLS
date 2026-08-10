@@ -53,7 +53,7 @@ function parseBody(req) {
   return body || {};
 }
 
-async function upsertAndInvite(email, name, perms, tabPerms, req) {
+async function upsertAndInvite(email, name, perms, tabPerms, req, awaitMail = true) {
   const existing = await sql`SELECT id FROM users WHERE email = ${email}`;
   const isNewUser = existing.rows.length === 0;
 
@@ -75,25 +75,33 @@ async function upsertAndInvite(email, name, perms, tabPerms, req) {
   const { rows: permRows } = await sql`SELECT card_key FROM permissions WHERE user_id = ${user.id}`;
   const cardLabels = permRows.map((r) => CARD_LABELS[r.card_key] || r.card_key);
 
-  // Best-effort notification - awaited before responding so a slow send never risks
-  // the function tearing down mid-send, but failures here still never block the
-  // invite itself from succeeding.
-  try {
-    const base = siteBaseUrl(req);
-    const listHtml = cardLabels.length ? `<ul>${cardLabels.map((l) => `<li>${l}</li>`).join('')}</ul>` : '<p>(no reports yet)</p>';
-    await sendMail({
-      to: email,
-      subject: isNewUser ? "You've been invited to Customer Query Segment Reports" : 'Your report access was updated',
-      html: `
-        <p>Hi ${name || email},</p>
-        <p>${isNewUser ? "You've been given access to the Customer Query Segment Reports site." : 'Your access was just updated.'} You can currently view:</p>
-        ${listHtml}
-        <p><a href="${base}/">Sign in with Google</a> using this email address (${email}) to view them.</p>
-      `,
-    });
-  } catch (e) {
-    console.error('Invite email failed:', e.message || e);
-  }
+  // Best-effort notification. For a single invite this is still awaited before responding
+  // so a slow send never risks the function tearing down mid-send. For bulk invite the
+  // caller passes awaitMail=false: Resend is a synchronous third-party network call, and
+  // awaiting it once per row inside a loop of possibly hundreds of invites put every one
+  // of those round trips in the serial critical path for no reason - the DB writes above
+  // are what the response actually depends on. Firing it here without awaiting lets it
+  // resolve in the background while the loop moves on to the next row; either way, a mail
+  // failure is still only logged, never allowed to fail the invite itself.
+  const mailPromise = (async () => {
+    try {
+      const base = siteBaseUrl(req);
+      const listHtml = cardLabels.length ? `<ul>${cardLabels.map((l) => `<li>${l}</li>`).join('')}</ul>` : '<p>(no reports yet)</p>';
+      await sendMail({
+        to: email,
+        subject: isNewUser ? "You've been invited to Customer Query Segment Reports" : 'Your report access was updated',
+        html: `
+          <p>Hi ${name || email},</p>
+          <p>${isNewUser ? "You've been given access to the Customer Query Segment Reports site." : 'Your access was just updated.'} You can currently view:</p>
+          ${listHtml}
+          <p><a href="${base}/">Sign in with Google</a> using this email address (${email}) to view them.</p>
+        `,
+      });
+    } catch (e) {
+      console.error('Invite email failed:', e.message || e);
+    }
+  })();
+  if (awaitMail) await mailPromise;
 
   return user;
 }
@@ -141,7 +149,7 @@ async function handleUsers(req, res, session) {
       const results = [];
       for (const entry of entries) {
         try {
-          const user = await upsertAndInvite(entry.email, entry.name, perms, tabPerms, req);
+          const user = await upsertAndInvite(entry.email, entry.name, perms, tabPerms, req, false);
           results.push({ email: entry.email, ok: true, user });
         } catch (e) {
           console.error('Bulk invite failed for', entry.email, e.message || e);

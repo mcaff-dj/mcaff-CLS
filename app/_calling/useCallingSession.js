@@ -137,9 +137,16 @@ export function useCallingSession(processKey, { getPendingBox, getDateBounds } =
     }
   }, [googleUser]);
 
+  // Fires alongside the auth-sync fetch above, not after it: the endpoint only needs
+  // processKey (identity comes from the session cookie server-side, same as any other
+  // protected endpoint), so waiting on googleUser here just serialized two round trips for no
+  // real data dependency. googleUser is only used afterward, inside loadProcessAgents itself,
+  // to match "me" against the returned roster - staying a dep of loadProcessAgents (and so
+  // transitively of this effect) means that match still recomputes once the real signed-in
+  // user is known.
   useEffect(() => {
-    if (googleUser?.email) loadProcessAgents(processKey);
-  }, [googleUser, processKey, loadProcessAgents]);
+    loadProcessAgents(processKey);
+  }, [processKey, loadProcessAgents]);
 
   // One agent, one process, one field at a time. status and maxQuota are sent independently so
   // changing availability never disturbs a quota an admin set.
@@ -220,9 +227,16 @@ export function useCallingSession(processKey, { getPendingBox, getDateBounds } =
       .then(d => { if (d && d.agents) setServerPresence(d.agents); })
       .catch(() => {});
   }, [processKey]);
+  // Held in a ref (not called directly) so the shared visibilitychange listener further down
+  // always invokes today's fetchServerPresence, not the one captured when the tab last had
+  // this effect run.
+  const fetchServerPresenceRef = useRef(fetchServerPresence);
+  fetchServerPresenceRef.current = fetchServerPresence;
   useEffect(() => {
     fetchServerPresence();
-    const t = setInterval(fetchServerPresence, 30000);
+    const t = setInterval(() => {
+      if (!document.hidden) fetchServerPresence();
+    }, 30000);
     return () => clearInterval(t);
   }, [fetchServerPresence]);
 
@@ -310,12 +324,15 @@ export function useCallingSession(processKey, { getPendingBox, getDateBounds } =
   // status choice should ever change their status or touch their assignments - never an idle
   // timer (a long call, a meeting, or just reading something could trigger it for no good
   // reason, silently pulling leads out from under someone who was still actively working them).
+  const heartbeatTickRef = useRef(() => {});
   useEffect(() => {
-    if (!googleUser?.email) return;
+    if (!googleUser?.email) { heartbeatTickRef.current = () => {}; return; }
+    const tick = () => {
+      if (agentStatus !== 'Offline') syncPresenceToServer(agentStatus);
+    };
+    heartbeatTickRef.current = tick;
     const t = setInterval(() => {
-      if (agentStatus !== 'Offline') {
-        syncPresenceToServer(agentStatus);
-      }
+      if (!document.hidden) tick();
     }, 2 * 60 * 1000);
     return () => clearInterval(t);
   }, [agentStatus, googleUser, syncPresenceToServer]);
@@ -328,6 +345,7 @@ export function useCallingSession(processKey, { getPendingBox, getDateBounds } =
   // since it's comparing the file's own headers, not a manually-bumped version constant.
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const deployedVersionRef = useRef(null);
+  const versionCheckRef = useRef(() => {});
   useEffect(() => {
     const checkVersion = async () => {
       try {
@@ -343,9 +361,26 @@ export function useCallingSession(processKey, { getPendingBox, getDateBounds } =
         // Network hiccup - just skip this round, next interval tries again.
       }
     };
+    versionCheckRef.current = checkVersion;
     checkVersion();
-    const t = setInterval(checkVersion, 3 * 60 * 1000);
+    const t = setInterval(() => {
+      if (!document.hidden) checkVersion();
+    }, 3 * 60 * 1000);
     return () => clearInterval(t);
+  }, []);
+
+  // One shared visibilitychange listener (not one per interval above) so a tab that's been
+  // backgrounded for a while catches presence/heartbeat/version-check up immediately on
+  // return, rather than waiting up to a full interval period for each to happen to tick.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.hidden) return;
+      fetchServerPresenceRef.current();
+      heartbeatTickRef.current();
+      versionCheckRef.current();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
   return {

@@ -1130,9 +1130,20 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
       // - this page only ever runs RTO's own sync, unconditionally, since there's no other
       // process left to gate it against here.
       useEffect(()=>{ sync(true); },[sync]);
+      // The 60s poll used to fire at the same cadence whether this tab was focused or sitting
+      // backgrounded/minimized (no visibilitychange gating existed anywhere in this file,
+      // confirmed via grep) - refetching+reparsing the whole sheet and rewriting the 10k-row
+      // localStorage cache (see sync() above) on a tab nobody's looking at. document.hidden is
+      // checked INSIDE the tick (not by tearing the interval down) so the timer keeps a steady
+      // 60s cadence and just no-ops while hidden, rather than drifting once the tab comes back.
+      // The visibilitychange listener re-syncs the instant the tab becomes visible again, so a
+      // tab backgrounded for 10 minutes catches up immediately instead of sitting on
+      // 10-minutes-stale data until the next scheduled tick.
       useEffect(()=>{
-        const t=setInterval(()=>sync(true),60000);
-        return()=>clearInterval(t);
+        const t=setInterval(()=>{ if(!document.hidden) sync(true); },60000);
+        const onVisible=()=>{ if(!document.hidden) sync(true); };
+        document.addEventListener('visibilitychange',onVisible);
+        return()=>{ clearInterval(t); document.removeEventListener('visibilitychange',onVisible); };
       },[sync]);
 
       // Dynamic Roster that automatically includes EVERY unique agent found in Google Sheet tickets or overrides
@@ -2084,6 +2095,535 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
         }
       }, [userRole, tab]);
 
+      // Overview tab's per-agent KPI/table/heatmap/export data - used to be a plain IIFE
+      // recomputed directly in the JSX body on every render while this tab was open (unlike
+      // every other derived-data block in this file, which goes through useMemo) - multiple
+      // allTickets.filter() passes over effectiveAgentRoster re-ran on every re-render,
+      // including the ~60s sync poll's isSyncing toggle, which re-renders this component
+      // whether or not anything below actually changed. Deps cover every piece of state this
+      // computation reads: allTickets/effectiveAgentRoster (the ticket and roster data
+      // itself), overrides (dispBreakdown, freshUnassignedInScope), activityLogs (agentLogs),
+      // googleUser/userRole/isProcessAdmin (which agents are visible and who "mine" resolves
+      // to), leadDates (assignedAt/disposedAt-scoped table columns), heatmapMetric/
+      // heatmapIntervalMinutes (Time-of-Day table bucketing), tickets (freshUnassignedInScope),
+      // serverPresence (Logged In At/Break/Busy averages), and dateScope/customDateFrom/
+      // customDateTo (every date-scoped filter above) - an incomplete list here would show
+      // stale metrics after a filter/date change instead of just being slow, which is worse.
+      const overviewMetrics = useMemo(() => {
+        const inScope = (t) => isDateInScope(t.rowDate, dateScope, customDateFrom, customDateTo);
+
+        // Drives agentMetrics below (Calling Date/Order Date, via inScope) - the KPI
+        // tiles and every other Overview number EXCEPT the Agent Performance Summary
+        // table, which has its own separate computeTableAgentMetrics further down:
+        // that table needs two independent date scopes (assigned vs disposed) applied
+        // to two different subsets of an agent's tickets, which this single-scope
+        // shape can't express.
+        const computeAgentMetrics = (ag, ticketInScope) => {
+          const email = ag.email.toLowerCase();
+          const prefix = email.split('@')[0];
+          const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(prefix));
+
+          const assigned = allTickets.filter(t => isMine(t.assignedAgent) && ticketInScope(t));
+          const disposed = assigned.filter(t => t.disposition || t.agentRemarks || t.status !== 'Pending');
+          const pending = assigned.filter(t => t.status === 'Pending' && !t.disposition && !t.agentRemarks);
+          // allTickets already merges a local override's connectedStatus with the
+          // sheet's own synced value onto t.connected (see the allTickets useMemo
+          // above) - re-deriving from overrides[t.id] alone here skipped that sheet
+          // fallback, so any ticket disposed outside the current browser's local
+          // cache (a different session, or synced straight from the sheet) never
+          // counted as connected, which is why Avg Connect Rate always read ~0%.
+          const connected = disposed.filter(t => t.connected === 'Yes');
+          const unreachable = disposed.filter(t => t.connected === 'No');
+          const refunded = assigned.filter(t => t.status === 'Refunded');
+          const totalRefundAmt = refunded.reduce((s, t) => s + (t.orderAmount || 0), 0);
+
+          // Prepaid/COD split for the Agent Performance Summary table below. Same
+          // isPrepaid test as the rest of this file (t.paymentMethod, normalised to
+          // exactly 'Prepaid'/'COD' back in the sheet parser - see parseRows).
+          const prepaidAssigned = assigned.filter(t => t.paymentMethod === 'Prepaid');
+          const codAssigned = assigned.filter(t => t.paymentMethod === 'COD');
+          const prepaidConnected = connected.filter(t => t.paymentMethod === 'Prepaid');
+          // "Converted" mirrors reordersConverted's own definition elsewhere in this
+          // file (agentPerf, above) - a replacement order was recorded, or the agent's
+          // disposition itself was one of these two - just split by payment method
+          // instead of scoped to one agent/date-range selection. t.disposition and
+          // t.newOrderId already carry any local override merged in (see allTickets'
+          // useMemo), so no separate overrides[t.id] lookup is needed here, same as
+          // t.connected above.
+          const isConverted = t => !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
+          const prepaidConverted = disposed.filter(t => t.paymentMethod === 'Prepaid' && isConverted(t));
+          const codConverted = disposed.filter(t => t.paymentMethod === 'COD' && isConverted(t));
+
+          const dispBreakdown = {};
+          disposed.forEach(t => {
+            const ov = overrides[t.id];
+            const key = ov?.agentDisposition || t.disposition || 'Other';
+            dispBreakdown[key] = (dispBreakdown[key] || 0) + 1;
+          });
+
+          const agentLogs = activityLogs.filter(l => l.agent && l.agent.toLowerCase().includes(prefix));
+          const ticketLogs = agentLogs.filter(l => l.type === 'ticket' || l.type === 'refund');
+
+          return {
+            ...ag,
+            assigned: assigned.length,
+            disposed: disposed.length,
+            pending: pending.length,
+            connected: connected.length,
+            unreachable: unreachable.length,
+            refunded: refunded.length,
+            totalRefundAmt,
+            connectRate: disposed.length > 0 ? Math.round((connected.length / disposed.length) * 100) : 0,
+            prepaidAssigned: prepaidAssigned.length,
+            codAssigned: codAssigned.length,
+            prepaidConnected: prepaidConnected.length,
+            prepaidConverted: prepaidConverted.length,
+            codConverted: codConverted.length,
+            dispBreakdown,
+            agentLogs,
+            ticketLogs
+          };
+        };
+
+        const agentMetrics = effectiveAgentRoster.map(ag => computeAgentMetrics(ag, inScope));
+
+        // An Agent's Overview tab must only ever reflect their own performance,
+        // never the whole team's - agentMetrics itself stays computed for every
+        // roster entry (other tabs/blocks below this one, e.g. the Admin panel,
+        // still need everyone), but every number and log entry actually rendered
+        // in this tab is scoped down to just the signed-in agent's own entry first.
+        const myEmailLower = (googleUser?.email || '').toLowerCase();
+        const isMyAgent = (ag) => myEmailLower && (ag.email.toLowerCase() === myEmailLower || ag.email.toLowerCase().includes(myEmailLower.split('@')[0]));
+        const visibleAgentMetrics = userRole === 'Agent' && !isProcessAdmin ? agentMetrics.filter(isMyAgent) : agentMetrics;
+
+        // Agent Performance Summary table ONLY (not the KPI tiles above, which stay on
+        // Calling Date/Order Date via agentMetrics/computeAgentMetrics) - every column
+        // filtered by the REAL date its own underlying event happened, via leadDates
+        // (fetchLeadDates above) - NOT one single scope the way agentMetrics uses.
+        // Assigned-flavored columns (Total Leads/Prepaid/COD Assigned) use assignedAt;
+        // Disposed-flavored columns (Total Disposed/Connected/Prepaid
+        // Connected/Prepaid+COD Converted) use disposedAt instead - deliberately two
+        // independent universes of tickets, not one funnel filtered by a single date:
+        // a lead assigned yesterday and disposed today counts toward TODAY's
+        // Disposed/Connected/Converted numbers even though it does NOT count toward
+        // today's Assigned numbers - "how many did I action today" and "how many did I
+        // newly receive today" are different questions. This is why it's a separate
+        // function from computeAgentMetrics rather than another call to it: that
+        // helper filters everything from ONE scoped `assigned` set, which can't
+        // express two different scopes for two different subsets of the same agent's
+        // tickets.
+        const assignedDateInScope = (t) => isLeadDateInScope(
+          leadDates[normalizeOrderKey(t.orderNumber)]?.assignedAt, dateScope, customDateFrom, customDateTo
+        );
+        const disposedDateInScope = (t) => isLeadDateInScope(
+          leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt, dateScope, customDateFrom, customDateTo
+        );
+        const computeTableAgentMetrics = (ag) => {
+          const email = ag.email.toLowerCase();
+          const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
+
+          const assignedByDate = allTickets.filter(t => isMine(t.assignedAgent) && assignedDateInScope(t));
+          const prepaidAssigned = assignedByDate.filter(t => t.paymentMethod === 'Prepaid');
+          const codAssigned = assignedByDate.filter(t => t.paymentMethod === 'COD');
+
+          // A "worked" ticket - any disposition/remark/non-Pending status - same test
+          // computeAgentMetrics uses for `disposed`, just scoped by disposedAt here
+          // instead of by whatever scoped `assigned` in the first place.
+          const isWorked = t => !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
+          const disposedByDate = allTickets.filter(t => isMine(t.assignedAgent) && isWorked(t) && disposedDateInScope(t));
+          const connected = disposedByDate.filter(t => t.connected === 'Yes');
+          const prepaidConnected = connected.filter(t => t.paymentMethod === 'Prepaid');
+          const isConverted = t => !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
+          const prepaidConverted = disposedByDate.filter(t => t.paymentMethod === 'Prepaid' && isConverted(t));
+          const codConverted = disposedByDate.filter(t => t.paymentMethod === 'COD' && isConverted(t));
+
+          // First Called At: same "average time-of-day across active days" pattern as
+          // Logged In At/Total Break Time (see getAgentPresenceLogSummary's own
+          // comment in db.js for why - an average across different calendar days can
+          // only be expressed as a time-of-day, not one specific instant), but computed
+          // here client-side from disposedByDate's own disposedAt timestamps (leadDates,
+          // already fetched for the Assigned/Disposed scoping above) rather than from
+          // agent_presence_log - a wholly different data source (this is "when did they
+          // first action a lead", not "when did they sign in"). "Active day" here means
+          // an IST calendar day with at least one disposed ticket that has a resolvable
+          // disposedAt - independent of the presence-log active-day set Logged In
+          // At/Total Break Time use, since it's tracking a different kind of event.
+          // Reduces to exactly "the first disposition of that day" for a single-day
+          // scope, matching the literal ask this column was added for.
+          const firstCallMinutesByDay = new Map(); // dayKey -> earliest minutes-since-midnight that day
+          for (const t of disposedByDate) {
+            const disposedAtIso = leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt;
+            if (!disposedAtIso) continue;
+            const at = new Date(disposedAtIso);
+            const dayKey = istDayKeyClient(at);
+            const mins = istMinutesSinceMidnightClient(at);
+            if (!firstCallMinutesByDay.has(dayKey) || mins < firstCallMinutesByDay.get(dayKey)) {
+              firstCallMinutesByDay.set(dayKey, mins);
+            }
+          }
+          const firstCallMinutesList = [...firstCallMinutesByDay.values()];
+          const firstCalledAtMinutes = firstCallMinutesList.length
+            ? Math.round(firstCallMinutesList.reduce((s, m) => s + m, 0) / firstCallMinutesList.length)
+            : null;
+
+          // FRT (First Response Time): disposedAt - assignedAt, averaged in minutes
+          // over disposedByDate tickets that have both timestamps - a per-ticket
+          // duration (unlike firstCalledAtMinutes' per-day time-of-day average above),
+          // so it's a plain mean of individual gaps, not bucketed by calendar day.
+          // Negative gaps (bad data - disposed logged before assigned) are dropped
+          // rather than dragging the average down.
+          const frtMinutesList = [];
+          for (const t of disposedByDate) {
+            const dates = leadDates[normalizeOrderKey(t.orderNumber)];
+            if (!dates?.assignedAt || !dates?.disposedAt) continue;
+            const diffMin = (new Date(dates.disposedAt).getTime() - new Date(dates.assignedAt).getTime()) / 60000;
+            if (diffMin >= 0) frtMinutesList.push(diffMin);
+          }
+          const frtMinutes = frtMinutesList.length
+            ? Math.round(frtMinutesList.reduce((s, m) => s + m, 0) / frtMinutesList.length)
+            : null;
+
+          return {
+            ...ag,
+            assigned: assignedByDate.length,
+            disposed: disposedByDate.length,
+            connected: connected.length,
+            prepaidAssigned: prepaidAssigned.length,
+            codAssigned: codAssigned.length,
+            prepaidConnected: prepaidConnected.length,
+            prepaidConverted: prepaidConverted.length,
+            codConverted: codConverted.length,
+            firstCalledAtMinutes,
+            frtMinutes,
+          };
+        };
+        const tableAgentMetrics = effectiveAgentRoster.map(computeTableAgentMetrics);
+        const visibleTableAgentMetrics = userRole === 'Agent' && !isProcessAdmin
+          ? tableAgentMetrics.filter(isMyAgent) : tableAgentMetrics;
+
+        // Time-of-Day Distribution table (below Agent Performance Summary) - a
+        // SEPARATE per-agent breakdown, not derived from tableAgentMetrics: this needs
+        // the underlying ticket-level disposedAt timestamps to bucket by time-of-day,
+        // which computeTableAgentMetrics already collapses down to plain counts. Same
+        // disposedDateInScope as the table above (so a multi-day page filter sums every
+        // matching day's activity into the same time-of-day bucket, rather than
+        // showing one day at a time), just re-sliced by heatmapIntervalMinutes/
+        // heatmapMetric instead of by payment type.
+        const isConvertedForHeatmap = t => !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
+        const heatmapAgentData = effectiveAgentRoster.map(ag => {
+          const email = ag.email.toLowerCase();
+          const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
+          const isWorked = t => !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
+          const disposedByDate = allTickets.filter(t => isMine(t.assignedAgent) && isWorked(t) && disposedDateInScope(t));
+
+          // 'dialled' = every disposed lead (connected or not) - the same set
+          // Total Disposed already counts, just bucketed by time-of-day here instead
+          // of totaled. 'connected'/'converted' narrow that same set further, matching
+          // the existing Total Connected column / the Prepaid+COD Converted columns
+          // combined (not split by payment type - this table has one Converted option).
+          let metricTickets = disposedByDate;
+          if (heatmapMetric === 'connected') metricTickets = disposedByDate.filter(t => t.connected === 'Yes');
+          else if (heatmapMetric === 'converted') metricTickets = disposedByDate.filter(isConvertedForHeatmap);
+
+          const bucketCounts = new Map(); // bucketIndex -> count
+          for (const t of metricTickets) {
+            const disposedAtIso = leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt;
+            if (!disposedAtIso) continue;
+            const mins = istMinutesSinceMidnightClient(new Date(disposedAtIso));
+            const bucketIndex = Math.floor(mins / heatmapIntervalMinutes);
+            bucketCounts.set(bucketIndex, (bucketCounts.get(bucketIndex) || 0) + 1);
+          }
+          return { ...ag, bucketCounts };
+        });
+        const visibleHeatmapAgentData = (userRole === 'Agent' && !isProcessAdmin
+          ? heatmapAgentData.filter(isMyAgent) : heatmapAgentData
+        ).filter(a => a.bucketCounts.size > 0); // no columns at all this range - pure noise, same as the table above
+
+        // Columns span only the buckets SOMEONE actually has activity in (not a fixed
+        // full-day grid, which for a 15-min interval would be 96 mostly-empty columns) -
+        // the narrowest range that still shows every non-zero cell.
+        const allHeatmapBucketIndexes = visibleHeatmapAgentData.flatMap(a => [...a.bucketCounts.keys()]);
+        const heatmapBucketIndexes = [];
+        if (allHeatmapBucketIndexes.length) {
+          const minBucket = Math.min(...allHeatmapBucketIndexes);
+          const maxBucket = Math.max(...allHeatmapBucketIndexes);
+          for (let i = minBucket; i <= maxBucket; i++) heatmapBucketIndexes.push(i);
+        }
+
+        // Global min/max across every rendered heatmap cell (Total row/column
+        // deliberately excluded below, once they exist - a grand total would dwarf
+        // every real cell and flatten the whole scale) - drives heatmapCellStyle's
+        // "lower = more highlighted" tint, confirmed as a whole-table scale (not
+        // per-agent-row) so the color also reflects cross-agent volume, not just each
+        // agent's own pattern.
+        const allHeatmapValues = visibleHeatmapAgentData.flatMap(a => heatmapBucketIndexes.map(idx => a.bucketCounts.get(idx) || 0));
+        const heatmapMin = allHeatmapValues.length ? Math.min(...allHeatmapValues) : 0;
+        const heatmapMax = allHeatmapValues.length ? Math.max(...allHeatmapValues) : 0;
+        // amber-500 (rgb(245,158,11)) - matches this table's existing amber accents
+        // (Total Break Time) for "needs attention." Alpha 0 at the highest value in
+        // view (no tint at all) up to 0.4 at the lowest (a visible but still
+        // text-legible highlight) - never applied to Total cells, which sit outside
+        // this scale entirely.
+        function heatmapCellStyle(value) {
+          if (heatmapMax <= heatmapMin) return undefined;
+          const t = (heatmapMax - value) / (heatmapMax - heatmapMin);
+          return { backgroundColor: `rgba(245, 158, 11, ${(t * 0.4).toFixed(2)})` };
+        }
+
+        // Converted Orders - a flat, ungrouped list (one row per order, not aggregated
+        // the way the two tables above are) for the CSV export below. Same "converted"
+        // test as the Time-of-Day table's 'converted' metric option (Prepaid+COD
+        // combined, not split by payment type) and the same disposedDateInScope date
+        // scoping as every other Disposed/Connected/Converted number on this page.
+        // Roster filtered by isMyAgent FIRST, then flat-mapped per agent - the same
+        // order visibleHeatmapAgentData already does it in, so a plain Agent sees only
+        // their own converted orders while Admin/Team Lead/isProcessAdmin see everyone's.
+        const convertedOrdersRoster = userRole === 'Agent' && !isProcessAdmin
+          ? effectiveAgentRoster.filter(isMyAgent) : effectiveAgentRoster;
+        const convertedOrdersList = convertedOrdersRoster.flatMap(ag => {
+          const email = ag.email.toLowerCase();
+          const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
+          const isWorked = t => !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
+          return allTickets
+            .filter(t => isMine(t.assignedAgent) && isWorked(t) && disposedDateInScope(t) && isConvertedForHeatmap(t))
+            .map(t => ({
+              orderNumber: t.orderNumber,
+              agentName: ag.name,
+              // A converted ticket can lack t.disposition itself if newOrderId alone is
+              // what qualified it (see isConvertedForHeatmap) - "Reorder" names that
+              // case rather than showing a blank cell for a genuinely converted order.
+              disposition: t.disposition || (t.newOrderId ? 'Reorder' : '—'),
+            }));
+        }).sort((a, b) => a.agentName.localeCompare(b.agentName) || a.orderNumber.localeCompare(b.orderNumber));
+
+        // Plain client-side CSV download (Blob + object URL + a throwaway anchor click)
+        // - no backend endpoint needed, since convertedOrdersList is already exactly
+        // what's on screen. Quotes/escapes any field containing a comma, quote, or
+        // newline per RFC 4180, defensively - dispositions are a closed set of short
+        // strings today, but agent names/order numbers are sheet data this script
+        // doesn't control.
+        function downloadConvertedOrdersCsv() {
+          const escapeCsv = (v) => {
+            const s = String(v ?? '');
+            return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+          };
+          const lines = [
+            ['Order', 'Agent Name', 'Disposition'].join(','),
+            ...convertedOrdersList.map(o => [o.orderNumber, o.agentName, o.disposition].map(escapeCsv).join(',')),
+          ];
+          const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `converted-orders-${new Date().toISOString().slice(0, 10)}.csv`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }
+
+        // Total row for the Agent Performance Summary table - team aggregates per
+        // column, NOT a per-agent row total (this table's columns mix counts,
+        // percentages and times - "Total Disposed" + "Connected %" + "Logged In At"
+        // can't be meaningfully added together into one row-total number the way the
+        // Time-of-Day table's homogeneous count columns can). Percentage columns
+        // aggregate as sum-of-numerators / sum-of-denominators (the statistically
+        // correct way to combine rates across agents with different denominators),
+        // NOT an average of each agent's own already-rounded percentage. Logged In
+        // At/Total Break Time average across agents that have a real value (loggedInMinutes
+        // null is excluded, not treated as 0).
+        const summaryRows = visibleTableAgentMetrics.filter(am => am.assigned > 0);
+        const summaryTotals = summaryRows.reduce((acc, am) => {
+          acc.assigned += am.assigned; acc.disposed += am.disposed; acc.connected += am.connected;
+          acc.prepaidAssigned += am.prepaidAssigned; acc.prepaidConnected += am.prepaidConnected;
+          acc.codAssigned += am.codAssigned; acc.prepaidConverted += am.prepaidConverted;
+          acc.codConverted += am.codConverted;
+          return acc;
+        }, { assigned: 0, disposed: 0, connected: 0, prepaidAssigned: 0, prepaidConnected: 0, codAssigned: 0, prepaidConverted: 0, codConverted: 0 });
+        const summaryLoggedInList = summaryRows
+          .map(am => serverPresence[am.email.toLowerCase()]?.loggedInMinutes)
+          .filter(m => m !== null && m !== undefined);
+        const summaryBreakList = summaryRows
+          .map(am => serverPresence[am.email.toLowerCase()]?.breakMinutes)
+          .filter(m => m !== null && m !== undefined);
+        const summaryBusyList = summaryRows
+          .map(am => serverPresence[am.email.toLowerCase()]?.busyMinutes)
+          .filter(m => m !== null && m !== undefined);
+        const summaryAvgLoggedIn = summaryLoggedInList.length
+          ? Math.round(summaryLoggedInList.reduce((s, m) => s + m, 0) / summaryLoggedInList.length) : null;
+        const summaryAvgBreak = summaryBreakList.length
+          ? Math.round(summaryBreakList.reduce((s, m) => s + m, 0) / summaryBreakList.length) : 0;
+        const summaryAvgBusy = summaryBusyList.length
+          ? Math.round(summaryBusyList.reduce((s, m) => s + m, 0) / summaryBusyList.length) : 0;
+        const summaryFrtList = summaryRows.map(am => am.frtMinutes).filter(m => m !== null && m !== undefined);
+        const summaryAvgFrt = summaryFrtList.length
+          ? Math.round(summaryFrtList.reduce((s, m) => s + m, 0) / summaryFrtList.length) : null;
+
+        // Same Blob/anchor download as downloadConvertedOrdersCsv below - exports
+        // exactly what's on screen in the Agent Performance Summary table, one row per
+        // agent plus the Team Total row, same column order and same formatPct/
+        // formatTimeOfDay/formatBreakMinutes strings the table itself renders (so a
+        // cell in the sheet always matches what an admin saw on screen, not a raw
+        // recomputation that could drift from it).
+        function downloadAgentSummaryCsv() {
+          const escapeCsv = (v) => {
+            const s = String(v ?? '');
+            return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+          };
+          const header = [
+            'Agent Name', 'Total Leads Assigned', 'Total Disposed', 'First Called At', 'FRT',
+            'Total Connected', 'Connected %', 'Total Prepaid Assigned', 'Total Prepaid Assigned %',
+            'Total Prepaid Connected', 'Total Prepaid Connected %', 'Total COD Assigned', 'Total COD Assigned %',
+            'Total Prepaid Converted', 'Total Prepaid Converted %', 'Total COD Converted', 'Total COD Converted %',
+            'Logged In At', 'Total Break Time', 'Total Busy Time',
+          ];
+          const rowFor = (am) => {
+            const presence = serverPresence[am.email.toLowerCase()];
+            return [
+              am.name, am.assigned, am.disposed, formatTimeOfDay(am.firstCalledAtMinutes), formatFrt(am.frtMinutes),
+              am.connected, formatPct(am.connected, am.disposed),
+              am.prepaidAssigned, formatPct(am.prepaidAssigned, am.assigned),
+              am.prepaidConnected, formatPct(am.prepaidConnected, am.prepaidAssigned),
+              am.codAssigned, formatPct(am.codAssigned, am.assigned),
+              am.prepaidConverted, formatPct(am.prepaidConverted, am.prepaidAssigned),
+              am.codConverted, formatPct(am.codConverted, am.codAssigned),
+              formatTimeOfDay(presence?.loggedInMinutes), formatBreakMinutes(presence?.breakMinutes), formatBreakMinutes(presence?.busyMinutes),
+            ];
+          };
+          const lines = [header.map(escapeCsv).join(',')];
+          summaryRows.forEach(am => lines.push(rowFor(am).map(escapeCsv).join(',')));
+          if (summaryRows.length > 0) {
+            lines.push([
+              'Team Total', summaryTotals.assigned, summaryTotals.disposed, '—', formatFrt(summaryAvgFrt),
+              summaryTotals.connected, formatPct(summaryTotals.connected, summaryTotals.disposed),
+              summaryTotals.prepaidAssigned, formatPct(summaryTotals.prepaidAssigned, summaryTotals.assigned),
+              summaryTotals.prepaidConnected, formatPct(summaryTotals.prepaidConnected, summaryTotals.prepaidAssigned),
+              summaryTotals.codAssigned, formatPct(summaryTotals.codAssigned, summaryTotals.assigned),
+              summaryTotals.prepaidConverted, formatPct(summaryTotals.prepaidConverted, summaryTotals.prepaidAssigned),
+              summaryTotals.codConverted, formatPct(summaryTotals.codConverted, summaryTotals.codAssigned),
+              formatTimeOfDay(summaryAvgLoggedIn), formatBreakMinutes(summaryAvgBreak), formatBreakMinutes(summaryAvgBusy),
+            ].map(escapeCsv).join(','));
+          }
+          const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `agent-performance-summary-${new Date().toISOString().slice(0, 10)}.csv`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }
+
+        // Raw per-lead detail behind the summary table above - one row per ticket
+        // rather than aggregated per agent, so an admin can audit/reconcile exactly
+        // which orders make up a summary number. Union of assignedDateInScope OR
+        // (worked AND disposedDateInScope) - the same two independent scopes
+        // computeTableAgentMetrics applies, just not collapsed to counts - so a lead
+        // assigned yesterday and disposed today appears once here (it isn't double
+        // counted the way it would be if this were a plain concatenation of the two
+        // scoped sets). Same isMyAgent roster scoping as the summary table: a plain
+        // Agent only ever gets their own raw rows.
+        const rawLeadDetailsRoster = userRole === 'Agent' && !isProcessAdmin
+          ? effectiveAgentRoster.filter(isMyAgent) : effectiveAgentRoster;
+        const isWorkedForRaw = t => !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
+        const rawLeadDetailsList = rawLeadDetailsRoster.flatMap(ag => {
+          const email = ag.email.toLowerCase();
+          const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
+          return allTickets
+            .filter(t => isMine(t.assignedAgent)
+              && (assignedDateInScope(t) || (isWorkedForRaw(t) && disposedDateInScope(t))))
+            .map(t => {
+              const dates = leadDates[normalizeOrderKey(t.orderNumber)] || {};
+              const isConverted = !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
+              // Per-lead FRT (unlike the summary table's per-agent average): this
+              // one ticket's own disposedAt - assignedAt, in minutes. null when
+              // either timestamp is missing or disposed logged before assigned (bad
+              // data) - same "drop, don't zero" rule as frtMinutes above.
+              const frtMinutes = (dates.assignedAt && dates.disposedAt)
+                ? (new Date(dates.disposedAt).getTime() - new Date(dates.assignedAt).getTime()) / 60000
+                : null;
+              return {
+                orderNumber: t.orderNumber,
+                agentName: ag.name,
+                paymentMethod: t.paymentMethod || '',
+                assignedAt: dates.assignedAt || '',
+                disposedAt: dates.disposedAt || '',
+                frtMinutes: (frtMinutes !== null && frtMinutes >= 0) ? Math.round(frtMinutes) : null,
+                connected: t.connected || '',
+                disposition: t.disposition || (t.newOrderId ? 'Reorder' : ''),
+                converted: isConverted ? 'Yes' : 'No',
+              };
+            });
+        }).sort((a, b) => a.agentName.localeCompare(b.agentName) || a.orderNumber.localeCompare(b.orderNumber));
+
+        // Same Blob/anchor download pattern as downloadConvertedOrdersCsv/
+        // downloadAgentSummaryCsv - assignedAt/disposedAt come back from Postgres as
+        // ISO strings (leadDates); formatted to IST here, same "when did this really
+        // happen" question the summary table's own date-scoping answers, rather than
+        // exporting a raw UTC ISO string a spreadsheet user would have to convert.
+        function downloadRawLeadDetailsCsv() {
+          const escapeCsv = (v) => {
+            const s = String(v ?? '');
+            return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+          };
+          const formatCsvDate = (iso) => iso
+            ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })
+            : '';
+          const lines = [
+            ['Order ID', 'Agent Name', 'Payment Method', 'Assigned Date', 'Disposed Date', 'FRT', 'Connected', 'Disposition', 'Converted'].join(','),
+            ...rawLeadDetailsList.map(r => [
+              r.orderNumber, r.agentName, r.paymentMethod, formatCsvDate(r.assignedAt), formatCsvDate(r.disposedAt),
+              formatFrt(r.frtMinutes), r.connected, r.disposition, r.converted,
+            ].map(escapeCsv).join(',')),
+          ];
+          const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `agent-performance-raw-${new Date().toISOString().slice(0, 10)}.csv`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }
+
+        const totalAssigned = visibleAgentMetrics.reduce((s, a) => s + a.assigned, 0);
+        const totalDisposed = visibleAgentMetrics.reduce((s, a) => s + a.disposed, 0);
+        const totalPending = visibleAgentMetrics.reduce((s, a) => s + a.pending, 0);
+        const totalRefunded = visibleAgentMetrics.reduce((s, a) => s + a.refunded, 0);
+        const totalRefundAmt = visibleAgentMetrics.reduce((s, a) => s + a.totalRefundAmt, 0);
+        const avgConnectRate = totalDisposed > 0 ? Math.round(visibleAgentMetrics.reduce((s, a) => s + a.connected, 0) / totalDisposed * 100) : 0;
+        const onlineCount = visibleAgentMetrics.filter(a => a.status === 'Online').length;
+        const freshUnassignedInScope = tickets.filter(t => {
+          const agt = overrides[t.id]?.assignedAgent || t.assignedAgent;
+          return (!agt || agt === 'Unassigned') && inScope(t);
+        }).length;
+
+        const dispColors = {
+          'Customer Agreed to Accept': { bg: 'bg-emerald-500', text: 'text-emerald-300' },
+          'Refund Requested': { bg: 'bg-violet-500', text: 'text-violet-300' },
+          'Address Change Requested': { bg: 'bg-amber-500', text: 'text-amber-300' },
+          'Product Issue / Exchange': { bg: 'bg-sky-500', text: 'text-sky-300' },
+          'Not Interested': { bg: 'bg-rose-500', text: 'text-rose-300' },
+          'Wrong Number': { bg: 'bg-orange-500', text: 'text-orange-300' },
+          'Ringing / No Answer': { bg: 'bg-zinc-500', text: 'text-zinc-300' },
+          'Not Reachable': { bg: 'bg-zinc-600', text: 'text-zinc-400' },
+          'Switch Off': { bg: 'bg-zinc-600', text: 'text-zinc-400' },
+          'Line Busy': { bg: 'bg-yellow-600', text: 'text-yellow-300' },
+          'Invalid Number': { bg: 'bg-red-600', text: 'text-red-300' },
+        };
+        const getDispColor = (key) => dispColors[key] || { bg: 'bg-indigo-500', text: 'text-indigo-300' };
+
+        return {
+          visibleTableAgentMetrics, visibleHeatmapAgentData, heatmapBucketIndexes, heatmapCellStyle,
+          downloadConvertedOrdersCsv, convertedOrdersList,
+          summaryRows, summaryTotals, summaryAvgFrt, summaryAvgLoggedIn, summaryAvgBreak, summaryAvgBusy, downloadAgentSummaryCsv,
+          rawLeadDetailsList, downloadRawLeadDetailsCsv,
+          totalAssigned, totalDisposed, totalPending, totalRefunded, totalRefundAmt, avgConnectRate, onlineCount, freshUnassignedInScope,
+        };
+      }, [allTickets, effectiveAgentRoster, overrides, activityLogs, googleUser, userRole, isProcessAdmin, leadDates, heatmapMetric, heatmapIntervalMinutes, tickets, serverPresence, dateScope, customDateFrom, customDateTo]);
+
       return(
         <div className="min-h-screen flex flex-col bg-[#09090b]">
 
@@ -2254,510 +2794,13 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
                  ══════════════════════════════════════════════════════════════════════ */
               <div className="space-y-6 animate-fadeIn">
                 {(() => {
-                  const inScope = (t) => isDateInScope(t.rowDate, dateScope, customDateFrom, customDateTo);
-
-                  // Drives agentMetrics below (Calling Date/Order Date, via inScope) - the KPI
-                  // tiles and every other Overview number EXCEPT the Agent Performance Summary
-                  // table, which has its own separate computeTableAgentMetrics further down:
-                  // that table needs two independent date scopes (assigned vs disposed) applied
-                  // to two different subsets of an agent's tickets, which this single-scope
-                  // shape can't express.
-                  const computeAgentMetrics = (ag, ticketInScope) => {
-                    const email = ag.email.toLowerCase();
-                    const prefix = email.split('@')[0];
-                    const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(prefix));
-
-                    const assigned = allTickets.filter(t => isMine(t.assignedAgent) && ticketInScope(t));
-                    const disposed = assigned.filter(t => t.disposition || t.agentRemarks || t.status !== 'Pending');
-                    const pending = assigned.filter(t => t.status === 'Pending' && !t.disposition && !t.agentRemarks);
-                    // allTickets already merges a local override's connectedStatus with the
-                    // sheet's own synced value onto t.connected (see the allTickets useMemo
-                    // above) - re-deriving from overrides[t.id] alone here skipped that sheet
-                    // fallback, so any ticket disposed outside the current browser's local
-                    // cache (a different session, or synced straight from the sheet) never
-                    // counted as connected, which is why Avg Connect Rate always read ~0%.
-                    const connected = disposed.filter(t => t.connected === 'Yes');
-                    const unreachable = disposed.filter(t => t.connected === 'No');
-                    const refunded = assigned.filter(t => t.status === 'Refunded');
-                    const totalRefundAmt = refunded.reduce((s, t) => s + (t.orderAmount || 0), 0);
-
-                    // Prepaid/COD split for the Agent Performance Summary table below. Same
-                    // isPrepaid test as the rest of this file (t.paymentMethod, normalised to
-                    // exactly 'Prepaid'/'COD' back in the sheet parser - see parseRows).
-                    const prepaidAssigned = assigned.filter(t => t.paymentMethod === 'Prepaid');
-                    const codAssigned = assigned.filter(t => t.paymentMethod === 'COD');
-                    const prepaidConnected = connected.filter(t => t.paymentMethod === 'Prepaid');
-                    // "Converted" mirrors reordersConverted's own definition elsewhere in this
-                    // file (agentPerf, above) - a replacement order was recorded, or the agent's
-                    // disposition itself was one of these two - just split by payment method
-                    // instead of scoped to one agent/date-range selection. t.disposition and
-                    // t.newOrderId already carry any local override merged in (see allTickets'
-                    // useMemo), so no separate overrides[t.id] lookup is needed here, same as
-                    // t.connected above.
-                    const isConverted = t => !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
-                    const prepaidConverted = disposed.filter(t => t.paymentMethod === 'Prepaid' && isConverted(t));
-                    const codConverted = disposed.filter(t => t.paymentMethod === 'COD' && isConverted(t));
-
-                    const dispBreakdown = {};
-                    disposed.forEach(t => {
-                      const ov = overrides[t.id];
-                      const key = ov?.agentDisposition || t.disposition || 'Other';
-                      dispBreakdown[key] = (dispBreakdown[key] || 0) + 1;
-                    });
-
-                    const agentLogs = activityLogs.filter(l => l.agent && l.agent.toLowerCase().includes(prefix));
-                    const ticketLogs = agentLogs.filter(l => l.type === 'ticket' || l.type === 'refund');
-
-                    return {
-                      ...ag,
-                      assigned: assigned.length,
-                      disposed: disposed.length,
-                      pending: pending.length,
-                      connected: connected.length,
-                      unreachable: unreachable.length,
-                      refunded: refunded.length,
-                      totalRefundAmt,
-                      connectRate: disposed.length > 0 ? Math.round((connected.length / disposed.length) * 100) : 0,
-                      prepaidAssigned: prepaidAssigned.length,
-                      codAssigned: codAssigned.length,
-                      prepaidConnected: prepaidConnected.length,
-                      prepaidConverted: prepaidConverted.length,
-                      codConverted: codConverted.length,
-                      dispBreakdown,
-                      agentLogs,
-                      ticketLogs
-                    };
-                  };
-
-                  const agentMetrics = effectiveAgentRoster.map(ag => computeAgentMetrics(ag, inScope));
-
-                  // An Agent's Overview tab must only ever reflect their own performance,
-                  // never the whole team's - agentMetrics itself stays computed for every
-                  // roster entry (other tabs/blocks below this one, e.g. the Admin panel,
-                  // still need everyone), but every number and log entry actually rendered
-                  // in this tab is scoped down to just the signed-in agent's own entry first.
-                  const myEmailLower = (googleUser?.email || '').toLowerCase();
-                  const isMyAgent = (ag) => myEmailLower && (ag.email.toLowerCase() === myEmailLower || ag.email.toLowerCase().includes(myEmailLower.split('@')[0]));
-                  const visibleAgentMetrics = userRole === 'Agent' && !isProcessAdmin ? agentMetrics.filter(isMyAgent) : agentMetrics;
-
-                  // Agent Performance Summary table ONLY (not the KPI tiles above, which stay on
-                  // Calling Date/Order Date via agentMetrics/computeAgentMetrics) - every column
-                  // filtered by the REAL date its own underlying event happened, via leadDates
-                  // (fetchLeadDates above) - NOT one single scope the way agentMetrics uses.
-                  // Assigned-flavored columns (Total Leads/Prepaid/COD Assigned) use assignedAt;
-                  // Disposed-flavored columns (Total Disposed/Connected/Prepaid
-                  // Connected/Prepaid+COD Converted) use disposedAt instead - deliberately two
-                  // independent universes of tickets, not one funnel filtered by a single date:
-                  // a lead assigned yesterday and disposed today counts toward TODAY's
-                  // Disposed/Connected/Converted numbers even though it does NOT count toward
-                  // today's Assigned numbers - "how many did I action today" and "how many did I
-                  // newly receive today" are different questions. This is why it's a separate
-                  // function from computeAgentMetrics rather than another call to it: that
-                  // helper filters everything from ONE scoped `assigned` set, which can't
-                  // express two different scopes for two different subsets of the same agent's
-                  // tickets.
-                  const assignedDateInScope = (t) => isLeadDateInScope(
-                    leadDates[normalizeOrderKey(t.orderNumber)]?.assignedAt, dateScope, customDateFrom, customDateTo
-                  );
-                  const disposedDateInScope = (t) => isLeadDateInScope(
-                    leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt, dateScope, customDateFrom, customDateTo
-                  );
-                  const computeTableAgentMetrics = (ag) => {
-                    const email = ag.email.toLowerCase();
-                    const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
-
-                    const assignedByDate = allTickets.filter(t => isMine(t.assignedAgent) && assignedDateInScope(t));
-                    const prepaidAssigned = assignedByDate.filter(t => t.paymentMethod === 'Prepaid');
-                    const codAssigned = assignedByDate.filter(t => t.paymentMethod === 'COD');
-
-                    // A "worked" ticket - any disposition/remark/non-Pending status - same test
-                    // computeAgentMetrics uses for `disposed`, just scoped by disposedAt here
-                    // instead of by whatever scoped `assigned` in the first place.
-                    const isWorked = t => !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
-                    const disposedByDate = allTickets.filter(t => isMine(t.assignedAgent) && isWorked(t) && disposedDateInScope(t));
-                    const connected = disposedByDate.filter(t => t.connected === 'Yes');
-                    const prepaidConnected = connected.filter(t => t.paymentMethod === 'Prepaid');
-                    const isConverted = t => !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
-                    const prepaidConverted = disposedByDate.filter(t => t.paymentMethod === 'Prepaid' && isConverted(t));
-                    const codConverted = disposedByDate.filter(t => t.paymentMethod === 'COD' && isConverted(t));
-
-                    // First Called At: same "average time-of-day across active days" pattern as
-                    // Logged In At/Total Break Time (see getAgentPresenceLogSummary's own
-                    // comment in db.js for why - an average across different calendar days can
-                    // only be expressed as a time-of-day, not one specific instant), but computed
-                    // here client-side from disposedByDate's own disposedAt timestamps (leadDates,
-                    // already fetched for the Assigned/Disposed scoping above) rather than from
-                    // agent_presence_log - a wholly different data source (this is "when did they
-                    // first action a lead", not "when did they sign in"). "Active day" here means
-                    // an IST calendar day with at least one disposed ticket that has a resolvable
-                    // disposedAt - independent of the presence-log active-day set Logged In
-                    // At/Total Break Time use, since it's tracking a different kind of event.
-                    // Reduces to exactly "the first disposition of that day" for a single-day
-                    // scope, matching the literal ask this column was added for.
-                    const firstCallMinutesByDay = new Map(); // dayKey -> earliest minutes-since-midnight that day
-                    for (const t of disposedByDate) {
-                      const disposedAtIso = leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt;
-                      if (!disposedAtIso) continue;
-                      const at = new Date(disposedAtIso);
-                      const dayKey = istDayKeyClient(at);
-                      const mins = istMinutesSinceMidnightClient(at);
-                      if (!firstCallMinutesByDay.has(dayKey) || mins < firstCallMinutesByDay.get(dayKey)) {
-                        firstCallMinutesByDay.set(dayKey, mins);
-                      }
-                    }
-                    const firstCallMinutesList = [...firstCallMinutesByDay.values()];
-                    const firstCalledAtMinutes = firstCallMinutesList.length
-                      ? Math.round(firstCallMinutesList.reduce((s, m) => s + m, 0) / firstCallMinutesList.length)
-                      : null;
-
-                    // FRT (First Response Time): disposedAt - assignedAt, averaged in minutes
-                    // over disposedByDate tickets that have both timestamps - a per-ticket
-                    // duration (unlike firstCalledAtMinutes' per-day time-of-day average above),
-                    // so it's a plain mean of individual gaps, not bucketed by calendar day.
-                    // Negative gaps (bad data - disposed logged before assigned) are dropped
-                    // rather than dragging the average down.
-                    const frtMinutesList = [];
-                    for (const t of disposedByDate) {
-                      const dates = leadDates[normalizeOrderKey(t.orderNumber)];
-                      if (!dates?.assignedAt || !dates?.disposedAt) continue;
-                      const diffMin = (new Date(dates.disposedAt).getTime() - new Date(dates.assignedAt).getTime()) / 60000;
-                      if (diffMin >= 0) frtMinutesList.push(diffMin);
-                    }
-                    const frtMinutes = frtMinutesList.length
-                      ? Math.round(frtMinutesList.reduce((s, m) => s + m, 0) / frtMinutesList.length)
-                      : null;
-
-                    return {
-                      ...ag,
-                      assigned: assignedByDate.length,
-                      disposed: disposedByDate.length,
-                      connected: connected.length,
-                      prepaidAssigned: prepaidAssigned.length,
-                      codAssigned: codAssigned.length,
-                      prepaidConnected: prepaidConnected.length,
-                      prepaidConverted: prepaidConverted.length,
-                      codConverted: codConverted.length,
-                      firstCalledAtMinutes,
-                      frtMinutes,
-                    };
-                  };
-                  const tableAgentMetrics = effectiveAgentRoster.map(computeTableAgentMetrics);
-                  const visibleTableAgentMetrics = userRole === 'Agent' && !isProcessAdmin
-                    ? tableAgentMetrics.filter(isMyAgent) : tableAgentMetrics;
-
-                  // Time-of-Day Distribution table (below Agent Performance Summary) - a
-                  // SEPARATE per-agent breakdown, not derived from tableAgentMetrics: this needs
-                  // the underlying ticket-level disposedAt timestamps to bucket by time-of-day,
-                  // which computeTableAgentMetrics already collapses down to plain counts. Same
-                  // disposedDateInScope as the table above (so a multi-day page filter sums every
-                  // matching day's activity into the same time-of-day bucket, rather than
-                  // showing one day at a time), just re-sliced by heatmapIntervalMinutes/
-                  // heatmapMetric instead of by payment type.
-                  const isConvertedForHeatmap = t => !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
-                  const heatmapAgentData = effectiveAgentRoster.map(ag => {
-                    const email = ag.email.toLowerCase();
-                    const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
-                    const isWorked = t => !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
-                    const disposedByDate = allTickets.filter(t => isMine(t.assignedAgent) && isWorked(t) && disposedDateInScope(t));
-
-                    // 'dialled' = every disposed lead (connected or not) - the same set
-                    // Total Disposed already counts, just bucketed by time-of-day here instead
-                    // of totaled. 'connected'/'converted' narrow that same set further, matching
-                    // the existing Total Connected column / the Prepaid+COD Converted columns
-                    // combined (not split by payment type - this table has one Converted option).
-                    let metricTickets = disposedByDate;
-                    if (heatmapMetric === 'connected') metricTickets = disposedByDate.filter(t => t.connected === 'Yes');
-                    else if (heatmapMetric === 'converted') metricTickets = disposedByDate.filter(isConvertedForHeatmap);
-
-                    const bucketCounts = new Map(); // bucketIndex -> count
-                    for (const t of metricTickets) {
-                      const disposedAtIso = leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt;
-                      if (!disposedAtIso) continue;
-                      const mins = istMinutesSinceMidnightClient(new Date(disposedAtIso));
-                      const bucketIndex = Math.floor(mins / heatmapIntervalMinutes);
-                      bucketCounts.set(bucketIndex, (bucketCounts.get(bucketIndex) || 0) + 1);
-                    }
-                    return { ...ag, bucketCounts };
-                  });
-                  const visibleHeatmapAgentData = (userRole === 'Agent' && !isProcessAdmin
-                    ? heatmapAgentData.filter(isMyAgent) : heatmapAgentData
-                  ).filter(a => a.bucketCounts.size > 0); // no columns at all this range - pure noise, same as the table above
-
-                  // Columns span only the buckets SOMEONE actually has activity in (not a fixed
-                  // full-day grid, which for a 15-min interval would be 96 mostly-empty columns) -
-                  // the narrowest range that still shows every non-zero cell.
-                  const allHeatmapBucketIndexes = visibleHeatmapAgentData.flatMap(a => [...a.bucketCounts.keys()]);
-                  const heatmapBucketIndexes = [];
-                  if (allHeatmapBucketIndexes.length) {
-                    const minBucket = Math.min(...allHeatmapBucketIndexes);
-                    const maxBucket = Math.max(...allHeatmapBucketIndexes);
-                    for (let i = minBucket; i <= maxBucket; i++) heatmapBucketIndexes.push(i);
-                  }
-
-                  // Global min/max across every rendered heatmap cell (Total row/column
-                  // deliberately excluded below, once they exist - a grand total would dwarf
-                  // every real cell and flatten the whole scale) - drives heatmapCellStyle's
-                  // "lower = more highlighted" tint, confirmed as a whole-table scale (not
-                  // per-agent-row) so the color also reflects cross-agent volume, not just each
-                  // agent's own pattern.
-                  const allHeatmapValues = visibleHeatmapAgentData.flatMap(a => heatmapBucketIndexes.map(idx => a.bucketCounts.get(idx) || 0));
-                  const heatmapMin = allHeatmapValues.length ? Math.min(...allHeatmapValues) : 0;
-                  const heatmapMax = allHeatmapValues.length ? Math.max(...allHeatmapValues) : 0;
-                  // amber-500 (rgb(245,158,11)) - matches this table's existing amber accents
-                  // (Total Break Time) for "needs attention." Alpha 0 at the highest value in
-                  // view (no tint at all) up to 0.4 at the lowest (a visible but still
-                  // text-legible highlight) - never applied to Total cells, which sit outside
-                  // this scale entirely.
-                  function heatmapCellStyle(value) {
-                    if (heatmapMax <= heatmapMin) return undefined;
-                    const t = (heatmapMax - value) / (heatmapMax - heatmapMin);
-                    return { backgroundColor: `rgba(245, 158, 11, ${(t * 0.4).toFixed(2)})` };
-                  }
-
-                  // Converted Orders - a flat, ungrouped list (one row per order, not aggregated
-                  // the way the two tables above are) for the CSV export below. Same "converted"
-                  // test as the Time-of-Day table's 'converted' metric option (Prepaid+COD
-                  // combined, not split by payment type) and the same disposedDateInScope date
-                  // scoping as every other Disposed/Connected/Converted number on this page.
-                  // Roster filtered by isMyAgent FIRST, then flat-mapped per agent - the same
-                  // order visibleHeatmapAgentData already does it in, so a plain Agent sees only
-                  // their own converted orders while Admin/Team Lead/isProcessAdmin see everyone's.
-                  const convertedOrdersRoster = userRole === 'Agent' && !isProcessAdmin
-                    ? effectiveAgentRoster.filter(isMyAgent) : effectiveAgentRoster;
-                  const convertedOrdersList = convertedOrdersRoster.flatMap(ag => {
-                    const email = ag.email.toLowerCase();
-                    const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
-                    const isWorked = t => !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
-                    return allTickets
-                      .filter(t => isMine(t.assignedAgent) && isWorked(t) && disposedDateInScope(t) && isConvertedForHeatmap(t))
-                      .map(t => ({
-                        orderNumber: t.orderNumber,
-                        agentName: ag.name,
-                        // A converted ticket can lack t.disposition itself if newOrderId alone is
-                        // what qualified it (see isConvertedForHeatmap) - "Reorder" names that
-                        // case rather than showing a blank cell for a genuinely converted order.
-                        disposition: t.disposition || (t.newOrderId ? 'Reorder' : '—'),
-                      }));
-                  }).sort((a, b) => a.agentName.localeCompare(b.agentName) || a.orderNumber.localeCompare(b.orderNumber));
-
-                  // Plain client-side CSV download (Blob + object URL + a throwaway anchor click)
-                  // - no backend endpoint needed, since convertedOrdersList is already exactly
-                  // what's on screen. Quotes/escapes any field containing a comma, quote, or
-                  // newline per RFC 4180, defensively - dispositions are a closed set of short
-                  // strings today, but agent names/order numbers are sheet data this script
-                  // doesn't control.
-                  function downloadConvertedOrdersCsv() {
-                    const escapeCsv = (v) => {
-                      const s = String(v ?? '');
-                      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-                    };
-                    const lines = [
-                      ['Order', 'Agent Name', 'Disposition'].join(','),
-                      ...convertedOrdersList.map(o => [o.orderNumber, o.agentName, o.disposition].map(escapeCsv).join(',')),
-                    ];
-                    const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `converted-orders-${new Date().toISOString().slice(0, 10)}.csv`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                  }
-
-                  // Total row for the Agent Performance Summary table - team aggregates per
-                  // column, NOT a per-agent row total (this table's columns mix counts,
-                  // percentages and times - "Total Disposed" + "Connected %" + "Logged In At"
-                  // can't be meaningfully added together into one row-total number the way the
-                  // Time-of-Day table's homogeneous count columns can). Percentage columns
-                  // aggregate as sum-of-numerators / sum-of-denominators (the statistically
-                  // correct way to combine rates across agents with different denominators),
-                  // NOT an average of each agent's own already-rounded percentage. Logged In
-                  // At/Total Break Time average across agents that have a real value (loggedInMinutes
-                  // null is excluded, not treated as 0).
-                  const summaryRows = visibleTableAgentMetrics.filter(am => am.assigned > 0);
-                  const summaryTotals = summaryRows.reduce((acc, am) => {
-                    acc.assigned += am.assigned; acc.disposed += am.disposed; acc.connected += am.connected;
-                    acc.prepaidAssigned += am.prepaidAssigned; acc.prepaidConnected += am.prepaidConnected;
-                    acc.codAssigned += am.codAssigned; acc.prepaidConverted += am.prepaidConverted;
-                    acc.codConverted += am.codConverted;
-                    return acc;
-                  }, { assigned: 0, disposed: 0, connected: 0, prepaidAssigned: 0, prepaidConnected: 0, codAssigned: 0, prepaidConverted: 0, codConverted: 0 });
-                  const summaryLoggedInList = summaryRows
-                    .map(am => serverPresence[am.email.toLowerCase()]?.loggedInMinutes)
-                    .filter(m => m !== null && m !== undefined);
-                  const summaryBreakList = summaryRows
-                    .map(am => serverPresence[am.email.toLowerCase()]?.breakMinutes)
-                    .filter(m => m !== null && m !== undefined);
-                  const summaryBusyList = summaryRows
-                    .map(am => serverPresence[am.email.toLowerCase()]?.busyMinutes)
-                    .filter(m => m !== null && m !== undefined);
-                  const summaryAvgLoggedIn = summaryLoggedInList.length
-                    ? Math.round(summaryLoggedInList.reduce((s, m) => s + m, 0) / summaryLoggedInList.length) : null;
-                  const summaryAvgBreak = summaryBreakList.length
-                    ? Math.round(summaryBreakList.reduce((s, m) => s + m, 0) / summaryBreakList.length) : 0;
-                  const summaryAvgBusy = summaryBusyList.length
-                    ? Math.round(summaryBusyList.reduce((s, m) => s + m, 0) / summaryBusyList.length) : 0;
-                  const summaryFrtList = summaryRows.map(am => am.frtMinutes).filter(m => m !== null && m !== undefined);
-                  const summaryAvgFrt = summaryFrtList.length
-                    ? Math.round(summaryFrtList.reduce((s, m) => s + m, 0) / summaryFrtList.length) : null;
-
-                  // Same Blob/anchor download as downloadConvertedOrdersCsv below - exports
-                  // exactly what's on screen in the Agent Performance Summary table, one row per
-                  // agent plus the Team Total row, same column order and same formatPct/
-                  // formatTimeOfDay/formatBreakMinutes strings the table itself renders (so a
-                  // cell in the sheet always matches what an admin saw on screen, not a raw
-                  // recomputation that could drift from it).
-                  function downloadAgentSummaryCsv() {
-                    const escapeCsv = (v) => {
-                      const s = String(v ?? '');
-                      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-                    };
-                    const header = [
-                      'Agent Name', 'Total Leads Assigned', 'Total Disposed', 'First Called At', 'FRT',
-                      'Total Connected', 'Connected %', 'Total Prepaid Assigned', 'Total Prepaid Assigned %',
-                      'Total Prepaid Connected', 'Total Prepaid Connected %', 'Total COD Assigned', 'Total COD Assigned %',
-                      'Total Prepaid Converted', 'Total Prepaid Converted %', 'Total COD Converted', 'Total COD Converted %',
-                      'Logged In At', 'Total Break Time', 'Total Busy Time',
-                    ];
-                    const rowFor = (am) => {
-                      const presence = serverPresence[am.email.toLowerCase()];
-                      return [
-                        am.name, am.assigned, am.disposed, formatTimeOfDay(am.firstCalledAtMinutes), formatFrt(am.frtMinutes),
-                        am.connected, formatPct(am.connected, am.disposed),
-                        am.prepaidAssigned, formatPct(am.prepaidAssigned, am.assigned),
-                        am.prepaidConnected, formatPct(am.prepaidConnected, am.prepaidAssigned),
-                        am.codAssigned, formatPct(am.codAssigned, am.assigned),
-                        am.prepaidConverted, formatPct(am.prepaidConverted, am.prepaidAssigned),
-                        am.codConverted, formatPct(am.codConverted, am.codAssigned),
-                        formatTimeOfDay(presence?.loggedInMinutes), formatBreakMinutes(presence?.breakMinutes), formatBreakMinutes(presence?.busyMinutes),
-                      ];
-                    };
-                    const lines = [header.map(escapeCsv).join(',')];
-                    summaryRows.forEach(am => lines.push(rowFor(am).map(escapeCsv).join(',')));
-                    if (summaryRows.length > 0) {
-                      lines.push([
-                        'Team Total', summaryTotals.assigned, summaryTotals.disposed, '—', formatFrt(summaryAvgFrt),
-                        summaryTotals.connected, formatPct(summaryTotals.connected, summaryTotals.disposed),
-                        summaryTotals.prepaidAssigned, formatPct(summaryTotals.prepaidAssigned, summaryTotals.assigned),
-                        summaryTotals.prepaidConnected, formatPct(summaryTotals.prepaidConnected, summaryTotals.prepaidAssigned),
-                        summaryTotals.codAssigned, formatPct(summaryTotals.codAssigned, summaryTotals.assigned),
-                        summaryTotals.prepaidConverted, formatPct(summaryTotals.prepaidConverted, summaryTotals.prepaidAssigned),
-                        summaryTotals.codConverted, formatPct(summaryTotals.codConverted, summaryTotals.codAssigned),
-                        formatTimeOfDay(summaryAvgLoggedIn), formatBreakMinutes(summaryAvgBreak), formatBreakMinutes(summaryAvgBusy),
-                      ].map(escapeCsv).join(','));
-                    }
-                    const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `agent-performance-summary-${new Date().toISOString().slice(0, 10)}.csv`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                  }
-
-                  // Raw per-lead detail behind the summary table above - one row per ticket
-                  // rather than aggregated per agent, so an admin can audit/reconcile exactly
-                  // which orders make up a summary number. Union of assignedDateInScope OR
-                  // (worked AND disposedDateInScope) - the same two independent scopes
-                  // computeTableAgentMetrics applies, just not collapsed to counts - so a lead
-                  // assigned yesterday and disposed today appears once here (it isn't double
-                  // counted the way it would be if this were a plain concatenation of the two
-                  // scoped sets). Same isMyAgent roster scoping as the summary table: a plain
-                  // Agent only ever gets their own raw rows.
-                  const rawLeadDetailsRoster = userRole === 'Agent' && !isProcessAdmin
-                    ? effectiveAgentRoster.filter(isMyAgent) : effectiveAgentRoster;
-                  const isWorkedForRaw = t => !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
-                  const rawLeadDetailsList = rawLeadDetailsRoster.flatMap(ag => {
-                    const email = ag.email.toLowerCase();
-                    const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
-                    return allTickets
-                      .filter(t => isMine(t.assignedAgent)
-                        && (assignedDateInScope(t) || (isWorkedForRaw(t) && disposedDateInScope(t))))
-                      .map(t => {
-                        const dates = leadDates[normalizeOrderKey(t.orderNumber)] || {};
-                        const isConverted = !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
-                        // Per-lead FRT (unlike the summary table's per-agent average): this
-                        // one ticket's own disposedAt - assignedAt, in minutes. null when
-                        // either timestamp is missing or disposed logged before assigned (bad
-                        // data) - same "drop, don't zero" rule as frtMinutes above.
-                        const frtMinutes = (dates.assignedAt && dates.disposedAt)
-                          ? (new Date(dates.disposedAt).getTime() - new Date(dates.assignedAt).getTime()) / 60000
-                          : null;
-                        return {
-                          orderNumber: t.orderNumber,
-                          agentName: ag.name,
-                          paymentMethod: t.paymentMethod || '',
-                          assignedAt: dates.assignedAt || '',
-                          disposedAt: dates.disposedAt || '',
-                          frtMinutes: (frtMinutes !== null && frtMinutes >= 0) ? Math.round(frtMinutes) : null,
-                          connected: t.connected || '',
-                          disposition: t.disposition || (t.newOrderId ? 'Reorder' : ''),
-                          converted: isConverted ? 'Yes' : 'No',
-                        };
-                      });
-                  }).sort((a, b) => a.agentName.localeCompare(b.agentName) || a.orderNumber.localeCompare(b.orderNumber));
-
-                  // Same Blob/anchor download pattern as downloadConvertedOrdersCsv/
-                  // downloadAgentSummaryCsv - assignedAt/disposedAt come back from Postgres as
-                  // ISO strings (leadDates); formatted to IST here, same "when did this really
-                  // happen" question the summary table's own date-scoping answers, rather than
-                  // exporting a raw UTC ISO string a spreadsheet user would have to convert.
-                  function downloadRawLeadDetailsCsv() {
-                    const escapeCsv = (v) => {
-                      const s = String(v ?? '');
-                      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-                    };
-                    const formatCsvDate = (iso) => iso
-                      ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })
-                      : '';
-                    const lines = [
-                      ['Order ID', 'Agent Name', 'Payment Method', 'Assigned Date', 'Disposed Date', 'FRT', 'Connected', 'Disposition', 'Converted'].join(','),
-                      ...rawLeadDetailsList.map(r => [
-                        r.orderNumber, r.agentName, r.paymentMethod, formatCsvDate(r.assignedAt), formatCsvDate(r.disposedAt),
-                        formatFrt(r.frtMinutes), r.connected, r.disposition, r.converted,
-                      ].map(escapeCsv).join(',')),
-                    ];
-                    const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `agent-performance-raw-${new Date().toISOString().slice(0, 10)}.csv`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                  }
-
-                  const totalAssigned = visibleAgentMetrics.reduce((s, a) => s + a.assigned, 0);
-                  const totalDisposed = visibleAgentMetrics.reduce((s, a) => s + a.disposed, 0);
-                  const totalPending = visibleAgentMetrics.reduce((s, a) => s + a.pending, 0);
-                  const totalRefunded = visibleAgentMetrics.reduce((s, a) => s + a.refunded, 0);
-                  const totalRefundAmt = visibleAgentMetrics.reduce((s, a) => s + a.totalRefundAmt, 0);
-                  const avgConnectRate = totalDisposed > 0 ? Math.round(visibleAgentMetrics.reduce((s, a) => s + a.connected, 0) / totalDisposed * 100) : 0;
-                  const onlineCount = visibleAgentMetrics.filter(a => a.status === 'Online').length;
-                  const freshUnassignedInScope = tickets.filter(t => {
-                    const agt = overrides[t.id]?.assignedAgent || t.assignedAgent;
-                    return (!agt || agt === 'Unassigned') && inScope(t);
-                  }).length;
-
-                  const dispColors = {
-                    'Customer Agreed to Accept': { bg: 'bg-emerald-500', text: 'text-emerald-300' },
-                    'Refund Requested': { bg: 'bg-violet-500', text: 'text-violet-300' },
-                    'Address Change Requested': { bg: 'bg-amber-500', text: 'text-amber-300' },
-                    'Product Issue / Exchange': { bg: 'bg-sky-500', text: 'text-sky-300' },
-                    'Not Interested': { bg: 'bg-rose-500', text: 'text-rose-300' },
-                    'Wrong Number': { bg: 'bg-orange-500', text: 'text-orange-300' },
-                    'Ringing / No Answer': { bg: 'bg-zinc-500', text: 'text-zinc-300' },
-                    'Not Reachable': { bg: 'bg-zinc-600', text: 'text-zinc-400' },
-                    'Switch Off': { bg: 'bg-zinc-600', text: 'text-zinc-400' },
-                    'Line Busy': { bg: 'bg-yellow-600', text: 'text-yellow-300' },
-                    'Invalid Number': { bg: 'bg-red-600', text: 'text-red-300' },
-                  };
-                  const getDispColor = (key) => dispColors[key] || { bg: 'bg-indigo-500', text: 'text-indigo-300' };
+                  const {
+                    visibleTableAgentMetrics, visibleHeatmapAgentData, heatmapBucketIndexes, heatmapCellStyle,
+                    downloadConvertedOrdersCsv, convertedOrdersList,
+                    summaryRows, summaryTotals, summaryAvgFrt, summaryAvgLoggedIn, summaryAvgBreak, summaryAvgBusy, downloadAgentSummaryCsv,
+                    rawLeadDetailsList, downloadRawLeadDetailsCsv,
+                    totalAssigned, totalDisposed, totalPending, totalRefunded, totalRefundAmt, avgConnectRate, onlineCount, freshUnassignedInScope,
+                  } = overviewMetrics;
 
                   return (
                     <>

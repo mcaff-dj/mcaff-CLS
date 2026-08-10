@@ -260,8 +260,17 @@ export default function NdrCallingClient() {
 
   useEffect(() => { syncNdr(true); }, [syncNdr]);
   useEffect(() => {
-    const t = setInterval(() => syncNdr(true), 60000);
+    const t = setInterval(() => {
+      if (!document.hidden) syncNdr(true);
+    }, 60000);
     return () => clearInterval(t);
+  }, [syncNdr]);
+  // Catches up a long-backgrounded tab immediately on return, instead of waiting up to a full
+  // 60s tick for the next poll to happen to fire.
+  useEffect(() => {
+    const onVisible = () => { if (!document.hidden) syncNdr(true); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, [syncNdr]);
 
   // Opens the Call/disposition modal, claiming the lead first if nobody holds it yet. Same

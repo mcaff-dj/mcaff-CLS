@@ -1314,27 +1314,31 @@ async function getCallingProcessAgents(processKey) {
   //
   // So: in if you hold the card and either have no calling tab rows at all, or have one for
   // THIS process. Global admins are always in, since they hold no tab rows by convention.
-  const { rows: members } = await sql`
-    SELECT u.id, u.email, u.name, u.is_admin
-    FROM users u
-    LEFT JOIN permissions p
-      ON p.user_id = u.id AND p.card_key = 'calling'
-    WHERE u.is_admin = 1
-       OR (p.card_key IS NOT NULL AND (
-            EXISTS (SELECT 1 FROM report_tab_permissions r
-                     WHERE r.user_id = u.id AND r.card_key = 'calling' AND r.tab_key = ${processKey})
-            OR NOT EXISTS (SELECT 1 FROM report_tab_permissions r2
-                     WHERE r2.user_id = u.id AND r2.card_key = 'calling')
-          ))
-    GROUP BY u.id, u.email, u.name, u.is_admin
-    ORDER BY u.is_admin DESC, u.name ASC
-  `;
-  const { rows: state } = await pgSql`
-    SELECT email, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons,
-           reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter,
-           ndr_brand_filter, updated_at, updated_by
-    FROM calling_agent_process WHERE process_key = ${processKey}
-  `;
+  // Neither query depends on the other's result - they're only combined in JS below (byEmail)
+  // - so fire both at once instead of waiting on MySQL before even starting the Postgres query.
+  const [{ rows: members }, { rows: state }] = await Promise.all([
+    sql`
+      SELECT u.id, u.email, u.name, u.is_admin
+      FROM users u
+      LEFT JOIN permissions p
+        ON p.user_id = u.id AND p.card_key = 'calling'
+      WHERE u.is_admin = 1
+         OR (p.card_key IS NOT NULL AND (
+              EXISTS (SELECT 1 FROM report_tab_permissions r
+                       WHERE r.user_id = u.id AND r.card_key = 'calling' AND r.tab_key = ${processKey})
+              OR NOT EXISTS (SELECT 1 FROM report_tab_permissions r2
+                       WHERE r2.user_id = u.id AND r2.card_key = 'calling')
+            ))
+      GROUP BY u.id, u.email, u.name, u.is_admin
+      ORDER BY u.is_admin DESC, u.name ASC
+    `,
+    pgSql`
+      SELECT email, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons,
+             reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter,
+             ndr_brand_filter, updated_at, updated_by
+      FROM calling_agent_process WHERE process_key = ${processKey}
+    `,
+  ]);
   const byEmail = {};
   for (const s of state) byEmail[String(s.email).toLowerCase()] = s;
   return members.map((m) => {

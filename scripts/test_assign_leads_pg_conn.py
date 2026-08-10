@@ -1,0 +1,103 @@
+"""Self-check for assign_leads.py's shared-connection refactor (_pg_cursor and the fetch/
+record functions' conn= param) - no real Postgres involved, just fake conn/cursor doubles
+verifying the two things a botched refactor of this would get wrong on a live 5-minute cron:
+
+  1. A shared conn is never closed by the function that borrowed it (main() owns closing it).
+  2. A caught failure on a shared conn rolls it back, so the NEXT function sharing that same
+     connection doesn't inherit "current transaction is aborted" from a prior fail-open.
+
+Run directly: python scripts/test_assign_leads_pg_conn.py
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import assign_leads  # noqa: E402
+
+
+class FakeCursor:
+    def __init__(self, rows=None, raise_on_execute=False):
+        self.rows = rows or []
+        self.raise_on_execute = raise_on_execute
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.executed.append(sql)
+        if self.raise_on_execute:
+            raise RuntimeError("boom")
+
+    def fetchall(self):
+        return self.rows
+
+
+class FakeConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.closed = False
+        self.committed = False
+        self.rolled_back = False
+
+    def cursor(self):
+        return self._cursor
+
+    def close(self):
+        self.closed = True
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
+
+
+def test_shared_conn_not_closed_by_pg_cursor():
+    conn = FakeConn(FakeCursor(rows=[("o1", "a@x.com")]))
+    with assign_leads._pg_cursor("unused", conn) as cur:
+        cur.execute("select 1")
+    assert not conn.closed, "a shared conn must outlive the _pg_cursor block that borrowed it"
+
+
+def test_fetch_rolls_back_shared_conn_on_failure():
+    conn = FakeConn(FakeCursor(raise_on_execute=True))
+    result = assign_leads.fetch_reassignment_attempts(conn=conn)
+    assert result == {}, "fetch_* must fail open (empty dict), not raise"
+    assert conn.rolled_back, "a caught failure on a SHARED conn must roll back or the next " \
+        "caller on the same connection inherits an aborted transaction"
+    assert not conn.closed, "fetch_* must never close a connection it didn't open"
+
+
+def test_fetch_succeeds_with_shared_conn():
+    conn = FakeConn(FakeCursor(rows=[("o1", "a@x.com"), ("o1", "b@x.com")]))
+    result = assign_leads.fetch_reassignment_attempts(conn=conn)
+    assert result == {"o1": {"a@x.com", "b@x.com"}}
+    assert not conn.closed
+    assert not conn.rolled_back
+
+
+def test_no_conn_no_env_fails_open_without_touching_pg():
+    # No POSTGRES_URL in the environment and no conn passed - must return the fail-open
+    # default without ever calling lib.get_pg_connection (which would try a real network
+    # connection at import time otherwise).
+    import os
+    old = os.environ.pop("POSTGRES_URL", None)
+    try:
+        assert assign_leads.fetch_reassignment_attempts() == {}
+        assert assign_leads.fetch_current_assignment_times() == {}
+        assert assign_leads.fetch_gokwik_refund_cache() == {}
+    finally:
+        if old is not None:
+            os.environ["POSTGRES_URL"] = old
+
+
+if __name__ == "__main__":
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for t in tests:
+        t()
+        print(f"  ok  {t.__name__}")
+    print(f"{len(tests)} passed")

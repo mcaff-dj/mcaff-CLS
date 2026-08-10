@@ -45,7 +45,7 @@ def build_awb_by_order_id():
 
 
 def fetch_missing(conn_str):
-    with psycopg.connect(conn_str) as conn:
+    with lib.get_pg_connection(conn_str) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT order_id FROM lead_assignments "
@@ -61,8 +61,13 @@ def main(conn_str):
     updated, not_found, conflicts = 0, 0, []
     seen_not_found = set()
 
+    # Chunk size for the batched executemany below - a few hundred keeps each chunk's UPDATE
+    # well inside any max_allowed_packet-equivalent while still collapsing what used to be one
+    # round trip per row.
+    CHUNK_SIZE = 500
+
     # The pooled endpoint has been observed killing the connection mid-run (after a
-    # couple hundred round trips) - each UPDATE commits individually and this whole
+    # couple hundred round trips) - each chunk commits individually and this whole
     # function is idempotent (only ever touches rows still NULL), so on a dropped
     # connection we just reconnect and pick up wherever the fresh missing-list says
     # to continue, rather than losing already-applied progress.
@@ -71,27 +76,52 @@ def main(conn_str):
         missing = [oid for oid in missing if oid not in seen_not_found]
         if not missing:
             break
+
+        pairs = []  # (awb_code, order_id)
+        for order_id in missing:
+            awb_code = awb_by_order_id.get(order_id)
+            if not awb_code:
+                not_found += 1
+                seen_not_found.add(order_id)
+                continue
+            pairs.append((awb_code, order_id))
+
         try:
-            with psycopg.connect(conn_str) as conn:
-                for order_id in missing:
-                    awb_code = awb_by_order_id.get(order_id)
-                    if not awb_code:
-                        not_found += 1
-                        seen_not_found.add(order_id)
-                        continue
-                    try:
-                        with conn.cursor() as cur:
-                            cur.execute(
+            with lib.get_pg_connection(conn_str) as conn:
+                with conn.cursor() as cur:
+                    for start in range(0, len(pairs), CHUNK_SIZE):
+                        chunk = pairs[start:start + CHUNK_SIZE]
+                        try:
+                            cur.executemany(
                                 "UPDATE lead_assignments SET awb_code = %s "
                                 "WHERE order_id = %s AND awb_code IS NULL "
                                 "AND reassigned_away_at IS NULL",
-                                (awb_code, order_id),
+                                chunk,
                             )
-                        conn.commit()
-                        updated += 1
-                    except psycopg.errors.UniqueViolation:
-                        conn.rollback()
-                        conflicts.append((order_id, awb_code))
+                            conn.commit()
+                            updated += len(chunk)
+                        except psycopg.errors.UniqueViolation:
+                            # Rare: this chunk has at least one order_id whose AWB collides
+                            # with another order_id's already-written AWB, which aborts the
+                            # WHOLE chunk's transaction (nothing in it committed, same as the
+                            # single-row version's per-row rollback used to guarantee). Redo
+                            # just this chunk one row at a time so only the genuinely
+                            # conflicting row(s) are skipped, instead of losing an otherwise-
+                            # clean batch of up to CHUNK_SIZE rows over one bad one.
+                            conn.rollback()
+                            for awb_code, order_id in chunk:
+                                try:
+                                    cur.execute(
+                                        "UPDATE lead_assignments SET awb_code = %s "
+                                        "WHERE order_id = %s AND awb_code IS NULL "
+                                        "AND reassigned_away_at IS NULL",
+                                        (awb_code, order_id),
+                                    )
+                                    conn.commit()
+                                    updated += 1
+                                except psycopg.errors.UniqueViolation:
+                                    conn.rollback()
+                                    conflicts.append((order_id, awb_code))
         except psycopg.OperationalError as e:
             print(f"Connection dropped ({e.__class__.__name__}) - reconnecting and resuming...")
             continue

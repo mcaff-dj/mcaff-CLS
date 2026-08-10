@@ -1,0 +1,43 @@
+-- Add a plain index on agent_presence_log.changed_at, alongside the existing
+-- agent_presence_log_email_idx (email, changed_at DESC) - see ensurePgSchema in
+-- api/_lib/db.js, which creates that one automatically on every cold start.
+--
+-- WHY THIS ONE IS HAND-RUN, NOT ADDED TO ensurePgSchema LIKE ITS SIBLING:
+-- agent_presence_log is an append-only heartbeat log (a new row every explicit status
+-- change plus a periodic heartbeat, from every agent, forever) - exactly the kind of
+-- table the existing BIGSERIAL-migration comment two functions above ensurePgSchema's
+-- index creation already warns about: a DDL statement that's cheap today can turn slow
+-- enough to threaten a cold-start request's own timeout once the table has grown. A plain
+-- CREATE INDEX takes a lock that blocks writes (every agent's presence heartbeat) for as
+-- long as the build takes, and by the time this table is big enough for the index to
+-- matter, it may also be big enough for that lock to matter. CONCURRENTLY avoids the write
+-- lock but cannot run inside a transaction block, which rules out ensurePgSchema's
+-- pattern - so this runs once, by hand, same as every other schema change in this
+-- directory.
+--
+-- WHY IT'S NEEDED: getAgentPresenceLogSummary (api/_lib/db.js), hit on every Overview-tab
+-- load and range change, runs two queries against this table:
+--
+--   1. WHERE changed_at < $from ORDER BY email, changed_at DESC  (DISTINCT ON (email))
+--   2. WHERE changed_at BETWEEN $from AND $rangeEnd ORDER BY email ASC, changed_at ASC
+--
+-- Neither is helped much by the existing (email, changed_at DESC) index for a request
+-- with no email predicate: query 1's WHERE has no email filter to seek on, and query 2's
+-- ORDER BY (email ASC, changed_at ASC) is the reverse of the index's own (email ASC,
+-- changed_at DESC) shape, which backward-scanning can't produce (reversing a composite
+-- index flips every column's direction together, not one column independently). Both
+-- degrade toward a full scan of the whole table as it grows, for what is usually a request
+-- for a tiny recent slice (Today, Yesterday, a week) of an ever-growing history. A plain
+-- index on changed_at lets Postgres prune to that slice first before sorting it - the
+-- range filter is the expensive part on a large, mostly-irrelevant-to-any-one-query table;
+-- the subsequent in-memory sort of an already-small result set is comparatively free.
+--
+-- Safe to run more than once (IF NOT EXISTS) and safe to run while the app is live
+-- (CONCURRENTLY - takes longer, but never blocks a presence-heartbeat write).
+--
+-- Verification after running:
+--   SELECT indexname FROM pg_indexes WHERE tablename = 'agent_presence_log';
+--   -- expect both agent_presence_log_email_idx and agent_presence_log_changed_at_idx
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_presence_log_changed_at_idx
+  ON agent_presence_log (changed_at);

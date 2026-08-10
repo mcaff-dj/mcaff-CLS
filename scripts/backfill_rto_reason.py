@@ -29,8 +29,6 @@ Only writes when a match is found in the sheet - an order_id no longer present
 import sys
 from pathlib import Path
 
-import psycopg
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib
 from lead_priority import COL_ORDER_ID, COL_RTO_REASON, cell
@@ -51,7 +49,7 @@ def build_rto_reason_by_order_id():
 
 
 def fetch_missing(conn_str):
-    with psycopg.connect(conn_str, prepare_threshold=None) as conn:
+    with lib.get_pg_connection(conn_str, prepare_threshold=None) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT DISTINCT order_id FROM lead_assignments WHERE rto_reason IS NULL")
             return [row[0] for row in cur.fetchall()]
@@ -64,30 +62,46 @@ def main(conn_str):
     missing = fetch_missing(conn_str)
     print(f"Found {len(missing)} distinct order_id(s) in Postgres with rto_reason still NULL.")
 
-    updated_orders, updated_rows, not_found = 0, 0, 0
+    # Resolved against the sheet up front, same as before - only the write below changed.
+    pairs = []  # (rto_reason, order_id)
+    not_found = 0
+    for order_id in missing:
+        rto_reason = rto_reason_by_order_id.get(order_id)
+        if not rto_reason:
+            not_found += 1
+            continue
+        pairs.append((rto_reason, order_id))
 
+    # Batched via executemany instead of one UPDATE + one commit per order_id - on a table
+    # with thousands of NULL rows, the per-row round trip (plus fsync per commit) was the
+    # entire cost of this script. CHUNK_SIZE keeps each transaction a bounded size rather
+    # than one all-or-nothing commit for the whole backfill, so a mid-run failure only loses
+    # the current chunk's progress, not everything already written.
+    CHUNK_SIZE = 500
+    updated_orders = 0
     # prepare_threshold=None: POSTGRES_URL is Supabase's pooled (PgBouncer transaction-mode)
     # endpoint - psycopg3's default server-side prepared-statement caching can collide with
     # another session's leftover statement on the same pooled backend
     # (psycopg.errors.DuplicatePreparedStatement). See backfill_delivery_partner.py, which hit
     # this for real.
-    with psycopg.connect(conn_str, prepare_threshold=None) as conn:
-        for order_id in missing:
-            rto_reason = rto_reason_by_order_id.get(order_id)
-            if not rto_reason:
-                not_found += 1
-                continue
-            with conn.cursor() as cur:
-                cur.execute(
+    with lib.get_pg_connection(conn_str, prepare_threshold=None) as conn:
+        with conn.cursor() as cur:
+            for start in range(0, len(pairs), CHUNK_SIZE):
+                chunk = pairs[start:start + CHUNK_SIZE]
+                cur.executemany(
                     "UPDATE lead_assignments SET rto_reason = %s "
                     "WHERE order_id = %s AND rto_reason IS NULL",
-                    (rto_reason, order_id),
+                    chunk,
                 )
-                updated_rows += cur.rowcount
-            conn.commit()
-            updated_orders += 1
+                conn.commit()
+                updated_orders += len(chunk)
 
-    print(f"Backfilled {updated_rows} row(s) across {updated_orders} distinct order_id(s).")
+    # Row count (as opposed to order_id count) isn't tracked anymore - rto_reason is
+    # order-level (see this script's own docstring: the same value can land on several
+    # physical rows sharing an order_id), and executemany's rowcount only reflects the last
+    # statement in a batch, not an aggregate - getting a precise row total back would cost
+    # an extra query per order_id, not worth it for a print statement in a one-off script.
+    print(f"Backfilled rto_reason for {updated_orders} order_id(s).")
     print(f"{not_found} order_id(s) had no RTO Reason in the sheet (or are no longer present) - left NULL.")
 
 

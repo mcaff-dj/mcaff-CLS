@@ -31,6 +31,31 @@ function checkAccess(session) {
   return null;
 }
 
+// Short-TTL read cache for the GET ops below (values/batchGet). Without it, every page-load
+// or poll is a live Sheets API call with nothing in front of it. A 20s staleness window is an
+// acceptable tradeoff for the load this saves (mirrors scripts/assign_leads.py's
+// GOKWIK_CACHE_TTL - accept a little staleness for a lot less load). A plain module-scoped
+// Map, not a shared/external cache: it persists across invocations on the same warm Lambda
+// container, which is all we need - no cross-container invalidation, since a stale-by-20s
+// read is fine either way.
+const READ_CACHE_TTL_MS = 20000;
+const _readCache = new Map(); // key (op+params) -> { expiresAt, promise }
+
+// Singleflight: a key already in the map - whether its fetch is still in flight or it
+// resolved within the last 20s - is reused instead of firing a duplicate live call, so a
+// burst of simultaneous agent page-loads for the same range collapses into one real request.
+function cachedRead(key, fetcher) {
+  const hit = _readCache.get(key);
+  if (hit && hit.expiresAt > Date.now()) return hit.promise;
+  const promise = fetcher();
+  _readCache.set(key, { expiresAt: Date.now() + READ_CACHE_TTL_MS, promise });
+  // A failed fetch must not poison the cache for the rest of the TTL window - evict on
+  // rejection so the very next request retries against Sheets instead of replaying the
+  // same error for up to 20s.
+  promise.catch(() => _readCache.delete(key));
+  return promise;
+}
+
 module.exports = async (req, res) => {
   const session = await getSession(req);
   const denied = checkAccess(session);
@@ -57,24 +82,28 @@ module.exports = async (req, res) => {
   try {
     if (req.method === 'GET' && req.query.op === 'values') {
       const range = req.query.range || '';
-      const r = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${RTO_SHEET_ID}/values/${encodeURIComponent(range)}?majorDimension=ROWS`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      const data = await r.json();
-      res.status(r.status).json(data);
+      const { status, data } = await cachedRead(`values:${range}`, async () => {
+        const r = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${RTO_SHEET_ID}/values/${encodeURIComponent(range)}?majorDimension=ROWS`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        return { status: r.status, data: await r.json() };
+      });
+      res.status(status).json(data);
       return;
     }
 
     if (req.method === 'GET' && req.query.op === 'batchGet') {
       const ranges = [].concat(req.query.ranges || []);
-      const qs = ranges.map((r) => `ranges=${encodeURIComponent(r)}`).join('&');
-      const r = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${RTO_SHEET_ID}/values:batchGet?${qs}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      const data = await r.json();
-      res.status(r.status).json(data);
+      const { status, data } = await cachedRead(`batchGet:${JSON.stringify(ranges)}`, async () => {
+        const qs = ranges.map((r) => `ranges=${encodeURIComponent(r)}`).join('&');
+        const r = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${RTO_SHEET_ID}/values:batchGet?${qs}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        return { status: r.status, data: await r.json() };
+      });
+      res.status(status).json(data);
       return;
     }
 

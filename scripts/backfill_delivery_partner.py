@@ -25,14 +25,13 @@ import os
 import sys
 from pathlib import Path
 
-import psycopg
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lib
 from lead_priority import prefix_rule_partner
 
 
 def main(conn_str):
-    with psycopg.connect(conn_str) as conn:
+    with lib.get_pg_connection(conn_str) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT id, awb_code FROM lead_assignments "
@@ -42,26 +41,39 @@ def main(conn_str):
 
     print(f"Found {len(rows)} row(s) with an AWB but no delivery_partner.")
 
-    updated, unmatched = 0, {}
+    # Resolved locally up front, same as before - only the write below changed.
+    pairs = []  # (partner, row_id)
+    unmatched = {}
+    for row_id, awb_code in rows:
+        partner = prefix_rule_partner(awb_code)
+        if not partner:
+            unmatched[awb_code[:3]] = unmatched.get(awb_code[:3], 0) + 1
+            continue
+        pairs.append((partner, row_id))
+
+    # Batched via executemany instead of one UPDATE + one commit per row - id is the table's
+    # own primary key, so unlike backfill_rto_reason.py's order_id (which can span several
+    # physical rows), each pair here maps to exactly one row and len(chunk) is an exact
+    # updated count, no separate rowcount tracking needed. CHUNK_SIZE bounds each transaction
+    # rather than one all-or-nothing commit for the whole backfill.
+    CHUNK_SIZE = 500
+    updated = 0
     # prepare_threshold=None: POSTGRES_URL is Supabase's pooled (PgBouncer transaction-mode)
     # endpoint, which cannot guarantee the same backend across statements - psycopg3's default
     # server-side prepared-statement caching then collides with another session's leftover
     # prepared statement on the same pooled backend ("prepared statement already exists").
     # Disabling it makes every statement a plain unnamed query, which the pooler handles fine.
-    with psycopg.connect(conn_str, prepare_threshold=None) as conn:
-        for row_id, awb_code in rows:
-            partner = prefix_rule_partner(awb_code)
-            if not partner:
-                unmatched[awb_code[:3]] = unmatched.get(awb_code[:3], 0) + 1
-                continue
-            with conn.cursor() as cur:
-                cur.execute(
+    with lib.get_pg_connection(conn_str, prepare_threshold=None) as conn:
+        with conn.cursor() as cur:
+            for start in range(0, len(pairs), CHUNK_SIZE):
+                chunk = pairs[start:start + CHUNK_SIZE]
+                cur.executemany(
                     "UPDATE lead_assignments SET delivery_partner = %s "
                     "WHERE id = %s AND delivery_partner IS NULL",
-                    (partner, row_id),
+                    chunk,
                 )
-            conn.commit()
-            updated += 1
+                conn.commit()
+                updated += len(chunk)
 
     print(f"Backfilled {updated} row(s).")
     if unmatched:

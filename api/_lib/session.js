@@ -68,8 +68,12 @@ async function getSession(req) {
   if (!payload) return null;
   const user = await getUserById(payload.uid);
   if (!user) return null;
-  const perms = user.is_admin ? CARD_KEYS : await getUserPermissions(user.id);
-  const tabPerms = user.is_admin ? {} : await getUserTabPermissions(user.id);
+  // Both queries are independent (neither's result feeds the other), so run them
+  // concurrently instead of back-to-back - this function runs on every gated request
+  // across the whole API, so halving its DB round-trip time matters everywhere.
+  const [perms, tabPerms] = user.is_admin
+    ? [CARD_KEYS, {}]
+    : await Promise.all([getUserPermissions(user.id), getUserTabPermissions(user.id)]);
   return {
     uid: user.id,
     email: user.email,
