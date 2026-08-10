@@ -154,3 +154,44 @@ def fetch_product_nps(mysql_brand):
     if rows is None:
         raise RuntimeError("MySQL credentials not configured - set MYSQL_HOST/USER/PASSWORD/DATABASE (or .env.local).")
     return _rows_to_sheet_shape(rows)
+
+
+def fetch_product_wise_nps(mysql_brand):
+    """Product wise NPS: unlike fetch_product_nps() above (which dedupes to one row per
+    person for the monthly "NPS - Product" trend), this groups nps_product BY PRODUCT NAME
+    instead of by month - each (response_id, product_slot) row IS one product rating, so no
+    response_id dedup applies here. Returns one dict per product, sorted by response volume
+    (highest first) - same brand values as fetch_product_nps (brands.py's nps_mysql_brand)."""
+    rows = mysql_lib.query(
+        """
+        SELECT product_name,
+               COUNT(*) AS responses,
+               AVG(overall_nps_score) AS avg_overall,
+               AVG(packaging) AS avg_packaging,
+               AVG(product_nps) AS avg_product_nps,
+               SUM(nps_category = "Promoter") AS promoters,
+               SUM(nps_category = "Passive") AS passives,
+               SUM(nps_category = "Detractor") AS detractors
+        FROM nps_product
+        WHERE brand = %s AND product_name IS NOT NULL AND TRIM(product_name) NOT IN ('', 'NA')
+        GROUP BY product_name
+        ORDER BY responses DESC
+        """,
+        params=(mysql_brand,),
+        database=DWH_DATABASE,
+    )
+    if rows is None:
+        raise RuntimeError("MySQL credentials not configured - set MYSQL_HOST/USER/PASSWORD/DATABASE (or .env.local).")
+    out = []
+    for product_name, responses, avg_overall, avg_packaging, avg_product_nps, promoters, passives, detractors in rows:
+        responses = int(responses)
+        out.append({
+            "product": product_name,
+            "responses": responses,
+            "avg_overall_nps": round(float(avg_overall), 1) if avg_overall is not None else None,
+            "avg_packaging_score": round(float(avg_packaging), 1) if avg_packaging is not None else None,
+            "avg_product_nps": round(float(avg_product_nps), 1) if avg_product_nps is not None else None,
+            "promoters": int(promoters), "passives": int(passives), "detractors": int(detractors),
+            "detractor_rate_pct": round(int(detractors) / responses * 100, 1) if responses else None,
+        })
+    return out

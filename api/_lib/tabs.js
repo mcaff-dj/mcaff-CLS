@@ -13,6 +13,7 @@ const CARD_TABS = {
   mcaffeine: [
     { key: 'csat', label: 'CSAT' },
     { key: 'nps', label: 'NPS' },
+    { key: 'prodwisenps', label: 'Product wise NPS' },
     { key: 'overview', label: 'Overview' },
     { key: 'monthly', label: 'Monthly Analysis' },
     { key: 'delivery', label: 'Delivery' },
@@ -27,6 +28,7 @@ const CARD_TABS = {
   hyphen: [
     { key: 'csat', label: 'CSAT' },
     { key: 'nps', label: 'NPS' },
+    { key: 'prodwisenps', label: 'Product wise NPS' },
     { key: 'overview', label: 'Overview' },
     { key: 'monthly', label: 'Monthly Analysis' },
     { key: 'delivery', label: 'Delivery' },

@@ -527,6 +527,54 @@ def build_csat_panel(ctx):
             f'<p class="desc">Monthly survey responses (bars, right axis) against CSAT out of 5 (line, left axis).</p>{a}</section><section>{i}</section>{insights}</div>')
 
 
+def build_product_wise_nps_panel(ctx):
+    """Product wise NPS: nps_product grouped by product name (ctx.prodwise_nps, see
+    nps_source.fetch_product_wise_nps) - a plain read-through table like RTO-Conversion's,
+    not derived from ticket rows. Capped to the top PRODWISE_NPS_CAP products by response
+    volume (already sorted desc by the query) so a long tail of 1-response products doesn't
+    turn this into an unusable wall of rows."""
+    rows = ctx.prodwise_nps or []
+    if not rows:
+        return ('  <div class="tab-panel" id="panel-prodwisenps"><section><h2>Product wise NPS</h2>'
+                '<p class="note">No product-wise NPS data found.</p></section></div>')
+
+    PRODWISE_NPS_CAP = 50
+    capped = rows[:PRODWISE_NPS_CAP]
+    cap_note = (f"<p class='desc'>Showing the top {PRODWISE_NPS_CAP} products by NPS response volume "
+                f"(of {len(rows)} total).</p>") if len(rows) > PRODWISE_NPS_CAP else ""
+
+    def fmt_score(v):
+        return fnum(v) if v is not None else "&ndash;"
+
+    def fmt_pct(v):
+        return f"{fnum(v)}%" if v is not None else "&ndash;"
+
+    body_rows = []
+    for i, r in enumerate(capped):
+        z = "zebra" if i % 2 == 1 else ""
+        body_rows.append(
+            f"<tr class='{z}'><td class='rowlabel'>{h_enc(r['product'])}</td>"
+            f"<td class='num'>{n0(r['responses'])}</td><td class='num'>{fmt_score(r['avg_overall_nps'])}</td>"
+            f"<td class='num'>{fmt_score(r['avg_packaging_score'])}</td><td class='num'>{n0(r['promoters'])}</td>"
+            f"<td class='num'>{n0(r['passives'])}</td><td class='num'>{n0(r['detractors'])}</td>"
+            f"<td class='num'>{fmt_pct(r['detractor_rate_pct'])}</td></tr>"
+        )
+
+    table = ("<div class='pivot-wrap'><div class='pivot-title'>Product wise NPS</div><div class='pivot-scroll'>"
+             "<table class='pivot-table'><thead><tr><th class='corner'>Product</th><th>Responses</th>"
+             "<th>Avg NPS</th><th>Avg Packaging Score</th><th>Promoters</th><th>Passives</th><th>Detractors</th>"
+             f"<th>Detractor %</th></tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>")
+
+    return f"""  <div class="tab-panel" id="panel-prodwisenps">
+    <section>
+      <h2>Product wise NPS</h2>
+      <p class="desc">Per-product NPS breakdown from survey responses (nps_product), not tied to complaint tickets.</p>
+      {cap_note}
+      {table}
+    </section>
+  </div>"""
+
+
 def _norm(v):
     s = "" if v is None else str(v)
     return "(blank)" if not s.strip() else s
@@ -1190,6 +1238,7 @@ def assemble_report(ctx, here_dir):
         head = f.read()
     nav = ('<button class="tab-btn active" data-tab="csat">CSAT</button>'
            '<button class="tab-btn" data-tab="nps">NPS</button>'
+           '<button class="tab-btn" data-tab="prodwisenps">Product wise NPS</button>'
            '<button class="tab-btn" data-tab="overview">Overview</button>'
            '<button class="tab-btn" data-tab="monthly">Monthly Analysis</button>'
            '<button class="tab-btn" data-tab="rtoconv">RTO-Conversion</button>')
@@ -1436,6 +1485,7 @@ def assemble_report(ctx, here_dir):
   {year_toolbar.rstrip()}
   {build_csat_panel(ctx)}
   {build_nps_panel(ctx)}
+  {build_product_wise_nps_panel(ctx)}
   {''.join(panels)}
   {build_prod_pkg_panel(ctx)}
   {build_rto_conversion_panel(ctx)}

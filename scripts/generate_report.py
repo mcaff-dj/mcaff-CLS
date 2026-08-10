@@ -225,6 +225,15 @@ def main():
         with open(nps_cache_path, "r", encoding="utf-8-sig") as f:
             nps_cache = json.load(f)
         mom, prodnps = nps_cache["mom"], nps_cache["prodnps"]
+        # Older caches predate the "Product wise NPS" tab and won't have this key yet -
+        # backfill just that piece rather than forcing a full re-query of mom/prodnps too.
+        prodwise_nps = nps_cache.get("prodwise_nps")
+        if prodwise_nps is None:
+            print(f"[{b['brand']}] no cached product-wise NPS yet, querying...")
+            prodwise_nps = nps_source.fetch_product_wise_nps(b["nps_mysql_brand"])
+            nps_cache["prodwise_nps"] = prodwise_nps
+            with open(nps_cache_path, "w", encoding="utf-8") as f:
+                json.dump(nps_cache, f, separators=(",", ":"))
     else:
         reason = "--refresh-nps" if args.refresh_nps else "no cache yet"
         print(f"[{b['brand']}] querying NPS tables ({reason})...")
@@ -234,9 +243,11 @@ def main():
             nps_source.fetch_delivery_nps(b["nps_mysql_brand"]), sheet_mom, NPS_SHEET_OVERRIDE_MONTHS)
         prodnps = nps_source.override_months_from_sheet(
             nps_source.fetch_product_nps(b["nps_mysql_brand"]), sheet_prodnps, NPS_SHEET_OVERRIDE_MONTHS)
+        # Product wise NPS (per product name, not per month) - no sheet override, MySQL-only.
+        prodwise_nps = nps_source.fetch_product_wise_nps(b["nps_mysql_brand"])
         nps_cache_path.parent.mkdir(parents=True, exist_ok=True)
         with open(nps_cache_path, "w", encoding="utf-8") as f:
-            json.dump({"mom": mom, "prodnps": prodnps}, f, separators=(",", ":"))
+            json.dump({"mom": mom, "prodnps": prodnps, "prodwise_nps": prodwise_nps}, f, separators=(",", ":"))
 
     rtoconv_cache_path = REPO_ROOT / f"data/{b['brand']}_rtoconv_cache.json"
     if args.quick and rtoconv_cache_path.exists():
@@ -256,7 +267,7 @@ def main():
     agent, ai = agent_hist, ai_hist
 
     ctx.data_rows = data_rows
-    ctx.mom, ctx.prodnps, ctx.agent, ctx.ai = mom, prodnps, agent, ai
+    ctx.mom, ctx.prodnps, ctx.prodwise_nps, ctx.agent, ctx.ai = mom, prodnps, prodwise_nps, agent, ai
     ctx.months = b["months"]
     ctx.n = len(ctx.months)
     ctx.distinct_years = sorted({year_of(mo) for mo in ctx.months if year_of(mo)})
