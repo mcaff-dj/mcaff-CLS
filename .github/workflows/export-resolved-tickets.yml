@@ -37,16 +37,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Export hyphen
-        env:
-          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
-        run: python scripts/export_recurring.py --api-token "${{ secrets.FLOWCALL_TOKEN_HYPHEN }}" --tab-name hyphen
-
-      - name: Push hyphen to dashboard
-        env:
-          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
-        run: python scripts/push_hyphen_to_dashboard.py
-
       - name: Export mcaffeine
         env:
           GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
@@ -57,7 +47,21 @@ jobs:
           GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
         run: python scripts/push_mcaffeine_to_dashboard.py
 
+      - name: Export hyphen
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+        run: python scripts/export_recurring.py --api-token "${{ secrets.FLOWCALL_TOKEN_HYPHEN }}" --tab-name hyphen
+
+      - name: Push hyphen to dashboard
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+        run: python scripts/push_hyphen_to_dashboard.py
+
+      # always() - mcaffeine's advanced export window still needs committing
+      # even when hyphen (running after it) fails; a plain default-condition
+      # step would skip here and mcaffeine's progress would never reach git.
       - name: Commit state file if changed
+        if: always()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
