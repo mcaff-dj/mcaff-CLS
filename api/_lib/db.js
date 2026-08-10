@@ -664,6 +664,15 @@ async function bootstrapPgSchema() {
     await pgSql`DROP INDEX IF EXISTS escalation_lead_assignments_parent_order_current_key`;
     await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS escalation_lead_assignments_parent_order_current_key ON escalation_lead_assignments (parent_order) WHERE reassigned_away_at IS NULL AND resolved_at IS NULL`;
   }
+  // Resolution's replacement-order fields, added for the BigQuery/Postgres hybrid migration
+  // (docs/superpowers/specs/2026-08-10-escalation-bigquery-postgres-hybrid-design.md) - `resolution`
+  // and `agent_remarks` already existed (status/notes' Postgres mirror); only the replacement
+  // order id and AWB were sheet-only (columns T/U) until now.
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS new_order_id TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS new_awb TEXT`;
+  // email becomes nullable: resolveEscalationAssignment now INSERTs a row for orders resolved
+  // without ever being assigned (see that function below) - such a row genuinely has no agent.
+  await pgSql`ALTER TABLE escalation_lead_assignments ALTER COLUMN email DROP NOT NULL`;
   } catch (e) {
     // Postgres codes for "already exists" (duplicate_column/duplicate_table/duplicate_object)
     // - a benign race, not a real failure: every statement above is its own ADD COLUMN IF NOT
@@ -1139,13 +1148,27 @@ async function unassignEscalationOrder(parentOrder) {
 // anyone (WHERE matches zero rows) - resolving an unassigned order still writes to the sheet
 // (the desk's real source of truth) via updateOrder/batchUpdateOrders; this table is only the
 // durable history side, so having nothing to update here is not an error.
-async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks) {
+async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks, newOrderId, newAwb) {
   await ensurePgSchema();
-  await pgSql`
+  // pgSql only ever returns `{ rows }` (see its definition above) - RETURNING lets an UPDATE
+  // still report whether it matched anything, without needing pgSql to expose rowCount.
+  const { rows } = await pgSql`
     UPDATE escalation_lead_assignments
-    SET resolved_at = now(), resolution = ${resolution || null}, agent_remarks = ${agentRemarks || null}
+    SET resolved_at = now(), resolution = ${resolution || null}, agent_remarks = ${agentRemarks || null},
+        new_order_id = ${newOrderId || null}, new_awb = ${newAwb || null}
     WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND resolved_at IS NULL
+    RETURNING parent_order
   `;
+  if (rows.length === 0) {
+    // No live row to update - this order was resolved without ever being assigned. Insert a
+    // standalone resolved row (email NULL) so it's still durably recorded; without this, an
+    // order resolved cold would look unresolved forever once Postgres is the read source.
+    await pgSql`
+      INSERT INTO escalation_lead_assignments
+        (parent_order, email, resolved_at, resolution, agent_remarks, new_order_id, new_awb)
+      VALUES (${parentOrder}, NULL, now(), ${resolution || null}, ${agentRemarks || null}, ${newOrderId || null}, ${newAwb || null})
+    `;
+  }
 }
 
 // bulk-update's own equivalent of resolveEscalationAssignment, for many orders sharing the
@@ -1176,7 +1199,8 @@ async function resolveEscalationAssignmentsBulk(parentOrders, resolution) {
 async function getEscalationAssignments() {
   await ensurePgSchema();
   const { rows } = await pgSql`
-    SELECT parent_order, email, assigned_at, reassigned_away_at, resolved_at, resolution, agent_remarks
+    SELECT parent_order, email, assigned_at, reassigned_away_at, resolved_at, resolution, agent_remarks,
+           new_order_id, new_awb
     FROM escalation_lead_assignments
     ORDER BY assigned_at DESC
     LIMIT 5000
@@ -1189,6 +1213,8 @@ async function getEscalationAssignments() {
     resolvedAt: r.resolved_at,
     resolution: r.resolution,
     agentRemarks: r.agent_remarks,
+    newOrderId: r.new_order_id,
+    newAwb: r.new_awb,
   }));
 }
 
