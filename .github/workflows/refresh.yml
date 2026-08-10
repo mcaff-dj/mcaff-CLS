@@ -178,10 +178,12 @@ jobs:
             pids="$pids $!"
           fi
           for p in $pids; do wait "$p"; done
-          # One recursive cp rather than a cp per file - these are already .gz on disk.
-          if compgen -G "api/_reports/*_raw_*.csv.gz" > /dev/null; then
+          # Uploaded plain (not gzipped): these are attachment downloads, and browsers don't
+          # decode Content-Encoding for Content-Disposition: attachment - unlike the HTML
+          # reports above, which are viewed rather than saved, so gzip there works fine.
+          if compgen -G "api/_reports/*_raw_*.csv" > /dev/null; then
             aws s3 cp api/_reports/ s3://mcaff-cls-reports/reports/ --recursive \
-              --exclude "*" --include "*_raw_*.csv.gz" --content-type "application/gzip" --only-show-errors
+              --exclude "*" --include "*_raw_*.csv" --content-type "text/csv; charset=utf-8" --only-show-errors
           fi
           # Cross-brand Org_KYC_Trends digest (see build_trend_digest.py) - small (tens of
           # KB), so no gzip; served the same signed-URL-redirect way as the report HTML (see

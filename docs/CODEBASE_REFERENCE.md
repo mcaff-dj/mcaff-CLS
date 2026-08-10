@@ -40,7 +40,7 @@ flowchart TB
     subgraph AWS
       AMP["Amplify<br/>hosts app/, rewrites /reports/*"]
       LAM["Lambda mcaff-cls-api<br/>express, api/_lambda/app.js"]
-      S3["S3 mcaff-cls-reports<br/>reports/*.html, *.csv.gz, *.json"]
+      S3["S3 mcaff-cls-reports<br/>reports/*.html, *.csv, *.json"]
       CF["CloudFront d1lqcvzr613wr4<br/>signed URLs"]
       SM["Secrets Manager<br/>mcaff-cls/app · /db · /cloudfront-signing"]
     end
@@ -145,7 +145,7 @@ Two independent Sheets clients:
 ### S3 — `mcaff-cls-reports`, prefix `reports/`
 
 `mcaffeine.html`, `hyphen.html`, `deepdive.html`, `productkyc.html`,
-`{brand}_raw_{tab}.csv.gz`, `csat_dashboard_data.json`, `agent_shift_status.json`,
+`{brand}_raw_{tab}.csv`, `csat_dashboard_data.json`, `agent_shift_status.json`,
 `productkyc_data.json`.
 
 ---
@@ -215,7 +215,7 @@ flowchart TD
     F --> K
     G --> K
     H --> K
-    E --> L["gen_raw_export — gzipped CSVs"]
+    E --> L["gen_raw_export — plain CSVs"]
     K --> M["api/_reports/{brand}.html"]
     M --> N["gzip -1 → S3 → CloudFront invalidation"]
     L --> N
@@ -233,7 +233,7 @@ flowchart TD
 | [gen_monthly.py](../scripts/gen_monthly.py) | Auto-written period-over-period narrative |
 | [gen_insights.py](../scripts/gen_insights.py) | Colour-coded callout cards (crit/watch/good/info) |
 | [gen_geo_insights.py](../scripts/gen_geo_insights.py) | AWB → city/state via MySQL, with two persistent caches |
-| [gen_raw_export.py](../scripts/gen_raw_export.py) | Curated, PII-free gzipped CSV per tab |
+| [gen_raw_export.py](../scripts/gen_raw_export.py) | Curated, PII-free plain CSV per tab |
 | [kyc_source.py](../scripts/kyc_source.py) / [nps_source.py](../scripts/nps_source.py) | The two MySQL data sources |
 
 ### Non-obvious decisions, and why

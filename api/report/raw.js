@@ -33,7 +33,7 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const key = `reports/${card}_raw_${tab}.csv.gz`;
+  const key = `reports/${card}_raw_${tab}.csv`;
   try {
     // Confirms the object actually exists first, so a not-yet-built tab returns the
     // same "not available yet" message it always has, instead of a redirect to a link
@@ -46,7 +46,6 @@ module.exports = async (req, res) => {
         Key: key,
         ResponseContentType: 'text/csv; charset=utf-8',
         ResponseContentDisposition: `attachment; filename="${card}_${tab}_raw.csv"`,
-        ResponseContentEncoding: 'gzip',
       }),
       { expiresIn: 60 }
     );
