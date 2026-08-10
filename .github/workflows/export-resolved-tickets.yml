@@ -18,6 +18,13 @@ concurrency:
 jobs:
   export:
     runs-on: ubuntu-latest
+    env:
+      # Without this, stdout is fully buffered (not a tty) and gets dropped
+      # on a crash - e.g. lib.py's ensure_grid_size() logs the failing Sheets
+      # API response body right before raise_for_status(), but that print
+      # never reached the log because the process died before the buffer
+      # flushed. Unbuffered stdout so diagnostic prints always survive.
+      PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
