@@ -728,7 +728,7 @@ function OrderRow({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Save failed');
       setJustSaved(true);
-      onToast('success', `Resolved — ${order.parentOrder || 'row'} synced to sheet`);
+      onToast('success', `Resolved — ${order.parentOrder || 'row'}`);
       setTimeout(() => onSaved(rowKey(order)), 600);
     } catch (err) {
       setError(err.message);
@@ -1266,44 +1266,32 @@ export default function EscalationClient() {
       const unassigned = orders.filter((o) => !assignments[rowKey(o)]);
       if (unassigned.length === 0) { showToast('success', 'All orders already assigned!'); return; }
 
+      let assignmentPayload;
+      const newMap = {};
       if (!isAdmin) {
-        // Assign all unassigned to self
-        const updates = unassigned.map((o) =>
-          fetch('/api/escalation/assign', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ rowNumber: o.rowNumber, parentOrder: o.parentOrder, agentId: googleUser.email }),
-          }).then(async (res) => {
-            if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || 'Assign failed'); }
-          })
-        );
-        await Promise.all(updates);
-        const newMap = {};
+        assignmentPayload = unassigned.map((o) => ({ parentOrder: o.parentOrder, agentId: googleUser.email }));
         unassigned.forEach((o) => { newMap[rowKey(o)] = { agentId: googleUser.email }; });
-        setAssignments((p) => ({ ...p, ...newMap }));
-        showToast('success', `Auto-assigned ${unassigned.length} orders to you`);
       } else {
-        // Admin: round-robin across all agents
         if (agents.length === 0) { showToast('error', 'No agents available'); return; }
-        const updates = unassigned.map((o, i) => {
-          const agent = agents[i % agents.length];
-          return fetch('/api/escalation/assign', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ rowNumber: o.rowNumber, parentOrder: o.parentOrder, agentId: agent.email }),
-          }).then(async (res) => {
-            if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || 'Assign failed'); }
-            return { key: rowKey(o), agentId: agent.email };
-          });
-        });
-        const results = await Promise.all(updates);
-        const newMap = {};
-        results.forEach(({ key, agentId }) => { newMap[key] = { agentId }; });
-        setAssignments((p) => ({ ...p, ...newMap }));
-        showToast('success', `Auto-assigned ${unassigned.length} orders (round-robin across ${agents.length} agents)`);
+        assignmentPayload = unassigned.map((o, i) => ({ parentOrder: o.parentOrder, agentId: agents[i % agents.length].email }));
+        unassigned.forEach((o, i) => { newMap[rowKey(o)] = { agentId: agents[i % agents.length].email }; });
       }
-    } catch { showToast('error', 'Auto-assign failed'); }
-    finally { setAutoAssigning(false); }
+
+      const res = await fetch('/api/escalation/assign-bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assignments: assignmentPayload }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Auto-assign failed');
+
+      setAssignments((p) => ({ ...p, ...newMap }));
+      showToast('success', isAdmin
+        ? `Auto-assigned ${unassigned.length} orders (round-robin across ${agents.length} agents)`
+        : `Auto-assigned ${unassigned.length} orders to you`);
+    } catch (err) {
+      showToast('error', err.message || 'Auto-assign failed');
+    } finally { setAutoAssigning(false); }
   }
 
   /* --- Derived --- */
