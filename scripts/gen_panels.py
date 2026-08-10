@@ -535,6 +535,44 @@ def _nps_month_label(ym):
     return pretty_month(nps_month_label(yr, mo))
 
 
+def _prodwise_sparkline(months):
+    """Inline SVG sparkline of NPS% over sorted months + directional arrow.
+    Returns (svg_html, spark_json_str): svg_html is the initial full-range render;
+    spark_json_str is {"YYYY-MM": nps_pct_or_null} for the data-spark attribute so the
+    Year-filter JS can redraw filtered to active years only."""
+    pts = sorted(
+        ((ym, m["nps_pct"]) for ym, m in months.items() if m["nps_pct"] is not None),
+        key=lambda t: t[0],
+    )
+    spark_json = "{" + ",".join(
+        f'"{ym}":{m["nps_pct"] if m["nps_pct"] is not None else "null"}'
+        for ym, m in sorted(months.items())
+    ) + "}"
+    if len(pts) < 2:
+        return ("", spark_json)
+    vals = [v for _, v in pts]
+    lo, hi = min(vals), max(vals)
+    rng = hi - lo or 1.0
+    W, H, PAD = 64, 22, 2
+    n = len(pts)
+    def px(i): return PAD + i * (W - 2 * PAD) / (n - 1)
+    def py(v): return H - PAD - (v - lo) / rng * (H - 2 * PAD)
+    coords = " ".join(f"{px(i):.1f},{py(v):.1f}" for i, (_, v) in enumerate(pts))
+    delta = vals[-1] - vals[0]
+    color = "var(--s2)" if delta > 0.5 else ("var(--s6)" if delta < -0.5 else "var(--s4)")
+    arrow = "&#x25B2;" if delta > 0.5 else ("&#x25BC;" if delta < -0.5 else "&#x2192;")
+    lx, ly = f"{px(n - 1):.1f}", f"{py(vals[-1]):.1f}"
+    svg = (
+        f"<svg width='{W}' height='{H}' viewBox='0 0 {W} {H}'"
+        f" style='vertical-align:middle;overflow:visible;display:inline-block'>"
+        f"<polyline points='{coords}' fill='none' stroke='{color}'"
+        f" stroke-width='1.5' stroke-linejoin='round' stroke-linecap='round'/>"
+        f"<circle cx='{lx}' cy='{ly}' r='2.5' fill='{color}'/></svg>"
+        f"<span style='color:{color};font-size:9px;margin-left:3px;vertical-align:middle'>{arrow}</span>"
+    )
+    return (svg, spark_json)
+
+
 def _prodwise_year_json(months, years):
     """months: ym ('YYYY-MM') -> per-month stats dict (see nps_source.fetch_product_wise_nps).
     Returns a compact {"<year>":[responses,sum_overall,cnt_overall,sum_packaging,cnt_packaging,
@@ -656,24 +694,47 @@ def build_product_wise_nps_panel(ctx):
     for i, r in enumerate(capped):
         z = "zebra" if i % 2 == 1 else ""
         py_attr = f" data-py='{_prodwise_year_json(r['months'], ctx.distinct_years)}'" if year_aware else ""
+        spark_svg, spark_json = _prodwise_sparkline(r["months"])
+        spark_attr = f" data-spark='{spark_json}'" if year_aware else ""
         body_rows.append(
-            f"<tr class='{z}'{py_attr}><td class='rowlabel'>{h_enc(r['product'])}</td>"
+            f"<tr class='{z}'{py_attr}{spark_attr}><td class='rowlabel'>{h_enc(r['product'])}</td>"
             f"<td class='num'>{n0(r['responses'])}</td><td class='num'>{fmt_score(r['avg_overall_nps'])}</td>"
             f"<td class='num'>{fmt_score(r['avg_packaging_score'])}</td><td class='num'>{n0(r['promoters'])}</td>"
             f"<td class='num'>{n0(r['passives'])}</td><td class='num'>{n0(r['detractors'])}</td>"
-            f"<td class='num'>{fmt_pct(r['detractor_rate_pct'])}</td></tr>"
+            f"<td class='num'>{fmt_pct(r['detractor_rate_pct'])}</td>"
+            f"<td class='num' style='min-width:80px'>{spark_svg}</td></tr>"
         )
 
     table = ("<div class='pivot-wrap'><div class='pivot-title'>Product wise NPS</div><div class='pivot-scroll'>"
              "<table class='pivot-table'><thead><tr><th class='corner'>Product</th><th>Responses</th>"
              "<th>Avg NPS</th><th>Avg Packaging Score</th><th>Promoters</th><th>Passives</th><th>Detractors</th>"
-             f"<th>Detractor %</th></tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>")
+             f"<th>Detractor %</th><th>Trend</th></tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>")
 
     year_script = ""
     if year_aware:
         year_script = """<script>
 (function(){
   function fmt1(v){ if(v==null) return '–'; v = Math.round(v*10)/10; return (v===Math.trunc(v)) ? String(v) : v.toFixed(1); }
+  function drawSpark(td, pts) {
+    if (pts.length < 2) { td.innerHTML = '–'; return; }
+    var vals = pts.map(function(p){ return p[1]; });
+    var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+    var rng = hi - lo || 1;
+    var W=64, H=22, PAD=2, n=pts.length;
+    function px(i){ return PAD + i*(W-2*PAD)/(n-1); }
+    function py(v){ return H - PAD - (v-lo)/rng*(H-2*PAD); }
+    var coords = pts.map(function(p,i){ return px(i).toFixed(1)+','+py(p[1]).toFixed(1); }).join(' ');
+    var delta = vals[n-1] - vals[0];
+    var col = delta > 0.5 ? 'var(--s2)' : (delta < -0.5 ? 'var(--s6)' : 'var(--s4)');
+    var arrow = delta > 0.5 ? '&#x25B2;' : (delta < -0.5 ? '&#x25BC;' : '&#x2192;');
+    var lx = px(n-1).toFixed(1), ly = py(vals[n-1]).toFixed(1);
+    td.innerHTML = "<svg width='"+W+"' height='"+H+"' viewBox='0 0 "+W+" "+H+"'"
+      +" style='vertical-align:middle;overflow:visible;display:inline-block'>"
+      +"<polyline points='"+coords+"' fill='none' stroke='"+col+"'"
+      +" stroke-width='1.5' stroke-linejoin='round' stroke-linecap='round'/>"
+      +"<circle cx='"+lx+"' cy='"+ly+"' r='2.5' fill='"+col+"'/></svg>"
+      +"<span style='color:"+col+";font-size:9px;margin-left:3px;vertical-align:middle'>"+arrow+"</span>";
+  }
   window.registerYearChart(function(){
     var activeYears = window.REPORT_ACTIVE_YEARS; if(!activeYears) return;
     document.querySelectorAll('#panel-prodwisenps table.pivot-table > tbody > tr[data-py]').forEach(function(tr){
@@ -692,6 +753,13 @@ def build_product_wise_nps_panel(ctx):
       c[5].textContent = window.fmtN0(pas);
       c[6].textContent = window.fmtN0(det);
       c[7].textContent = resp ? (fmt1(det/resp*100)+'%') : '–';
+      var sparkRaw = tr.getAttribute('data-spark');
+      if (sparkRaw) {
+        var sm = JSON.parse(sparkRaw);
+        var pts = Object.keys(sm).filter(function(ym){ return sm[ym] !== null && activeYears.has(ym.slice(0,4)); })
+          .sort().map(function(ym){ return [ym, sm[ym]]; });
+        drawSpark(c[8], pts);
+      }
     });
   });
 })();
