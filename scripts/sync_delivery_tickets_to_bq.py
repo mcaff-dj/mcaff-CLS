@@ -1,29 +1,22 @@
-"""Pushes today's resolved Delivery-class tickets from PEP_CLS into BigQuery's
-Delivery_escalation table - the BigQuery counterpart of
-sync_delivery_tickets_to_sheet.py, reading the same MySQL rows on the same
-"resolved today" definition.
+"""Pushes Delivery-class tickets from PEP_CLS into BigQuery's Delivery_escalation table - the
+BigQuery counterpart of sync_delivery_tickets_to_sheet.py, reading the same MySQL rows on the
+same "resolved since <date>" definition.
 
-Reuses that script's MySQL query, row-building, and AWB-backfill functions by
-import instead of re-implementing "which tickets count" a second time - it is
-NOT modified and keeps writing the sheet exactly as before (see
-docs/superpowers/specs/2026-08-09-escalation-bigquery-direct-ingest-design.md,
-which takes this same reuse-by-import approach for its own BigQuery loader).
+Reuses that script's MySQL query, row-building, and AWB-backfill functions by import instead of
+re-implementing "which tickets count" a second time - it is NOT modified and keeps writing the
+sheet exactly as before (see docs/superpowers/specs/2026-08-10-escalation-bigquery-postgres-hybrid-design.md).
 
-Both brand tabs land in ONE table, distinguished by a `brand` column
-('HYPHEN' / 'mCaffeine') - the same split the sheet tabs and the
-hyphen_tickets/mcaff_tickets MySQL tables already use, so nothing has to
-translate between them.
+Both brand tabs land in ONE table, distinguished by a `brand` column ('HYPHEN' / 'mCaffeine') -
+the same split the sheet tabs and the hyphen_tickets/mcaff_tickets MySQL tables already use.
 
-Dedup is independent of the sheet: each run queries BigQuery for ticket
-numbers already loaded for that brand and skips them, the BigQuery equivalent
-of column Z's role in the sheet job. Rows are appended via a load job (see
-bq_lib.load_ndjson) rather than a streaming insert - this dedup query is the
-only line of defense, since load jobs have no per-row insertId dedup the way
-streaming inserts do.
+Ingest is a full WRITE_TRUNCATE rebuild every run, not an incremental append: total_times_user_reached
+needs recomputing for already-loaded rows whenever a new same-AWB ticket arrives, which an
+append-only path can't do. --rebuild-since should always be the same anchor date (the date the
+table's history starts from) - see .github/workflows/sync-escalation-bq.yml.
 
-CREDENTIALS: same GOOGLE_SA_KEY_JSON/GOOGLE_SA_KEY_FILE service account as
-lib.py's Sheets calls, plus BQ_PROJECT_ID for the target GCP project. That
-account needs BigQuery Data Editor + BigQuery Job User on BQ_PROJECT_ID.
+CREDENTIALS: same GOOGLE_SA_KEY_JSON/GOOGLE_SA_KEY_FILE service account as lib.py's Sheets calls,
+plus BQ_PROJECT_ID for the target GCP project. That account needs BigQuery Data Editor + BigQuery
+Job User on BQ_PROJECT_ID.
 """
 import argparse
 import os
@@ -49,12 +42,6 @@ TICKET_FIELDS = [
     "delivery_partner_name", "order_date", "order_month", "query_date",
     "query_month", "wh_name",
 ]
-
-SCHEMA = [{"name": name, "type": "STRING"} for name in ["brand", *TICKET_FIELDS, "ticket_number"]] + [
-    {"name": "loaded_at", "type": "TIMESTAMP"},
-    {"name": "total_times_user_reached", "type": "FLOAT"},
-]
-
 
 def get_awb_reach_counts(table, awbs):
     """AWB -> total count of Delivery-class tickets ever raised against it in
@@ -94,12 +81,6 @@ def row_to_bq_dict(sheet_row, brand, awb_counts=None):
     return d
 
 
-def get_existing_ticket_numbers(brand):
-    sql = f"SELECT ticket_number FROM `{PROJECT}.{DATASET}.{TABLE}` WHERE brand = @brand"
-    rows = bq_lib.run_query(PROJECT, sql, params={"brand": brand})
-    return {r["ticket_number"] for r in rows if r.get("ticket_number")}
-
-
 def rebuild_table(since, dry_run):
     """Rewrites the WHOLE table (both brands) with freshly rebuilt rows -
     the only way to correct already-loaded fields (awb_number,
@@ -136,44 +117,6 @@ def rebuild_table(since, dry_run):
     print(f"  rewrote {rewritten} row(s)")
 
 
-def sync_brand(brand, dry_run, since=None):
-    table = TAB_TABLE[brand]
-    print(f"--- {brand} ({table}) -> BigQuery {DATASET}.{TABLE} ---")
-
-    if not PROJECT:
-        raise RuntimeError("BQ_PROJECT_ID env var is required")
-
-    if not dry_run:
-        bq_lib.ensure_table(PROJECT, DATASET, TABLE, SCHEMA)
-
-    existing = get_existing_ticket_numbers(brand) if not dry_run else set()
-    if not dry_run:
-        print(f"  {len(existing)} ticket numbers already in BigQuery")
-
-    db_rows = tickets.fetch_today_delivery_tickets(table, since=since)
-    print(f"  {len(db_rows)} Delivery-class tickets resolved {'since ' + since if since else 'today'} in DB")
-
-    new_db_rows = [r for r in db_rows if r[0] not in existing]
-    print(f"  {len(new_db_rows)} new rows to {'would insert' if dry_run else 'insert'}")
-    if not new_db_rows:
-        return
-
-    sheet_rows = [tickets.build_sheet_row(r) for r in new_db_rows]
-    tickets.fill_missing_awb(sheet_rows)
-    awb_counts = get_awb_reach_counts(table, [r[4] for r in sheet_rows])
-    bq_rows = [row_to_bq_dict(r, brand, awb_counts) for r in sheet_rows]
-
-    if dry_run:
-        for r in bq_rows[:5]:
-            print("   ", r)
-        if len(bq_rows) > 5:
-            print(f"    ... and {len(bq_rows) - 5} more")
-        return
-
-    inserted = bq_lib.load_ndjson(PROJECT, DATASET, TABLE, bq_rows)
-    print(f"  inserted {inserted} row(s)")
-
-
 def self_check():
     """Offline check of the row mapping - no BigQuery, no DB."""
     db_row = ("TCK-1", "Late", "ORD-1", "", "AWB-1", "Delhivery",
@@ -203,22 +146,18 @@ def self_check():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tab", choices=sorted(TAB_TABLE), help="brand to sync (HYPHEN or mCaffeine)")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and print only, no BigQuery writes")
-    parser.add_argument("--since", help="YYYY-MM-DD: backfill tickets resolved from this date through today (default: today only)")
-    parser.add_argument("--rebuild-since", metavar="YYYY-MM-DD",
+    parser.add_argument("--rebuild-since", metavar="YYYY-MM-DD", required=False,
                          help="Rewrite the WHOLE table (both brands, WRITE_TRUNCATE) with freshly rebuilt rows since "
-                              "this date, to fix already-loaded awb_number/delivery_partner_name/total_times_user_reached. "
-                              "Ignores --tab (always both brands); pass the same date the table was originally loaded with.")
+                              "this date, to keep awb_number/delivery_partner_name/total_times_user_reached correct. "
+                              "Always both brands.")
     parser.add_argument("--self-check", action="store_true", help="Run the offline row-mapping check and exit")
     args = parser.parse_args()
     if args.self_check:
         return self_check()
-    if args.rebuild_since:
-        return rebuild_table(args.rebuild_since, args.dry_run)
-    if not args.tab:
-        parser.error("--tab is required")
-    sync_brand(args.tab, args.dry_run, args.since)
+    if not args.rebuild_since:
+        parser.error("--rebuild-since is required")
+    rebuild_table(args.rebuild_since, args.dry_run)
 
 
 if __name__ == "__main__":
