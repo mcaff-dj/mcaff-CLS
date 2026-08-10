@@ -118,6 +118,9 @@ module.exports = async (req, res) => {
         }
       );
       const out = await r.json().catch(() => ({}));
+      // Same staleness bug fixed in api/ndr/sheet.js: a write must not leave the 20s read cache
+      // above serving pre-write data to a poll landing inside that window.
+      if (r.ok) _readCache.clear();
       res.status(r.status).json(out);
       return;
     }

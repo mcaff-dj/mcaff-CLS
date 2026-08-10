@@ -113,6 +113,10 @@ module.exports = async (req, res) => {
         }
       );
       const out = await r.json().catch(() => ({}));
+      // A write just changed cells the 20s read cache above may still be serving stale - without
+      // this, a poll landing inside that window hands the UI pre-write data and an
+      // already-disposed lead reappears in Fresh Leads until the cache ages out on its own.
+      if (r.ok) _readCache.clear();
       res.status(r.status).json(out);
       return;
     }
