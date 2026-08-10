@@ -22,45 +22,6 @@ from gen_raw_export import raw_download_link
 from report_context import ci_key, fnum, h_enc, j_enc, n0, pretty_month, round1, sort_keys_by_last_period, year_of
 
 
-def _batch_table(ctx, subset, title):
-    pm = {}
-    pt = {}
-    prod_cache = {}
-    for r in subset:
-        b = ctx.cell(r, ctx.col["batch"])
-        if not str(b).strip():
-            continue
-        prod = ctx.cell(r, ctx.col["prod"])
-        if not str(prod).strip():
-            prod = "(blank)"
-        prod = ci_key(prod, prod_cache)
-        mo = ctx.cell(r, ctx.col["month"])
-        if not str(mo).strip():
-            continue
-        pm.setdefault(prod, {})
-        pm[prod][mo] = pm[prod].get(mo, 0) + 1
-        pt[prod] = pt.get(prod, 0) + 1
-    order = sort_keys_by_last_period(pm, pt, ctx.months)[:25]
-    if not order:
-        return ""
-    parts = [f"<div class='pivot-wrap'><div class='pivot-title'>{h_enc(title)} Batch Numberwise Complaints - Monthly</div>"
-             f"<div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner'>Product Name</th>"]
-    for mo in ctx.months:
-        parts.append(f"<th class='month-hdr' data-yr='{year_of(mo)}'>{h_enc(mo)}</th>")
-    parts.append("</tr></thead><tbody>")
-    for ri, prod in enumerate(order, start=1):
-        z = "zebra" if ri % 2 == 1 else ""
-        parts.append(f"<tr class='{z}'><td class='rowlabel' title=\"{h_enc(prod)}\">{h_enc(prod)}</td>")
-        for mo in ctx.months:
-            cnt = pm[prod].get(mo, 0)
-            cd = n0(cnt) if cnt > 0 else "-"
-            parts.append(f"<td class='num' data-yr='{year_of(mo)}'>{cd}</td>")
-        parts.append("</tr>")
-    parts.append("</tbody></table></div></div>")
-    return (f"<section><h2>Batch Numberwise Complaints (Top 25 Products)</h2>"
-            f"<p class=\"desc\">Count of {h_enc(title)} tickets that carry a Batch Number, by product and ticket month.</p>{''.join(parts)}</section>")
-
-
 def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mode, dim2_pct_label, dim2_cap, coverage_mode):
     months = ctx.months
     n = ctx.n
@@ -217,7 +178,7 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     sb1.append("</tr></thead><tbody>")
     for ci, cat in enumerate(cat_order):
         z = "zebra" if (ci + 1) % 2 == 1 else ""
-        sb1.append(f"<tr class='{z} xf-row' id='xf-{pfx}-catrow-{ci}' onclick='onXfClick(\"{pfx}\",\"cat\",{ci})'><td class='rowlabel'>{h_enc(cat)}</td>")
+        sb1.append(f"<tr class='{z} xf-row' id='xf-{pfx}-catrow-{ci}' onclick='onXfClick(\"{pfx}\",\"cat\",{ci})'><td class='rowlabel' title=\"{h_enc(cat)}\">{h_enc(cat)}</td>")
         for mi in range(n):
             if not month_has_data[mi]:
                 continue
@@ -245,7 +206,7 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     sb2.append("</tr></thead><tbody>")
     for di, dv in enumerate(dim2_order):
         z = "zebra" if (di + 1) % 2 == 1 else ""
-        sb2.append(f"<tr class='{z} xf-row' id='xf-{pfx}-dimrow-{di}' onclick='onXfClick(\"{pfx}\",\"dim2\",{di})'><td class='rowlabel'>{h_enc(dv)}</td>")
+        sb2.append(f"<tr class='{z} xf-row' id='xf-{pfx}-dimrow-{di}' onclick='onXfClick(\"{pfx}\",\"dim2\",{di})'><td class='rowlabel' title=\"{h_enc(dv)}\">{h_enc(dv)}</td>")
         for mi in range(n):
             if not month_has_data[mi]:
                 continue
@@ -354,19 +315,20 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     else:
         insights_block = build_insights_card(f"Insights &mdash; {h_enc(cls['label'])}", get_category_insight_items(ctx, subset))
         weekly_block = build_weekly_class_block(ctx, cls)
-    batch = ""
-    if cls["key"] in ("Product", "Product Suggestion/Recommendation"):
-        batch = _batch_table(ctx, subset, cls["label"])
+    if cls["id"] == "suggestion":
+        cat_desc = "Percent = complaints &divide; that month's total order volume (\"Total Sales M\")."
+        dim2_section = ""
+    else:
+        cat_desc = "Percent = complaints &divide; that month's total order volume (\"Total Sales M\"). Click a row in either table below to cross-filter."
+        dim2_section = f"<section><h2>{h_enc(dim2_title)}</h2>{coverage_note}{capped_note}{''.join(sb2)}</section>\n"
 
     return f"""{raw_download_link(ctx, pfx)}
 <div class="gran-monthly">
 {filter_note}
-<section><h2>{h_enc(cls['label'])} Complaints by Issue Category</h2><p class="desc">Percent = complaints &divide; that month's total order volume ("Total Sales M"). Click a row in either table below to cross-filter.</p>{''.join(sb1)}</section>
-<section><h2>{h_enc(dim2_title)}</h2>{coverage_note}{capped_note}{''.join(sb2)}</section>
-<section><h2>{h_enc(cls['label'])} Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line). Recomputes for the row selected above.</p>{''.join(sb3)}</section>
+<section><h2>{h_enc(cls['label'])} Complaints by Issue Category</h2><p class="desc">{cat_desc}</p>{''.join(sb1)}</section>
+{dim2_section}<section><h2>{h_enc(cls['label'])} Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line). Recomputes for the row selected above.</p>{''.join(sb3)}</section>
 </div>
 {weekly_block}
-{batch}
 {insights_block}
 {js}"""
 
@@ -402,7 +364,7 @@ def _build_category_pivot(ctx, subset, title):
     totals = {}
     for ri, cat in enumerate(cat_order, start=1):
         z = "zebra" if ri % 2 == 1 else ""
-        parts.append(f"<tr class='{z}'><td class='rowlabel'>{h_enc(cat)}</td>")
+        parts.append(f"<tr class='{z}'><td class='rowlabel' title=\"{h_enc(cat)}\">{h_enc(cat)}</td>")
         for mo in months:
             cnt = cat_month[cat].get(mo, 0)
             totals[mo] = totals.get(mo, 0) + cnt
@@ -764,7 +726,7 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
     t.append("</tr></thead><tbody>")
     for pi, p in enumerate(parents_out):
         z = "zebra" if (pi + 1) % 2 == 1 else ""
-        t.append(f"<tr class='{z} ppk-lvl1' id='{prefix}-parent-{pi}' style='font-weight:700;'><td class='rowlabel'>"
+        t.append(f"<tr class='{z} ppk-lvl1' id='{prefix}-parent-{pi}' style='font-weight:700;'><td class='rowlabel' title=\"{h_enc(SKUS[p['sku']])}\">"
                  f"<span id='{prefix}-icon-1-{pi}' class='ppk-toggle-icon' onclick=\"ppkToggle('{prefix}',1,{pi},event)\" style='cursor:pointer;'>+</span>{h_enc(SKUS[p['sku']])}</td>"
                  f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td>")
         for mi in range(n):
@@ -782,7 +744,7 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
             for cgi in cg_by_pg.get(pgi, []):
                 cg = cls_groups[cgi]
                 t.append(f"<tr class='ppk-lvl3 {prefix}-child-of-pg{pgi}' id='{prefix}-cg-{cgi}' style='display:none;background:var(--pivot-zebra-bg);'>"
-                         f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'>"
+                         f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel' title=\"{h_enc(CLASSES[cg['cls']])}\">"
                          f"<span id='{prefix}-icon-3-{cgi}' class='ppk-toggle-icon' onclick=\"ppkToggle('{prefix}',3,{cgi},event)\" style='cursor:pointer;'>+</span>{h_enc(CLASSES[cg['cls']])}</td>"
                          f"<td class='rowlabel'></td><td class='rowlabel'></td>")
                 for mi in range(n):
@@ -791,7 +753,7 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
                 for catgi in cat_by_cg.get(cgi, []):
                     catg = cat_groups[catgi]
                     t.append(f"<tr class='ppk-lvl4 {prefix}-child-of-cg{cgi}' id='{prefix}-catg-{catgi}' style='display:none;'>"
-                             f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'>"
+                             f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel' title=\"{h_enc(CATS[catg['cat']])}\">"
                              f"<span id='{prefix}-icon-4-{catgi}' class='ppk-toggle-icon' onclick=\"ppkToggle('{prefix}',4,{catgi},event)\" style='cursor:pointer;'>+</span>{h_enc(CATS[catg['cat']])}</td>"
                              f"<td class='rowlabel'></td>")
                     for mi in range(n):
@@ -801,7 +763,7 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
                         c = rows_out[ri]
                         t.append(f"<tr class='ppk-lvl5 {prefix}-child-of-catg{catgi}' id='{prefix}-row-{ri}' style='display:none;background:var(--surface-card);'>"
                                  f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td>"
-                                 f"<td class='rowlabel'>{h_enc(BATCHES[c['batch']])}</td>")
+                                 f"<td class='rowlabel' title=\"{h_enc(BATCHES[c['batch']])}\">{h_enc(BATCHES[c['batch']])}</td>")
                         for mi in range(n):
                             t.append(f"<td class='num' id='{prefix}-row-{ri}-{mi}-cnt'{yr_attrs[mi]}>-</td><td class='pct' id='{prefix}-row-{ri}-{mi}-pct'{yr_attrs[mi]}>-</td>")
                         t.append("</tr>")
@@ -1369,7 +1331,7 @@ def assemble_report(ctx, here_dir):
     h.push("</tr></thead><tbody>");
     var totals = visGi.map(function(){{ return 0; }});
     rowLabels.forEach(function(lbl, ri){{
-      h.push("<tr class='"+((ri%2===0)?'zebra':'')+"'><td class='rowlabel'>"+window.escXml(lbl)+"</td>");
+      h.push("<tr class='"+((ri%2===0)?'zebra':'')+"'><td class='rowlabel' title='"+window.escXml(lbl).replace(/'/g,'&#39;')+"'>"+window.escXml(lbl)+"</td>");
       visGi.forEach(function(gi, vi){{
         var cnt = counts[ri][gi]||0; totals[vi]+=cnt;
         var sm = basisAt(basis, ri, gi);
