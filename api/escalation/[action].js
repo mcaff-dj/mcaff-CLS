@@ -13,9 +13,8 @@
 // tab. Access is enforced here rather than in the browser, so the client is free to render
 // whatever it likes without that being a permission decision.
 const { getSession } = require('../_lib/session');
-const {
-  getEligibleOrders, getFreshLeads, updateOrder, batchUpdateOrders, getSheetIndex,
-} = require('../_lib/escalationSheet');
+const { updateOrder, batchUpdateOrders } = require('../_lib/escalationSheet');
+const { getEligibleOrders, getFreshLeads } = require('../_lib/escalationBq');
 const { CSV_HEADERS, parseCSV, toCSV } = require('../_lib/escalationCsv');
 const {
   getCallingProcessAgents, assignEscalationOrder, unassignEscalationOrder,
