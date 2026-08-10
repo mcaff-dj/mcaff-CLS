@@ -365,19 +365,21 @@ def ensure_grid_size(spreadsheet_id, sheet_name, min_rows, min_cols):
     """Grows the sheet's underlying grid if needed. A PUT to an explicit range
     fails outright with 'exceeds grid limits' if the target is beyond the
     sheet's current (fixed) row/column count - unlike values:append, which
-    auto-grows the grid. Adds a buffer beyond the immediate need so a future
-    incremental write doesn't have to resize again right away - but ONLY on
-    whichever dimension actually needs to grow: a workbook already close to
-    Google Sheets' 10M-cell-per-workbook ceiling can reject an unnecessary
-    column bump (e.g. rows need to grow but columns already fit) that a
-    blanket buffer on both dimensions would trigger."""
+    auto-grows the grid. Adds a small buffer beyond the immediate need so a
+    future incremental write doesn't have to resize again right away - but
+    ONLY on whichever dimension actually needs to grow: a workbook already
+    close to Google Sheets' 10M-cell-per-workbook ceiling can reject an
+    unnecessary column bump (e.g. rows need to grow but columns already fit)
+    that a blanket buffer on both dimensions would trigger. Kept deliberately
+    small (not the ~500/~20 this used to add) - this workbook runs close to
+    the cap, and every extra buffered cell is one less cell of headroom."""
     gid, grid_props = _get_sheet_gid_and_grid(spreadsheet_id, sheet_name)
     cur_rows = grid_props.get("rowCount", 0)
     cur_cols = grid_props.get("columnCount", 0)
     if min_rows <= cur_rows and min_cols <= cur_cols:
         return
-    new_rows = max(min_rows + 500, cur_rows) if min_rows > cur_rows else cur_rows
-    new_cols = max(min_cols + 20, cur_cols) if min_cols > cur_cols else cur_cols
+    new_rows = max(min_rows + 50, cur_rows) if min_rows > cur_rows else cur_rows
+    new_cols = max(min_cols + 5, cur_cols) if min_cols > cur_cols else cur_cols
     token = get_write_access_token()
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate"
     body = {
