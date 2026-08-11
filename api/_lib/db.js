@@ -1236,6 +1236,11 @@ async function unassignEscalationOrder(parentOrder) {
 // Writes tat_days (the raw day count) and never tat_to_resolve - that one is a generated column
 // holding the bucket label, which Postgres recomputes from delivered_at/assigned_at on this same
 // write. Assigning to it would be an error, not a no-op.
+// updatedBy also becomes the row's `email` (not just `updated_by`) - whoever resolves a lead
+// claims it in the assignment filter, on this SAME row. This must NOT go through
+// assignEscalationOrder: that function's whole job is opening a fresh cycle when there's no live
+// row, which is true of every already-resolved order - calling it before every resolve reopened a
+// brand-new row on every re-resolve/already-closed order instead of updating the one that's there.
 async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks, newOrderId, newAwb, updatedBy) {
   await ensurePgSchema();
   // pgSql only ever returns `{ rows }` (see its definition above) - RETURNING lets an UPDATE
@@ -1245,7 +1250,7 @@ async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks
     SET last_updated_at = now(),
         resolution = ${resolution || null}, agent_remarks = ${agentRemarks || null},
         new_order_id = ${newOrderId || null}, new_awb = ${newAwb || null},
-        updated_by = ${updatedBy || null},
+        updated_by = ${updatedBy || null}, email = COALESCE(${updatedBy || null}, email),
         delivered_at = CASE WHEN ${resolution} = 'Delivered' THEN now() ELSE delivered_at END,
         tat_days = EXTRACT(EPOCH FROM (now() - assigned_at)) / 86400.0
     WHERE id = COALESCE(
@@ -1257,15 +1262,15 @@ async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks
     RETURNING parent_order
   `;
   if (rows.length === 0) {
-    // No live row to update - this order was resolved without ever being assigned. Insert a
-    // standalone resolved row (email NULL) so it's still durably recorded; without this, an
-    // order resolved cold would look unresolved forever once Postgres is the read source.
+    // No row at all for this order yet - this order was resolved without ever being assigned.
+    // email = updatedBy (not NULL) so it's still durably attributed; without this, an order
+    // resolved cold would look unresolved AND unassigned forever once Postgres is the read source.
     const deliveredAt = resolution === 'Delivered' ? new Date() : null;
     await pgSql`
       INSERT INTO escalation_lead_assignments
         (parent_order, email, last_updated_at, resolution, agent_remarks, new_order_id, new_awb,
          updated_by, delivered_at)
-      VALUES (${parentOrder}, NULL, now(), ${resolution || null}, ${agentRemarks || null},
+      VALUES (${parentOrder}, ${updatedBy || null}, now(), ${resolution || null}, ${agentRemarks || null},
               ${newOrderId || null}, ${newAwb || null}, ${updatedBy || null}, ${deliveredAt})
     `;
   }
@@ -1280,6 +1285,7 @@ async function resolveEscalationAssignmentsBulk(parentOrders, resolution, update
   await pgSql`
     UPDATE escalation_lead_assignments
     SET last_updated_at = now(), resolution = ${resolution || null}, updated_by = ${updatedBy || null},
+        email = COALESCE(${updatedBy || null}, email),
         delivered_at = CASE WHEN ${resolution} = 'Delivered' THEN now() ELSE delivered_at END,
         tat_days = EXTRACT(EPOCH FROM (now() - assigned_at)) / 86400.0
     WHERE parent_order = ANY(${parentOrders}::text[]) AND reassigned_away_at IS NULL AND last_updated_at IS NULL
