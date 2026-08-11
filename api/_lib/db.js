@@ -679,7 +679,47 @@ async function bootstrapPgSchema() {
   await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS new_order_id TEXT`;
   await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS new_awb TEXT`;
   await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ`;
-  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS tat_to_resolve NUMERIC`;
+  // tat_to_resolve holds the BUCKET LABEL ("Within 48 hrs", "4-8 days", ...), reproducing the
+  // Google Sheet's own IF-ladder now that the sheet is no longer the source of truth. The raw day
+  // count keeps its own numeric column, tat_days - the label is derived from it, so storing only
+  // the label would throw away the number every average/threshold question needs.
+  //
+  // Existing deployments have tat_to_resolve as the NUMERIC column: rename it to tat_days (the
+  // data is the day count, so this preserves it) before the label column claims the name. Checked
+  // against information_schema rather than attempted blindly, same pattern as the
+  // resolved_at -> last_updated_at rename above.
+  const { rows: tatNumeric } = await pgSql`
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'escalation_lead_assignments'
+      AND column_name = 'tat_to_resolve' AND data_type = 'numeric'
+  `;
+  if (tatNumeric.length > 0) {
+    await pgSql`ALTER TABLE escalation_lead_assignments RENAME COLUMN tat_to_resolve TO tat_days`;
+  }
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS tat_days NUMERIC`;
+  // GENERATED ... STORED, not a column the app writes: the bucket is a pure function of
+  // delivered_at and assigned_at, so Postgres recomputing it on every write is one less thing that
+  // can drift (a hand-written label would go stale the moment either timestamp is corrected, and
+  // every future writer would have to remember the ladder). Both operands are immutable, which is
+  // what makes them legal in a generated expression - now() would not be.
+  //
+  // delivered_at is only stamped for resolution = 'Delivered' (see resolveEscalationAssignment),
+  // so an order resolved as Reshipped/Cancelled/Lost reads 'unresolved' here. That follows the
+  // "bucket by delivered_at" rule as asked - COALESCE(delivered_at, last_updated_at) would instead
+  // bucket every resolution by when it was resolved.
+  await pgSql`
+    ALTER TABLE escalation_lead_assignments
+    ADD COLUMN IF NOT EXISTS tat_to_resolve TEXT GENERATED ALWAYS AS (
+      CASE
+        WHEN delivered_at IS NULL THEN 'unresolved'
+        WHEN EXTRACT(EPOCH FROM (delivered_at - assigned_at)) / 86400.0 <= 2  THEN 'Within 48 hrs'
+        WHEN EXTRACT(EPOCH FROM (delivered_at - assigned_at)) / 86400.0 <= 4  THEN 'Within 2-4 days'
+        WHEN EXTRACT(EPOCH FROM (delivered_at - assigned_at)) / 86400.0 <= 8  THEN '4-8 days'
+        WHEN EXTRACT(EPOCH FROM (delivered_at - assigned_at)) / 86400.0 <= 10 THEN '8-10 days'
+        ELSE 'Greater than 10 days'
+      END
+    ) STORED
+  `;
   // email becomes nullable: resolveEscalationAssignment now INSERTs a row for orders resolved
   // without ever being assigned (see that function below) - such a row genuinely has no agent.
   await pgSql`ALTER TABLE escalation_lead_assignments ALTER COLUMN email DROP NOT NULL`;
@@ -1182,6 +1222,9 @@ async function unassignEscalationOrder(parentOrder) {
 // anyone (WHERE matches zero rows) - resolving an unassigned order still writes to the sheet
 // (the desk's real source of truth) via updateOrder/batchUpdateOrders; this table is only the
 // durable history side, so having nothing to update here is not an error.
+// Writes tat_days (the raw day count) and never tat_to_resolve - that one is a generated column
+// holding the bucket label, which Postgres recomputes from delivered_at/assigned_at on this same
+// write. Assigning to it would be an error, not a no-op.
 async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks, newOrderId, newAwb) {
   await ensurePgSchema();
   // pgSql only ever returns `{ rows }` (see its definition above) - RETURNING lets an UPDATE
@@ -1192,7 +1235,7 @@ async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks
         resolution = ${resolution || null}, agent_remarks = ${agentRemarks || null},
         new_order_id = ${newOrderId || null}, new_awb = ${newAwb || null},
         delivered_at = CASE WHEN ${resolution} = 'Delivered' THEN now() ELSE delivered_at END,
-        tat_to_resolve = EXTRACT(EPOCH FROM (now() - assigned_at)) / 86400.0
+        tat_days = EXTRACT(EPOCH FROM (now() - assigned_at)) / 86400.0
     WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND last_updated_at IS NULL
     RETURNING parent_order
   `;
@@ -1221,7 +1264,7 @@ async function resolveEscalationAssignmentsBulk(parentOrders, resolution) {
     UPDATE escalation_lead_assignments
     SET last_updated_at = now(), resolution = ${resolution || null},
         delivered_at = CASE WHEN ${resolution} = 'Delivered' THEN now() ELSE delivered_at END,
-        tat_to_resolve = EXTRACT(EPOCH FROM (now() - assigned_at)) / 86400.0
+        tat_days = EXTRACT(EPOCH FROM (now() - assigned_at)) / 86400.0
     WHERE parent_order = ANY(${parentOrders}::text[]) AND reassigned_away_at IS NULL AND last_updated_at IS NULL
   `;
 }
@@ -1242,7 +1285,7 @@ async function getEscalationAssignments() {
   await ensurePgSchema();
   const { rows } = await pgSql`
     SELECT parent_order, email, assigned_at, reassigned_away_at, last_updated_at, resolution, agent_remarks,
-           new_order_id, new_awb, delivered_at, tat_to_resolve
+           new_order_id, new_awb, delivered_at, tat_days, tat_to_resolve
     FROM escalation_lead_assignments
     ORDER BY assigned_at DESC
     LIMIT 5000
@@ -1258,6 +1301,8 @@ async function getEscalationAssignments() {
     newOrderId: r.new_order_id,
     newAwb: r.new_awb,
     deliveredAt: r.delivered_at,
+    tatDays: r.tat_days,
+    // The bucket label, not a number - see the generated column in bootstrapPgSchema.
     tatToResolve: r.tat_to_resolve,
   }));
 }
