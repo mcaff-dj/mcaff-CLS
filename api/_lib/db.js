@@ -1368,7 +1368,11 @@ const ESCALATION_ORDERS_LIMIT = 2000;
 async function getEscalationOrders(limit = ESCALATION_ORDERS_LIMIT, { includeResolved = false } = {}) {
   await ensurePgSchema();
   // Newest cycles first, so a truncated response keeps the orders most likely to still need
-  // action rather than an arbitrary slice.
+  // action rather than an arbitrary slice. Sorted by whichever happened last - assigned_at alone
+  // left a just-resolved order sitting wherever it was originally assigned instead of floating to
+  // the top, which is where "I just updated this" expects to find it. Only matters when
+  // includeResolved is on (Fresh Leads' rows are always pending, so last_updated_at is always
+  // NULL there and this degrades to plain assigned_at DESC).
   // includeResolved short-circuits the pending filter (`$1 OR ...`) rather than dropping it via a
   // separate query string - RTO Queue wants every order's latest cycle, resolved or not (see
   // getEligibleOrders), Fresh Leads still wants pending-only, and this keeps both on one query.
@@ -1383,7 +1387,7 @@ async function getEscalationOrders(limit = ESCALATION_ORDERS_LIMIT, { includeRes
       ORDER BY parent_order, assigned_at DESC
     ) latest
     WHERE ${includeResolved} OR last_updated_at IS NULL
-    ORDER BY assigned_at DESC
+    ORDER BY COALESCE(last_updated_at, assigned_at) DESC
     LIMIT ${limit}
   `;
   // Counted over the same DISTINCT ON set, not over raw rows - one order with five past cycles is

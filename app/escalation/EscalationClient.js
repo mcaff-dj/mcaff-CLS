@@ -824,9 +824,6 @@ function OrderRow({
           />
         </td>
 
-        {/* Location */}
-        <td className="locCell">{loc || <span className="muted">—</span>}</td>
-
         {/* Assigned To (admin only) */}
         {isAdmin && (
           <td>
@@ -877,7 +874,7 @@ function OrderRow({
       {/* Expanded resolve panel */}
       {expanded && !justSaved && (
         <tr className="expandRow">
-          <td colSpan={isAdmin ? 9 : 8}>
+          <td colSpan={isAdmin ? 8 : 7}>
             <div className="resolvePanel">
               {/* Context strip */}
               <div className="resolveContext">
@@ -1688,7 +1685,6 @@ export default function EscalationClient() {
                         </th>
                         <th scope="col">Status</th>
                         <th scope="col">Tags</th>
-                        <th scope="col">Location</th>
                         {isAdmin && <th scope="col">Assigned To</th>}
                         <th scope="col" className="thAction">Action</th>
                       </tr>
