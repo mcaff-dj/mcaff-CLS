@@ -102,7 +102,7 @@ const handler = async (req, res) => {
       if (!parentOrder || !newOrderId || !newAwb || !newStatus) {
         return res.status(400).json({ error: 'parentOrder, newOrderId, newAwb, and newStatus are all required' });
       }
-      await resolveEscalationAssignment(parentOrder, newStatus, notes || '', newOrderId, newAwb);
+      await resolveEscalationAssignment(parentOrder, newStatus, notes || '', newOrderId, newAwb, session.email);
       return res.status(200).json({ ok: true });
     }
 
@@ -120,7 +120,7 @@ const handler = async (req, res) => {
       }
       const parentOrders = items.map((i) => i.parentOrder).filter(Boolean);
       if (!parentOrders.length) return res.status(400).json({ error: 'Every item requires parentOrder' });
-      await resolveEscalationAssignmentsBulk(parentOrders, status);
+      await resolveEscalationAssignmentsBulk(parentOrders, status, session.email);
       return res.status(200).json({ ok: true, updated: parentOrders.length });
     }
 
@@ -171,7 +171,7 @@ const handler = async (req, res) => {
       });
 
       await Promise.all(updates.map((u) =>
-        resolveEscalationAssignment(u.parentOrder, u.newStatus, u.notes, u.newOrderId, u.newAwb)
+        resolveEscalationAssignment(u.parentOrder, u.newStatus, u.notes, u.newOrderId, u.newAwb, session.email)
       ));
       return res.status(200).json({
         ok: true,

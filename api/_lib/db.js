@@ -679,6 +679,11 @@ async function bootstrapPgSchema() {
   await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS new_order_id TEXT`;
   await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS new_awb TEXT`;
   await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ`;
+  // Who actually clicked resolve/bulk-resolve/CSV-imported a row - distinct from `email`, which
+  // is whoever the order was ASSIGNED to (untouched by a resolve) and stays NULL for orders
+  // resolved cold. A CSV import in particular has no assignee at all to fall back on, so without
+  // this column there was no record anywhere of who ran the import.
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS updated_by TEXT`;
   // tat_to_resolve holds the BUCKET LABEL ("Within 48 hrs", "4-8 days", ...), reproducing the
   // Google Sheet's own IF-ladder now that the sheet is no longer the source of truth. The raw day
   // count keeps its own numeric column, tat_days - the label is derived from it, so storing only
@@ -1231,7 +1236,7 @@ async function unassignEscalationOrder(parentOrder) {
 // Writes tat_days (the raw day count) and never tat_to_resolve - that one is a generated column
 // holding the bucket label, which Postgres recomputes from delivered_at/assigned_at on this same
 // write. Assigning to it would be an error, not a no-op.
-async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks, newOrderId, newAwb) {
+async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks, newOrderId, newAwb, updatedBy) {
   await ensurePgSchema();
   // pgSql only ever returns `{ rows }` (see its definition above) - RETURNING lets an UPDATE
   // still report whether it matched anything, without needing pgSql to expose rowCount.
@@ -1240,6 +1245,7 @@ async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks
     SET last_updated_at = now(),
         resolution = ${resolution || null}, agent_remarks = ${agentRemarks || null},
         new_order_id = ${newOrderId || null}, new_awb = ${newAwb || null},
+        updated_by = ${updatedBy || null},
         delivered_at = CASE WHEN ${resolution} = 'Delivered' THEN now() ELSE delivered_at END,
         tat_days = EXTRACT(EPOCH FROM (now() - assigned_at)) / 86400.0
     WHERE id = COALESCE(
@@ -1258,9 +1264,9 @@ async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks
     await pgSql`
       INSERT INTO escalation_lead_assignments
         (parent_order, email, last_updated_at, resolution, agent_remarks, new_order_id, new_awb,
-         delivered_at)
+         updated_by, delivered_at)
       VALUES (${parentOrder}, NULL, now(), ${resolution || null}, ${agentRemarks || null},
-              ${newOrderId || null}, ${newAwb || null}, ${deliveredAt})
+              ${newOrderId || null}, ${newAwb || null}, ${updatedBy || null}, ${deliveredAt})
     `;
   }
 }
@@ -1268,12 +1274,12 @@ async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks
 // bulk-update's own equivalent of resolveEscalationAssignment, for many orders sharing the
 // SAME resolution/remarks in one call (that's what a bulk action means) - one UPDATE ...
 // WHERE parent_order = ANY(...) instead of N round-trips for what is logically one operation.
-async function resolveEscalationAssignmentsBulk(parentOrders, resolution) {
+async function resolveEscalationAssignmentsBulk(parentOrders, resolution, updatedBy) {
   await ensurePgSchema();
   if (!parentOrders.length) return;
   await pgSql`
     UPDATE escalation_lead_assignments
-    SET last_updated_at = now(), resolution = ${resolution || null},
+    SET last_updated_at = now(), resolution = ${resolution || null}, updated_by = ${updatedBy || null},
         delivered_at = CASE WHEN ${resolution} = 'Delivered' THEN now() ELSE delivered_at END,
         tat_days = EXTRACT(EPOCH FROM (now() - assigned_at)) / 86400.0
     WHERE parent_order = ANY(${parentOrders}::text[]) AND reassigned_away_at IS NULL AND last_updated_at IS NULL
@@ -1296,7 +1302,7 @@ async function getEscalationAssignments() {
   await ensurePgSchema();
   const { rows } = await pgSql`
     SELECT parent_order, email, assigned_at, reassigned_away_at, last_updated_at, resolution, agent_remarks,
-           new_order_id, new_awb, delivered_at, tat_days, tat_to_resolve
+           new_order_id, new_awb, updated_by, delivered_at, tat_days, tat_to_resolve
     FROM escalation_lead_assignments
     ORDER BY assigned_at DESC
     LIMIT 5000
@@ -1311,6 +1317,7 @@ async function getEscalationAssignments() {
     agentRemarks: r.agent_remarks,
     newOrderId: r.new_order_id,
     newAwb: r.new_awb,
+    updatedBy: r.updated_by,
     deliveredAt: r.delivered_at,
     tatDays: r.tat_days,
     // The bucket label, not a number - see the generated column in bootstrapPgSchema.
