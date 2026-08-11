@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bq_lib
 import lib
 
-PROJECT = os.environ.get("BQ_PROJECT_ID", "sheetdata-501810")
+PROJECT = os.environ.get("BQ_PROJECT_ID") or "sheetdata-501810"
 DATASET = os.environ.get("BQ_DATASET", "escalation")
 TABLE = os.environ.get("BQ_SHEET_TABLE", "orders_sheet_columns")
 
@@ -83,9 +83,6 @@ def sheet_row_to_bq_dict(row_values, brand, row_number):
 def sweep_tab(dry_run):
     """Reads both brand tabs, truncate-rebuilds orders_sheet_columns with the union - see module
     docstring for why this can't be scoped to one brand."""
-    if not PROJECT:
-        raise RuntimeError("BQ_PROJECT_ID env var is required")
-
     all_rows = []
     for brand, tab in SHEET_TABS.items():
         values = lib.get_sheet_values(SPREADSHEET_ID, f"'{tab}'!A2:Z")

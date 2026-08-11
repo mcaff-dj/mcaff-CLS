@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bq_lib
 import sync_delivery_tickets_to_sheet as tickets
 
-PROJECT = os.environ.get("BQ_PROJECT_ID", "sheetdata-501810")
+PROJECT = os.environ.get("BQ_PROJECT_ID") or "sheetdata-501810"
 DATASET = os.environ.get("BQ_DATASET", "escalation")
 TABLE = os.environ.get("BQ_TABLE", "Delivery_escalation")
 
@@ -93,9 +93,6 @@ def rebuild_table(since, dry_run):
     anything outside that window disappears. write_disposition="WRITE_TRUNCATE"
     only swaps in on load-job success, so a failed run leaves the existing
     table untouched rather than half-overwriting it."""
-    if not PROJECT:
-        raise RuntimeError("BQ_PROJECT_ID env var is required")
-
     all_bq_rows = []
     for brand, table in TAB_TABLE.items():
         db_rows = tickets.fetch_today_delivery_tickets(table, since=since)
