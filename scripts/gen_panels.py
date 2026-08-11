@@ -614,7 +614,7 @@ def _build_prodwise_heatmap(capped):
     if not all_yms:
         return ""
 
-    NPS_MID = 0  # standard NPS breakeven: positive above 0, negative below
+    NPS_MID = 50  # "excellent NPS" threshold: below 50 = underperforming (red), above = strong (green)
 
     def _nps(m):
         return m["nps_pct"] if m else None
@@ -652,16 +652,16 @@ def _build_prodwise_heatmap(capped):
 
     legend = (
         "<div class='legend-row' style='justify-content:center;gap:10px;'>"
-        "<span class='lname'>Negative NPS</span>"
+        "<span class='lname'>&lt; 50 (below excellent)</span>"
         "<span style='display:inline-block;width:140px;height:10px;border-radius:5px;"
         "background:linear-gradient(to right, var(--s6), var(--grid), var(--s2));'></span>"
-        "<span class='lname'>Positive NPS</span></div>"
+        "<span class='lname'>&gt; 50 (excellent)</span></div>"
     )
 
     return (
         "<div class='pivot-wrap'><div class='pivot-title'>Product wise NPS &mdash; Monthly Heatmap</div>"
         "<p class='desc'>NPS% = (Promoters &minus; Detractors) &divide; Total &times; 100, per product per month. "
-        "Color midpoint is 0 (NPS breakeven); blank cells had no survey responses that month.</p>"
+        "Color midpoint is 50 (excellent NPS threshold); blank cells had no survey responses that month.</p>"
         f"{legend}<div class='pivot-scroll'><table class='pivot-table'><thead><tr>"
         f"<th class='corner'>Product</th>{head_cells}<th>Trend</th></tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
     )
