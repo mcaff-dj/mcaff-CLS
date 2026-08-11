@@ -91,6 +91,14 @@ function rowKey(o) {
   return `${o.brand}:${o.ticketNumber}`;
 }
 
+// Never throws, so a non-JSON response body (an API Gateway/CloudFront error page, an empty 502)
+// surfaces as a readable message instead of a "Unexpected token <" parse error that says nothing
+// about the actual request. `_raw` carries a short snippet of whatever the body was.
+async function readJson(res) {
+  const text = await res.text().catch(() => '');
+  try { return JSON.parse(text); } catch { return { _raw: text.slice(0, 200) }; }
+}
+
 /* ============================================================
    Priority helper
    ============================================================ */
@@ -1114,9 +1122,11 @@ export default function EscalationClient() {
         fetch(ordersUrl),
         fetch('/api/escalation/assign'),
       ]);
-      const od = await ordersRes.json();
-      const ad = await assignRes.json();
-      if (!ordersRes.ok) throw new Error(od.error || 'Failed to load');
+      // Read as text first, then parse: a failure ABOVE the handler (Lambda/API Gateway 502/504,
+      // an HTML error page) has no `error` key - or is not JSON at all - and bare "Failed to load"
+      // hid that. Keep the status code and a snippet of whatever came back instead.
+      const [od, ad] = await Promise.all([readJson(ordersRes), readJson(assignRes)]);
+      if (!ordersRes.ok) throw new Error(od.error || `Failed to load (HTTP ${ordersRes.status}${od._raw ? `: ${od._raw}` : ''})`);
       setOrders(od.orders);
       // Server now keys assignments by parentOrder (no sheet read needed to translate to a
       // row number - see api/escalation/[action].js's assign GET) - join against the orders

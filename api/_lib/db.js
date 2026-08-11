@@ -1279,20 +1279,25 @@ async function getLiveEscalationAssignments() {
 // resolution data used to live in different databases; now they're both here). The LATERAL
 // join picks the single most-recent assignment row per order (highest assigned_at) - the same
 // "most recent wins" rule the old JS Map-based merge applied by keeping the first-seen row from
-// an assigned_at DESC list. WHERE a.last_updated_at IS NULL drops already-resolved orders; an order
-// with no assignment row at all still passes (LEFT JOIN LATERAL ... ON true leaves a.* all NULL,
-// and NULL IS NULL is true). No predicate beyond that - RTO Queue and Fresh Leads both currently
-// return every row; brand/tab-specific filtering rules are a follow-up, not implemented here.
+// an assigned_at DESC list. The last_updated_at IS NULL predicate drops already-resolved orders,
+// and sits OUTSIDE the DISTINCT ON - inside it, an order whose latest cycle is resolved would be
+// resurrected by an older unresolved cycle, since DISTINCT ON would then pick the most recent of
+// only the surviving rows. An order never assigned still passes (its columns are NULL). No
+// predicate beyond that - RTO Queue and Fresh Leads both currently return every pending row;
+// brand/tab-specific filtering rules are a follow-up, not implemented here.
 async function getEscalationOrders() {
   await ensurePgSchema();
   const { rows } = await pgSql`
-    SELECT DISTINCT ON (parent_order)
-      parent_order, email, resolution, agent_remarks, new_order_id, new_awb, last_updated_at,
-      brand, ticket_number, awb_number, added_date, query_class, query_category,
-      delivery_partner_name, order_date, order_month, query_date, query_month, wh_name,
-      total_times_user_reached
-    FROM escalation_lead_assignments
-    ORDER BY parent_order, assigned_at DESC
+    SELECT * FROM (
+      SELECT DISTINCT ON (parent_order)
+        parent_order, email, resolution, agent_remarks, new_order_id, new_awb, last_updated_at,
+        brand, ticket_number, awb_number, added_date, query_class, query_category,
+        delivery_partner_name, order_date, order_month, query_date, query_month, wh_name,
+        total_times_user_reached
+      FROM escalation_lead_assignments
+      ORDER BY parent_order, assigned_at DESC
+    ) latest
+    WHERE last_updated_at IS NULL
   `;
   return rows.map((r) => ({
     brand: r.brand || '',
