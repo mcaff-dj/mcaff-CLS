@@ -83,13 +83,12 @@ const VIEW_LABELS = {
   settings: 'Settings',
 };
 
-// Both HYPHEN and mCaffeine tabs feed this page's `orders` list side by side, and each restarts
-// its own row numbering at row 2 - rowNumber alone can collide across the two. Anywhere a row
-// needs a stable, globally-unique identity (Set/Map keys, React `key`, DOM ids) use this instead
-// of raw `order.rowNumber`. Sheet-write calls still send the raw rowNumber + sheetTab separately
-// (see api/_lib/escalationSheet.js), which is what actually addresses the write.
+// Both HYPHEN and mCaffeine feed this page's `orders` list side by side, and a bare ticketNumber
+// isn't guaranteed unique across brands - this is the stable, globally-unique row identity for
+// Set/Map keys, React `key`, and DOM ids. ticketNumber is the MySQL ticketing system's own
+// per-row ID, unlike parentOrder, which one order can share across multiple ticket rows.
 function rowKey(o) {
-  return `${o.sheetTab}:${o.rowNumber}`;
+  return `${o.brand}:${o.ticketNumber}`;
 }
 
 /* ============================================================
@@ -683,7 +682,7 @@ function OrderRow({
   const [error,      setError]      = useState('');
   const [assigning,  setAssigning]  = useState(false);
   const firstRef = useRef(null);
-  const fId = `row-${order.sheetTab}-${order.rowNumber}`;
+  const fId = `row-${order.brand}-${order.ticketNumber}`;
 
   const resolveTypeDef = RESOLVE_TYPES.find((t) => t.value === resType);
   const needsOrder = resolveTypeDef?.needsOrder ?? false;
@@ -716,8 +715,6 @@ function OrderRow({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          rowNumber: order.rowNumber,
-          sheetTab: order.sheetTab,
           parentOrder: order.parentOrder,
           newOrderId: needsOrder ? newOrderId.trim() : '-',
           newAwb:     needsAwb   ? newAwb.trim()     : '-',
@@ -746,7 +743,7 @@ function OrderRow({
       const res = await fetch('/api/escalation/assign', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rowNumber: order.rowNumber, parentOrder: order.parentOrder, agentId: agentId || null }),
+        body: JSON.stringify({ parentOrder: order.parentOrder, agentId: agentId || null }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Failed to save assignment');
@@ -1152,9 +1149,8 @@ export default function EscalationClient() {
   }, [isAdmin, view]);
 
   /* --- Handlers --- */
-  // Every key below is rowKey(order) ("sheetTab:rowNumber"), not a bare rowNumber - see rowKey's
-  // own comment for why (HYPHEN and mCaffeine rows are merged into one `orders` list and each
-  // tab restarts its row numbering at row 2).
+  // Every key below is rowKey(order) ("brand:ticketNumber"), not a bare ticketNumber - see
+  // rowKey's own comment for why (HYPHEN and mCaffeine rows are merged into one `orders` list).
   function handleSaved(key) {
     setOrders((p) => p.filter((o) => rowKey(o) !== key));
     setExpandedRow(null);
@@ -1197,8 +1193,8 @@ export default function EscalationClient() {
   async function handleBulkApply(status) {
     const items = Array.from(selectedRows).map((key) => {
       const o = orders.find((o) => rowKey(o) === key);
-      return { rowNumber: o?.rowNumber, sheetTab: o?.sheetTab, parentOrder: o?.parentOrder };
-    }).filter((i) => i.rowNumber && i.sheetTab);
+      return { parentOrder: o?.parentOrder };
+    }).filter((i) => i.parentOrder);
     setBulkLoading(true);
     try {
       const res = await fetch('/api/escalation/bulk-update', {
@@ -1242,16 +1238,21 @@ export default function EscalationClient() {
   }
 
   /* --- Bulk upload result --- */
-  // `keys` are "sheetTab:rowNumber" composites (see api/escalation/[action].js's import
-  // response) - matched against rowKey(o), not a bare rowNumber.
+  // `keys` are "brand:parentOrder" composites (see api/escalation/[action].js's import
+  // response) - a matched CSV row resolves every ticket row sharing that order, same granularity
+  // resolution itself uses, so this filters/deselects by order identity, not by rowKey(o).
   function handleImported(keys) {
     if (keys?.length) {
       const done = new Set(keys);
-      setOrders((p) => p.filter((o) => !done.has(rowKey(o))));
+      const orderKey = (o) => `${o.brand}:${o.parentOrder}`;
+      setOrders((p) => p.filter((o) => !done.has(orderKey(o))));
       setResolvedCount((c) => c + keys.length);
       setSelectedRows((p) => {
         const n = new Set(p);
-        keys.forEach((k) => n.delete(k));
+        p.forEach((k) => {
+          const o = orders.find((o) => rowKey(o) === k);
+          if (o && done.has(orderKey(o))) n.delete(k);
+        });
         return n;
       });
     }
