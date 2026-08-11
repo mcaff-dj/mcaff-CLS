@@ -699,6 +699,10 @@ def build_product_wise_nps_panel(ctx):
 
     year_aware = len(ctx.distinct_years) > 1
 
+    for r in capped:
+        if 'nps_pct' not in r:
+            r['nps_pct'] = round((r['promoters'] - r['detractors']) / r['responses'] * 100, 1) if r.get('responses') else None
+
     body_rows = []
     for i, r in enumerate(capped):
         z = "zebra" if i % 2 == 1 else ""
