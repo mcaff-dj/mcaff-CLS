@@ -642,15 +642,23 @@ async function bootstrapPgSchema() {
       email TEXT NOT NULL,
       assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       reassigned_away_at TIMESTAMPTZ,
-      resolved_at TIMESTAMPTZ,
+      last_updated_at TIMESTAMPTZ,
       resolution TEXT,
       agent_remarks TEXT
     )
   `;
+  // Rename resolved_at → last_updated_at on existing deployments (new installs use the name above).
+  const { rows: renameCheck } = await pgSql`
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'escalation_lead_assignments' AND column_name = 'resolved_at'
+  `;
+  if (renameCheck.length > 0) {
+    await pgSql`ALTER TABLE escalation_lead_assignments RENAME COLUMN resolved_at TO last_updated_at`;
+  }
   // At most one live cycle per order - same partial-unique-index pattern as RTO's
   // lead_assignments_order_id_current_key and NDR's ndr_lead_assignments_awb_current_key.
   // "Live" means neither reassigned nor resolved - reassigned_away_at IS NULL AND
-  // resolved_at IS NULL - so a fresh re-escalation after resolution gets a new row, not
+  // last_updated_at IS NULL - so a fresh re-escalation after resolution gets a new row, not
   // a silent conflict with the old one. Checked via pg_indexes first (not a bare
   // DROP+CREATE) so this is a true no-op after the first run, same as every other
   // statement here - an unconditional DROP+CREATE on every cold start would instead leave
@@ -660,9 +668,9 @@ async function bootstrapPgSchema() {
   const { rows: escIdxRows } = await pgSql`
     SELECT indexdef FROM pg_indexes WHERE indexname = 'escalation_lead_assignments_parent_order_current_key'
   `;
-  if (escIdxRows.length === 0 || !escIdxRows[0].indexdef.includes('resolved_at IS NULL')) {
+  if (escIdxRows.length === 0 || !escIdxRows[0].indexdef.includes('last_updated_at IS NULL')) {
     await pgSql`DROP INDEX IF EXISTS escalation_lead_assignments_parent_order_current_key`;
-    await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS escalation_lead_assignments_parent_order_current_key ON escalation_lead_assignments (parent_order) WHERE reassigned_away_at IS NULL AND resolved_at IS NULL`;
+    await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS escalation_lead_assignments_parent_order_current_key ON escalation_lead_assignments (parent_order) WHERE reassigned_away_at IS NULL AND last_updated_at IS NULL`;
   }
   // Resolution's replacement-order fields, added for the BigQuery/Postgres hybrid migration
   // (docs/superpowers/specs/2026-08-10-escalation-bigquery-postgres-hybrid-design.md) - `resolution`
@@ -670,6 +678,8 @@ async function bootstrapPgSchema() {
   // order id and AWB were sheet-only (columns T/U) until now.
   await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS new_order_id TEXT`;
   await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS new_awb TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS tat_to_resolve NUMERIC`;
   // email becomes nullable: resolveEscalationAssignment now INSERTs a row for orders resolved
   // without ever being assigned (see that function below) - such a row genuinely has no agent.
   await pgSql`ALTER TABLE escalation_lead_assignments ALTER COLUMN email DROP NOT NULL`;
@@ -1141,18 +1151,18 @@ async function disposeNdrLead(awbNumber, disposition, agentRemarks) {
 // silently mutating email in place. A no-op re-assign to the SAME agent (e.g. re-saving the
 // dropdown without changing it) touches nothing, same ON CONFLICT DO NOTHING safety claimNdrLead
 // relies on. "Live" means neither reassigned nor resolved (reassigned_away_at IS NULL AND
-// resolved_at IS NULL), so a fresh assignment after resolution starts a new cycle.
+// last_updated_at IS NULL), so a fresh assignment after resolution starts a new cycle.
 async function assignEscalationOrder(parentOrder, email) {
   await ensurePgSchema();
   await pgSql`
     UPDATE escalation_lead_assignments
     SET reassigned_away_at = now()
-    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND resolved_at IS NULL AND email <> ${email}
+    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND last_updated_at IS NULL AND email <> ${email}
   `;
   await pgSql`
     INSERT INTO escalation_lead_assignments (parent_order, email)
     VALUES (${parentOrder}, ${email})
-    ON CONFLICT (parent_order) WHERE reassigned_away_at IS NULL AND resolved_at IS NULL DO NOTHING
+    ON CONFLICT (parent_order) WHERE reassigned_away_at IS NULL AND last_updated_at IS NULL DO NOTHING
   `;
 }
 
@@ -1164,13 +1174,13 @@ async function unassignEscalationOrder(parentOrder) {
   await pgSql`
     UPDATE escalation_lead_assignments
     SET reassigned_away_at = now()
-    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND resolved_at IS NULL
+    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND last_updated_at IS NULL
   `;
 }
 
 // Stamps a resolution onto the SAME live row assignEscalationOrder created - same relationship
 // disposeNdrLead has to claimNdrLead. Targets the one row guaranteed unique by the partial
-// index (reassigned_away_at IS NULL AND resolved_at IS NULL), so calling resolve twice on an
+// index (reassigned_away_at IS NULL AND last_updated_at IS NULL), so calling resolve twice on an
 // already-resolved order is safely a no-op. Silently a no-op if the order was never assigned to
 // anyone (WHERE matches zero rows) - resolving an unassigned order still writes to the sheet
 // (the desk's real source of truth) via updateOrder/batchUpdateOrders; this table is only the
@@ -1181,19 +1191,25 @@ async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks
   // still report whether it matched anything, without needing pgSql to expose rowCount.
   const { rows } = await pgSql`
     UPDATE escalation_lead_assignments
-    SET resolved_at = now(), resolution = ${resolution || null}, agent_remarks = ${agentRemarks || null},
-        new_order_id = ${newOrderId || null}, new_awb = ${newAwb || null}
-    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND resolved_at IS NULL
+    SET last_updated_at = now(),
+        resolution = ${resolution || null}, agent_remarks = ${agentRemarks || null},
+        new_order_id = ${newOrderId || null}, new_awb = ${newAwb || null},
+        delivered_at = CASE WHEN ${resolution} = 'Delivered' THEN now() ELSE delivered_at END,
+        tat_to_resolve = EXTRACT(EPOCH FROM (now() - assigned_at)) / 86400.0
+    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND last_updated_at IS NULL
     RETURNING parent_order
   `;
   if (rows.length === 0) {
     // No live row to update - this order was resolved without ever being assigned. Insert a
     // standalone resolved row (email NULL) so it's still durably recorded; without this, an
     // order resolved cold would look unresolved forever once Postgres is the read source.
+    const deliveredAt = resolution === 'Delivered' ? new Date() : null;
     await pgSql`
       INSERT INTO escalation_lead_assignments
-        (parent_order, email, resolved_at, resolution, agent_remarks, new_order_id, new_awb)
-      VALUES (${parentOrder}, NULL, now(), ${resolution || null}, ${agentRemarks || null}, ${newOrderId || null}, ${newAwb || null})
+        (parent_order, email, last_updated_at, resolution, agent_remarks, new_order_id, new_awb,
+         delivered_at)
+      VALUES (${parentOrder}, NULL, now(), ${resolution || null}, ${agentRemarks || null},
+              ${newOrderId || null}, ${newAwb || null}, ${deliveredAt})
     `;
   }
 }
@@ -1206,8 +1222,10 @@ async function resolveEscalationAssignmentsBulk(parentOrders, resolution) {
   if (!parentOrders.length) return;
   await pgSql`
     UPDATE escalation_lead_assignments
-    SET resolved_at = now(), resolution = ${resolution || null}
-    WHERE parent_order = ANY(${parentOrders}::text[]) AND reassigned_away_at IS NULL AND resolved_at IS NULL
+    SET last_updated_at = now(), resolution = ${resolution || null},
+        delivered_at = CASE WHEN ${resolution} = 'Delivered' THEN now() ELSE delivered_at END,
+        tat_to_resolve = EXTRACT(EPOCH FROM (now() - assigned_at)) / 86400.0
+    WHERE parent_order = ANY(${parentOrders}::text[]) AND reassigned_away_at IS NULL AND last_updated_at IS NULL
   `;
 }
 
@@ -1226,8 +1244,8 @@ async function resolveEscalationAssignmentsBulk(parentOrders, resolution) {
 async function getEscalationAssignments() {
   await ensurePgSchema();
   const { rows } = await pgSql`
-    SELECT parent_order, email, assigned_at, reassigned_away_at, resolved_at, resolution, agent_remarks,
-           new_order_id, new_awb
+    SELECT parent_order, email, assigned_at, reassigned_away_at, last_updated_at, resolution, agent_remarks,
+           new_order_id, new_awb, delivered_at, tat_to_resolve
     FROM escalation_lead_assignments
     ORDER BY assigned_at DESC
     LIMIT 5000
@@ -1237,11 +1255,13 @@ async function getEscalationAssignments() {
     email: r.email,
     assignedAt: r.assigned_at,
     reassignedAwayAt: r.reassigned_away_at,
-    resolvedAt: r.resolved_at,
+    lastUpdatedAt: r.last_updated_at,
     resolution: r.resolution,
     agentRemarks: r.agent_remarks,
     newOrderId: r.new_order_id,
     newAwb: r.new_awb,
+    deliveredAt: r.delivered_at,
+    tatToResolve: r.tat_to_resolve,
   }));
 }
 
@@ -1252,7 +1272,7 @@ async function getLiveEscalationAssignments() {
   await ensurePgSchema();
   const { rows } = await pgSql`
     SELECT parent_order, email FROM escalation_lead_assignments
-    WHERE reassigned_away_at IS NULL AND resolved_at IS NULL
+    WHERE reassigned_away_at IS NULL AND last_updated_at IS NULL
   `;
   return rows.map((r) => ({ parentOrder: r.parent_order, email: r.email }));
 }
@@ -1262,7 +1282,7 @@ async function getLiveEscalationAssignments() {
 // resolution data used to live in different databases; now they're both here). The LATERAL
 // join picks the single most-recent assignment row per order (highest assigned_at) - the same
 // "most recent wins" rule the old JS Map-based merge applied by keeping the first-seen row from
-// an assigned_at DESC list. WHERE a.resolved_at IS NULL drops already-resolved orders; an order
+// an assigned_at DESC list. WHERE a.last_updated_at IS NULL drops already-resolved orders; an order
 // with no assignment row at all still passes (LEFT JOIN LATERAL ... ON true leaves a.* all NULL,
 // and NULL IS NULL is true). No predicate beyond that - RTO Queue and Fresh Leads both currently
 // return every row; brand/tab-specific filtering rules are a follow-up, not implemented here.
@@ -1275,13 +1295,13 @@ async function getEscalationOrders() {
            a.resolution, a.agent_remarks, a.new_order_id, a.new_awb
     FROM escalation_tickets t
     LEFT JOIN LATERAL (
-      SELECT resolution, agent_remarks, new_order_id, new_awb, resolved_at
+      SELECT resolution, agent_remarks, new_order_id, new_awb, last_updated_at
       FROM escalation_lead_assignments a
       WHERE a.parent_order = t.parent_order
       ORDER BY a.assigned_at DESC
       LIMIT 1
     ) a ON true
-    WHERE a.resolved_at IS NULL
+    WHERE a.last_updated_at IS NULL
   `;
   return rows.map((r) => ({
     brand: r.brand,

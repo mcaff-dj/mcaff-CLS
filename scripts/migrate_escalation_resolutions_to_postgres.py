@@ -69,7 +69,7 @@ def migrate(dry_run):
                 cur.execute(
                     """
                     UPDATE escalation_lead_assignments
-                    SET resolved_at = COALESCE(resolved_at, now()),
+                    SET last_updated_at = COALESCE(last_updated_at, now()),
                         resolution = COALESCE(resolution, %s),
                         agent_remarks = COALESCE(agent_remarks, %s),
                         new_order_id = COALESCE(new_order_id, %s),
@@ -82,7 +82,7 @@ def migrate(dry_run):
                     cur.execute(
                         """
                         INSERT INTO escalation_lead_assignments
-                          (parent_order, email, resolved_at, resolution, agent_remarks, new_order_id, new_awb)
+                          (parent_order, email, last_updated_at, resolution, agent_remarks, new_order_id, new_awb)
                         VALUES (%s, NULL, now(), %s, %s, %s, %s)
                         """,
                         (parent_order, status, notes, new_order_id, new_awb),
@@ -101,7 +101,7 @@ def reconcile():
     conn = lib.get_pg_connection(conn_str)
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM escalation_lead_assignments WHERE resolved_at IS NOT NULL")
+            cur.execute("SELECT COUNT(*) FROM escalation_lead_assignments WHERE last_updated_at IS NOT NULL")
             pg_resolved = cur.fetchone()[0]
     finally:
         conn.close()

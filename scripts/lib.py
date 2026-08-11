@@ -72,7 +72,6 @@ _token_cache = {
     "read": {"token": None, "expiry": 0},
     "write": {"token": None, "expiry": 0},
     "drive": {"token": None, "expiry": 0},
-    "bigquery": {"token": None, "expiry": 0},
 }
 
 

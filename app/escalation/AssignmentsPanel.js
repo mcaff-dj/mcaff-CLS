@@ -60,14 +60,14 @@ export default function AssignmentsPanel({ agents }) {
       return byEmail.get(email);
     };
     history.forEach((r) => {
-      if (!r.reassignedAwayAt && !r.resolvedAt) {
+      if (!r.reassignedAwayAt && !r.lastUpdatedAt) {
         get(r.email).currentlyAssigned += 1;
       }
-      if (r.resolvedAt && inRange(r.resolvedAt)) {
+      if (r.lastUpdatedAt && inRange(r.lastUpdatedAt)) {
         const row = get(r.email);
         row.resolved += 1;
-        row.totalResolveMinutes += (new Date(r.resolvedAt) - new Date(r.assignedAt)) / 60000;
-      } else if (!r.resolvedAt) {
+        row.totalResolveMinutes += (new Date(r.lastUpdatedAt) - new Date(r.assignedAt)) / 60000;
+      } else if (!r.lastUpdatedAt) {
         // ensure agents with only live (unresolved) assignments still appear
         get(r.email);
       }
