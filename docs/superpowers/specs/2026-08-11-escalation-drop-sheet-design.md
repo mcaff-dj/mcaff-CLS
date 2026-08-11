@@ -122,7 +122,8 @@ row sharing that order, consistent with resolution's own `(brand, parent_order)`
 
 ## Scheduled jobs
 
-- `scripts/sync_escalation_sheet_to_bq.py` and `scripts/test_escalation_sheet_sweep.py` — deleted.
+- `scripts/sync_escalation_sheet_to_bq.py` — deleted (its self-check lived inline behind its own
+  `--self-check` flag, not a separate test file — nothing else to delete).
 - `.github/workflows/sync-escalation-bq.yml` — drop the "Sweep sheet-computed columns
   (orders_sheet_columns)" step; keep the "Rebuild ticket columns (Delivery_escalation)" step
   unchanged.
@@ -159,7 +160,6 @@ Per this project's no-live-testing rule: offline only, no real BigQuery/Postgres
 | `app/escalation/EscalationClient.js` | `rowKey()` → `brand:ticketNumber`; update/assign payloads drop `rowNumber`/`sheetTab`; fix Auto-Assign-All's candidate filter. |
 | `api/_lib/escalationBq.test.js` | Update fixtures for the new row shape. |
 | `scripts/sync_escalation_sheet_to_bq.py` | **Delete.** |
-| `scripts/test_escalation_sheet_sweep.py` | **Delete.** |
 | `.github/workflows/sync-escalation-bq.yml` | Drop the sheet-sweep step. |
 
 ## Open items
