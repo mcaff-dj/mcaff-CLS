@@ -102,6 +102,10 @@ const handler = async (req, res) => {
       if (!parentOrder || !newOrderId || !newAwb || !newStatus) {
         return res.status(400).json({ error: 'parentOrder, newOrderId, newAwb, and newStatus are all required' });
       }
+      // Anyone with tab access who resolves a lead claims it - the Google sign-in session email
+      // becomes the assignment, whether or not this order was ever explicitly assigned via the
+      // dropdown first. assignEscalationOrder is already a safe no-op if it's already them.
+      await assignEscalationOrder(parentOrder, session.email);
       await resolveEscalationAssignment(parentOrder, newStatus, notes || '', newOrderId, newAwb, session.email);
       return res.status(200).json({ ok: true });
     }
@@ -120,6 +124,9 @@ const handler = async (req, res) => {
       }
       const parentOrders = items.map((i) => i.parentOrder).filter(Boolean);
       if (!parentOrders.length) return res.status(400).json({ error: 'Every item requires parentOrder' });
+      // Same claim-on-resolve rule as the single-order 'update' action above, just one
+      // assignEscalationOrder call per order since that function isn't itself bulk-shaped.
+      await Promise.all(parentOrders.map((po) => assignEscalationOrder(po, session.email)));
       await resolveEscalationAssignmentsBulk(parentOrders, status, session.email);
       return res.status(200).json({ ok: true, updated: parentOrders.length });
     }
@@ -170,9 +177,13 @@ const handler = async (req, res) => {
         });
       });
 
-      await Promise.all(updates.map((u) =>
-        resolveEscalationAssignment(u.parentOrder, u.newStatus, u.notes, u.newOrderId, u.newAwb, session.email)
-      ));
+      // Same claim-on-resolve rule as the 'update'/'bulk-update' actions - a CSV import used to
+      // leave email NULL forever (no assignee to fall back on), so every bulk-uploaded row went
+      // unattributed in the assignment filter and every agent stat that reads off `email`.
+      await Promise.all(updates.map(async (u) => {
+        await assignEscalationOrder(u.parentOrder, session.email);
+        await resolveEscalationAssignment(u.parentOrder, u.newStatus, u.notes, u.newOrderId, u.newAwb, session.email);
+      }));
       return res.status(200).json({
         ok: true,
         updated: updates.length,
