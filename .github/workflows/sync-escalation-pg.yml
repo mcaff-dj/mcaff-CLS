@@ -1,4 +1,4 @@
-name: Rebuild escalation_tickets
+name: Sync escalation ticket data into escalation_lead_assignments
 
 on:
   schedule:
@@ -31,7 +31,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Sync escalation_tickets from MySQL
+      - name: Sync ticket data into escalation_lead_assignments
         env:
           MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
           MYSQL_USER: ${{ secrets.MYSQL_USER }}

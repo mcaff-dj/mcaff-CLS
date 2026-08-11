@@ -683,33 +683,30 @@ async function bootstrapPgSchema() {
   // email becomes nullable: resolveEscalationAssignment now INSERTs a row for orders resolved
   // without ever being assigned (see that function below) - such a row genuinely has no agent.
   await pgSql`ALTER TABLE escalation_lead_assignments ALTER COLUMN email DROP NOT NULL`;
-  // Ticket data for the Escalation desk - previously BigQuery's Delivery_escalation, moved here
-  // so the read path is one query (this table LEFT JOINed with escalation_lead_assignments)
-  // instead of two systems merged in JavaScript. Populated by
-  // scripts/sync_delivery_tickets_to_pg.py, upserted every 2h, not written by the app itself.
+  // Ticket data for the Escalation desk, merged directly onto escalation_lead_assignments
+  // instead of a separate escalation_tickets table (that table's LEFT JOIN was never actually
+  // wired into getEscalationOrders - these columns went unread). Populated by
+  // scripts/sync_delivery_tickets_to_pg.py, upserted every 2h onto each order's live row (see
+  // that script for the update-live-row-else-insert logic), not written by the app itself.
   // Date-shaped columns stay TEXT - they're display-formatted strings
-  // (sync_delivery_tickets_to_sheet.py's build_sheet_row), not real timestamps.
-  await pgSql`
-    CREATE TABLE IF NOT EXISTS escalation_tickets (
-      brand TEXT NOT NULL,
-      ticket_number TEXT NOT NULL,
-      parent_order TEXT NOT NULL,
-      awb_number TEXT,
-      added_date TEXT,
-      query_class TEXT,
-      query_category TEXT,
-      delivery_partner_name TEXT,
-      order_date TEXT,
-      order_month TEXT,
-      query_date TEXT,
-      query_month TEXT,
-      wh_name TEXT,
-      total_times_user_reached INTEGER,
-      loaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      PRIMARY KEY (brand, ticket_number)
-    )
-  `;
-  await pgSql`CREATE INDEX IF NOT EXISTS escalation_tickets_parent_order_idx ON escalation_tickets (parent_order)`;
+  // (sync_delivery_tickets_to_sheet.py's build_sheet_row), not real timestamps. One order can
+  // have multiple MySQL tickets over time; only the most-recently-synced ticket's fields survive
+  // on the shared live row (last-synced-ticket-wins), matching this table's existing
+  // one-live-row-per-order shape.
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS brand TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS ticket_number TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS awb_number TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS added_date TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS query_class TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS query_category TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS delivery_partner_name TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS order_date TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS order_month TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS query_date TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS query_month TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS wh_name TEXT`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS total_times_user_reached INTEGER`;
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS ticket_loaded_at TIMESTAMPTZ`;
   } catch (e) {
     // Postgres codes for "already exists" (duplicate_column/duplicate_table/duplicate_object)
     // - a benign race, not a real failure: every statement above is its own ADD COLUMN IF NOT
@@ -1290,25 +1287,28 @@ async function getEscalationOrders() {
   await ensurePgSchema();
   const { rows } = await pgSql`
     SELECT DISTINCT ON (parent_order)
-      parent_order, email, resolution, agent_remarks, new_order_id, new_awb, last_updated_at
+      parent_order, email, resolution, agent_remarks, new_order_id, new_awb, last_updated_at,
+      brand, ticket_number, awb_number, added_date, query_class, query_category,
+      delivery_partner_name, order_date, order_month, query_date, query_month, wh_name,
+      total_times_user_reached
     FROM escalation_lead_assignments
     ORDER BY parent_order, assigned_at DESC
   `;
   return rows.map((r) => ({
-    brand: '',
+    brand: r.brand || '',
     parentOrder: r.parent_order || '',
-    awbNumber: '',
-    addedDate: '',
-    queryClass: '',
-    queryCategory: '',
-    deliveryPartnerName: '',
-    orderDate: '',
-    orderMonth: '',
-    queryDate: '',
-    queryMonth: '',
-    whName: '',
-    ticketNumber: '',
-    totalTimesConsumerReached: '',
+    awbNumber: r.awb_number || '',
+    addedDate: r.added_date || '',
+    queryClass: r.query_class || '',
+    queryCategory: r.query_category || '',
+    deliveryPartnerName: r.delivery_partner_name || '',
+    orderDate: r.order_date || '',
+    orderMonth: r.order_month || '',
+    queryDate: r.query_date || '',
+    queryMonth: r.query_month || '',
+    whName: r.wh_name || '',
+    ticketNumber: r.ticket_number || '',
+    totalTimesConsumerReached: r.total_times_user_reached ?? '',
     newOrderId: r.new_order_id || '',
     awb: r.new_awb || '',
     status: r.resolution || '',
@@ -1330,18 +1330,21 @@ async function getFreshLeads() {
 }
 
 // CSV import's row-matching index - a matched row only needs to confirm the order exists and
-// learn its brand (there is no Sheet cell to address anymore, so no row_number is carried).
-// Replaces the old getSheetIndexFromBq (which queried BigQuery's orders_sheet_columns).
+// learn its brand. Replaces the old getSheetIndexFromBq (which queried BigQuery's
+// orders_sheet_columns). byParentAwb is now populated from the merged awb_number column (dead
+// until the ticket-data merge put awb_number on this same table).
 async function getEscalationOrderIndex() {
   await ensurePgSchema();
-  const { rows } = await pgSql`SELECT DISTINCT parent_order FROM escalation_lead_assignments`;
+  const { rows } = await pgSql`SELECT DISTINCT ON (parent_order) parent_order, brand, awb_number FROM escalation_lead_assignments ORDER BY parent_order, assigned_at DESC`;
   const byParent = new Map();
   const byParentAwb = new Map();
   rows.forEach((r) => {
     const parent = String(r.parent_order || '').trim().toLowerCase();
     if (!parent) return;
-    const ref = { brand: '' };
+    const ref = { brand: r.brand || '' };
     if (!byParent.has(parent)) byParent.set(parent, ref);
+    const awb = String(r.awb_number || '').trim().toLowerCase();
+    if (awb) byParentAwb.set(`${parent}||${awb}`, ref);
   });
   return { byParent, byParentAwb };
 }

@@ -1,22 +1,28 @@
-"""Pushes Delivery-class tickets from PEP_CLS into Supabase Postgres' escalation_tickets table -
-the Postgres counterpart of sync_delivery_tickets_to_sheet.py, reading the same MySQL rows on the
-same "resolved since <date>" definition. Replaces sync_delivery_tickets_to_bq.py now that ticket
-data lives in the same Postgres database escalation_lead_assignments already does (see
-docs/superpowers/specs/2026-08-11-escalation-drop-bq-and-sheet-design.md).
+"""Pushes Delivery-class tickets from PEP_CLS into Supabase Postgres, writing ticket fields
+directly onto each order's row in escalation_lead_assignments - the Postgres counterpart of
+sync_delivery_tickets_to_sheet.py, reading the same MySQL rows on the same "resolved since <date>"
+definition.
+
+Ticket data used to live in a separate escalation_tickets table, joined against
+escalation_lead_assignments at read time - but that join was never actually wired into
+api/_lib/db.js's getEscalationOrders, so the columns went unread. This merges ticket fields
+directly onto escalation_lead_assignments instead (see
+docs/superpowers/specs/2026-08-11-escalation-drop-bq-and-sheet-design.md for the now-superseded
+two-table design). One order can have multiple MySQL tickets over time but only one live
+assignment row, so this writes onto whichever row is currently "live" (reassigned_away_at IS NULL
+AND last_updated_at IS NULL) for that parent_order, inserting a fresh live row (email NULL) if
+none exists yet - same pattern resolveEscalationAssignment (api/_lib/db.js) already uses for
+orders resolved without ever being assigned. Last-synced ticket wins when an order has more than
+one ticket.
 
 Reuses sync_delivery_tickets_to_sheet.py's MySQL query, row-building, and AWB-backfill functions
 by import instead of re-implementing "which tickets count" a second time - that script is NOT
 modified and keeps writing the sheet exactly as before.
 
-Both brand tabs land in ONE table, distinguished by a `brand` column ('HYPHEN' / 'mCaffeine').
-
-Unlike the BigQuery version, this is a real upsert (ON CONFLICT DO UPDATE), not a truncate-rebuild
-- Postgres has no DML billing restriction to work around. total_times_user_reached still needs a
-second pass: a --since-windowed fetch only recomputes that count for rows it just touched, so
-older rows sharing the same AWB would otherwise go stale. The second UPDATE below fixes exactly
-those rows, using the same awb_counts already computed for step one - cheaper than rewriting the
-whole table, and more correct than the BigQuery version (which only fixed staleness by rebuilding
-everything back to a fixed anchor date).
+total_times_user_reached still needs a second pass: a --since-windowed fetch only recomputes that
+count for rows it just touched, so older live rows sharing the same AWB would otherwise go stale.
+The second UPDATE below fixes exactly those rows, using the same awb_counts already computed for
+step one.
 
 CREDENTIALS: MYSQL_* (unchanged - same as sync_delivery_tickets_to_sheet.py) plus POSTGRES_URL.
 No Google credentials needed - this script never touches Sheets or BigQuery.
@@ -41,27 +47,39 @@ TICKET_FIELDS = [
     "query_month", "wh_name",
 ]
 
-UPSERT_SQL = """
-    INSERT INTO escalation_tickets
-      (brand, ticket_number, parent_order, awb_number, added_date, query_class, query_category,
-       delivery_partner_name, order_date, order_month, query_date, query_month, wh_name,
-       total_times_user_reached, loaded_at)
-    VALUES (%(brand)s, %(ticket_number)s, %(parent_order)s, %(awb_number)s, %(added_date)s,
+# Two-step write per ticket row: try the live row for this order first (the common case - an
+# order already has an assignment/eligibility row), fall back to inserting a fresh live row
+# (email NULL) when none exists yet. Can't be a single ON CONFLICT upsert - unlike the old
+# escalation_tickets table (PK brand+ticket_number), escalation_lead_assignments has no unique
+# constraint ticket data alone can target, only the partial "live row per parent_order" index.
+UPDATE_LIVE_SQL = """
+    UPDATE escalation_lead_assignments
+    SET brand = %(brand)s, ticket_number = %(ticket_number)s, awb_number = %(awb_number)s,
+        added_date = %(added_date)s, query_class = %(query_class)s, query_category = %(query_category)s,
+        delivery_partner_name = %(delivery_partner_name)s, order_date = %(order_date)s,
+        order_month = %(order_month)s, query_date = %(query_date)s, query_month = %(query_month)s,
+        wh_name = %(wh_name)s, total_times_user_reached = %(total_times_user_reached)s,
+        ticket_loaded_at = %(loaded_at)s
+    WHERE parent_order = %(parent_order)s AND reassigned_away_at IS NULL AND last_updated_at IS NULL
+"""
+
+INSERT_LIVE_SQL = """
+    INSERT INTO escalation_lead_assignments
+      (parent_order, email, brand, ticket_number, awb_number, added_date, query_class,
+       query_category, delivery_partner_name, order_date, order_month, query_date, query_month,
+       wh_name, total_times_user_reached, ticket_loaded_at)
+    VALUES (%(parent_order)s, NULL, %(brand)s, %(ticket_number)s, %(awb_number)s, %(added_date)s,
             %(query_class)s, %(query_category)s, %(delivery_partner_name)s, %(order_date)s,
             %(order_month)s, %(query_date)s, %(query_month)s, %(wh_name)s,
             %(total_times_user_reached)s, %(loaded_at)s)
-    ON CONFLICT (brand, ticket_number) DO UPDATE SET
-      parent_order = EXCLUDED.parent_order, awb_number = EXCLUDED.awb_number,
-      added_date = EXCLUDED.added_date, query_class = EXCLUDED.query_class,
-      query_category = EXCLUDED.query_category, delivery_partner_name = EXCLUDED.delivery_partner_name,
-      order_date = EXCLUDED.order_date, order_month = EXCLUDED.order_month,
-      query_date = EXCLUDED.query_date, query_month = EXCLUDED.query_month, wh_name = EXCLUDED.wh_name,
-      total_times_user_reached = EXCLUDED.total_times_user_reached, loaded_at = EXCLUDED.loaded_at
 """
 
+# Scoped to the live row only - a resolved order's ticket columns are history, not something a
+# later reach-count recompute should silently rewrite.
 RECOMPUTE_SQL = """
-    UPDATE escalation_tickets SET total_times_user_reached = %(count)s
+    UPDATE escalation_lead_assignments SET total_times_user_reached = %(count)s
     WHERE brand = %(brand)s AND awb_number = %(awb_number)s
+      AND reassigned_away_at IS NULL AND last_updated_at IS NULL
 """
 
 
@@ -127,18 +145,25 @@ def sync(since, dry_run):
         return
 
     conn = lib.get_pg_connection(os.environ["POSTGRES_URL"])
+    inserted = 0
     try:
         with conn.cursor() as cur:
-            cur.executemany(UPSERT_SQL, all_rows)
-            # Recompute total_times_user_reached on every row sharing a touched AWB, not just the
-            # ones this run fetched - see module docstring for why a plain upsert can't do this.
+            for row in all_rows:
+                cur.execute(UPDATE_LIVE_SQL, row)
+                if cur.rowcount == 0:
+                    cur.execute(INSERT_LIVE_SQL, row)
+                    inserted += 1
+            # Recompute total_times_user_reached on every live row sharing a touched AWB, not
+            # just the ones this run fetched - see module docstring for why a plain upsert can't
+            # do this.
             recompute = [{"brand": b, "awb_number": awb, "count": c} for (b, awb), c in all_awb_counts.items()]
             if recompute:
                 cur.executemany(RECOMPUTE_SQL, recompute)
         conn.commit()
     finally:
         conn.close()
-    print(f"  upserted {len(all_rows)} row(s), recomputed total_times_user_reached for {len(all_awb_counts)} AWB(s)")
+    print(f"  wrote {len(all_rows)} row(s) ({inserted} new live row(s)), "
+          f"recomputed total_times_user_reached for {len(all_awb_counts)} AWB(s)")
 
 
 def self_check():
@@ -162,6 +187,18 @@ def self_check():
                                            datetime(2026, 8, 1), datetime(2026, 8, 2), datetime(2026, 8, 3), "WH1"))
     out3 = row_to_pg_dict(no_awb_row, "HYPHEN", awb_counts={})
     assert out3["total_times_user_reached"] is None, out3
+
+    # Every %(name)s placeholder the write-path SQL references must exist as a key on the dict
+    # row_to_pg_dict produces (or, for RECOMPUTE_SQL, on the recompute-params dict) - catches a
+    # column added to one but not the other without needing a live Postgres connection.
+    import re
+    placeholders = lambda sql: set(re.findall(r"%\((\w+)\)s", sql))
+    for sql in (UPDATE_LIVE_SQL, INSERT_LIVE_SQL):
+        missing = placeholders(sql) - set(out.keys())
+        assert not missing, f"{sql!r} references undefined keys: {missing}"
+    recompute_keys = {"brand", "awb_number", "count"}
+    missing = placeholders(RECOMPUTE_SQL) - recompute_keys
+    assert not missing, f"RECOMPUTE_SQL references undefined keys: {missing}"
     print("self-check ok")
 
 
