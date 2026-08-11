@@ -218,7 +218,7 @@ def fetch_product_wise_nps(mysql_brand):
         out.append({
             "product": product_name,
             "responses": responses,
-            "avg_overall_nps": round(sum(m["sum_overall"] for m in months.values()) / cnt_overall, 1) if cnt_overall else None,
+            "nps_pct": round((promoters - detractors) / responses * 100, 1) if responses else None,
             "avg_packaging_score": round(sum(m["sum_packaging"] for m in months.values()) / cnt_packaging, 1) if cnt_packaging else None,
             "promoters": promoters, "passives": passives, "detractors": detractors,
             "detractor_rate_pct": round(detractors / responses * 100, 1) if responses else None,

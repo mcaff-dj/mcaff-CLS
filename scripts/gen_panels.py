@@ -563,8 +563,8 @@ def _prodwise_sparkline(months, value_fn=None):
     def py(v): return H - PAD - (v - lo) / rng * (H - 2 * PAD)
     coords = " ".join(f"{px(i):.1f},{py(v):.1f}" for i, (_, v) in enumerate(pts))
     delta = vals[-1] - vals[0]
-    color = "var(--s2)" if delta > 0.5 else ("var(--s6)" if delta < -0.5 else "var(--s4)")
-    arrow = "&#x25B2;" if delta > 0.5 else ("&#x25BC;" if delta < -0.5 else "&#x2192;")
+    color = "var(--s2)" if delta > 2 else ("var(--s6)" if delta < -2 else "var(--s4)")
+    arrow = "&#x25B2;" if delta > 2 else ("&#x25BC;" if delta < -2 else "&#x2192;")
     lx, ly = f"{px(n - 1):.1f}", f"{py(vals[-1]):.1f}"
     svg = (
         f"<svg width='{W}' height='{H}' viewBox='0 0 {W} {H}'"
@@ -614,12 +614,12 @@ def _build_prodwise_heatmap(capped):
     if not all_yms:
         return ""
 
-    NPS_MID = 7.0  # scores >= 7 are passive/promoter range
+    NPS_MID = 0  # standard NPS breakeven: positive above 0, negative below
 
-    def _avg_nps(m):
-        return round(m["sum_overall"] / m["cnt_overall"], 1) if m and m["cnt_overall"] else None
+    def _nps(m):
+        return m["nps_pct"] if m else None
 
-    all_vals = [_avg_nps(m) for r in capped for m in r["months"].values() if m["cnt_overall"]]
+    all_vals = [_nps(m) for r in capped for m in r["months"].values() if m and m["nps_pct"] is not None]
     # ponytail: domain = max deviation from midpoint in the data (floor 1.0)
     domain = max(1.0, max((abs(v - NPS_MID) for v in all_vals if v is not None), default=0.0))
 
@@ -639,11 +639,11 @@ def _build_prodwise_heatmap(capped):
         cells = []
         for ym in all_yms:
             m = r["months"].get(ym)
-            avg = _avg_nps(m)
+            avg = _nps(m)
             label = fnum(avg) if avg is not None else "&ndash;"
             title = f" title='{h_enc(r['product'])} &middot; {h_enc(_nps_month_label(ym))}: {n0(m['responses'])} responses'" if m else ""
             cells.append(f"<td class='num hm-cell' data-yr='{ym[:4]}'{cell_style(avg)}{title}>{label}</td>")
-        spark_svg, spark_json = _prodwise_sparkline(r["months"], value_fn=_avg_nps)
+        spark_svg, spark_json = _prodwise_sparkline(r["months"])
         body_rows.append(
             f"<tr class='{z}' data-hm-spark='{spark_json}'>"
             f"<td class='rowlabel'>{h_enc(r['product'])}</td>{''.join(cells)}"
@@ -652,16 +652,16 @@ def _build_prodwise_heatmap(capped):
 
     legend = (
         "<div class='legend-row' style='justify-content:center;gap:10px;'>"
-        f"<span class='lname'>Low (&lt;{NPS_MID})</span>"
+        "<span class='lname'>Negative NPS</span>"
         "<span style='display:inline-block;width:140px;height:10px;border-radius:5px;"
         "background:linear-gradient(to right, var(--s6), var(--grid), var(--s2));'></span>"
-        f"<span class='lname'>High (&gt;{NPS_MID})</span></div>"
+        "<span class='lname'>Positive NPS</span></div>"
     )
 
     return (
         "<div class='pivot-wrap'><div class='pivot-title'>Product wise NPS &mdash; Monthly Heatmap</div>"
-        "<p class='desc'>Avg NPS score (1&ndash;10) per product per month. "
-        "Color midpoint is 7 (promoter threshold); blank cells had no survey responses that month.</p>"
+        "<p class='desc'>NPS% = (Promoters &minus; Detractors) &divide; Total &times; 100, per product per month. "
+        "Color midpoint is 0 (NPS breakeven); blank cells had no survey responses that month.</p>"
         f"{legend}<div class='pivot-scroll'><table class='pivot-table'><thead><tr>"
         f"<th class='corner'>Product</th>{head_cells}<th>Trend</th></tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
     )
@@ -707,7 +707,7 @@ def build_product_wise_nps_panel(ctx):
         spark_attr = f" data-spark='{spark_json}'" if year_aware else ""
         body_rows.append(
             f"<tr class='{z}'{py_attr}{spark_attr}><td class='rowlabel'>{h_enc(r['product'])}</td>"
-            f"<td class='num'>{n0(r['responses'])}</td><td class='num'>{fmt_score(r['avg_overall_nps'])}</td>"
+            f"<td class='num'>{n0(r['responses'])}</td><td class='num'>{fmt_score(r['nps_pct'])}</td>"
             f"<td class='num'>{fmt_score(r['avg_packaging_score'])}</td><td class='num'>{n0(r['promoters'])}</td>"
             f"<td class='num'>{n0(r['passives'])}</td><td class='num'>{n0(r['detractors'])}</td>"
             f"<td class='num'>{fmt_pct(r['detractor_rate_pct'])}</td>"
@@ -716,7 +716,7 @@ def build_product_wise_nps_panel(ctx):
 
     table = ("<div class='pivot-wrap'><div class='pivot-title'>Product wise NPS</div><div class='pivot-scroll'>"
              "<table class='pivot-table'><thead><tr><th class='corner'>Product</th><th>Responses</th>"
-             "<th>Avg NPS</th><th>Avg Packaging Score</th><th>Promoters</th><th>Passives</th><th>Detractors</th>"
+             "<th>NPS</th><th>Avg Packaging Score</th><th>Promoters</th><th>Passives</th><th>Detractors</th>"
              f"<th>Detractor %</th><th>Trend</th></tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>")
 
     year_script = ""
@@ -734,8 +734,8 @@ def build_product_wise_nps_panel(ctx):
     function py(v){ return H - PAD - (v-lo)/rng*(H-2*PAD); }
     var coords = pts.map(function(p,i){ return px(i).toFixed(1)+','+py(p[1]).toFixed(1); }).join(' ');
     var delta = vals[n-1] - vals[0];
-    var col = delta > 0.5 ? 'var(--s2)' : (delta < -0.5 ? 'var(--s6)' : 'var(--s4)');
-    var arrow = delta > 0.5 ? '&#x25B2;' : (delta < -0.5 ? '&#x25BC;' : '&#x2192;');
+    var col = delta > 2 ? 'var(--s2)' : (delta < -2 ? 'var(--s6)' : 'var(--s4)');
+    var arrow = delta > 2 ? '&#x25B2;' : (delta < -2 ? '&#x25BC;' : '&#x2192;');
     var lx = px(n-1).toFixed(1), ly = py(vals[n-1]).toFixed(1);
     td.innerHTML = "<svg width='"+W+"' height='"+H+"' viewBox='0 0 "+W+" "+H+"'"
       +" style='vertical-align:middle;overflow:visible;display:inline-block'>"
@@ -748,15 +748,15 @@ def build_product_wise_nps_panel(ctx):
     var activeYears = window.REPORT_ACTIVE_YEARS; if(!activeYears) return;
     document.querySelectorAll('#panel-prodwisenps table.pivot-table > tbody > tr[data-py]').forEach(function(tr){
       var py = JSON.parse(tr.getAttribute('data-py'));
-      var resp=0,sumO=0,cntO=0,sumP=0,cntP=0,prom=0,pas=0,det=0;
+      var resp=0,sumP=0,cntP=0,prom=0,pas=0,det=0;
       Object.keys(py).forEach(function(yr){
         if(yr !== '_other' && !activeYears.has(yr)) return;
         var a = py[yr];
-        resp+=a[0]; sumO+=a[1]; cntO+=a[2]; sumP+=a[3]; cntP+=a[4]; prom+=a[5]; pas+=a[6]; det+=a[7];
+        resp+=a[0]; sumP+=a[3]; cntP+=a[4]; prom+=a[5]; pas+=a[6]; det+=a[7];
       });
       var c = tr.children;
       c[1].textContent = window.fmtN0(resp);
-      c[2].textContent = cntO ? fmt1(sumO/cntO) : '–';
+      c[2].textContent = resp ? fmt1((prom-det)/resp*100) : '–';
       c[3].textContent = cntP ? fmt1(sumP/cntP) : '–';
       c[4].textContent = window.fmtN0(prom);
       c[5].textContent = window.fmtN0(pas);
