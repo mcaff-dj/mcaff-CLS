@@ -628,9 +628,9 @@ async function bootstrapPgSchema() {
   await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS ndr_lead_assignments_awb_current_key ON ndr_lead_assignments (awb_number) WHERE reassigned_away_at IS NULL`;
   // Escalation desk's own assignment/resolution history - the same role lead_assignments
   // plays for RTO and ndr_lead_assignments for NDR. Deliberately keyed by parent_order
-  // (HYP_Parent_OrderID), NOT the sheet's row number: a row number shifts whenever the sheet
-  // is re-sorted or re-synced, while parent_order is the same stable key
-  // api/_lib/escalationSheet.js's getSheetIndex already matches CSV-import rows on. Written
+  // (HYP_Parent_OrderID), NOT a Sheet/ticket row number: a row number shifts whenever its
+  // source table is re-sorted or re-synced, while parent_order is the same stable key
+  // getEscalationOrderIndex (this file) already matches CSV-import rows on. Written
   // directly from api/escalation/[action].js's assign/update/bulk-update actions (there is no
   // cron equivalent of assign_leads.py for this desk - assignment here is always an admin/
   // agent clicking something in the UI), replacing the old non-durable in-memory
