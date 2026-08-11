@@ -1486,7 +1486,7 @@ export default function EscalationClient() {
             <div>
               <h1 className="pageTitle">{view === 'freshLeads' ? 'Fresh Leads' : 'RTO Action Queue'}</h1>
               <p className="pageSubtitle">
-                Google Sheet-backed resolution · sorted by priority · {truncated ? `${totalPending} of ${pendingTotal}` : totalPending} {view === 'freshLeads' ? 'leads' : 'orders'} pending
+                Google Sheet-backed resolution · sorted by priority · {truncated ? `${totalPending} of ${pendingTotal}` : totalPending} {view === 'freshLeads' ? 'leads pending' : 'orders (all statuses)'}
               </p>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1566,7 +1566,7 @@ export default function EscalationClient() {
 
           {/* Stat cards */}
           <div className="statsGrid">
-            <StatCard variant="pending"    icon={<Icon path={I.alert} size={16} />} value={loading ? null : totalPending}    label="Total Pending"   sub="Needs resolution" />
+            <StatCard variant="pending"    icon={<Icon path={I.alert} size={16} />} value={loading ? null : totalPending}    label={view === 'freshLeads' ? 'Total Pending' : 'Total Orders'} sub={view === 'freshLeads' ? 'Needs resolution' : 'All statuses'} />
             <StatCard variant="unassigned" icon={<Icon path={I.chevDown} size={16} />} value={loading ? null : unassignedCount} label="Unassigned"      sub="No agent yet" />
             <StatCard variant="assigned"   icon={<Icon path={I.users} size={16} />} value={loading ? null : assignedCount}   label="Assigned"        sub="In progress" />
             <StatCard variant="resolved"   icon={<Icon path={I.check} size={16} />} value={resolvedCount}                    label="Resolved"        sub="This session" />

@@ -1359,10 +1359,13 @@ async function getLiveEscalationAssignments() {
 // client shows a banner) instead of silently looking like the whole queue.
 const ESCALATION_ORDERS_LIMIT = 2000;
 
-async function getEscalationOrders(limit = ESCALATION_ORDERS_LIMIT) {
+async function getEscalationOrders(limit = ESCALATION_ORDERS_LIMIT, { includeResolved = false } = {}) {
   await ensurePgSchema();
   // Newest cycles first, so a truncated response keeps the orders most likely to still need
   // action rather than an arbitrary slice.
+  // includeResolved short-circuits the pending filter (`$1 OR ...`) rather than dropping it via a
+  // separate query string - RTO Queue wants every order's latest cycle, resolved or not (see
+  // getEligibleOrders), Fresh Leads still wants pending-only, and this keeps both on one query.
   const { rows } = await pgSql`
     SELECT * FROM (
       SELECT DISTINCT ON (parent_order)
@@ -1373,7 +1376,7 @@ async function getEscalationOrders(limit = ESCALATION_ORDERS_LIMIT) {
       FROM escalation_lead_assignments
       ORDER BY parent_order, assigned_at DESC
     ) latest
-    WHERE last_updated_at IS NULL
+    WHERE ${includeResolved} OR last_updated_at IS NULL
     ORDER BY assigned_at DESC
     LIMIT ${limit}
   `;
@@ -1385,7 +1388,7 @@ async function getEscalationOrders(limit = ESCALATION_ORDERS_LIMIT) {
       FROM escalation_lead_assignments
       ORDER BY parent_order, assigned_at DESC
     ) latest
-    WHERE last_updated_at IS NULL
+    WHERE ${includeResolved} OR last_updated_at IS NULL
   `;
   const orders = rows.map((r) => ({
     brand: r.brand || '',
@@ -1410,13 +1413,14 @@ async function getEscalationOrders(limit = ESCALATION_ORDERS_LIMIT) {
   return { orders, total: (countRows[0] && countRows[0].total) || orders.length };
 }
 
-// getEligibleOrders/getFreshLeads both call the one query above and currently return identical
-// rows - see getEscalationOrders' own comment. Kept as two names (not one, with call sites
-// deduplicated) because api/escalation/[action].js's `orders`/`export` actions already branch on
-// req.query.type === 'fresh-leads' to pick one or the other, and tab-wise rules that will one day
-// make them differ are a known follow-up, not this task's job.
+// getEligibleOrders/getFreshLeads used to return identical rows - see getEscalationOrders' own
+// comment. Kept as two names (not one, with call sites deduplicated) because
+// api/escalation/[action].js's `orders`/`export` actions already branch on
+// req.query.type === 'fresh-leads' to pick one or the other. RTO Queue now diverges:
+// includeResolved so agents can see (and re-open/audit) already-resolved orders in the same view
+// instead of them vanishing the moment they're resolved.
 async function getEligibleOrders(limit) {
-  return getEscalationOrders(limit);
+  return getEscalationOrders(limit, { includeResolved: true });
 }
 
 async function getFreshLeads(limit) {
