@@ -13,42 +13,17 @@
 // tab. Access is enforced here rather than in the browser, so the client is free to render
 // whatever it likes without that being a permission decision.
 const { getSession } = require('../_lib/session');
-const { updateOrder, batchUpdateOrders } = require('../_lib/escalationSheet');
-const { getEligibleOrders, getFreshLeads } = require('../_lib/escalationBq');
 const { CSV_HEADERS, parseCSV, toCSV } = require('../_lib/escalationCsv');
 const {
   getCallingProcessAgents, assignEscalationOrder, unassignEscalationOrder,
   resolveEscalationAssignment, getEscalationAssignments,
   getLiveEscalationAssignments, resolveEscalationAssignmentsBulk,
+  getEligibleOrders, getFreshLeads, getEscalationOrderIndex,
 } = require('../_lib/db');
-const { runQuery } = require('../_lib/bigquery');
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'escalation';
 const PROCESS_KEY = 'escalation';
-
-const BQ_PROJECT = process.env.BQ_PROJECT_ID || 'sheetdata-501810';
-const BQ_DATASET = process.env.BQ_DATASET || 'escalation';
-
-// CSV import's row-matching index, sourced from orders_sheet_columns instead of a live Sheet
-// read (that table already carries row_number/brand for exactly this purpose - see
-// docs/superpowers/specs/2026-08-10-escalation-bigquery-postgres-hybrid-design.md).
-async function getSheetIndexFromBq() {
-  const rows = await runQuery(BQ_PROJECT,
-    `SELECT parent_order AS parentOrder, awb_key AS awbKey, row_number AS rowNumber, brand
-     FROM \`${BQ_PROJECT}.${BQ_DATASET}.orders_sheet_columns\`
-     WHERE deleted_from_sheet_at IS NULL`);
-  const byParent = new Map();
-  const byParentAwb = new Map();
-  rows.forEach((r) => {
-    const parent = String(r.parentOrder || '').trim().toLowerCase();
-    if (!parent) return;
-    const ref = { rowNumber: Number(r.rowNumber), sheetTab: r.brand };
-    if (!byParent.has(parent)) byParent.set(parent, ref);
-    if (r.awbKey) byParentAwb.set(`${parent}||${r.awbKey}`, ref);
-  });
-  return { byParent, byParentAwb };
-}
 
 function checkAccess(session) {
   if (!session) return 'Not authenticated';
@@ -93,8 +68,8 @@ const handler = async (req, res) => {
         return res.status(200).json({ assignments });
       }
       if (req.method === 'POST') {
-        const { rowNumber, parentOrder, agentId } = body;
-        if (!rowNumber || !parentOrder) return res.status(400).json({ error: 'rowNumber and parentOrder are required' });
+        const { parentOrder, agentId } = body;
+        if (!parentOrder) return res.status(400).json({ error: 'parentOrder is required' });
         if (!agentId) await unassignEscalationOrder(parentOrder);
         else await assignEscalationOrder(parentOrder, agentId);
         return res.status(200).json({ ok: true });
@@ -121,12 +96,11 @@ const handler = async (req, res) => {
 
     if (action === 'update') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-      const { rowNumber, sheetTab, parentOrder, newOrderId, newAwb, newStatus, notes } = body;
-      if (!rowNumber || !sheetTab || !newOrderId || !newAwb || !newStatus) {
-        return res.status(400).json({ error: 'rowNumber, sheetTab, newOrderId, newAwb, and newStatus are all required' });
+      const { parentOrder, newOrderId, newAwb, newStatus, notes } = body;
+      if (!parentOrder || !newOrderId || !newAwb || !newStatus) {
+        return res.status(400).json({ error: 'parentOrder, newOrderId, newAwb, and newStatus are all required' });
       }
-      await updateOrder(rowNumber, sheetTab, { newOrderId, newAwb, newStatus, notes: notes || '' });
-      if (parentOrder) await resolveEscalationAssignment(parentOrder, newStatus, notes || '', newOrderId, newAwb);
+      await resolveEscalationAssignment(parentOrder, newStatus, notes || '', newOrderId, newAwb);
       return res.status(200).json({ ok: true });
     }
 
@@ -142,14 +116,10 @@ const handler = async (req, res) => {
           error: `Bulk update only supports statuses that need no replacement: ${BULK_ALLOWED.join(', ')}`,
         });
       }
-      if (items.some((i) => !i.sheetTab)) {
-        return res.status(400).json({ error: 'Every item requires sheetTab' });
-      }
-      const updated = await batchUpdateOrders(
-        items.map(({ rowNumber, sheetTab }) => ({ rowNumber, sheetTab, newOrderId: '-', newAwb: '-', newStatus: status }))
-      );
-      await resolveEscalationAssignmentsBulk(items.map((i) => i.parentOrder).filter(Boolean), status);
-      return res.status(200).json({ ok: true, updated });
+      const parentOrders = items.map((i) => i.parentOrder).filter(Boolean);
+      if (!parentOrders.length) return res.status(400).json({ error: 'Every item requires parentOrder' });
+      await resolveEscalationAssignmentsBulk(parentOrders, status);
+      return res.status(200).json({ ok: true, updated: parentOrders.length });
     }
 
     if (action === 'import') {
@@ -166,10 +136,10 @@ const handler = async (req, res) => {
       if (!rows.length) return res.status(400).json({ error: 'No data rows found in the CSV' });
 
       const norm = (v) => String(v ?? '').trim().toLowerCase();
-      const { byParent, byParentAwb } = await getSheetIndexFromBq();
+      const { byParent, byParentAwb } = await getEscalationOrderIndex();
       const updates = [];
       const errors = [];
-      const seenRows = new Set(); // keyed "sheetTab:rowNumber" - a bare rowNumber can collide across tabs
+      const seenOrders = new Set(); // keyed "brand:parentOrder" - one order can carry multiple ticket rows
 
       rows.forEach((row, i) => {
         const line = i + 2; // account for the header line
@@ -180,19 +150,16 @@ const handler = async (req, res) => {
         if (!parent) return errors.push({ line, reason: 'Missing HYP_Parent_OrderID' });
         if (!status) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'Missing Status_2 (nothing to write)' });
 
-        // Prefer an exact parent+AWB match, fall back to parent only. Both indexes are searched
-        // across every configured tab already (getSheetIndexFromBq), so this finds a row
-        // regardless of which brand tab it actually lives in.
+        // Prefer an exact parent+AWB match, fall back to parent only.
         const ref = (awb && byParentAwb.get(`${parent}||${awb}`)) || byParent.get(parent);
 
-        if (ref == null) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'No matching order in sheet' });
-        const seenKey = `${ref.sheetTab}:${ref.rowNumber}`;
-        if (seenRows.has(seenKey)) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'Duplicate row in file (skipped)' });
-        seenRows.add(seenKey);
+        if (ref == null) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'No matching order found' });
+        const seenKey = `${ref.brand}:${parent}`;
+        if (seenOrders.has(seenKey)) return errors.push({ line, order: row.HYP_Parent_OrderID, reason: 'Duplicate row in file (skipped)' });
+        seenOrders.add(seenKey);
 
         updates.push({
-          rowNumber: ref.rowNumber,
-          sheetTab: ref.sheetTab,
+          brand: ref.brand,
           parentOrder: row.HYP_Parent_OrderID,
           newOrderId: String(row['New Order ID'] ?? '').trim() || '-',
           newAwb: String(row['New AWB / Tracking'] ?? '').trim() || '-',
@@ -201,19 +168,17 @@ const handler = async (req, res) => {
         });
       });
 
-      const updated = updates.length ? await batchUpdateOrders(updates) : 0;
       await Promise.all(updates.map((u) =>
         resolveEscalationAssignment(u.parentOrder, u.newStatus, u.notes, u.newOrderId, u.newAwb)
       ));
       return res.status(200).json({
         ok: true,
-        updated,
+        updated: updates.length,
         skipped: errors.length,
         total: rows.length,
-        // "sheetTab:rowNumber" composite - the client matches these against the same composite
-        // it builds from each row's own sheetTab+rowNumber (rowNumber alone isn't unique
-        // across tabs).
-        rowNumbers: updates.map((u) => `${u.sheetTab}:${u.rowNumber}`),
+        // "brand:parentOrder" composite - the client matches these against every ticket row
+        // sharing that order, not a single row (resolution is per-order, not per-ticket-row).
+        rowNumbers: updates.map((u) => `${u.brand}:${u.parentOrder}`),
         errors: errors.slice(0, 50), // cap payload
       });
     }
