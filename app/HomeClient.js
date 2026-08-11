@@ -47,7 +47,8 @@ var NEXT_PAGE_ROUTES = {
 var CALLING_TEAM_SUBITEMS = {
   overview: { label: 'Overview', text: 'Calling Team Overview', url: '/calling-overview' },
   rto: { label: 'RTO-Calling', text: 'RTO CRM Agent & Refund Portal', url: '/rto-crm' },
-  ndr: { label: 'NDR-Calling', text: 'NDR Calling Agent Portal', url: '/ndr-calling' }
+  ndr: { label: 'NDR-Calling', text: 'NDR Calling Agent Portal', url: '/ndr-calling' },
+  escalation: { label: 'Escalation', text: 'Escalation Agent Portal', url: '/escalation' }
 };
 
 function selectCallingTeamView(view) {
