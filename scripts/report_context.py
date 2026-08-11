@@ -157,6 +157,25 @@ def fnum(v):
     return s
 
 
+def index_map(seq):
+    """{value: its index in seq} - the O(1) replacement for calling seq.index(v) inside a
+    per-row loop, which is a linear scan of seq per row. The panel builders index ~100k
+    ticket rows against lists of hundreds (delivery partners, query categories) to
+    thousands (SKUs, batches) of entries.
+
+    Worth roughly a second per brand, not more: list.index() is a tight C loop, so despite
+    the O(n*k) shape it was never the bottleneck the sizes suggest. Kept because it's
+    strictly cheaper and removes the misleading shape, not as a fix for anything.
+
+    First occurrence wins (setdefault), so this matches list.index() exactly even if seq
+    somehow holds a duplicate - e.g. dim2_order's appended "(other)" sentinel colliding
+    with a real value literally named "(other)"."""
+    d = {}
+    for i, v in enumerate(seq):
+        d.setdefault(v, i)
+    return d
+
+
 def n0(v):
     """Matches PowerShell's $n.ToString('N0') under this machine's culture, which formats
     with Indian digit grouping (lakh/crore: 1,67,751) rather than Western thousands
@@ -193,6 +212,16 @@ class Ctx:
     def __init__(self, brand):
         self.b = brand
         self.col = brand["col"]
+        # Set from --quick by generate_report.py. Sources that can serve a run from their
+        # on-disk cache instead of a live re-query check this. Defaults False so anything
+        # constructing a bare Ctx (tests, ad-hoc scripts) gets full-refresh behaviour.
+        self.quick = False
+        # cell() is called tens of millions of times per brand, so the only two columns it
+        # has to normalize are resolved to plain ints once here instead of being looked up
+        # out of self.col on every call. -1 default: no caller ever passes a negative
+        # index, so a brand missing either key simply never normalizes that column.
+        self._cat_i = self.col.get("cat", -1)
+        self._partner_i = self.col.get("partner", -1)
 
     def cell(self, row, i):
         if row is None:
@@ -208,10 +237,15 @@ class Ctx:
             v = row
         else:
             return ""
-        if i == self.col["cat"] and isinstance(v, str) and v.casefold() in _CAT_NORM_MAP_CI:
-            return _CAT_NORM_MAP_CI[v.casefold()]
-        if i == self.col["partner"] and isinstance(v, str) and v.casefold() in _PARTNER_NORM_MAP_CI:
-            return _PARTNER_NORM_MAP_CI[v.casefold()]
+        # Integer column check first, and casefold() computed once rather than twice: it
+        # allocates a new string every time, and the overwhelming majority of calls are for
+        # columns with no normalization map at all.
+        if i == self._cat_i:
+            if isinstance(v, str):
+                return _CAT_NORM_MAP_CI.get(v.casefold(), v)
+        elif i == self._partner_i:
+            if isinstance(v, str):
+                return _PARTNER_NORM_MAP_CI.get(v.casefold(), v)
         return v
 
     def count_by(self, data, i):

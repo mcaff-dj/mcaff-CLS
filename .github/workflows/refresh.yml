@@ -11,7 +11,7 @@ on:
         # Agent/AI CSAT row added to the sheet's AGENT/AI tabs is invisible until a cron
         # fires. Tick this to refetch those tabs live instead of waiting for one. The
         # site's own "Refresh Data" button doesn't set it, so that stays quick.
-        description: 'Refetch the Agent/AI CSAT and RTO-Conversion sheet tabs instead of reusing cache'
+        description: 'Refetch the Agent/AI CSAT + RTO-Conversion sheet tabs and the delivery-geo MySQL data instead of reusing cache'
         type: boolean
         default: false
 
@@ -94,9 +94,10 @@ jobs:
           # 2 PM IST cron fires as a schedule event. Every run - button or schedule - only
           # ever pulls the last ~30 days live from the primary sheet (settled months come from
           # the CLS_KYC_mCaff/CLS_KYC_Hyphen MySQL mirrors instead, see kyc_source.py). --quick
-          # only changes whether the small tabs / RTO-Conversion data get refetched live
-          # (schedule) or reused from cache (button) - unless a manual run ticks the
-          # full_refresh input, which opts that run into the live refetch too.
+          # only changes whether the small tabs / RTO-Conversion data and the delivery-geo
+          # order counts + AWB lookups get refetched live (schedule) or reused from cache
+          # (button) - unless a manual run ticks the full_refresh input, which opts that run
+          # into the live refetch too.
           QUICK=""
           if [ "${EVENT_NAME}" = "workflow_dispatch" ] && [ "${FULL_REFRESH:-}" != "true" ]; then
             echo "Manual trigger - running a quick refresh (reusing cached small tabs/RTO-Conversion data)."

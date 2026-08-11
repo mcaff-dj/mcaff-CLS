@@ -112,7 +112,14 @@ def _order_counts_by_month_cached(ctx, brand_db):
     regardless of which areas happen to have complaints in any given run."""
     cache_path = _orders_cache_path(ctx)
     cache = _load_json_cache(cache_path)
-    refresh_months = set(ctx.months[-1:])
+    # The most recent month is the only one that can still be accumulating orders, so it is
+    # normally re-queried live. Under --quick (the site's Refresh-Data button) it comes from
+    # cache too - the same staleness trade the small tabs / NPS / RTO-Conversion sources
+    # already make on that path, and this is the expensive query: ~20-35s against the
+    # ~50M-row Item_level_data, per brand, inside the report-assembly step that dominates
+    # the run. A month with NO cache entry at all is still queried either way, so the first
+    # run of a new calendar month pays for it once rather than dropping the month entirely.
+    refresh_months = set() if ctx.quick else set(ctx.months[-1:])
     result = {}
     changed = False
     for month_label in ctx.months:
@@ -160,6 +167,15 @@ def _awb_geo_map(ctx, awbs):
                 out[a] = (v[0], v[1])
         else:
             to_fetch.append(a)
+
+    if to_fetch and ctx.quick:
+        # Same --quick trade as the order counts above: an AWB first seen today stays
+        # unresolved (so its ticket contributes to no city/state) until the next scheduled
+        # run looks it up and caches it. Skipped outright rather than capped to a batch or
+        # two, because each batch is an IN() against the ~50M-row Item_level_data.
+        print(f"[{ctx.b['brand']}] quick refresh: reusing cached AWB geo "
+              f"({len(to_fetch)} unresolved AWBs skipped)", flush=True)
+        to_fetch = []
 
     if to_fetch:
         import mysql_lib
@@ -211,7 +227,7 @@ def _delivery_rows_all(ctx):
     category (not just 'Delayed Order') so per-category state movers can be computed for
     Monthly Analysis's narrative bullets - see get_category_state_movers."""
     col = ctx.col
-    return [r for r in ctx.unique if ctx.cell(r, col["cls"]) == "Delivery"]
+    return ctx.unique_by_class.get("Delivery", [])
 
 
 def _global_week_index(ctx, row):

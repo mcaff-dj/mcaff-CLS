@@ -88,7 +88,9 @@ def setup(ctx):
     ctx.ma_month_ctx = {
         "n": ctx.n,
         "sales": ctx.sales_arr,
-        "index_fn": lambda r: ctx.months.index(ctx.cell(r, ctx.col["month"])) if ctx.cell(r, ctx.col["month"]) in ctx.months else -1,
+        # One hash lookup, not two linear scans of ctx.months plus a duplicate cell() read -
+        # this runs once per unique row per class (see build_class_period_data).
+        "index_fn": lambda r: ctx.month_index.get(ctx.cell(r, ctx.col["month"]), -1),
         "label_fn": lambda idx: pretty_month(ctx.months[idx]),
         "weeks_fn": weeks_for_month,
     }
@@ -152,7 +154,7 @@ def setup(ctx):
 
 
 def build_class_period_data(ctx, cls, period):
-    subset = [r for r in ctx.unique if ctx.cell(r, ctx.col["cls"]) == cls["key"]]
+    subset = ctx.unique_by_class.get(cls["key"], [])
     sub_dims = [d for d in _SUB_DIM.get(cls["id"], []) if d in ctx.col]
 
     cat_period = {}

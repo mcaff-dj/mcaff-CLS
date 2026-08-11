@@ -67,6 +67,17 @@ def _get_connection(cred):
         _conn = pymysql.connect(
             host=cred["host"], user=cred["user"], password=cred["password"],
             database=cred["database"], port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
+            # connect_timeout alone only bounds the TCP/TLS handshake - once connected, a
+            # blocked query waits forever. A refresh run hung for 1h28m inside
+            # gen_geo_insights' order-count query before being cancelled by hand; the whole
+            # job otherwise finishes in 3-6 min. These bound the wait for a server reply so
+            # such a query raises instead of stalling the run.
+            #
+            # 180s, not something tighter: the slowest LEGITIMATE query here is kyc_source's
+            # settled-rows scan, measured at 80.3s for CLS_KYC_mCaff on a cold buffer pool
+            # (20.9s typical), and gen_geo_insights' per-month order counts run 20-35s. A
+            # 60s ceiling would kill both. This is a hang backstop, not a latency budget.
+            read_timeout=180, write_timeout=180,
         )
         _current_db = cred["database"]
     else:

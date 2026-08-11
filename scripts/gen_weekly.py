@@ -70,23 +70,28 @@ def _get_sales_w_by_week(ctx):
 
 def setup(ctx):
     """Populates ctx.weeks_by_month_idx / all_weeks / week_month_of / total_weeks /
-    week_start_idx / week_sales_arr / weekly_eligible_months / month_index_lookup."""
+    week_start_idx / week_sales_arr / weekly_eligible_months."""
     n = ctx.n
     months = ctx.months
     weeks_by_month_idx = []
     all_weeks = []
     week_month_of = []
+    # One pass over data_rows collecting each month's week values, rather than a full pass
+    # per month (n passes over ~185k rows). Each month's dict still sees rows in data_rows
+    # order, so ties under get_week_num sort the same way they did before.
+    month_index = ctx.month_index
+    month_col, week_col = ctx.col["month"], ctx.col["week"]
+    wk_seen_by_mi = [{} for _ in range(n)]
+    for r in ctx.data_rows:
+        mi = month_index.get(ctx.cell(r, month_col), -1)
+        if mi < 0:
+            continue
+        wk_val = ctx.cell(r, week_col)
+        if not str(wk_val).strip() or wk_val == "#N/A":
+            continue
+        wk_seen_by_mi[mi].setdefault(wk_val, True)
     for mi in range(n):
-        mo_lbl = months[mi]
-        wk_seen = {}
-        for r in ctx.data_rows:
-            if ctx.cell(r, ctx.col["month"]) != mo_lbl:
-                continue
-            wk_val = ctx.cell(r, ctx.col["week"])
-            if not str(wk_val).strip() or wk_val == "#N/A":
-                continue
-            wk_seen.setdefault(wk_val, True)
-        wk_ordered = sorted(wk_seen.keys(), key=get_week_num)
+        wk_ordered = sorted(wk_seen_by_mi[mi].keys(), key=get_week_num)
         weeks_by_month_idx.append(wk_ordered)
         for wk_val in wk_ordered:
             all_weeks.append(wk_val)
@@ -114,7 +119,6 @@ def setup(ctx):
     ctx.week_sales_arr = week_sales_arr
 
     ctx.weekly_eligible_months = [mi for mi in range(n) if len(weeks_by_month_idx[mi]) > 0]
-    ctx.month_index_lookup = {months[mi]: mi for mi in range(n)}
 
 
 def is_partial_week(ctx, week_val, month_idx):
@@ -159,9 +163,9 @@ def get_week_buckets_global(ctx, rows, key_col_idx):
     key_cache = {}
     for r in rows:
         mo_lbl = ctx.cell(r, ctx.col["month"])
-        if mo_lbl not in ctx.month_index_lookup:
+        if mo_lbl not in ctx.month_index:
             continue
-        mi = ctx.month_index_lookup[mo_lbl]
+        mi = ctx.month_index[mo_lbl]
         wk_val = ctx.cell(r, ctx.col["week"])
         if not str(wk_val).strip() or wk_val == "#N/A":
             continue
@@ -228,7 +232,7 @@ def build_weekly_overview_block(ctx):
 def build_weekly_class_block(ctx, cls):
     if not ctx.weekly_eligible_months:
         return ""
-    subset = [r for r in ctx.unique if ctx.cell(r, ctx.col["cls"]) == cls["key"]]
+    subset = ctx.unique_by_class.get(cls["key"], [])
     by_key, key_tot = get_week_buckets_global(ctx, subset, ctx.col["cat"])
     if not key_tot:
         return f"<div class='gran-weekly gran-weekly-dynamic'><p class='note'>No {h_enc(cls['label'])} tickets found.</p></div>"
@@ -261,7 +265,7 @@ def build_weekly_class_block(ctx, cls):
 def build_weekly_delivery_block(ctx):
     if not ctx.weekly_eligible_months:
         return ""
-    delivery = [r for r in ctx.unique if ctx.cell(r, ctx.col["cls"]) == "Delivery"]
+    delivery = ctx.unique_by_class.get("Delivery", [])
     cat_by_key, cat_tot = get_week_buckets_global(ctx, delivery, ctx.col["cat"])
     if not cat_tot:
         return "<div class='gran-weekly gran-weekly-dynamic'><p class='note'>No Delivery tickets found.</p></div>"
@@ -273,9 +277,9 @@ def build_weekly_delivery_block(ctx):
     partner_cache = {}
     for r in delivery:
         mo_lbl = ctx.cell(r, ctx.col["month"])
-        if mo_lbl not in ctx.month_index_lookup:
+        if mo_lbl not in ctx.month_index:
             continue
-        mi = ctx.month_index_lookup[mo_lbl]
+        mi = ctx.month_index[mo_lbl]
         wk_val = ctx.cell(r, ctx.col["week"])
         if not str(wk_val).strip() or wk_val == "#N/A":
             continue

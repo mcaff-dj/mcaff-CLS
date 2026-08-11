@@ -20,7 +20,7 @@ import kyc_source
 import lib
 import nps_source
 from brands import BRANDS
-from report_context import Ctx, ci_key, fnum, h_enc, n0, pretty_month, round1, year_of
+from report_context import Ctx, ci_key, fnum, h_enc, index_map, n0, pretty_month, round1, year_of
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
@@ -142,6 +142,11 @@ def main():
     b = BRANDS[args.brand_index]
     col = b["col"]
     ctx = Ctx(b)
+    # Carried on ctx rather than threaded through the panel builders as an argument: the
+    # geo source reached from deep inside assemble_report (gen_geo_insights, via
+    # build_geo_script and gen_monthly's narrative movers) is the only consumer, and every
+    # other cross-cutting run input already travels this way.
+    ctx.quick = args.quick
     out_path = REPO_ROOT / b["out_file"]
 
     # Per-stage timings. This job's cost was previously only visible as one ~80s "Regenerate
@@ -278,8 +283,21 @@ def main():
     ctx.mom, ctx.prodnps, ctx.prodwise_nps, ctx.agent, ctx.ai = mom, prodnps, prodwise_nps, agent, ai
     ctx.months = b["months"]
     ctx.n = len(ctx.months)
+    # ctx.months is a list, and nearly every per-row loop in the panel builders needs the
+    # row's month as an index into it. Done as `mo in months` + `months.index(mo)` that was
+    # two linear scans of the month list per row; this makes it one hash lookup.
+    ctx.month_index = index_map(ctx.months)
     ctx.distinct_years = sorted({year_of(mo) for mo in ctx.months if year_of(mo)})
     ctx.unique = [r for r in data_rows if ctx.cell(r, col["uniq"]) == "Unique"]
+    # Bucketed once here because every consumer used to re-derive its own
+    # `[r for r in ctx.unique if cell(r, cls) == key]`: the KPI row, the cross-filter panel,
+    # the class panel, gen_weekly's two blocks, gen_geo_insights and gen_monthly's four
+    # period views each made a full pass over all unique rows - ~10 scans per class.
+    # Buckets keep ctx.unique's own order, so every consumer sees the same row sequence the
+    # list comprehension gave it.
+    ctx.unique_by_class = {}
+    for r in ctx.unique:
+        ctx.unique_by_class.setdefault(ctx.cell(r, col["cls"]), []).append(r)
 
     ctx.sales_m = get_sales_m_by_month(ctx, data_rows)
     ctx.sales_arr = [ctx.sales_m.get(mo, 0) for mo in ctx.months]
@@ -340,7 +358,7 @@ def main():
     gen_raw_export.build_raw_exports(ctx, out_path.parent)
     lap("raw-data exports (gzipped CSVs)")
 
-    html = gen_panels.assemble_report(ctx, HERE)
+    html = gen_panels.assemble_report(ctx, HERE, lap=lap)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
     size_kb = round(out_path.stat().st_size / 1024)

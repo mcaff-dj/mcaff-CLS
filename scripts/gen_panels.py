@@ -20,15 +20,22 @@ from gen_weekly import build_weekly_class_block, build_weekly_delivery_block, ge
 from gen_monthly import build_monthly_analysis_panel
 from gen_raw_export import raw_download_link
 from nps_source import _month_label as nps_month_label
-from report_context import ci_key, fnum, h_enc, j_enc, n0, pretty_month, round1, sort_keys_by_last_period, year_of
+from report_context import (ci_key, fnum, h_enc, index_map, j_enc, n0, pretty_month, round1,
+                            sort_keys_by_last_period, year_of)
 
 
 def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mode, dim2_pct_label, dim2_cap, coverage_mode):
     months = ctx.months
     n = ctx.n
-    subset = [r for r in ctx.unique if ctx.cell(r, ctx.col["cls"]) == cls["key"]]
+    subset = ctx.unique_by_class.get(cls["key"], [])
     pfx = cls["id"]
     dim2_col = ctx.col[dim2_key]
+    # Hoisted out of the four per-row loops below: `month_index` replaces the
+    # `mo in months` + `months.index(mo)` linear scan pair, and the column indices are
+    # plain dict lookups that don't need repeating ~100k times.
+    month_index = ctx.month_index
+    month_col = ctx.col["month"]
+    cat_col = ctx.col["cat"]
 
     # Months this class has zero tickets for (e.g. a query category introduced only
     # partway through the sheet's history) get their header/data cells skipped entirely
@@ -38,44 +45,53 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     # needed, and MONTHS/tickets_json stay in the original full-month index space.
     month_has_data = [False] * n
     for r in subset:
-        mo = ctx.cell(r, ctx.col["month"])
-        if mo in months:
-            month_has_data[months.index(mo)] = True
+        mi = month_index.get(ctx.cell(r, month_col), -1)
+        if mi >= 0:
+            month_has_data[mi] = True
 
     # Shared caches so every pass below resolves the same raw value (e.g. "Product not
     # Sealed" vs "product NOT sealed") to the same first-seen-cased key - matching
     # PowerShell's case-insensitive @{} hashtables. Without sharing these across passes,
-    # a later pass's cat_order.index(cat)/dim2_order.index(v) could throw on a
-    # differently-cased occurrence of a value already seen (and canonicalized) earlier.
+    # a later pass's cat_pos[cat]/dim2_pos[v] could KeyError on a differently-cased
+    # occurrence of a value already seen (and canonicalized) earlier.
     cat_cache = {}
     dim2_cache = {}
 
     cat_tot = {}
     cat_month = {}
     for r in subset:
-        c = ctx.cell(r, ctx.col["cat"])
+        c = ctx.cell(r, cat_col)
         if not str(c).strip():
             c = "(blank)"
         c = ci_key(c, cat_cache)
         cat_tot[c] = cat_tot.get(c, 0) + 1
-        mo = ctx.cell(r, ctx.col["month"])
-        if mo in months:
+        mo = ctx.cell(r, month_col)
+        if mo in month_index:
             cat_month.setdefault(c, {})
             cat_month[c][mo] = cat_month[c].get(mo, 0) + 1
     cat_order = sort_keys_by_last_period(cat_month, cat_tot, months)
 
     dim2_tot_all = {}
     dim2_month = {}
+    # Months with at least one row whose dim2 value is actually filled in, recorded in this
+    # same pass purely so the "sinceFirst" coverage note below can find the first such month
+    # without its own months x subset rescan. Tracked separately from dim2_month rather than
+    # inferred from its non-"(blank)" keys, so a raw value that literally reads "(blank)"
+    # still counts as populated - exactly as the old row-by-row .strip() check did.
+    dim2_filled_months = set()
     for r in subset:
         v = ctx.cell(r, dim2_col)
-        if not str(v).strip():
+        blank = not str(v).strip()
+        if blank:
             v = "(blank)"
         v = ci_key(v, dim2_cache)
         dim2_tot_all[v] = dim2_tot_all.get(v, 0) + 1
-        mo = ctx.cell(r, ctx.col["month"])
-        if mo in months:
+        mo = ctx.cell(r, month_col)
+        if mo in month_index:
             dim2_month.setdefault(v, {})
             dim2_month[v][mo] = dim2_month[v].get(mo, 0) + 1
+            if not blank:
+                dim2_filled_months.add(mo)
     dim2_order_full = sort_keys_by_last_period(dim2_month, dim2_tot_all, months)
     dim2_capped = len(dim2_order_full) > dim2_cap
     if dim2_capped:
@@ -92,8 +108,7 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     first_covered_month = None
     if coverage_mode == "sinceFirst":
         for mo in months:
-            has = any(ctx.cell(r, ctx.col["month"]) == mo and str(ctx.cell(r, dim2_col)).strip() for r in subset)
-            if has:
+            if mo in dim2_filled_months:
                 first_covered_month = mo
                 break
     if coverage_mode == "sinceFirst":
@@ -112,24 +127,29 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     tk = []
     alloc_sum = {}
     alloc_cnt = {}
+    # dim2_cap is 9999 for Delivery/Technical/Warehouse, i.e. the dim2 list is effectively
+    # uncapped, so as .index() calls these rescanned a hundreds-of-entries partner list per
+    # row across ~100k Delivery rows. Measured at ~0.2s, not the seconds that shape implies.
+    cat_pos = index_map(cat_order)
+    dim2_pos = index_map(dim2_order)
+    alloc_col = ctx.col["alloc"]
     for r in subset:
-        mo = ctx.cell(r, ctx.col["month"])
-        mi = months.index(mo) if mo in months else -1
+        mi = month_index.get(ctx.cell(r, month_col), -1)
         if mi < 0:
             continue
-        cat = ctx.cell(r, ctx.col["cat"])
+        cat = ctx.cell(r, cat_col)
         if not str(cat).strip():
             cat = "(blank)"
         cat = ci_key(cat, cat_cache)
-        ci = cat_order.index(cat)
+        ci = cat_pos[cat]
         v = ctx.cell(r, dim2_col)
         if not str(v).strip():
             v = "(blank)"
         v = ci_key(v, dim2_cache)
-        di = other_idx if (dim2_capped and v not in dim2_top) else dim2_order.index(v)
+        di = other_idx if (dim2_capped and v not in dim2_top) else dim2_pos[v]
         tk.append(f"[{mi},{ci},{di}]")
         if pct_mode == "alloc":
-            ar = ctx.cell(r, ctx.col["alloc"])
+            ar = ctx.cell(r, alloc_col)
             try:
                 av = float(str(ar).replace(",", ""))
             except (ValueError, TypeError):
@@ -431,7 +451,7 @@ def _build_combo_chart(ctx, vals, title, bar_color, line_color):
 
 
 def build_class_panel(ctx, cls):
-    subset = [r for r in ctx.unique if ctx.cell(r, ctx.col["cls"]) == cls["key"]]
+    subset = ctx.unique_by_class.get(cls["key"], [])
     pivot, month_totals = _build_category_pivot(ctx, subset, f"{cls['label']} Complaints")
     chart = _build_combo_chart(ctx, month_totals, f"{cls['label']} Complaints wrt Sales", cls["color"], "var(--s1)")
     insights = build_insights_card(f"Insights &mdash; {h_enc(cls['label'])}", get_category_insight_items(ctx, subset))
@@ -827,13 +847,22 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
     # "product NOT sealed" collapse into a single bucket under whichever casing was seen first.
     sku_cache, prod_cache, cls_cache, cat_cache, batch_cache = {}, {}, {}, {}, {}
     sku_set, prod_set, cls_set, cat_set, batch_set = {}, {}, {}, {}, {}
+    # Hoisted: both passes read these five columns on every row.
+    sku_col, prod_col, cls_col = ctx.col["sku"], ctx.col["prod"], ctx.col["cls"]
+    cat_col, batch_col, prosales_col = ctx.col["cat"], ctx.col["batch"], ctx.col["prosales"]
     for r in subset:
-        sku_set.setdefault(ci_key(_norm(ctx.cell(r, ctx.col["sku"])), sku_cache), True)
-        prod_set.setdefault(ci_key(_norm(ctx.cell(r, ctx.col["prod"])), prod_cache), True)
-        cls_set.setdefault(ci_key(_norm(ctx.cell(r, ctx.col["cls"])), cls_cache), True)
-        cat_set.setdefault(ci_key(_norm(ctx.cell(r, ctx.col["cat"])), cat_cache), True)
-        batch_set.setdefault(ci_key(_norm(ctx.cell(r, ctx.col["batch"])), batch_cache), True)
+        sku_set.setdefault(ci_key(_norm(ctx.cell(r, sku_col)), sku_cache), True)
+        prod_set.setdefault(ci_key(_norm(ctx.cell(r, prod_col)), prod_cache), True)
+        cls_set.setdefault(ci_key(_norm(ctx.cell(r, cls_col)), cls_cache), True)
+        cat_set.setdefault(ci_key(_norm(ctx.cell(r, cat_col)), cat_cache), True)
+        batch_set.setdefault(ci_key(_norm(ctx.cell(r, batch_col)), batch_cache), True)
     SKUS, PRODS, CLASSES, CATS, BATCHES = list(sku_set), list(prod_set), list(cls_set), list(cat_set), list(batch_set)
+    # The second pass needs each value's position in those five lists on every row. As
+    # .index() calls that was five linear scans per row against lists running from a handful
+    # (CLASSES) to thousands of entries (SKUS, BATCHES) - measured at ~0.2s for the monthly
+    # instance, so a real saving but a small one.
+    SKU_I, PROD_I, CLS_I = index_map(SKUS), index_map(PRODS), index_map(CLASSES)
+    CAT_I, BATCH_I = index_map(CATS), index_map(BATCHES)
 
     # "Pro Sales" (raw sheet column, never named/read anywhere else in the pipeline) is a
     # per-SKU-per-MONTH sales figure - unlike "Total Sales M" (company-wide, one value per
@@ -851,16 +880,11 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
         pidx = period_index_fn(r)
         if pidx < 0 or pidx >= n:
             continue
-        sku = ci_key(_norm(ctx.cell(r, ctx.col["sku"])), sku_cache)
-        si = SKUS.index(sku)
-        prod = ci_key(_norm(ctx.cell(r, ctx.col["prod"])), prod_cache)
-        pi = PRODS.index(prod)
-        cls_ = ci_key(_norm(ctx.cell(r, ctx.col["cls"])), cls_cache)
-        li = CLASSES.index(cls_)
-        cat = ci_key(_norm(ctx.cell(r, ctx.col["cat"])), cat_cache)
-        ci = CATS.index(cat)
-        bat = ci_key(_norm(ctx.cell(r, ctx.col["batch"])), batch_cache)
-        bi = BATCHES.index(bat)
+        si = SKU_I[ci_key(_norm(ctx.cell(r, sku_col)), sku_cache)]
+        pi = PROD_I[ci_key(_norm(ctx.cell(r, prod_col)), prod_cache)]
+        li = CLS_I[ci_key(_norm(ctx.cell(r, cls_col)), cls_cache)]
+        ci = CAT_I[ci_key(_norm(ctx.cell(r, cat_col)), cat_cache)]
+        bi = BATCH_I[ci_key(_norm(ctx.cell(r, batch_col)), batch_cache)]
         tickets.append(f"[{pidx},{si},{pi},{li},{ci},{bi}]")
         ck = f"{si}|{pi}|{li}|{ci}|{bi}"
         if ck not in combo_tot:
@@ -870,7 +894,7 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
             combo_list.append({"sku": si, "prod": pi, "cls": li, "cat": ci, "batch": bi})
         combo_tot[ck] += 1
         combo_mc[ck][pidx] += 1
-        ps = str(ctx.cell(r, ctx.col["prosales"])).strip()
+        ps = str(ctx.cell(r, prosales_col)).strip()
         if ps:
             pk_ = (si, pidx)
             prosales_counts.setdefault(pk_, {})
@@ -1205,15 +1229,21 @@ _PPK_CSS = ("<style>.ppk-scroll{max-height:640px;overflow-y:auto;}.ppk-pivot-tab
 
 def build_prod_pkg_panel(ctx):
     months = ctx.months
+    month_index = ctx.month_index
+    month_col = ctx.col["month"]
+    # Built here rather than pulled out of ctx.unique_by_class: _build_ppk_core numbers its
+    # SKU/product/category/batch lists in first-seen order, so this has to stay in
+    # ctx.unique's own row order (the two classes interleaved) rather than concatenating two
+    # per-class buckets, which would renumber every index in the emitted tables.
     ppsub = [r for r in ctx.unique if ctx.cell(r, ctx.col["cls"]) in ("Packaging and Operational", "Product")]
 
     def month_index_fn(r):
-        mo = ctx.cell(r, ctx.col["month"])
-        return months.index(mo) if mo in months else -1
+        return month_index.get(ctx.cell(r, month_col), -1)
 
     core = _build_ppk_core(ctx, ppsub, months, month_index_fn, lambda mo: mo, "ppk", "Month", year_fn=year_of)
 
-    weekly_block = build_weekly_prod_pkg_block(ctx)
+    # Same row set, so it's passed down instead of being derived a second time.
+    weekly_block = build_weekly_prod_pkg_block(ctx, ppsub)
 
     if core is None:
         return (f'  <div class="tab-panel" id="panel-prodpkg"><section><h2>Product Packaging and Operational Complaints wrt Product Sales</h2>'
@@ -1268,21 +1298,29 @@ def build_prod_pkg_panel(ctx):
 {core["js"]}"""
 
 
-def build_weekly_prod_pkg_block(ctx):
+def build_weekly_prod_pkg_block(ctx, ppsub_all):
     """One full drill-down instance per weekly-eligible month, shown/hidden by the existing
     page-wide gran_toolbar's Weekly mode + month-chip picker (same '.gran-weekly
     data-month=...' mechanism every other weekly table already uses) - no new toggle JS
-    needed here, just correctly-tagged HTML per month."""
+    needed here, just correctly-tagged HTML per month.
+
+    `ppsub_all` is build_prod_pkg_panel's Product/Packaging row set, passed in rather than
+    re-derived - same rows, same order."""
     if not ctx.weekly_eligible_months:
         return ""
-    ppsub_all = [r for r in ctx.unique if ctx.cell(r, ctx.col["cls"]) in ("Packaging and Operational", "Product")]
+    # One pass instead of a filtering pass per eligible month. Each bucket keeps
+    # ppsub_all's order, so every month sees the same rows in the same sequence as before.
+    by_month = {}
+    month_col = ctx.col["month"]
+    for r in ppsub_all:
+        by_month.setdefault(ctx.cell(r, month_col), []).append(r)
     parts = []
     for mi in ctx.weekly_eligible_months:
         week_list = ctx.weeks_by_month_idx[mi]
         month_label = ctx.months[mi]
         if not week_list:
             continue
-        subset = [r for r in ppsub_all if ctx.cell(r, ctx.col["month"]) == month_label]
+        subset = by_month.get(month_label, [])
         prefix = f"ppkw{mi}"
 
         def week_index_fn(r, week_list=week_list):
@@ -1458,7 +1496,14 @@ def build_rto_conversion_panel(ctx):
   </div>"""
 
 
-def assemble_report(ctx, here_dir):
+def assemble_report(ctx, here_dir, lap=None):
+    """`lap(label)` is generate_report.py's stage timer, passed in so this function's cost
+    is attributed per panel in the CI log. It is by far the most expensive stage of a run
+    (~60s of a ~100s regenerate step) and used to report as one opaque line, which is no
+    more useful for finding the cost than the whole step being one line was."""
+    if lap is None:
+        def lap(_label):
+            pass
     with open(here_dir / "_shell_head.html", "r", encoding="utf-8") as f:
         head = f.read()
     nav = ('<button class="tab-btn active" data-tab="csat">CSAT</button>'
@@ -1473,8 +1518,9 @@ def assemble_report(ctx, here_dir):
 
     panels = [f'<div class="tab-panel" id="panel-overview">{ctx.overview_html}</div>']
     panels.append(build_monthly_analysis_panel(ctx))
+    lap("  assemble: monthly analysis panel")
     for c in ctx.b["classes"]:
-        kpi = ctx.kpi_row(c, [r for r in ctx.unique if ctx.cell(r, ctx.col["cls"]) == c["key"]])
+        kpi = ctx.kpi_row(c, ctx.unique_by_class.get(c["key"], []))
         if c["id"] == "delivery":
             detail = build_cross_filter_panel(ctx, c, "partner", "Delivery Partner Name", f"{h_enc(c['label'])} Complaints wrt Delivery Partners", "alloc", "wrt allocation", 9999, "none")
         elif c["id"] == "technical":
@@ -1488,6 +1534,7 @@ def assemble_report(ctx, here_dir):
         else:
             detail = build_class_panel(ctx, c)
         panels.append(f'<div class="tab-panel" id="panel-{c["id"]}">{kpi}\n{detail}</div>')
+        lap(f"  assemble: {c['id']} panel")
 
     now_str = ctx.now_ist.strftime("%d %b %Y, %H:%M") + " IST"
     foot = (f'<footer><p><strong>Methodology:</strong> Aggregated from the raw "{ctx.b["sheet_name"]}" tab. '
@@ -1690,6 +1737,18 @@ def assemble_report(ctx, here_dir):
 </script>
 """
 
+    # Hoisted out of the return f-string below purely so each one can be timed separately -
+    # inlined there they were indistinguishable in the log from the panels above.
+    csat_panel = build_csat_panel(ctx)
+    nps_panel = build_nps_panel(ctx)
+    prodwise_panel = build_product_wise_nps_panel(ctx)
+    lap("  assemble: CSAT + NPS + product-wise NPS panels")
+    prod_pkg_panel = build_prod_pkg_panel(ctx)
+    lap("  assemble: product & packaging panel (monthly + per-month weekly)")
+    rto_panel = build_rto_conversion_panel(ctx)
+    geo_script = build_geo_script(ctx)
+    lap("  assemble: RTO-Conversion panel + geo script")
+
     return f"""<title>{h_enc(ctx.b['title'])} Customer Query &mdash; Segment Report</title>
 <script>window.REPORT_CARD = '{j_enc(ctx.b['brand'])}';</script>
 {head}
@@ -1708,13 +1767,13 @@ def assemble_report(ctx, here_dir):
   <h2 id="active-tab-title" style="text-align:center;font-size:19px;margin:22px 0 4px;">CSAT</h2>
   {gran_toolbar.rstrip()}
   {year_toolbar.rstrip()}
-  {build_csat_panel(ctx)}
-  {build_nps_panel(ctx)}
-  {build_product_wise_nps_panel(ctx)}
+  {csat_panel}
+  {nps_panel}
+  {prodwise_panel}
   {''.join(panels)}
-  {build_prod_pkg_panel(ctx)}
-  {build_rto_conversion_panel(ctx)}
+  {prod_pkg_panel}
+  {rto_panel}
   {foot}
 </div>
 {tabjs}
-{build_geo_script(ctx)}"""
+{geo_script}"""
