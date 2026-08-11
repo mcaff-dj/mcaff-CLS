@@ -1215,13 +1215,19 @@ async function unassignEscalationOrder(parentOrder) {
   `;
 }
 
-// Stamps a resolution onto the SAME live row assignEscalationOrder created - same relationship
-// disposeNdrLead has to claimNdrLead. Targets the one row guaranteed unique by the partial
-// index (reassigned_away_at IS NULL AND last_updated_at IS NULL), so calling resolve twice on an
-// already-resolved order is safely a no-op. Silently a no-op if the order was never assigned to
-// anyone (WHERE matches zero rows) - resolving an unassigned order still writes to the sheet
-// (the desk's real source of truth) via updateOrder/batchUpdateOrders; this table is only the
-// durable history side, so having nothing to update here is not an error.
+// Stamps a resolution onto the SAME row this order already has - same relationship
+// disposeNdrLead has to claimNdrLead. Prefers the live row (reassigned_away_at IS NULL AND
+// last_updated_at IS NULL, guaranteed unique by the partial index); if this order's live cycle
+// already got closed out from under it (reassigned away, or already resolved by an earlier call -
+// re-import, a double-submit, whatever), falls back to the most recently assigned row for this
+// parent_order instead of leaving it untouched. Without that fallback, resolving a non-live order
+// used to fall straight through to the cold-insert branch below and spawn a second, email-less,
+// disconnected row for an order that already had one - duplicating history instead of updating it.
+// Only actually inserts when NO row exists for this parent_order at all (both subqueries NULL).
+// Silently a no-op if the order was never assigned to anyone (WHERE matches zero rows) - resolving
+// an unassigned order still writes to the sheet (the desk's real source of truth) via
+// updateOrder/batchUpdateOrders; this table is only the durable history side, so having nothing to
+// update here is not an error.
 // Writes tat_days (the raw day count) and never tat_to_resolve - that one is a generated column
 // holding the bucket label, which Postgres recomputes from delivered_at/assigned_at on this same
 // write. Assigning to it would be an error, not a no-op.
@@ -1236,7 +1242,12 @@ async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks
         new_order_id = ${newOrderId || null}, new_awb = ${newAwb || null},
         delivered_at = CASE WHEN ${resolution} = 'Delivered' THEN now() ELSE delivered_at END,
         tat_days = EXTRACT(EPOCH FROM (now() - assigned_at)) / 86400.0
-    WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND last_updated_at IS NULL
+    WHERE id = COALESCE(
+      (SELECT id FROM escalation_lead_assignments
+        WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND last_updated_at IS NULL LIMIT 1),
+      (SELECT id FROM escalation_lead_assignments
+        WHERE parent_order = ${parentOrder} ORDER BY assigned_at DESC LIMIT 1)
+    )
     RETURNING parent_order
   `;
   if (rows.length === 0) {
