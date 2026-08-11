@@ -2,7 +2,7 @@ name: Sync escalation ticket data into escalation_lead_assignments
 
 on:
   schedule:
-    - cron: '0 */2 * * *'   # every 2 hours, matching the existing ticket-sync cadence
+    - cron: '0 */3 * * *'   # every 3 hours
   workflow_dispatch:
     inputs:
       since:
