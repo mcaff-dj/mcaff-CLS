@@ -1289,35 +1289,26 @@ async function getLiveEscalationAssignments() {
 async function getEscalationOrders() {
   await ensurePgSchema();
   const { rows } = await pgSql`
-    SELECT t.brand, t.parent_order, t.awb_number, t.added_date, t.query_class, t.query_category,
-           t.delivery_partner_name, t.order_date, t.order_month, t.query_date, t.query_month,
-           t.wh_name, t.ticket_number, t.total_times_user_reached,
-           a.resolution, a.agent_remarks, a.new_order_id, a.new_awb
-    FROM escalation_tickets t
-    LEFT JOIN LATERAL (
-      SELECT resolution, agent_remarks, new_order_id, new_awb, last_updated_at
-      FROM escalation_lead_assignments a
-      WHERE a.parent_order = t.parent_order
-      ORDER BY a.assigned_at DESC
-      LIMIT 1
-    ) a ON true
-    WHERE a.last_updated_at IS NULL
+    SELECT DISTINCT ON (parent_order)
+      parent_order, email, resolution, agent_remarks, new_order_id, new_awb, last_updated_at
+    FROM escalation_lead_assignments
+    ORDER BY parent_order, assigned_at DESC
   `;
   return rows.map((r) => ({
-    brand: r.brand,
+    brand: '',
     parentOrder: r.parent_order || '',
-    awbNumber: r.awb_number || '',
-    addedDate: r.added_date || '',
-    queryClass: r.query_class || '',
-    queryCategory: r.query_category || '',
-    deliveryPartnerName: r.delivery_partner_name || '',
-    orderDate: r.order_date || '',
-    orderMonth: r.order_month || '',
-    queryDate: r.query_date || '',
-    queryMonth: r.query_month || '',
-    whName: r.wh_name || '',
-    ticketNumber: r.ticket_number || '',
-    totalTimesConsumerReached: r.total_times_user_reached ?? '',
+    awbNumber: '',
+    addedDate: '',
+    queryClass: '',
+    queryCategory: '',
+    deliveryPartnerName: '',
+    orderDate: '',
+    orderMonth: '',
+    queryDate: '',
+    queryMonth: '',
+    whName: '',
+    ticketNumber: '',
+    totalTimesConsumerReached: '',
     newOrderId: r.new_order_id || '',
     awb: r.new_awb || '',
     status: r.resolution || '',
@@ -1343,16 +1334,14 @@ async function getFreshLeads() {
 // Replaces the old getSheetIndexFromBq (which queried BigQuery's orders_sheet_columns).
 async function getEscalationOrderIndex() {
   await ensurePgSchema();
-  const { rows } = await pgSql`SELECT parent_order, awb_number, brand FROM escalation_tickets`;
+  const { rows } = await pgSql`SELECT DISTINCT parent_order FROM escalation_lead_assignments`;
   const byParent = new Map();
   const byParentAwb = new Map();
   rows.forEach((r) => {
     const parent = String(r.parent_order || '').trim().toLowerCase();
     if (!parent) return;
-    const ref = { brand: r.brand };
+    const ref = { brand: '' };
     if (!byParent.has(parent)) byParent.set(parent, ref);
-    const awbKey = String(r.awb_number || '').trim().toLowerCase();
-    if (awbKey) byParentAwb.set(`${parent}||${awbKey}`, ref);
   });
   return { byParent, byParentAwb };
 }
