@@ -147,7 +147,13 @@ def sync(since, dry_run):
     conn = lib.get_pg_connection(os.environ["POSTGRES_URL"])
     inserted = 0
     try:
-        with conn.cursor() as cur:
+        # Pipeline mode batches the network round-trips: each row's UPDATE (and its
+        # conditional INSERT-on-miss) still depends on that row's own prior result, but
+        # psycopg overlaps sending row N+1's queries with receiving row N's replies instead
+        # of a strict wait-then-send per row - this is psycopg's own documented use case for
+        # pipelining (insert-after-failed-update). One flush at the end instead of one round
+        # trip per statement is what actually cuts wall-clock on a remote (Supabase) connection.
+        with conn.pipeline(), conn.cursor() as cur:
             for row in all_rows:
                 cur.execute(UPDATE_LIVE_SQL, row)
                 if cur.rowcount == 0:
