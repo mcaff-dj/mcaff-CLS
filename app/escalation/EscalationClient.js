@@ -734,7 +734,7 @@ function OrderRow({
       if (!res.ok) throw new Error(data.error || 'Save failed');
       setJustSaved(true);
       onToast('success', `Resolved — ${order.parentOrder || 'row'}`);
-      setTimeout(() => onSaved(rowKey(order)), 600);
+      setTimeout(() => onSaved(rowKey(order), resType), 600);
     } catch (err) {
       setError(err.message);
       onToast('error', err.message);
@@ -763,7 +763,10 @@ function OrderRow({
   }
 
   const loc    = [order.city, order.state].filter(Boolean).join(', ');
-  const isRto  = (order.statusAsPerAwb || '').toLowerCase().includes('rto');
+  // `status` is the resolution (api/_lib/db.js's getEscalationOrders maps resolution -> status).
+  // This used to read order.statusAsPerAwb, a field the API has never returned - so the Status
+  // column was blank for every row no matter what the database held.
+  const isRto  = (order.status || '').toLowerCase().includes('rto');
   const queryCat = order.queryCategory || '';
   const rowTags   = tags || new Set();
   const escalated = rowTags.has('social');
@@ -811,7 +814,7 @@ function OrderRow({
         {/* Status */}
         <td>
           <span className={`badge${isRto ? ' badgeRto' : ''}`}>
-            {order.statusAsPerAwb || '—'}
+            {order.status || '—'}
           </span>
         </td>
 
@@ -1163,8 +1166,16 @@ export default function EscalationClient() {
   /* --- Handlers --- */
   // Every key below is rowKey(order) ("brand:ticketNumber"), not a bare ticketNumber - see
   // rowKey's own comment for why (HYPHEN and mCaffeine rows are merged into one `orders` list).
-  function handleSaved(key) {
-    setOrders((p) => p.filter((o) => rowKey(o) !== key));
+  // Updates the row in place rather than dropping it from the list. RTO Queue now shows resolved
+  // orders too (see getEligibleOrders' includeResolved), so removing a row on save made the lead
+  // vanish out from under whoever just resolved it - and a reload would bring it straight back.
+  // Fresh Leads is still pending-only server-side, so a resolved row there is dropped as before.
+  function handleSaved(key, resolvedStatus) {
+    if (view === 'freshLeads') {
+      setOrders((p) => p.filter((o) => rowKey(o) !== key));
+    } else {
+      setOrders((p) => p.map((o) => (rowKey(o) === key ? { ...o, status: resolvedStatus || o.status } : o)));
+    }
     setExpandedRow(null);
     setSelectedRows((p) => { const n = new Set(p); n.delete(key); return n; });
     setResolvedCount((c) => c + 1);
@@ -1216,7 +1227,11 @@ export default function EscalationClient() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Bulk update failed');
-      setOrders((p) => p.filter((o) => !selectedRows.has(rowKey(o))));
+      // Same in-place update as handleSaved - see its comment for why resolved rows stay put on
+      // RTO Queue but are still dropped on Fresh Leads.
+      setOrders((p) => (view === 'freshLeads'
+        ? p.filter((o) => !selectedRows.has(rowKey(o)))
+        : p.map((o) => (selectedRows.has(rowKey(o)) ? { ...o, status } : o))));
       setResolvedCount((c) => c + items.length);
       setSelectedRows(new Set());
       showToast('success', `${data.updated} orders marked as "${status}"`);
@@ -1257,7 +1272,11 @@ export default function EscalationClient() {
     if (keys?.length) {
       const done = new Set(keys);
       const orderKey = (o) => `${o.brand}:${o.parentOrder}`;
-      setOrders((p) => p.filter((o) => !done.has(orderKey(o))));
+      // A CSV carries a DIFFERENT status per row, so unlike handleSaved/handleBulkApply there's no
+      // single value to patch in - refetch instead of guessing. Fresh Leads still just drops the
+      // resolved rows (they're gone from its pending-only query anyway).
+      if (view === 'freshLeads') setOrders((p) => p.filter((o) => !done.has(orderKey(o))));
+      else load();
       setResolvedCount((c) => c + keys.length);
       setSelectedRows((p) => {
         const n = new Set(p);
@@ -1321,7 +1340,7 @@ export default function EscalationClient() {
           .filter(Boolean).some((v) => String(v).toLowerCase().includes(q));
         if (!hit) return false;
       }
-      if (filterStatus   && !String(o.statusAsPerAwb || '').toLowerCase().includes(filterStatus)) return false;
+      if (filterStatus   && !String(o.status || '').toLowerCase().includes(filterStatus)) return false;
       if (filterPartner  && o.deliveryPartnerName !== filterPartner) return false;
       if (filterPriority && getPriority(o.totalTimesConsumerReached).level !== filterPriority) return false;
       if (filterAgent) {

@@ -208,7 +208,9 @@ const handler = async (req, res) => {
         : (await (req.query.type === 'fresh-leads' ? getFreshLeads(20000) : getEligibleOrders(20000))).orders.map((o) => ({
             HYP_Parent_OrderID: o.parentOrder,
             AWB_Number: o.awbNumber,
-            Status_1: o.statusAsPerAwb,
+            // `status` (the resolution), not the never-populated statusAsPerAwb this used to read -
+            // Status_1 exported blank for every row.
+            Status_1: o.status,
             'New Order ID': '',
             'New AWB / Tracking': '',
             Status_2: '',
