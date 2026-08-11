@@ -110,10 +110,12 @@ row sharing that order, consistent with resolution's own `(brand, parent_order)`
   highlight-matching effect) switches to this.
 - `update`/`assign` fetch payloads drop `rowNumber`/`sheetTab`, send `parentOrder` (+ `newOrderId`,
   `newAwb`, `newStatus`, `notes` for `update`; `agentId` for `assign`).
-- **Auto-Assign-All's candidate filter is a real fix, not just a rename**: it currently does
-  `.filter((i) => i.rowNumber && i.sheetTab)` — with both fields gone, this would silently filter
-  out every candidate and the button would stop assigning anything. Filter becomes
-  `.filter((i) => i.parentOrder)`.
+- **`handleBulkApply`'s (the "mark selected as Delivered" bulk action) candidate filter is a real
+  fix, not just a rename**: it currently builds `{ rowNumber, sheetTab, parentOrder }` per selected
+  row and does `.filter((i) => i.rowNumber && i.sheetTab)` — with both fields gone, this would
+  silently filter out every selected row and the button would resolve nothing. Becomes
+  `{ parentOrder }` filtered by `.filter((i) => i.parentOrder)`. (`handleAutoAssign` already only
+  ever used `parentOrder`/`agentId` — nothing to fix there.)
 - Fields that render Sheet-sourced data (`city`/`state` location string, `statusAsPerAwb` RTO
   badge, the Status filter dropdown) are left as-is — they already tolerate missing data and will
   just show blank/inert until tab-wise filtering rules are specified. Not touched in this change.
