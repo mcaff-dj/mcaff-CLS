@@ -56,8 +56,10 @@ const handler = async (req, res) => {
 
     if (action === 'orders') {
       if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
-      const orders = req.query.type === 'fresh-leads' ? await getFreshLeads() : await getEligibleOrders();
-      return res.status(200).json({ orders });
+      // { orders, total } - total is the true pending count, which can exceed the rows returned
+      // (see getEscalationOrders' cap, and why an uncapped response 500s at the Lambda layer).
+      const { orders, total } = req.query.type === 'fresh-leads' ? await getFreshLeads() : await getEligibleOrders();
+      return res.status(200).json({ orders, total });
     }
 
     if (action === 'assign') {
@@ -195,7 +197,10 @@ const handler = async (req, res) => {
             Status_2: 'Reshipped',
             Notes: 'Customer confirmed new address',
           }]
-        : (await (req.query.type === 'fresh-leads' ? getFreshLeads() : getEligibleOrders())).map((o) => ({
+        // Higher cap than the queue's: a CSV row is 7 short columns, not the queue's 18, so far
+        // more rows fit in the same 6MB response. Still capped - an uncapped read is what broke
+        // the queue.
+        : (await (req.query.type === 'fresh-leads' ? getFreshLeads(20000) : getEligibleOrders(20000))).orders.map((o) => ({
             HYP_Parent_OrderID: o.parentOrder,
             AWB_Number: o.awbNumber,
             Status_1: o.statusAsPerAwb,

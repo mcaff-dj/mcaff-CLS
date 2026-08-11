@@ -1283,23 +1283,48 @@ async function getLiveEscalationAssignments() {
 // and sits OUTSIDE the DISTINCT ON - inside it, an order whose latest cycle is resolved would be
 // resurrected by an older unresolved cycle, since DISTINCT ON would then pick the most recent of
 // only the surviving rows. An order never assigned still passes (its columns are NULL). No
-// predicate beyond that - RTO Queue and Fresh Leads both currently return every pending row;
+// predicate beyond that - RTO Queue and Fresh Leads both return the same pending rows;
 // brand/tab-specific filtering rules are a follow-up, not implemented here.
-async function getEscalationOrders() {
+//
+// Capped, and returns { orders, total } rather than a bare array. Restoring the pending filter
+// above was not on its own enough to keep this response under Lambda's 6MB limit: the ticket sync
+// (scripts/sync_delivery_tickets_to_pg.py) inserts a LIVE row per order, so nearly every row in
+// the table is pending and the filter removes far less than it looks like it should. Past the
+// limit Lambda never gets to return at all - API Gateway substitutes its own opaque
+// {"message":"Internal server error"}, which is what the desk showed as "Failed to load". `total`
+// is the true unfiltered pending count, so a truncated response is visible to the caller (the
+// client shows a banner) instead of silently looking like the whole queue.
+const ESCALATION_ORDERS_LIMIT = 2000;
+
+async function getEscalationOrders(limit = ESCALATION_ORDERS_LIMIT) {
   await ensurePgSchema();
+  // Newest cycles first, so a truncated response keeps the orders most likely to still need
+  // action rather than an arbitrary slice.
   const { rows } = await pgSql`
     SELECT * FROM (
       SELECT DISTINCT ON (parent_order)
         parent_order, email, resolution, agent_remarks, new_order_id, new_awb, last_updated_at,
-        brand, ticket_number, awb_number, added_date, query_class, query_category,
+        assigned_at, brand, ticket_number, awb_number, added_date, query_class, query_category,
         delivery_partner_name, order_date, order_month, query_date, query_month, wh_name,
         total_times_user_reached
       FROM escalation_lead_assignments
       ORDER BY parent_order, assigned_at DESC
     ) latest
     WHERE last_updated_at IS NULL
+    ORDER BY assigned_at DESC
+    LIMIT ${limit}
   `;
-  return rows.map((r) => ({
+  // Counted over the same DISTINCT ON set, not over raw rows - one order with five past cycles is
+  // one pending order, and a count that disagreed with the list would make the banner nonsense.
+  const { rows: countRows } = await pgSql`
+    SELECT count(*)::int AS total FROM (
+      SELECT DISTINCT ON (parent_order) parent_order, last_updated_at
+      FROM escalation_lead_assignments
+      ORDER BY parent_order, assigned_at DESC
+    ) latest
+    WHERE last_updated_at IS NULL
+  `;
+  const orders = rows.map((r) => ({
     brand: r.brand || '',
     parentOrder: r.parent_order || '',
     awbNumber: r.awb_number || '',
@@ -1319,6 +1344,7 @@ async function getEscalationOrders() {
     status: r.resolution || '',
     notes: r.agent_remarks || '',
   }));
+  return { orders, total: (countRows[0] && countRows[0].total) || orders.length };
 }
 
 // getEligibleOrders/getFreshLeads both call the one query above and currently return identical
@@ -1326,12 +1352,12 @@ async function getEscalationOrders() {
 // deduplicated) because api/escalation/[action].js's `orders`/`export` actions already branch on
 // req.query.type === 'fresh-leads' to pick one or the other, and tab-wise rules that will one day
 // make them differ are a known follow-up, not this task's job.
-async function getEligibleOrders() {
-  return getEscalationOrders();
+async function getEligibleOrders(limit) {
+  return getEscalationOrders(limit);
 }
 
-async function getFreshLeads() {
-  return getEscalationOrders();
+async function getFreshLeads(limit) {
+  return getEscalationOrders(limit);
 }
 
 // CSV import's row-matching index - a matched row only needs to confirm the order exists and

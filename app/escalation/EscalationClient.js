@@ -1072,6 +1072,7 @@ export default function EscalationClient() {
   const [taggedRows,    setTaggedRows]    = useState(new Map());
 
   // Data
+  const [pendingTotal, setPendingTotal] = useState(0);
   const [agents,       setAgents]       = useState([]);
   const [assignments,  setAssignments]  = useState({});
   const [resolvedCount, setResolvedCount] = useState(0);
@@ -1128,6 +1129,10 @@ export default function EscalationClient() {
       const [od, ad] = await Promise.all([readJson(ordersRes), readJson(assignRes)]);
       if (!ordersRes.ok) throw new Error(od.error || `Failed to load (HTTP ${ordersRes.status}${od._raw ? `: ${od._raw}` : ''})`);
       setOrders(od.orders);
+      // The server caps how many pending orders one response can carry (an uncapped response
+      // exceeds Lambda's 6MB limit and fails before it is ever sent) - `total` is the real count,
+      // so the shortfall gets said out loud rather than looking like an empty tail of the queue.
+      setPendingTotal(typeof od.total === 'number' ? od.total : od.orders.length);
       // Server now keys assignments by parentOrder (no sheet read needed to translate to a
       // row number - see api/escalation/[action].js's assign GET) - join against the orders
       // we already have so the rest of this file can keep working off rowKey.
@@ -1357,8 +1362,11 @@ export default function EscalationClient() {
   const rangeStart = filtered.length === 0 ? 0 : startIdx + 1;
   const rangeEnd   = Math.min(startIdx + pageSize, filtered.length);
 
-  // Stats
+  // Stats. Every count here is over the rows actually loaded, so the stat cards keep adding up
+  // (assigned + unassigned = the table) - `pendingTotal` from the server can be larger, and that
+  // gap is reported on its own below rather than smuggled into these numbers.
   const totalPending    = orders.length;
+  const truncated       = pendingTotal > totalPending;
   const assignedCount   = Object.keys(assignments).filter((k) => orders.some((o) => rowKey(o) === k)).length;
   const unassignedCount = totalPending - assignedCount;
   const highCount       = orders.filter((o) => getPriority(o.totalTimesConsumerReached).level === 'high').length;
@@ -1478,7 +1486,7 @@ export default function EscalationClient() {
             <div>
               <h1 className="pageTitle">{view === 'freshLeads' ? 'Fresh Leads' : 'RTO Action Queue'}</h1>
               <p className="pageSubtitle">
-                Google Sheet-backed resolution · sorted by priority · {totalPending} {view === 'freshLeads' ? 'leads' : 'orders'} pending
+                Google Sheet-backed resolution · sorted by priority · {truncated ? `${totalPending} of ${pendingTotal}` : totalPending} {view === 'freshLeads' ? 'leads' : 'orders'} pending
               </p>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1546,6 +1554,13 @@ export default function EscalationClient() {
           {error && (
             <div className="banner bannerError" role="alert">
               <Icon path={I.alert} size={12} /> {error}
+            </div>
+          )}
+
+          {truncated && (
+            <div className="banner bannerError" role="status">
+              <Icon path={I.alert} size={12} />
+              Showing the {totalPending} most recent of {pendingTotal} pending {view === 'freshLeads' ? 'leads' : 'orders'} — one response cannot carry them all. Resolve or filter down the backlog to see the rest.
             </div>
           )}
 
