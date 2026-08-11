@@ -17,9 +17,10 @@ COALESCE in the UPDATE means a second run - or the live cron sync running in bet
 clobbered by older Sheet data: a column already set (by an earlier run of this script or by the
 cron job) is left alone. Only fills gaps.
 
-Matches scripts/sync_delivery_tickets_to_pg.py's write shape: UPDATE the order's live row
-(reassigned_away_at IS NULL AND last_updated_at IS NULL), INSERT a fresh live row (email NULL) if
-none exists yet.
+Matches scripts/sync_delivery_tickets_to_pg.py's write shape: UPDATE the order's most-recently-
+assigned row (resolved or not), INSERT a fresh row (email NULL) only if none exists yet - NOT the
+old "live row or insert" shape, which reopened a bogus new cycle on every re-run against an order
+that had already been resolved.
 """
 import argparse
 import os
@@ -57,7 +58,10 @@ UPDATE_LIVE_SQL = """
         query_month = COALESCE(query_month, %(query_month)s),
         wh_name = COALESCE(wh_name, %(wh_name)s),
         ticket_loaded_at = COALESCE(ticket_loaded_at, now())
-    WHERE parent_order = %(parent_order)s AND reassigned_away_at IS NULL AND last_updated_at IS NULL
+    WHERE id = (
+        SELECT id FROM escalation_lead_assignments
+        WHERE parent_order = %(parent_order)s ORDER BY assigned_at DESC LIMIT 1
+    )
 """
 
 INSERT_LIVE_SQL = """

@@ -8,12 +8,14 @@ escalation_lead_assignments at read time - but that join was never actually wire
 api/_lib/db.js's getEscalationOrders, so the columns went unread. This merges ticket fields
 directly onto escalation_lead_assignments instead (see
 docs/superpowers/specs/2026-08-11-escalation-drop-bq-and-sheet-design.md for the now-superseded
-two-table design). One order can have multiple MySQL tickets over time but only one live
-assignment row, so this writes onto whichever row is currently "live" (reassigned_away_at IS NULL
-AND last_updated_at IS NULL) for that parent_order, inserting a fresh live row (email NULL) if
-none exists yet - same pattern resolveEscalationAssignment (api/_lib/db.js) already uses for
-orders resolved without ever being assigned. Last-synced ticket wins when an order has more than
-one ticket.
+two-table design). One order can have multiple MySQL tickets over time but only one row should
+own its ticket columns at a time, so this writes onto whichever row is most recently assigned for
+that parent_order - resolved or not - inserting a fresh row (email NULL) only if the order has no
+row at all yet. Matches resolveEscalationAssignment's (api/_lib/db.js) fallback-to-most-recent-row
+logic - NOT the plain "live row or insert" this script used before, which re-opened a bogus new
+cycle (blank status, blank assignee, fresh assigned_at) on every sync of an order that had already
+been resolved, since a resolved order has no "live" row for the old WHERE to match. Last-synced
+ticket wins when an order has more than one ticket.
 
 Reuses sync_delivery_tickets_to_sheet.py's MySQL query, row-building, and AWB-backfill functions
 by import instead of re-implementing "which tickets count" a second time - that script is NOT
@@ -47,11 +49,11 @@ TICKET_FIELDS = [
     "query_month", "wh_name",
 ]
 
-# Two-step write per ticket row: try the live row for this order first (the common case - an
-# order already has an assignment/eligibility row), fall back to inserting a fresh live row
-# (email NULL) when none exists yet. Can't be a single ON CONFLICT upsert - unlike the old
-# escalation_tickets table (PK brand+ticket_number), escalation_lead_assignments has no unique
-# constraint ticket data alone can target, only the partial "live row per parent_order" index.
+# Two-step write per ticket row: try the most-recently-assigned row for this order first (the
+# common case - an order already has an assignment/eligibility row), fall back to inserting a
+# fresh row (email NULL) only when none exists yet. Can't be a single ON CONFLICT upsert - unlike
+# the old escalation_tickets table (PK brand+ticket_number), escalation_lead_assignments has no
+# unique constraint ticket data alone can target.
 UPDATE_LIVE_SQL = """
     UPDATE escalation_lead_assignments
     SET brand = %(brand)s, ticket_number = %(ticket_number)s, awb_number = %(awb_number)s,
@@ -60,7 +62,10 @@ UPDATE_LIVE_SQL = """
         order_month = %(order_month)s, query_date = %(query_date)s, query_month = %(query_month)s,
         wh_name = %(wh_name)s, total_times_user_reached = %(total_times_user_reached)s,
         ticket_loaded_at = %(loaded_at)s
-    WHERE parent_order = %(parent_order)s AND reassigned_away_at IS NULL AND last_updated_at IS NULL
+    WHERE id = (
+        SELECT id FROM escalation_lead_assignments
+        WHERE parent_order = %(parent_order)s ORDER BY assigned_at DESC LIMIT 1
+    )
 """
 
 INSERT_LIVE_SQL = """
