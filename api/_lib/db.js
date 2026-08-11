@@ -673,6 +673,33 @@ async function bootstrapPgSchema() {
   // email becomes nullable: resolveEscalationAssignment now INSERTs a row for orders resolved
   // without ever being assigned (see that function below) - such a row genuinely has no agent.
   await pgSql`ALTER TABLE escalation_lead_assignments ALTER COLUMN email DROP NOT NULL`;
+  // Ticket data for the Escalation desk - previously BigQuery's Delivery_escalation, moved here
+  // so the read path is one query (this table LEFT JOINed with escalation_lead_assignments)
+  // instead of two systems merged in JavaScript. Populated by
+  // scripts/sync_delivery_tickets_to_pg.py, upserted every 2h, not written by the app itself.
+  // Date-shaped columns stay TEXT - they're display-formatted strings
+  // (sync_delivery_tickets_to_sheet.py's build_sheet_row), not real timestamps.
+  await pgSql`
+    CREATE TABLE IF NOT EXISTS escalation_tickets (
+      brand TEXT NOT NULL,
+      ticket_number TEXT NOT NULL,
+      parent_order TEXT NOT NULL,
+      awb_number TEXT,
+      added_date TEXT,
+      query_class TEXT,
+      query_category TEXT,
+      delivery_partner_name TEXT,
+      order_date TEXT,
+      order_month TEXT,
+      query_date TEXT,
+      query_month TEXT,
+      wh_name TEXT,
+      total_times_user_reached INTEGER,
+      loaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (brand, ticket_number)
+    )
+  `;
+  await pgSql`CREATE INDEX IF NOT EXISTS escalation_tickets_parent_order_idx ON escalation_tickets (parent_order)`;
   } catch (e) {
     // Postgres codes for "already exists" (duplicate_column/duplicate_table/duplicate_object)
     // - a benign race, not a real failure: every statement above is its own ADD COLUMN IF NOT
@@ -1228,6 +1255,86 @@ async function getLiveEscalationAssignments() {
     WHERE reassigned_away_at IS NULL AND resolved_at IS NULL
   `;
   return rows.map((r) => ({ parentOrder: r.parent_order, email: r.email }));
+}
+
+// Escalation desk's read path - one query, replacing what used to be a BigQuery query plus a
+// JavaScript-side merge against getEscalationAssignments (two systems, because ticket data and
+// resolution data used to live in different databases; now they're both here). The LATERAL
+// join picks the single most-recent assignment row per order (highest assigned_at) - the same
+// "most recent wins" rule the old JS Map-based merge applied by keeping the first-seen row from
+// an assigned_at DESC list. WHERE a.resolved_at IS NULL drops already-resolved orders; an order
+// with no assignment row at all still passes (LEFT JOIN LATERAL ... ON true leaves a.* all NULL,
+// and NULL IS NULL is true). No predicate beyond that - RTO Queue and Fresh Leads both currently
+// return every row; brand/tab-specific filtering rules are a follow-up, not implemented here.
+async function getEscalationOrders() {
+  await ensurePgSchema();
+  const { rows } = await pgSql`
+    SELECT t.brand, t.parent_order, t.awb_number, t.added_date, t.query_class, t.query_category,
+           t.delivery_partner_name, t.order_date, t.order_month, t.query_date, t.query_month,
+           t.wh_name, t.ticket_number, t.total_times_user_reached,
+           a.resolution, a.agent_remarks, a.new_order_id, a.new_awb
+    FROM escalation_tickets t
+    LEFT JOIN LATERAL (
+      SELECT resolution, agent_remarks, new_order_id, new_awb, resolved_at
+      FROM escalation_lead_assignments a
+      WHERE a.parent_order = t.parent_order
+      ORDER BY a.assigned_at DESC
+      LIMIT 1
+    ) a ON true
+    WHERE a.resolved_at IS NULL
+  `;
+  return rows.map((r) => ({
+    brand: r.brand,
+    parentOrder: r.parent_order || '',
+    awbNumber: r.awb_number || '',
+    addedDate: r.added_date || '',
+    queryClass: r.query_class || '',
+    queryCategory: r.query_category || '',
+    deliveryPartnerName: r.delivery_partner_name || '',
+    orderDate: r.order_date || '',
+    orderMonth: r.order_month || '',
+    queryDate: r.query_date || '',
+    queryMonth: r.query_month || '',
+    whName: r.wh_name || '',
+    ticketNumber: r.ticket_number || '',
+    totalTimesConsumerReached: r.total_times_user_reached ?? '',
+    newOrderId: r.new_order_id || '',
+    awb: r.new_awb || '',
+    status: r.resolution || '',
+    notes: r.agent_remarks || '',
+  }));
+}
+
+// getEligibleOrders/getFreshLeads both call the one query above and currently return identical
+// rows - see getEscalationOrders' own comment. Kept as two names (not one, with call sites
+// deduplicated) because api/escalation/[action].js's `orders`/`export` actions already branch on
+// req.query.type === 'fresh-leads' to pick one or the other, and tab-wise rules that will one day
+// make them differ are a known follow-up, not this task's job.
+async function getEligibleOrders() {
+  return getEscalationOrders();
+}
+
+async function getFreshLeads() {
+  return getEscalationOrders();
+}
+
+// CSV import's row-matching index - a matched row only needs to confirm the order exists and
+// learn its brand (there is no Sheet cell to address anymore, so no row_number is carried).
+// Replaces the old getSheetIndexFromBq (which queried BigQuery's orders_sheet_columns).
+async function getEscalationOrderIndex() {
+  await ensurePgSchema();
+  const { rows } = await pgSql`SELECT parent_order, awb_number, brand FROM escalation_tickets`;
+  const byParent = new Map();
+  const byParentAwb = new Map();
+  rows.forEach((r) => {
+    const parent = String(r.parent_order || '').trim().toLowerCase();
+    if (!parent) return;
+    const ref = { brand: r.brand };
+    if (!byParent.has(parent)) byParent.set(parent, ref);
+    const awbKey = String(r.awb_number || '').trim().toLowerCase();
+    if (awbKey) byParentAwb.set(`${parent}||${awbKey}`, ref);
+  });
+  return { byParent, byParentAwb };
 }
 
 // dateFrom/dateTo are inclusive "YYYY-MM-DD" strings (or null for unbounded), interpreted
@@ -1855,6 +1962,7 @@ module.exports = {
   claimNdrLead, disposeNdrLead,
   assignEscalationOrder, unassignEscalationOrder, resolveEscalationAssignment, getEscalationAssignments,
   getLiveEscalationAssignments, resolveEscalationAssignmentsBulk,
+  getEligibleOrders, getFreshLeads, getEscalationOrderIndex,
   // Exported for api/_lib/db.retry.test.js only - nothing in the app calls these directly.
   isPoolExhausted, withPgConnectRetry, toTransactionModePooler,
 };
