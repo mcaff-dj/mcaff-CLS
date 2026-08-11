@@ -1,15 +1,19 @@
-name: Sync escalation data to BigQuery
+name: Rebuild escalation_tickets
 
 on:
   schedule:
     - cron: '0 */2 * * *'   # every 2 hours, matching the existing ticket-sync cadence
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Backfill from this date (YYYY-MM-DD) through today; leave blank for today only"
+        required: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: sync-escalation-bq
+  group: sync-escalation-pg
   cancel-in-progress: false
 
 jobs:
@@ -27,19 +31,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Rebuild ticket columns (Delivery_escalation)
+      - name: Sync escalation_tickets from MySQL
         env:
-          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
           MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
           MYSQL_USER: ${{ secrets.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
           MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
           MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
-          BQ_PROJECT_ID: ${{ secrets.BQ_PROJECT_ID }}
-        run: python scripts/sync_delivery_tickets_to_bq.py --rebuild-since 2026-07-01
-
-      - name: Sweep sheet-computed columns (orders_sheet_columns)
-        env:
-          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
-          BQ_PROJECT_ID: ${{ secrets.BQ_PROJECT_ID }}
-        run: python scripts/sync_escalation_sheet_to_bq.py
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+        run: python scripts/sync_delivery_tickets_to_pg.py ${{ github.event.inputs.since && format('--since {0}', github.event.inputs.since) || '' }}
