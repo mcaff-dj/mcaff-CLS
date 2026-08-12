@@ -67,4 +67,5 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
+// Manual deploy trigger touch (2026-08-12) - no functional change.
 module.exports = app;
