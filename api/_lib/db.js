@@ -138,6 +138,45 @@ async function withPgTransaction(work) {
   }
 }
 
+// Short-lived read cache for the handful of queries that pull WHOLE tables back over the wire.
+// This exists for Supabase EGRESS, not latency: getEscalationOrders alone returns up to 2000
+// wide rows (its own comment notes it approaches Lambda's 6MB response cap), and the desk
+// refetches it on every load, every view switch and after every bulk action - so a few agents
+// working a normal day move gigabytes out of Postgres for data that changes far more slowly
+// than it is read (the ticket sync that feeds most of those columns runs every 2 hours).
+//
+// Caches the PROMISE, not the resolved value, so N concurrent requests that arrive together
+// (the common case - one page load fires orders + assignments at once) collapse onto one query
+// instead of racing to fill the same slot. A rejected read evicts itself so a transient failure
+// isn't served for the rest of the TTL.
+//
+// ponytail: per-container, so a write in one warm Lambda cannot invalidate another's copy -
+// staleness is bounded by CACHE_TTL_MS, not by the invalidation calls below (those only make
+// the writer's OWN next read correct immediately, which is what the agent who just clicked
+// sees). If cross-container freshness ever matters, move this to Redis or a LISTEN/NOTIFY
+// channel rather than shortening the TTL to nothing.
+const CACHE_TTL_MS = 30000;
+const readCache = new Map();
+
+function cachedRead(key, fn) {
+  const hit = readCache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.promise;
+  const promise = fn().catch((e) => {
+    // Only evict if this entry is still the live one - a later read may already have replaced it.
+    if (readCache.get(key) && readCache.get(key).promise === promise) readCache.delete(key);
+    throw e;
+  });
+  readCache.set(key, { at: Date.now(), promise });
+  return promise;
+}
+
+// Prefix-scoped so one desk's writes don't throw away another's cached reads.
+function invalidateCache(prefix) {
+  for (const key of readCache.keys()) {
+    if (key.startsWith(prefix)) readCache.delete(key);
+  }
+}
+
 // Fetched once per warm Lambda instance, then reused - same "do it once, cache it"
 // idea as ensureSchema()'s schemaReady flag below.
 async function getPool() {
@@ -757,6 +796,37 @@ async function bootstrapPgSchema() {
   await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS wh_name TEXT`;
   await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS total_times_user_reached INTEGER`;
   await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS ticket_loaded_at TIMESTAMPTZ`;
+  // Last write of ANY kind to this row - the input to the orders endpoint's ETag (see
+  // getEscalationOrdersEtag below), which is what lets an unchanged queue be answered with a
+  // 304 instead of several megabytes of Supabase egress.
+  //
+  // Maintained by a TRIGGER, not by each writer stamping it: the ticket sync
+  // (scripts/sync_delivery_tickets_to_pg.py) and the migration/backfill scripts write this table
+  // directly over their own psycopg connections and never call anything in this file, so a
+  // per-writer column assignment would silently miss them - the desk would then serve a stale 304
+  // for hours after a sync. One trigger covers every writer that exists now or later.
+  //
+  // A timestamp column alone would not be enough either: setEscalationTags changes only `tags`,
+  // touching no existing timestamp, so a max(last_updated_at) fingerprint would miss a tag edit.
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`;
+  await pgSql`
+    CREATE OR REPLACE FUNCTION escalation_touch_updated_at() RETURNS trigger AS $$
+    BEGIN NEW.updated_at = now(); RETURN NEW; END;
+    $$ LANGUAGE plpgsql
+  `;
+  // Created only when absent, checked the same way the escalation partial index above is - an
+  // unconditional DROP + CREATE on every cold start would leave a window on EVERY container start
+  // in which an UPDATE landing right then is not stamped, and that row would then be invisible to
+  // the ETag until something else touched it.
+  const { rows: trgRows } = await pgSql`
+    SELECT 1 FROM pg_trigger WHERE tgname = 'escalation_set_updated_at' AND NOT tgisinternal
+  `;
+  if (trgRows.length === 0) {
+    await pgSql`
+      CREATE TRIGGER escalation_set_updated_at BEFORE UPDATE ON escalation_lead_assignments
+      FOR EACH ROW EXECUTE FUNCTION escalation_touch_updated_at()
+    `;
+  }
   } catch (e) {
     // Postgres codes for "already exists" (duplicate_column/duplicate_table/duplicate_object)
     // - a benign race, not a real failure: every statement above is its own ADD COLUMN IF NOT
@@ -1162,6 +1232,7 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
       rto_reason = COALESCE(lead_assignments.rto_reason, EXCLUDED.rto_reason),
       delivery_partner = COALESCE(EXCLUDED.delivery_partner, lead_assignments.delivery_partner)
   `;
+  invalidateCache('calling:leadDates');
 }
 
 // NDR's own equivalent of the assignment half of record_lead_assignments (scripts/
@@ -1176,6 +1247,7 @@ async function claimNdrLead(awbNumber, email) {
     VALUES (${awbNumber}, ${email})
     ON CONFLICT (awb_number) WHERE reassigned_away_at IS NULL DO NOTHING
   `;
+  invalidateCache('calling:ndrLeadDates');
 }
 
 // NDR's own equivalent of the disposal half of recordLeadDisposition above - updates the
@@ -1190,6 +1262,7 @@ async function disposeNdrLead(awbNumber, disposition, agentRemarks) {
     SET disposed_at = now(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null}
     WHERE awb_number = ${awbNumber} AND reassigned_away_at IS NULL
   `;
+  invalidateCache('calling:ndrLeadDates');
 }
 
 // Escalation's own equivalent of claimNdrLead, but explicit about reassignment: closes any
@@ -1211,6 +1284,7 @@ async function assignEscalationOrder(parentOrder, email) {
     VALUES (${parentOrder}, ${email})
     ON CONFLICT (parent_order) WHERE reassigned_away_at IS NULL AND last_updated_at IS NULL DO NOTHING
   `;
+  invalidateCache('escalation:');
 }
 
 // Clears an order's live assignment (the queue table's "Clear assignment" action) without
@@ -1223,6 +1297,7 @@ async function unassignEscalationOrder(parentOrder) {
     SET reassigned_away_at = now()
     WHERE parent_order = ${parentOrder} AND reassigned_away_at IS NULL AND last_updated_at IS NULL
   `;
+  invalidateCache('escalation:');
 }
 
 // Stamps a resolution onto the SAME row this order already has - same relationship
@@ -1279,6 +1354,7 @@ async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks
               ${newOrderId || null}, ${newAwb || null}, ${updatedBy || null}, ${deliveredAt})
     `;
   }
+  invalidateCache('escalation:');
 }
 
 // Replaces an order's whole tag set (the client sends the full set after each toggle, so there's
@@ -1296,6 +1372,7 @@ async function setEscalationTags(parentOrder, tags) {
       WHERE parent_order = ${parentOrder} ORDER BY assigned_at DESC LIMIT 1
     )
   `;
+  invalidateCache('escalation:');
 }
 
 // bulk-update's own equivalent of resolveEscalationAssignment, for many orders sharing the
@@ -1312,6 +1389,7 @@ async function resolveEscalationAssignmentsBulk(parentOrders, resolution, update
         tat_days = EXTRACT(EPOCH FROM (now() - assigned_at)) / 86400.0
     WHERE parent_order = ANY(${parentOrders}::text[]) AND reassigned_away_at IS NULL AND last_updated_at IS NULL
   `;
+  invalidateCache('escalation:');
 }
 
 // Full history, newest first. No date filtering here on purpose: "assigned this week" and
@@ -1326,7 +1404,11 @@ async function resolveEscalationAssignmentsBulk(parentOrders, resolution, update
 // ever exceeds 5000 rows, add either pagination to the Assignments UI or a date-range param
 // here (getLiveEscalationAssignments below covers the actually-common "who's live right now"
 // case without touching history size at all).
-async function getEscalationAssignments() {
+function getEscalationAssignments() {
+  return cachedRead('escalation:assignments', fetchEscalationAssignments);
+}
+
+async function fetchEscalationAssignments() {
   await ensurePgSchema();
   const { rows } = await pgSql`
     SELECT parent_order, email, assigned_at, reassigned_away_at, last_updated_at, resolution, agent_remarks,
@@ -1361,7 +1443,11 @@ async function getEscalationAssignments() {
 // { agentId: null } entry per order - a TRUTHY object - so the client counted them as assigned,
 // rendered an empty "?" chip instead of the agent name, and hid the Assign dropdown that chip
 // replaces, making those orders impossible to assign at all.
-async function getLiveEscalationAssignments() {
+function getLiveEscalationAssignments() {
+  return cachedRead('escalation:live', fetchLiveEscalationAssignments);
+}
+
+async function fetchLiveEscalationAssignments() {
   await ensurePgSchema();
   const { rows } = await pgSql`
     SELECT parent_order, email FROM escalation_lead_assignments
@@ -1392,7 +1478,38 @@ async function getLiveEscalationAssignments() {
 // client shows a banner) instead of silently looking like the whole queue.
 const ESCALATION_ORDERS_LIMIT = 2000;
 
-async function getEscalationOrders(limit = ESCALATION_ORDERS_LIMIT, { includeResolved = false } = {}) {
+// Cheap fingerprint of everything getEscalationOrders' response is derived from, so the route can
+// answer an unchanged queue with a 304 and move ~60 bytes out of Supabase instead of the several
+// megabytes the full response costs. This is the lever that survives all-columns-required: it
+// doesn't shrink the payload, it stops sending it when nothing changed.
+//
+// Deliberately whole-table, not restricted to the DISTINCT ON "latest cycle per order" set the
+// response actually shows. A write to a non-latest row can't change the response, so this errs
+// toward an extra refetch - which is correct-but-wasteful, the only direction that is safe here.
+// The opposite error (a change this misses) serves a stale 304 for as long as the browser keeps
+// the entry, which is exactly the bug an ETag must never have.
+//
+// count(*) catches inserts (and deletes, if this table ever gets any) even against a clock that
+// moved backwards; max(updated_at) catches in-place edits including tag-only ones. Not cached -
+// a fingerprint has to be current to be worth anything, and it is small enough that running it
+// per request is the point.
+async function getEscalationOrdersFingerprint() {
+  await ensurePgSchema();
+  const { rows } = await pgSql`
+    SELECT count(*)::int AS n, coalesce(extract(epoch FROM max(updated_at))::text, '0') AS t
+    FROM escalation_lead_assignments
+  `;
+  const r = rows[0] || {};
+  return `${r.n || 0}-${r.t || '0'}`;
+}
+
+// By far the heaviest read in this file (see cachedRead's comment) - cached per
+// (limit, includeResolved), which is the full set of inputs the query below varies on.
+function getEscalationOrders(limit = ESCALATION_ORDERS_LIMIT, { includeResolved = false } = {}) {
+  return cachedRead(`escalation:orders:${limit}:${includeResolved}`, () => fetchEscalationOrders(limit, includeResolved));
+}
+
+async function fetchEscalationOrders(limit, includeResolved) {
   await ensurePgSchema();
   // Newest cycles first, so a truncated response keeps the orders most likely to still need
   // action rather than an arbitrary slice. Sorted by whichever happened last - assigned_at alone
@@ -1463,6 +1580,32 @@ async function getEligibleOrders(limit) {
 
 async function getFreshLeads(limit) {
   return getEscalationOrders(limit);
+}
+
+// The CSV export's own read. It used to reuse getEligibleOrders/getFreshLeads at limit 20000,
+// which pulled every displayed column for ten times the queue's row count to fill a CSV that
+// only ever writes three of them (see the export action's row mapping) - the single largest
+// read this app could issue, and one click could cost more egress than a day of queue loads.
+// Deliberately NOT cached: an export is rare, so a hit is unlikely, while a miss would park
+// tens of thousands of rows in the container's cache for the TTL.
+async function getEscalationOrdersForExport(limit, { includeResolved = false } = {}) {
+  await ensurePgSchema();
+  const { rows } = await pgSql`
+    SELECT * FROM (
+      SELECT DISTINCT ON (parent_order)
+        parent_order, awb_number, resolution, last_updated_at, assigned_at
+      FROM escalation_lead_assignments
+      ORDER BY parent_order, assigned_at DESC
+    ) latest
+    WHERE ${includeResolved} OR last_updated_at IS NULL
+    ORDER BY COALESCE(last_updated_at, assigned_at) DESC
+    LIMIT ${limit}
+  `;
+  return rows.map((r) => ({
+    parentOrder: r.parent_order || '',
+    awbNumber: r.awb_number || '',
+    status: r.resolution || '',
+  }));
 }
 
 // CSV import's row-matching index - a matched row only needs to confirm the order exists and
@@ -2074,7 +2217,11 @@ async function getCallingOverviewData(query) {
 // reading it unfiltered here would risk matching an order_id to a RETIRED cycle's dates
 // (whichever row Postgres happens to return last), not the live one the sheet and this
 // function's caller both mean.
-async function getAllLeadDates() {
+function getAllLeadDates() {
+  return cachedRead('calling:leadDates', fetchAllLeadDates);
+}
+
+async function fetchAllLeadDates() {
   await ensurePgSchema();
   const { rows } = await pgSql`SELECT order_id, assigned_at, disposed_at FROM lead_assignments_current`;
   const out = {};
@@ -2086,7 +2233,11 @@ async function getAllLeadDates() {
 // - see claimNdrLead/disposeNdrLead) rather than order_id. WHERE reassigned_away_at IS NULL for
 // the same reason getAllLeadDates reads lead_assignments_current instead of the base table: only
 // the current cycle's dates matter to whatever's on screen right now.
-async function getAllNdrLeadDates() {
+function getAllNdrLeadDates() {
+  return cachedRead('calling:ndrLeadDates', fetchAllNdrLeadDates);
+}
+
+async function fetchAllNdrLeadDates() {
   await ensurePgSchema();
   const { rows } = await pgSql`
     SELECT awb_number, assigned_at, disposed_at FROM ndr_lead_assignments WHERE reassigned_away_at IS NULL
@@ -2110,7 +2261,9 @@ module.exports = {
   claimNdrLead, disposeNdrLead,
   assignEscalationOrder, unassignEscalationOrder, resolveEscalationAssignment, getEscalationAssignments,
   getLiveEscalationAssignments, resolveEscalationAssignmentsBulk, setEscalationTags,
-  getEligibleOrders, getFreshLeads, getEscalationOrderIndex,
-  // Exported for api/_lib/db.retry.test.js only - nothing in the app calls these directly.
-  isPoolExhausted, withPgConnectRetry, toTransactionModePooler,
+  getEligibleOrders, getFreshLeads, getEscalationOrderIndex, getEscalationOrdersForExport,
+  getEscalationOrdersFingerprint,
+  // Exported for api/_lib/db.retry.test.js and db.cache.test.js only - nothing in the app calls
+  // these directly.
+  isPoolExhausted, withPgConnectRetry, toTransactionModePooler, cachedRead, invalidateCache, CACHE_TTL_MS,
 };

@@ -18,8 +18,21 @@ const {
   getCallingProcessAgents, assignEscalationOrder, unassignEscalationOrder,
   resolveEscalationAssignment, getEscalationAssignments,
   getLiveEscalationAssignments, resolveEscalationAssignmentsBulk, setEscalationTags,
-  getEligibleOrders, getFreshLeads, getEscalationOrderIndex,
+  getEligibleOrders, getFreshLeads, getEscalationOrderIndex, getEscalationOrdersForExport,
+  getEscalationOrdersFingerprint,
 } = require('../_lib/db');
+
+// If-None-Match is a LIST (RFC 9110), and a proxy or the browser may hand back several entries or
+// an entry stripped of its W/ prefix - so this compares weakly, per tag, rather than testing the
+// raw header for equality. Getting this wrong is only ever a performance bug (a missed 304), never
+// a correctness one: a false NEGATIVE just resends the rows. A false positive would serve stale
+// data, which is why '*' is not honoured here - nothing issues it against this endpoint, and
+// treating it as a match would 304 a client that has no copy at all.
+function etagMatches(header, etag) {
+  if (!header) return false;
+  const strip = (t) => t.trim().replace(/^W\//, '');
+  return String(header).split(',').some((t) => strip(t) === strip(etag));
+}
 
 // The only tag keys that can be stored - mirrors TAGS in app/escalation/EscalationClient.js.
 // Validated here rather than trusting the client: `tags` is written straight into a TEXT[] and
@@ -61,9 +74,28 @@ const handler = async (req, res) => {
 
     if (action === 'orders') {
       if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+      // This response is the app's largest Supabase egress item and the desk refetches it on every
+      // load, view switch and bulk action - so revalidate before resending. The ETag is a
+      // fingerprint of the whole table (getEscalationOrdersFingerprint), and on a match the
+      // expensive query never runs at all: the browser replays its own cached copy and Postgres
+      // moves ~60 bytes instead of megabytes.
+      //
+      // `no-cache` means STORE but always revalidate - not "don't cache" (that is `no-store`).
+      // `private` keeps any shared proxy from holding one desk's rows. Nothing changes in
+      // EscalationClient.js: a plain fetch() of a URL the browser has an ETag for sends
+      // If-None-Match on its own and serves the cached body on a 304, so res.json() still sees
+      // the full { orders, total }.
+      const type = req.query.type === 'fresh-leads' ? 'fresh-leads' : 'queue';
+      // Scoped by `type`: the two views hit the same URL path with different query strings and
+      // return different row sets, so one shared fingerprint would let a Fresh Leads copy answer
+      // an RTO Queue request.
+      const etag = `W/"${type}-${await getEscalationOrdersFingerprint()}"`;
+      res.setHeader('ETag', etag);
+      res.setHeader('Cache-Control', 'private, no-cache');
+      if (etagMatches(req.headers['if-none-match'], etag)) return res.status(304).end();
       // { orders, total } - total is the true pending count, which can exceed the rows returned
       // (see getEscalationOrders' cap, and why an uncapped response 500s at the Lambda layer).
-      const { orders, total } = req.query.type === 'fresh-leads' ? await getFreshLeads() : await getEligibleOrders();
+      const { orders, total } = type === 'fresh-leads' ? await getFreshLeads() : await getEligibleOrders();
       return res.status(200).json({ orders, total });
     }
 
@@ -219,8 +251,10 @@ const handler = async (req, res) => {
           }]
         // Higher cap than the queue's: a CSV row is 7 short columns, not the queue's 18, so far
         // more rows fit in the same 6MB response. Still capped - an uncapped read is what broke
-        // the queue.
-        : (await (req.query.type === 'fresh-leads' ? getFreshLeads(20000) : getEligibleOrders(20000))).orders.map((o) => ({
+        // the queue. Reads getEscalationOrdersForExport, not getEligibleOrders/getFreshLeads:
+        // three columns are all this mapping uses, and at 20000 rows the difference is the
+        // largest single read the app can make (see that function's comment).
+        : (await getEscalationOrdersForExport(20000, { includeResolved: req.query.type !== 'fresh-leads' })).map((o) => ({
             HYP_Parent_OrderID: o.parentOrder,
             AWB_Number: o.awbNumber,
             // `status` (the resolution), not the never-populated statusAsPerAwb this used to read -
@@ -245,6 +279,8 @@ const handler = async (req, res) => {
 };
 
 module.exports = handler;
+// Exported for api/_lib/db.cache.test.js only - nothing in the app calls this directly.
+module.exports.etagMatches = etagMatches;
 // The import action accepts a pasted CSV body, so it needs a bigger cap than the 1mb default.
 // Vercel reads this export off the route module; under Lambda the equivalent limit is
 // api/_lambda/app.js's own express.json({ limit }), which is set to match.
