@@ -17,9 +17,14 @@ const { CSV_HEADERS, parseCSV, toCSV } = require('../_lib/escalationCsv');
 const {
   getCallingProcessAgents, assignEscalationOrder, unassignEscalationOrder,
   resolveEscalationAssignment, getEscalationAssignments,
-  getLiveEscalationAssignments, resolveEscalationAssignmentsBulk,
+  getLiveEscalationAssignments, resolveEscalationAssignmentsBulk, setEscalationTags,
   getEligibleOrders, getFreshLeads, getEscalationOrderIndex,
 } = require('../_lib/db');
+
+// The only tag keys that can be stored - mirrors TAGS in app/escalation/EscalationClient.js.
+// Validated here rather than trusting the client: `tags` is written straight into a TEXT[] and
+// read back onto every row, so an unrecognized key would persist forever and render as nothing.
+const VALID_TAGS = ['sos', 'social', 'ceo'];
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'escalation';
@@ -94,6 +99,16 @@ const handler = async (req, res) => {
     if (action === 'assignments') {
       if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
       return res.status(200).json({ assignments: await getEscalationAssignments() });
+    }
+
+    if (action === 'tag') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+      const { parentOrder, tags } = body; // tags = the order's FULL tag set after the toggle
+      if (!parentOrder) return res.status(400).json({ error: 'parentOrder is required' });
+      if (!Array.isArray(tags)) return res.status(400).json({ error: 'tags array is required' });
+      const clean = [...new Set(tags.filter((t) => VALID_TAGS.includes(t)))];
+      await setEscalationTags(parentOrder, clean);
+      return res.status(200).json({ ok: true, tags: clean });
     }
 
     if (action === 'update') {

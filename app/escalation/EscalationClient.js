@@ -383,8 +383,12 @@ function SkeletonRows({ count = 7 }) {
 /* ============================================================
    Bulk Action Bar
    ============================================================ */
-function BulkActionBar({ count, onApply, onClear, loading }) {
+// Two independent bulk actions on the same selection: set a status, or assign an agent (admins
+// only, matching who gets the per-row Assign dropdown). Each has its own select + button rather
+// than one shared Apply, so picking an agent can't silently also fire a status change.
+function BulkActionBar({ count, onApply, onAssign, onClear, loading, assigning, isAdmin, agents }) {
   const [bulkStatus, setBulkStatus] = useState('');
+  const [bulkAgent,  setBulkAgent]  = useState('');
 
   return (
     <div className="bulkBar">
@@ -394,6 +398,32 @@ function BulkActionBar({ count, onApply, onClear, loading }) {
         <span className="bulkHint">Bulk update only works for statuses that need no replacement order.</span>
       </div>
       <div className="bulkBarRight">
+        {isAdmin && (
+          <>
+            <select
+              className="filterSelect"
+              value={bulkAgent}
+              onChange={(e) => setBulkAgent(e.target.value)}
+              style={{ height: 32, fontSize: 12 }}
+              aria-label="Bulk assign agent"
+            >
+              <option value="">Assign to…</option>
+              {agents.map((a) => (
+                <option key={a.email} value={a.email}>{a.name || a.email}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="btn btnSm btnSecondary"
+              disabled={!bulkAgent || assigning}
+              onClick={() => { onAssign(bulkAgent); setBulkAgent(''); }}
+            >
+              {assigning ? <span className="spinner spinnerMuted" /> : <Icon path={I.users} size={12} />}
+              {assigning ? 'Assigning…' : 'Assign'}
+            </button>
+            <span className="bulkDivider" />
+          </>
+        )}
         <select
           className="filterSelect"
           value={bulkStatus}
@@ -1093,6 +1123,7 @@ export default function EscalationClient() {
 
   // Auto-assign
   const [autoAssigning, setAutoAssigning] = useState(false);
+  const [bulkAssigning, setBulkAssigning] = useState(false);
 
   /* --- Toasts --- */
   const showToast = useCallback((type, message) => {
@@ -1143,6 +1174,13 @@ export default function EscalationClient() {
         if (a) assignmentsByRow[rowKey(o)] = a;
       });
       setAssignments(assignmentsByRow);
+      // Tags come back on the order itself (escalation_lead_assignments.tags) - seeded here so
+      // they survive a reload and are visible to every agent, not just whoever set them.
+      const tagMap = new Map();
+      od.orders.forEach((o) => {
+        if (o.tags && o.tags.length) tagMap.set(rowKey(o), new Set(o.tags));
+      });
+      setTaggedRows(tagMap);
       setSelectedRows(new Set());
       setLastSync(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
     } catch (err) { setError(err.message); }
@@ -1197,18 +1235,41 @@ export default function EscalationClient() {
     setSelectedRows(checked ? new Set(rows.map(rowKey)) : new Set());
   }
 
-  function handleToggleTag(key, tagKey, flag) {
+  // Optimistic: the Map updates immediately, then the same full set is persisted. Tags used to
+  // live ONLY in this state, so every tag vanished on reload and no one else could see it.
+  async function handleToggleTag(key, tagKey, flag) {
+    const order = orders.find((o) => rowKey(o) === key);
+    const before = taggedRows.get(key);
+    const set = new Set(before || []);
+    if (flag) set.add(tagKey); else set.delete(tagKey);
+
     setTaggedRows((prev) => {
       const next = new Map(prev);
-      const set = new Set(next.get(key) || []);
-      if (flag) set.add(tagKey); else set.delete(tagKey);
       if (set.size) next.set(key, set); else next.delete(key);
       return next;
     });
     if (flag) {
       const t = TAG_BY_KEY[tagKey];
-      const parentOrder = orders.find((o) => rowKey(o) === key)?.parentOrder;
-      showToast('success', `Tagged ${parentOrder || key} as ${t ? t.label : tagKey}`);
+      showToast('success', `Tagged ${order?.parentOrder || key} as ${t ? t.label : tagKey}`);
+    }
+    if (!order?.parentOrder) return;
+
+    try {
+      const res = await fetch('/api/escalation/tag', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentOrder: order.parentOrder, tags: Array.from(set) }),
+      });
+      if (!res.ok) throw new Error((await readJson(res)).error || 'Failed to save tag');
+    } catch (err) {
+      // Put the previous set back - a tag that silently failed to save would look applied until
+      // the next reload dropped it, which is exactly the bug this whole change fixes.
+      setTaggedRows((prev) => {
+        const next = new Map(prev);
+        if (before && before.size) next.set(key, before); else next.delete(key);
+        return next;
+      });
+      showToast('error', err.message || 'Failed to save tag');
     }
   }
 
@@ -1290,6 +1351,32 @@ export default function EscalationClient() {
   }
 
   /* --- Auto-assign --- */
+  // Assigns every SELECTED row to one agent - same assign-bulk endpoint handleAutoAssign uses,
+  // just an explicit agent over an explicit selection instead of round-robin over the unassigned.
+  async function handleBulkAssign(agentId) {
+    const rows = orders.filter((o) => selectedRows.has(rowKey(o)));
+    if (!rows.length || !agentId) return;
+    setBulkAssigning(true);
+    try {
+      const res = await fetch('/api/escalation/assign-bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          assignments: rows.map((o) => ({ parentOrder: o.parentOrder, agentId })),
+        }),
+      });
+      const data = await readJson(res);
+      if (!res.ok) throw new Error(data.error || 'Bulk assign failed');
+      const newMap = {};
+      rows.forEach((o) => { newMap[rowKey(o)] = { agentId }; });
+      setAssignments((p) => ({ ...p, ...newMap }));
+      const name = agents.find((a) => a.email === agentId)?.name || agentId;
+      showToast('success', `Assigned ${rows.length} order${rows.length === 1 ? '' : 's'} to ${name}`);
+    } catch (err) {
+      showToast('error', err.message || 'Bulk assign failed');
+    } finally { setBulkAssigning(false); }
+  }
+
   async function handleAutoAssign() {
     if (!isAdmin && !googleUser?.email) return;
 
@@ -1663,8 +1750,12 @@ export default function EscalationClient() {
             <BulkActionBar
               count={selectedRows.size}
               onApply={handleBulkApply}
+              onAssign={handleBulkAssign}
               onClear={() => setSelectedRows(new Set())}
               loading={bulkLoading}
+              assigning={bulkAssigning}
+              isAdmin={isAdmin}
+              agents={agents}
             />
           )}
 

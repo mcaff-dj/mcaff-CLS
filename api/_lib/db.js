@@ -684,6 +684,11 @@ async function bootstrapPgSchema() {
   // resolved cold. A CSV import in particular has no assignee at all to fall back on, so without
   // this column there was no record anywhere of who ran the import.
   await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS updated_by TEXT`;
+  // Escalation source tags (sos / social / ceo - see TAGS in app/escalation/EscalationClient.js).
+  // Until now these lived ONLY in React state, so every tag an agent set was silently gone on the
+  // next reload and invisible to everyone else. TEXT[] rather than a join table: it's a tiny
+  // fixed vocabulary read and written as one whole set per order, never queried across orders.
+  await pgSql`ALTER TABLE escalation_lead_assignments ADD COLUMN IF NOT EXISTS tags TEXT[]`;
   // tat_to_resolve holds the BUCKET LABEL ("Within 48 hrs", "4-8 days", ...), reproducing the
   // Google Sheet's own IF-ladder now that the sheet is no longer the source of truth. The raw day
   // count keeps its own numeric column, tat_days - the label is derived from it, so storing only
@@ -1276,6 +1281,23 @@ async function resolveEscalationAssignment(parentOrder, resolution, agentRemarks
   }
 }
 
+// Replaces an order's whole tag set (the client sends the full set after each toggle, so there's
+// no add/remove distinction to keep straight on either side). Targets the same row resolve does -
+// most recent for this parent_order - so tags set before a resolve stay attached to it afterwards
+// rather than stranding on a stale cycle. Silently a no-op for an order with no row at all: tags
+// are an annotation on an existing escalation, not a reason to create one.
+async function setEscalationTags(parentOrder, tags) {
+  await ensurePgSchema();
+  await pgSql`
+    UPDATE escalation_lead_assignments
+    SET tags = ${tags && tags.length ? tags : null}
+    WHERE id = (
+      SELECT id FROM escalation_lead_assignments
+      WHERE parent_order = ${parentOrder} ORDER BY assigned_at DESC LIMIT 1
+    )
+  `;
+}
+
 // bulk-update's own equivalent of resolveEscalationAssignment, for many orders sharing the
 // SAME resolution/remarks in one call (that's what a bulk action means) - one UPDATE ...
 // WHERE parent_order = ANY(...) instead of N round-trips for what is logically one operation.
@@ -1334,11 +1356,16 @@ async function getEscalationAssignments() {
 // The live-only subset of the above, for callers that just need "who's assigned right now"
 // (the assign GET action) - reading only rows the partial unique index already guarantees are
 // few (at most one per parent_order), instead of the full ever-growing history.
+// email IS NOT NULL matters: the ticket sync (scripts/sync_delivery_tickets_to_pg.py) creates rows
+// with email NULL for orders nobody has been assigned to yet. Returning those produced an
+// { agentId: null } entry per order - a TRUTHY object - so the client counted them as assigned,
+// rendered an empty "?" chip instead of the agent name, and hid the Assign dropdown that chip
+// replaces, making those orders impossible to assign at all.
 async function getLiveEscalationAssignments() {
   await ensurePgSchema();
   const { rows } = await pgSql`
     SELECT parent_order, email FROM escalation_lead_assignments
-    WHERE reassigned_away_at IS NULL AND last_updated_at IS NULL
+    WHERE reassigned_away_at IS NULL AND last_updated_at IS NULL AND email IS NOT NULL
   `;
   return rows.map((r) => ({ parentOrder: r.parent_order, email: r.email }));
 }
@@ -1382,7 +1409,7 @@ async function getEscalationOrders(limit = ESCALATION_ORDERS_LIMIT, { includeRes
         parent_order, email, resolution, agent_remarks, new_order_id, new_awb, last_updated_at,
         assigned_at, brand, ticket_number, awb_number, added_date, query_class, query_category,
         delivery_partner_name, order_date, order_month, query_date, query_month, wh_name,
-        total_times_user_reached
+        total_times_user_reached, tags
       FROM escalation_lead_assignments
       ORDER BY parent_order, assigned_at DESC
     ) latest
@@ -1419,6 +1446,7 @@ async function getEscalationOrders(limit = ESCALATION_ORDERS_LIMIT, { includeRes
     awb: r.new_awb || '',
     status: r.resolution || '',
     notes: r.agent_remarks || '',
+    tags: r.tags || [],
   }));
   return { orders, total: (countRows[0] && countRows[0].total) || orders.length };
 }
@@ -2081,7 +2109,7 @@ module.exports = {
   deleteProcessDisposition, reorderProcessDispositions,
   claimNdrLead, disposeNdrLead,
   assignEscalationOrder, unassignEscalationOrder, resolveEscalationAssignment, getEscalationAssignments,
-  getLiveEscalationAssignments, resolveEscalationAssignmentsBulk,
+  getLiveEscalationAssignments, resolveEscalationAssignmentsBulk, setEscalationTags,
   getEligibleOrders, getFreshLeads, getEscalationOrderIndex,
   // Exported for api/_lib/db.retry.test.js only - nothing in the app calls these directly.
   isPoolExhausted, withPgConnectRetry, toTransactionModePooler,
