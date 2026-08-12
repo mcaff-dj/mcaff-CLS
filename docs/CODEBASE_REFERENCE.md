@@ -908,7 +908,7 @@ Connected column reads "No" is eligible to go to a *different* agent, up to
 ### Timings
 
 Assign 5 min · heartbeat 2 min · staleness 10 min · sheet sync 60 s (15 s on failure) ·
-presence poll 30 s · version check 3 min · quota 20 · archive 9 AM IST · retention 30 days.
+presence poll 30 s · version check 3 min · quota 20 · archive 9 AM IST · retention 5 days.
 
 ---
 

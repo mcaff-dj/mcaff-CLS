@@ -22,10 +22,17 @@ landed in MySQL, and deleting it can never take a retired cycle of the same lead
 along with it. Those retired rows are never purged here at all: assign_leads.py
 reads them to enforce "an agent who already failed to connect never gets this
 lead again", which has to hold for the life of the lead, exactly as the old
-lead_reassignment_attempts table was also never expired. The retention window
-matches rto-crm.html's recentAssignments feature (see api/_lib/db.js), which
-reads lead_assignments_current for up to 30 days, so disposed leads stay visible
-there for their full lookback window before cleanup.
+lead_reassignment_attempts table was also never expired.
+
+RETENTION_DAYS was cut from 30 to 5 to keep the Supabase project under its
+storage quota. This is deliberately SHORTER than what the app's own Postgres
+readers assume, so the reduced window is a real behaviour change, not just
+housekeeping: rto-crm.html's recentAssignments (api/auth/[action].js caps
+`hours` at 24*30) and the Overview tab's Agent Performance Summary
+(getAllLeadDates, unbounded) both read lead_assignments_current directly, so
+their 7-day and 30-day date scopes now only see leads disposed within the last
+5 days. Everything older lives solely in MySQL PEP_CLS.CLS_RTO_calling. Raise
+this back toward 30 if those views need their full lookback again.
 """
 import os
 import sys
@@ -39,7 +46,7 @@ from mysql_lib import get_credential
 
 SCHEMA = "PEP_CLS"
 TABLE = "CLS_RTO_calling"
-RETENTION_DAYS = 30
+RETENTION_DAYS = 5
 
 COLUMNS = [
     "order_id", "agent_email", "assigned_at", "disposed_at",
