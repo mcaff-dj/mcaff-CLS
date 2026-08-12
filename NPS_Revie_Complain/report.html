@@ -1,0 +1,2198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Product-wise Issue vs NPS</title>
+<style>
+  :root{
+    --page:#f9f9f7; --surface-card:#ffffff; --text-primary:#0b0b0b; --text-secondary:#52514e;
+    --text-muted:#898781; --border:rgba(11,11,11,0.10); --grid:#e1e0d9;
+    --accent:#c2740c;
+    --good:#0ca30c; --warning:#fab219; --critical:#d03b3b;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --page:#0d0d0d; --surface-card:#1a1a19; --text-primary:#ffffff; --text-secondary:#c3c2b7;
+      --text-muted:#898781; --border:rgba(255,255,255,0.10); --grid:#2c2c2a;
+      --accent:#e0993d;
+      --good:#0ca30c; --warning:#fab219; --critical:#e66767;
+    }
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;min-height:100vh;background:var(--page);color:var(--text-primary);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif;padding:32px 20px;}
+  .wrap{width:100%;max-width:1180px;margin:0 auto;}
+  header{text-align:center;margin-bottom:24px;}
+  .badge{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--accent);background:color-mix(in srgb, var(--accent) 14%, transparent);border-radius:999px;padding:4px 12px;margin-bottom:14px;}
+  h1{font-size:clamp(22px,4vw,28px);margin:0 0 12px;letter-spacing:-0.01em;}
+  header p{margin:0;color:var(--text-secondary);font-size:14px;line-height:1.6;}
+
+  .stat-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0 0 24px;}
+  @media (max-width:760px){.stat-row{grid-template-columns:repeat(2,1fr);}}
+  .stat-tile{background:var(--surface-card);border:1px solid var(--border);border-radius:14px;padding:16px 18px;}
+  .stat-label{font-size:11.5px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.03em;margin-bottom:8px;}
+  .stat-value{font-size:26px;font-weight:700;letter-spacing:-0.01em;font-variant-numeric:proportional-nums;}
+  .stat-sub{font-size:12px;color:var(--text-secondary);margin-top:4px;}
+
+  .panel{background:var(--surface-card);border:1px solid var(--border);border-radius:14px;padding:20px 22px;margin-bottom:20px;}
+  .panel h2{font-size:15px;margin:0 0 4px;}
+  .panel .hint{font-size:12.5px;color:var(--text-secondary);margin:0 0 14px;}
+
+  .toolbar{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center;}
+  .search{flex:1;max-width:320px;padding:8px 12px;border-radius:8px;border:1px solid var(--grid);
+    background:var(--page);color:var(--text-primary);font-size:13px;font-family:inherit;}
+  .brand-filter{display:flex;gap:6px;}
+  .brand-btn{appearance:none;border:1px solid var(--grid);background:var(--page);color:var(--text-secondary);
+    font-size:12.5px;font-family:inherit;padding:7px 12px;border-radius:8px;cursor:pointer;}
+  .brand-btn:hover{color:var(--text-primary);}
+  .brand-btn.active{color:#fff;background:var(--accent);border-color:var(--accent);font-weight:600;}
+  .col-brand{white-space:nowrap;}
+  .col-sku{white-space:nowrap;font-variant-numeric:tabular-nums;}
+
+  table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums;}
+  thead th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--text-muted);
+    border-bottom:1px solid var(--grid);padding:8px 10px;cursor:pointer;user-select:none;white-space:nowrap;}
+  thead th:hover{color:var(--text-primary);}
+  tbody td{padding:9px 10px;border-bottom:1px solid var(--grid);}
+  tbody tr:last-child td{border-bottom:none;}
+  .col-product{max-width:340px;}
+  tbody td, thead th{text-align:right;}
+  td.col-product, td.col-brand, td.col-sku, thead th[data-type="text"]{text-align:left;}
+
+  .risk-pill{display:inline-block;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;
+    border-radius:999px;padding:2px 9px;}
+  .risk-good{color:var(--good);background:color-mix(in srgb, var(--good) 14%, transparent);}
+  .risk-warning{color:var(--warning);background:color-mix(in srgb, var(--warning) 20%, transparent);}
+  .risk-critical{color:var(--critical);background:color-mix(in srgb, var(--critical) 16%, transparent);}
+  .risk-low-sample{color:var(--text-muted);background:color-mix(in srgb, var(--text-muted) 14%, transparent);}
+
+  .table-scroll{overflow-x:auto;}
+  footer{text-align:center;color:var(--text-muted);font-size:12px;margin-top:24px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="badge">NPS Review &amp; Complaint</span>
+    <h1>Product-wise Issue vs NPS</h1>
+    <p>Complaint tickets (query class: Product / Packaging and Operational) from CLS_KYC_mCaff + CLS_KYC_Hyphen,
+       mapped onto nps_product. Generated 2026-08-03T19:30:27+05:30.</p>
+  </header>
+
+  <div class="stat-row">
+        <div class="stat-tile">
+          <div class="stat-label">Complaint rows analyzed</div>
+          <div class="stat-value">19,706</div>
+          <div class="stat-sub">Product + Packaging tickets, both brands</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-label">Distinct products complained about</div>
+          <div class="stat-value">442</div>
+          <div class="stat-sub">Normalized product names</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-label">Matched to NPS data</div>
+          <div class="stat-value">27.7%</div>
+          <div class="stat-sub">5,459 of 19,706 complaint rows</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-label">High-risk products</div>
+          <div class="stat-value">1</div>
+          <div class="stat-sub">Detractor rate ≥25% or avg NPS &lt;7</div>
+        </div></div>
+
+  <div class="panel">
+    <h2>Products with complaints, matched to NPS</h2>
+    <p class="hint">Sorted by complaint volume. Click a column header to re-sort. 305 product name(s)
+      (14,247 complaint rows) could not be matched to nps_product by name and are
+      listed below the table instead of being silently dropped.</p>
+    <div class="toolbar">
+      <input class="search" id="search" type="text" placeholder="Filter by product name...">
+      <div class="brand-filter" id="brand-filter">
+        <button class="brand-btn active" data-brand="all" type="button">All brands</button>
+        <button class="brand-btn" data-brand="Hyphen" type="button">Hyphen</button><button class="brand-btn" data-brand="Mcaffeine" type="button">Mcaffeine</button>
+      </div>
+    </div>
+    <div class="table-scroll">
+    <table id="main-table">
+      <thead><tr>
+        <th data-type="text">Product</th>
+        <th data-type="text">Brand</th>
+        <th data-type="text">SKU</th>
+        <th data-type="num">Complaints</th>
+        <th data-type="num">Product issues</th>
+        <th data-type="num">Packaging issues</th>
+        <th data-type="num">NPS responses</th>
+        <th data-type="num">Avg NPS</th>
+        <th data-type="num">Avg packaging score</th>
+        <th data-type="num">Detractor %</th>
+        <th data-type="text">Status</th>
+      </tr></thead>
+      <tbody>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">summer breeze perfume body lotion</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf371 (+1 more)</td>
+          <td data-sort="803">803</td>
+          <td data-sort="192">192</td>
+          <td data-sort="611">611</td>
+          <td data-sort="1778">1,778</td>
+          <td data-sort="8.65">8.65</td>
+          <td data-sort="4.53">4.53</td>
+          <td data-sort="10.8">10.8%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">sweet escape perfume body lotion</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf370 (+2 more)</td>
+          <td data-sort="656">656</td>
+          <td data-sort="185">185</td>
+          <td data-sort="471">471</td>
+          <td data-sort="2126">2,126</td>
+          <td data-sort="8.58">8.58</td>
+          <td data-sort="4.52">4.52</td>
+          <td data-sort="11.3">11.3%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">guava tini de tan body wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf396_WB (+1 more)</td>
+          <td data-sort="462">462</td>
+          <td data-sort="120">120</td>
+          <td data-sort="342">342</td>
+          <td data-sort="3220">3,220</td>
+          <td data-sort="8.45">8.45</td>
+          <td data-sort="4.4">4.4</td>
+          <td data-sort="13.0">13.0%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee face wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">50MCaf41_WB_F (+4 more)</td>
+          <td data-sort="214">214</td>
+          <td data-sort="30">30</td>
+          <td data-sort="184">184</td>
+          <td data-sort="821">821</td>
+          <td data-sort="8.37">8.37</td>
+          <td data-sort="4.28">4.28</td>
+          <td data-sort="14.0">14.0%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">sun bath spf 80 pa body sunscreen spray</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf365</td>
+          <td data-sort="211">211</td>
+          <td data-sort="29">29</td>
+          <td data-sort="182">182</td>
+          <td data-sort="62">62</td>
+          <td data-sort="6.9">6.9</td>
+          <td data-sort="4.32">4.32</td>
+          <td data-sort="27.4">27.4%</td>
+          <td><span class="risk-pill risk-critical">High risk</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">take a dip triple action deo body wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf408_WB</td>
+          <td data-sort="200">200</td>
+          <td data-sort="94">94</td>
+          <td data-sort="106">106</td>
+          <td data-sort="1859">1,859</td>
+          <td data-sort="8.32">8.32</td>
+          <td data-sort="4.29">4.29</td>
+          <td data-sort="14.7">14.7%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Hyphen">
+          <td class="col-product">golden hour glow screen spf 50 pa</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX033F040</td>
+          <td data-sort="175">175</td>
+          <td data-sort="63">63</td>
+          <td data-sort="112">112</td>
+          <td data-sort="624">624</td>
+          <td data-sort="7.82">7.82</td>
+          <td data-sort="4.36">4.36</td>
+          <td data-sort="20.5">20.5%</td>
+          <td><span class="risk-pill risk-warning">Watch</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">brightening raspberry rush body scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf382_WB</td>
+          <td data-sort="167">167</td>
+          <td data-sort="4">4</td>
+          <td data-sort="163">163</td>
+          <td data-sort="323">323</td>
+          <td data-sort="8.93">8.93</td>
+          <td data-sort="4.38">4.38</td>
+          <td data-sort="7.4">7.4%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">brightening raspberry rush serum body lotion spf 50 pa</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf385</td>
+          <td data-sort="165">165</td>
+          <td data-sort="48">48</td>
+          <td data-sort="117">117</td>
+          <td data-sort="497">497</td>
+          <td data-sort="8.34">8.34</td>
+          <td data-sort="4.34">4.34</td>
+          <td data-sort="13.1">13.1%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Hyphen">
+          <td class="col-product">sun milk 100 mineral sunscreen spf 50 pa</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX030F050</td>
+          <td data-sort="162">162</td>
+          <td data-sort="85">85</td>
+          <td data-sort="77">77</td>
+          <td data-sort="435">435</td>
+          <td data-sort="7.96">7.96</td>
+          <td data-sort="4.36">4.36</td>
+          <td data-sort="18.6">18.6%</td>
+          <td><span class="risk-pill risk-warning">Watch</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">naked rich choco body butter</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf48</td>
+          <td data-sort="145">145</td>
+          <td data-sort="7">7</td>
+          <td data-sort="138">138</td>
+          <td data-sort="120">120</td>
+          <td data-sort="8.49">8.49</td>
+          <td data-sort="4.44">4.44</td>
+          <td data-sort="11.7">11.7%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">high shine perfector hair spray</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf406</td>
+          <td data-sort="130">130</td>
+          <td data-sort="20">20</td>
+          <td data-sort="110">110</td>
+          <td data-sort="502">502</td>
+          <td data-sort="8.08">8.08</td>
+          <td data-sort="4.27">4.27</td>
+          <td data-sort="18.1">18.1%</td>
+          <td><span class="risk-pill risk-warning">Watch</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee under eye cream</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">15MCaf62 (+1 more)</td>
+          <td data-sort="123">123</td>
+          <td data-sort="25">25</td>
+          <td data-sort="98">98</td>
+          <td data-sort="140">140</td>
+          <td data-sort="8.24">8.24</td>
+          <td data-sort="4.47">4.47</td>
+          <td data-sort="17.1">17.1%</td>
+          <td><span class="risk-pill risk-warning">Watch</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">sun glaze mist spf 50 pa sunscreen spray</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf364</td>
+          <td data-sort="116">116</td>
+          <td data-sort="18">18</td>
+          <td data-sort="98">98</td>
+          <td data-sort="32">32</td>
+          <td data-sort="6.72">6.72</td>
+          <td data-sort="3.07">3.07</td>
+          <td data-sort="34.4">34.4%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee body wash with berries</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf212_WB (+2 more)</td>
+          <td data-sort="107">107</td>
+          <td data-sort="6">6</td>
+          <td data-sort="101">101</td>
+          <td data-sort="92">92</td>
+          <td data-sort="8.82">8.82</td>
+          <td data-sort="4.62">4.62</td>
+          <td data-sort="8.7">8.7%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">blueberry breeze body scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf285_WB</td>
+          <td data-sort="94">94</td>
+          <td data-sort="7">7</td>
+          <td data-sort="87">87</td>
+          <td data-sort="145">145</td>
+          <td data-sort="9.03">9.03</td>
+          <td data-sort="4.56">4.56</td>
+          <td data-sort="6.2">6.2%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">by the blues perfume body lotion</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf401</td>
+          <td data-sort="81">81</td>
+          <td data-sort="11">11</td>
+          <td data-sort="70">70</td>
+          <td data-sort="1943">1,943</td>
+          <td data-sort="8.5">8.5</td>
+          <td data-sort="4.45">4.45</td>
+          <td data-sort="12.1">12.1%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">blueberry swirl serum body lotion</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf298_WB</td>
+          <td data-sort="76">76</td>
+          <td data-sort="13">13</td>
+          <td data-sort="63">63</td>
+          <td data-sort="126">126</td>
+          <td data-sort="8.95">8.95</td>
+          <td data-sort="4.44">4.44</td>
+          <td data-sort="7.1">7.1%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">11 aha bha skin smoothening strawberry body lotion</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf402</td>
+          <td data-sort="74">74</td>
+          <td data-sort="21">21</td>
+          <td data-sort="53">53</td>
+          <td data-sort="324">324</td>
+          <td data-sort="8.64">8.64</td>
+          <td data-sort="4.47">4.47</td>
+          <td data-sort="10.2">10.2%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">2 salicylic acid niacinamide matcha tea face wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf270</td>
+          <td data-sort="59">59</td>
+          <td data-sort="20">20</td>
+          <td data-sort="39">39</td>
+          <td data-sort="143">143</td>
+          <td data-sort="8.28">8.28</td>
+          <td data-sort="4.39">4.39</td>
+          <td data-sort="12.6">12.6%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">brightening raspberry rush body wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf383_WB (+2 more)</td>
+          <td data-sort="58">58</td>
+          <td data-sort="4">4</td>
+          <td data-sort="54">54</td>
+          <td data-sort="589">589</td>
+          <td data-sort="8.58">8.58</td>
+          <td data-sort="4.41">4.41</td>
+          <td data-sort="10.4">10.4%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Hyphen">
+          <td class="col-product">matte max velvet touch sunscreen spf 70 pa</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX026F030</td>
+          <td data-sort="57">57</td>
+          <td data-sort="26">26</td>
+          <td data-sort="31">31</td>
+          <td data-sort="284">284</td>
+          <td data-sort="8.46">8.46</td>
+          <td data-sort="4.37">4.37</td>
+          <td data-sort="12.3">12.3%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee body wash with almonds</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf208_WB</td>
+          <td data-sort="54">54</td>
+          <td data-sort="2">2</td>
+          <td data-sort="52">52</td>
+          <td data-sort="29">29</td>
+          <td data-sort="8.55">8.55</td>
+          <td data-sort="4.37">4.37</td>
+          <td data-sort="6.9">6.9%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">naked and raw coffee body scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">55MCaf40</td>
+          <td data-sort="49">49</td>
+          <td data-sort="3">3</td>
+          <td data-sort="46">46</td>
+          <td data-sort="842">842</td>
+          <td data-sort="8.57">8.57</td>
+          <td data-sort="4.49">4.49</td>
+          <td data-sort="11.4">11.4%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Hyphen">
+          <td class="col-product">vitamin infused peptide dewy prep</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX025F010</td>
+          <td data-sort="48">48</td>
+          <td data-sort="4">4</td>
+          <td data-sort="44">44</td>
+          <td data-sort="47">47</td>
+          <td data-sort="8.62">8.62</td>
+          <td data-sort="4.31">4.31</td>
+          <td data-sort="8.5">8.5%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee body lotion</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">250MCaf59_WB (+1 more)</td>
+          <td data-sort="45">45</td>
+          <td data-sort="2">2</td>
+          <td data-sort="43">43</td>
+          <td data-sort="6">6</td>
+          <td data-sort="5.67">5.67</td>
+          <td data-sort="0">–</td>
+          <td data-sort="50.0">50.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Hyphen">
+          <td class="col-product">0 1 retinal reset serum pro</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX016F030</td>
+          <td data-sort="43">43</td>
+          <td data-sort="18">18</td>
+          <td data-sort="25">25</td>
+          <td data-sort="264">264</td>
+          <td data-sort="8.58">8.58</td>
+          <td data-sort="4.46">4.46</td>
+          <td data-sort="12.5">12.5%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">blueberry swirl deep moisturizing body butter</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf345_WB</td>
+          <td data-sort="40">40</td>
+          <td data-sort="4">4</td>
+          <td data-sort="36">36</td>
+          <td data-sort="32">32</td>
+          <td data-sort="9.19">9.19</td>
+          <td data-sort="4.43">4.43</td>
+          <td data-sort="3.1">3.1%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">caramel crunch exfoliating body wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf397_WB</td>
+          <td data-sort="39">39</td>
+          <td data-sort="8">8</td>
+          <td data-sort="31">31</td>
+          <td data-sort="1303">1,303</td>
+          <td data-sort="8.64">8.64</td>
+          <td data-sort="4.42">4.42</td>
+          <td data-sort="10.4">10.4%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">glow boost grapefruit body wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf384_WB</td>
+          <td data-sort="38">38</td>
+          <td data-sort="1">1</td>
+          <td data-sort="37">37</td>
+          <td data-sort="44">44</td>
+          <td data-sort="8.89">8.89</td>
+          <td data-sort="4.27">4.27</td>
+          <td data-sort="9.1">9.1%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">green tea face wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf53 (+1 more)</td>
+          <td data-sort="32">32</td>
+          <td data-sort="2">2</td>
+          <td data-sort="30">30</td>
+          <td data-sort="15">15</td>
+          <td data-sort="8.33">8.33</td>
+          <td data-sort="4.2">4.2</td>
+          <td data-sort="20.0">20.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">island fresh triple action deo body wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf409_WB</td>
+          <td data-sort="30">30</td>
+          <td data-sort="11">11</td>
+          <td data-sort="19">19</td>
+          <td data-sort="458">458</td>
+          <td data-sort="8.57">8.57</td>
+          <td data-sort="4.35">4.35</td>
+          <td data-sort="11.4">11.4%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">take it easy 10 magnesium body lotion</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf398</td>
+          <td data-sort="30">30</td>
+          <td data-sort="6">6</td>
+          <td data-sort="24">24</td>
+          <td data-sort="456">456</td>
+          <td data-sort="8.69">8.69</td>
+          <td data-sort="4.48">4.48</td>
+          <td data-sort="9.9">9.9%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee body lotion pack of 2</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="28">28</td>
+          <td data-sort="4">4</td>
+          <td data-sort="24">24</td>
+          <td data-sort="1">1</td>
+          <td data-sort="9.0">9.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">caramel eclairs coffee body scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf407</td>
+          <td data-sort="27">27</td>
+          <td data-sort="7">7</td>
+          <td data-sort="20">20</td>
+          <td data-sort="253">253</td>
+          <td data-sort="8.91">8.91</td>
+          <td data-sort="4.57">4.57</td>
+          <td data-sort="7.1">7.1%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">water light gel oil free coffee moisturizer</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf83_N</td>
+          <td data-sort="24">24</td>
+          <td data-sort="10">10</td>
+          <td data-sort="14">14</td>
+          <td data-sort="87">87</td>
+          <td data-sort="8.8">8.8</td>
+          <td data-sort="4.44">4.44</td>
+          <td data-sort="5.7">5.7%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">super glow flash facial mask</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf375</td>
+          <td data-sort="24">24</td>
+          <td data-sort="15">15</td>
+          <td data-sort="9">9</td>
+          <td data-sort="359">359</td>
+          <td data-sort="7.96">7.96</td>
+          <td data-sort="4.25">4.25</td>
+          <td data-sort="18.9">18.9%</td>
+          <td><span class="risk-pill risk-warning">Watch</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">berries brightening coffee face scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf369</td>
+          <td data-sort="22">22</td>
+          <td data-sort="8">8</td>
+          <td data-sort="14">14</td>
+          <td data-sort="87">87</td>
+          <td data-sort="8.64">8.64</td>
+          <td data-sort="4.38">4.38</td>
+          <td data-sort="6.9">6.9%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">choco tinted lip balm with berries</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf240</td>
+          <td data-sort="19">19</td>
+          <td data-sort="3">3</td>
+          <td data-sort="16">16</td>
+          <td data-sort="6">6</td>
+          <td data-sort="7.83">7.83</td>
+          <td data-sort="0">–</td>
+          <td data-sort="33.3">33.3%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">gua sha green quartz</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MTOOL2_GS</td>
+          <td data-sort="19">19</td>
+          <td data-sort="1">1</td>
+          <td data-sort="18">18</td>
+          <td data-sort="2">2</td>
+          <td data-sort="9.5">9.5</td>
+          <td data-sort="5.0">5.0</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">high shine glossing shampoo</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf404</td>
+          <td data-sort="19">19</td>
+          <td data-sort="8">8</td>
+          <td data-sort="11">11</td>
+          <td data-sort="502">502</td>
+          <td data-sort="8.94">8.94</td>
+          <td data-sort="4.53">4.53</td>
+          <td data-sort="6.0">6.0%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee body wash with cocoa</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf209_WB</td>
+          <td data-sort="19">19</td>
+          <td data-sort="1">1</td>
+          <td data-sort="18">18</td>
+          <td data-sort="45">45</td>
+          <td data-sort="8.24">8.24</td>
+          <td data-sort="4.64">4.64</td>
+          <td data-sort="15.6">15.6%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">clear glow 1 kojic acid alpha arbutin daily brightening sunscreen</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf302</td>
+          <td data-sort="19">19</td>
+          <td data-sort="8">8</td>
+          <td data-sort="11">11</td>
+          <td data-sort="399">399</td>
+          <td data-sort="8.38">8.38</td>
+          <td data-sort="4.31">4.31</td>
+          <td data-sort="14.0">14.0%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">vanilla dream deep moisturizing body butter</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf346_WB</td>
+          <td data-sort="17">17</td>
+          <td data-sort="3">3</td>
+          <td data-sort="14">14</td>
+          <td data-sort="2">2</td>
+          <td data-sort="5.0">5.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="50.0">50.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee body scrub with berries</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">100MCaf199</td>
+          <td data-sort="16">16</td>
+          <td data-sort="0">0</td>
+          <td data-sort="16">16</td>
+          <td data-sort="106">106</td>
+          <td data-sort="8.45">8.45</td>
+          <td data-sort="4.42">4.42</td>
+          <td data-sort="12.3">12.3%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">green tea vitamin c serum</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">3MCaf189</td>
+          <td data-sort="16">16</td>
+          <td data-sort="10">10</td>
+          <td data-sort="6">6</td>
+          <td data-sort="106">106</td>
+          <td data-sort="8.42">8.42</td>
+          <td data-sort="4.44">4.44</td>
+          <td data-sort="13.2">13.2%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Hyphen">
+          <td class="col-product">0 05 retinal reset serum</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX015F030</td>
+          <td data-sort="16">16</td>
+          <td data-sort="6">6</td>
+          <td data-sort="10">10</td>
+          <td data-sort="96">96</td>
+          <td data-sort="8.68">8.68</td>
+          <td data-sort="4.55">4.55</td>
+          <td data-sort="9.4">9.4%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">daily glow green tea sunscreen spf 50 pa</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf220</td>
+          <td data-sort="15">15</td>
+          <td data-sort="6">6</td>
+          <td data-sort="9">9</td>
+          <td data-sort="94">94</td>
+          <td data-sort="8.7">8.7</td>
+          <td data-sort="4.4">4.4</td>
+          <td data-sort="6.4">6.4%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">shimmer body butter</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf234_WB</td>
+          <td data-sort="14">14</td>
+          <td data-sort="7">7</td>
+          <td data-sort="7">7</td>
+          <td data-sort="86">86</td>
+          <td data-sort="8.63">8.63</td>
+          <td data-sort="4.59">4.59</td>
+          <td data-sort="10.5">10.5%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">high shine intensifier conditioner</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf405</td>
+          <td data-sort="12">12</td>
+          <td data-sort="4">4</td>
+          <td data-sort="8">8</td>
+          <td data-sort="272">272</td>
+          <td data-sort="8.94">8.94</td>
+          <td data-sort="4.55">4.55</td>
+          <td data-sort="7.0">7.0%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">black tea complex night cream</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf259</td>
+          <td data-sort="12">12</td>
+          <td data-sort="7">7</td>
+          <td data-sort="5">5</td>
+          <td data-sort="275">275</td>
+          <td data-sort="8.74">8.74</td>
+          <td data-sort="4.52">4.52</td>
+          <td data-sort="8.4">8.4%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">naked raw coffee face mask</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf46 (+1 more)</td>
+          <td data-sort="11">11</td>
+          <td data-sort="1">1</td>
+          <td data-sort="10">10</td>
+          <td data-sort="79">79</td>
+          <td data-sort="8.18">8.18</td>
+          <td data-sort="4.19">4.19</td>
+          <td data-sort="13.9">13.9%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coconut cream body wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf281_WB</td>
+          <td data-sort="11">11</td>
+          <td data-sort="1">1</td>
+          <td data-sort="10">10</td>
+          <td data-sort="2">2</td>
+          <td data-sort="8.0">8.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">glow boost grapefruit body scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf381_WB</td>
+          <td data-sort="10">10</td>
+          <td data-sort="1">1</td>
+          <td data-sort="9">9</td>
+          <td data-sort="2">2</td>
+          <td data-sort="9.5">9.5</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">green tea under eye cream</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="10">10</td>
+          <td data-sort="1">1</td>
+          <td data-sort="9">9</td>
+          <td data-sort="31">31</td>
+          <td data-sort="8.06">8.06</td>
+          <td data-sort="4.54">4.54</td>
+          <td data-sort="19.4">19.4%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">green tea oil free moisturizer</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="10">10</td>
+          <td data-sort="3">3</td>
+          <td data-sort="7">7</td>
+          <td data-sort="5">5</td>
+          <td data-sort="8.4">8.4</td>
+          <td data-sort="0">–</td>
+          <td data-sort="20.0">20.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Hyphen">
+          <td class="col-product">vitamin infused peptide lip balm peach</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX006F010</td>
+          <td data-sort="9">9</td>
+          <td data-sort="5">5</td>
+          <td data-sort="4">4</td>
+          <td data-sort="33">33</td>
+          <td data-sort="8.09">8.09</td>
+          <td data-sort="4.35">4.35</td>
+          <td data-sort="18.2">18.2%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">pore clearing coffee cookie face scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf387</td>
+          <td data-sort="8">8</td>
+          <td data-sort="1">1</td>
+          <td data-sort="7">7</td>
+          <td data-sort="163">163</td>
+          <td data-sort="9.01">9.01</td>
+          <td data-sort="4.62">4.62</td>
+          <td data-sort="4.9">4.9%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">naked and raw coffee face wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">15SMCaf41</td>
+          <td data-sort="8">8</td>
+          <td data-sort="2">2</td>
+          <td data-sort="6">6</td>
+          <td data-sort="76">76</td>
+          <td data-sort="8.59">8.59</td>
+          <td data-sort="4.32">4.32</td>
+          <td data-sort="10.5">10.5%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">5 aha coffee underarm roll on</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf278</td>
+          <td data-sort="8">8</td>
+          <td data-sort="3">3</td>
+          <td data-sort="5">5</td>
+          <td data-sort="213">213</td>
+          <td data-sort="8.75">8.75</td>
+          <td data-sort="4.46">4.46</td>
+          <td data-sort="8.5">8.5%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">skin bounce moisturizing cream</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="8">8</td>
+          <td data-sort="5">5</td>
+          <td data-sort="3">3</td>
+          <td data-sort="3">3</td>
+          <td data-sort="10.0">10.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">the addiction collection gift set</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="7">7</td>
+          <td data-sort="0">0</td>
+          <td data-sort="7">7</td>
+          <td data-sort="45">45</td>
+          <td data-sort="7.98">7.98</td>
+          <td data-sort="4.32">4.32</td>
+          <td data-sort="15.6">15.6%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">midnight in bombay</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="7">7</td>
+          <td data-sort="3">3</td>
+          <td data-sort="4">4</td>
+          <td data-sort="44">44</td>
+          <td data-sort="8.11">8.11</td>
+          <td data-sort="4.46">4.46</td>
+          <td data-sort="15.9">15.9%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">naked raw coffee face wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf41</td>
+          <td data-sort="7">7</td>
+          <td data-sort="1">1</td>
+          <td data-sort="6">6</td>
+          <td data-sort="360">360</td>
+          <td data-sort="8.72">8.72</td>
+          <td data-sort="4.39">4.39</td>
+          <td data-sort="8.1">8.1%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">ceramide intense barrier repair cream</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf82_N</td>
+          <td data-sort="7">7</td>
+          <td data-sort="2">2</td>
+          <td data-sort="5">5</td>
+          <td data-sort="4">4</td>
+          <td data-sort="7.5">7.5</td>
+          <td data-sort="0">–</td>
+          <td data-sort="25.0">25.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee sugar body scrub with coconut</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf205</td>
+          <td data-sort="7">7</td>
+          <td data-sort="1">1</td>
+          <td data-sort="6">6</td>
+          <td data-sort="1">1</td>
+          <td data-sort="7.0">7.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Hyphen">
+          <td class="col-product">vitamin infused peptide lip balm vanilla</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX005F010</td>
+          <td data-sort="7">7</td>
+          <td data-sort="5">5</td>
+          <td data-sort="2">2</td>
+          <td data-sort="46">46</td>
+          <td data-sort="8.35">8.35</td>
+          <td data-sort="4.68">4.68</td>
+          <td data-sort="13.0">13.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee lip scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">5SMcaf122_F (+1 more)</td>
+          <td data-sort="6">6</td>
+          <td data-sort="1">1</td>
+          <td data-sort="5">5</td>
+          <td data-sort="48">48</td>
+          <td data-sort="8.94">8.94</td>
+          <td data-sort="4.5">4.5</td>
+          <td data-sort="4.2">4.2%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">jade roller face massager</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MTOOL1_JD_N_S</td>
+          <td data-sort="6">6</td>
+          <td data-sort="2">2</td>
+          <td data-sort="4">4</td>
+          <td data-sort="2">2</td>
+          <td data-sort="9.5">9.5</td>
+          <td data-sort="5.0">5.0</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">smoking pumpkin spice body scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf286_WB</td>
+          <td data-sort="6">6</td>
+          <td data-sort="0">0</td>
+          <td data-sort="6">6</td>
+          <td data-sort="2">2</td>
+          <td data-sort="10.0">10.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">bite of desire</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="6">6</td>
+          <td data-sort="0">0</td>
+          <td data-sort="6">6</td>
+          <td data-sort="28">28</td>
+          <td data-sort="8.39">8.39</td>
+          <td data-sort="4.33">4.33</td>
+          <td data-sort="14.3">14.3%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee sugar body scrub with pomegranate</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf206</td>
+          <td data-sort="6">6</td>
+          <td data-sort="2">2</td>
+          <td data-sort="4">4</td>
+          <td data-sort="5">5</td>
+          <td data-sort="7.2">7.2</td>
+          <td data-sort="3.5">3.5</td>
+          <td data-sort="20.0">20.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">guava fizz de tan soap</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">3MCaf394</td>
+          <td data-sort="6">6</td>
+          <td data-sort="5">5</td>
+          <td data-sort="1">1</td>
+          <td data-sort="268">268</td>
+          <td data-sort="7.7">7.7</td>
+          <td data-sort="4.44">4.44</td>
+          <td data-sort="22.8">22.8%</td>
+          <td><span class="risk-pill risk-warning">Watch</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">mcaffeine shades lip cheek glow tint raspberry 03</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="6">6</td>
+          <td data-sort="3">3</td>
+          <td data-sort="3">3</td>
+          <td data-sort="1">1</td>
+          <td data-sort="10.0">10.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">lip juice tinted lip balm berry blush</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf341</td>
+          <td data-sort="5">5</td>
+          <td data-sort="1">1</td>
+          <td data-sort="4">4</td>
+          <td data-sort="69">69</td>
+          <td data-sort="9.16">9.16</td>
+          <td data-sort="4.54">4.54</td>
+          <td data-sort="5.8">5.8%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">cherry wine</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf354</td>
+          <td data-sort="5">5</td>
+          <td data-sort="0">0</td>
+          <td data-sort="5">5</td>
+          <td data-sort="48">48</td>
+          <td data-sort="8.17">8.17</td>
+          <td data-sort="4.57">4.57</td>
+          <td data-sort="14.6">14.6%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">clear glow 1 kojic acid daily brightening face wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf299</td>
+          <td data-sort="5">5</td>
+          <td data-sort="5">5</td>
+          <td data-sort="0">0</td>
+          <td data-sort="245">245</td>
+          <td data-sort="8.4">8.4</td>
+          <td data-sort="4.38">4.38</td>
+          <td data-sort="12.7">12.7%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">lip juice tinted lip balm watermelon pop</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf340</td>
+          <td data-sort="5">5</td>
+          <td data-sort="3">3</td>
+          <td data-sort="2">2</td>
+          <td data-sort="1">1</td>
+          <td data-sort="6.0">6.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="100.0">100.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee hydrogel under eye patches 15 pairs</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">15MCaf177</td>
+          <td data-sort="5">5</td>
+          <td data-sort="1">1</td>
+          <td data-sort="4">4</td>
+          <td data-sort="320">320</td>
+          <td data-sort="8.46">8.46</td>
+          <td data-sort="4.35">4.35</td>
+          <td data-sort="12.5">12.5%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">kombucha hydra repair face moisturizer with hyaluronic acid ceramides</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="5">5</td>
+          <td data-sort="2">2</td>
+          <td data-sort="3">3</td>
+          <td data-sort="1">1</td>
+          <td data-sort="10.0">10.0</td>
+          <td data-sort="4.0">4.0</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">guava tini de tan body scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCFMUBX0418F0100</td>
+          <td data-sort="4">4</td>
+          <td data-sort="0">0</td>
+          <td data-sort="4">4</td>
+          <td data-sort="96">96</td>
+          <td data-sort="8.64">8.64</td>
+          <td data-sort="4.38">4.38</td>
+          <td data-sort="11.5">11.5%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">vanilla dream serum body lotion spf 30</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf296_WB</td>
+          <td data-sort="4">4</td>
+          <td data-sort="1">1</td>
+          <td data-sort="3">3</td>
+          <td data-sort="4">4</td>
+          <td data-sort="5.75">5.75</td>
+          <td data-sort="0">–</td>
+          <td data-sort="50.0">50.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">naked raw coffee body polishing oil</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf64</td>
+          <td data-sort="4">4</td>
+          <td data-sort="1">1</td>
+          <td data-sort="3">3</td>
+          <td data-sort="43">43</td>
+          <td data-sort="9.33">9.33</td>
+          <td data-sort="4.69">4.69</td>
+          <td data-sort="4.7">4.7%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">pumpkin spice latte body wash without box</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf279_WB</td>
+          <td data-sort="4">4</td>
+          <td data-sort="1">1</td>
+          <td data-sort="3">3</td>
+          <td data-sort="3">3</td>
+          <td data-sort="9.67">9.67</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">lip juice tinted lip balm caramel toffee</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf342</td>
+          <td data-sort="4">4</td>
+          <td data-sort="1">1</td>
+          <td data-sort="3">3</td>
+          <td data-sort="4">4</td>
+          <td data-sort="7.5">7.5</td>
+          <td data-sort="0">–</td>
+          <td data-sort="25.0">25.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">vanilla muse</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf353</td>
+          <td data-sort="4">4</td>
+          <td data-sort="0">0</td>
+          <td data-sort="4">4</td>
+          <td data-sort="30">30</td>
+          <td data-sort="8.1">8.1</td>
+          <td data-sort="4.24">4.24</td>
+          <td data-sort="26.7">26.7%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">slow kiss</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf351</td>
+          <td data-sort="4">4</td>
+          <td data-sort="2">2</td>
+          <td data-sort="2">2</td>
+          <td data-sort="25">25</td>
+          <td data-sort="7.16">7.16</td>
+          <td data-sort="4.08">4.08</td>
+          <td data-sort="24.0">24.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">naked and raw coffee face scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">15SMCaf42</td>
+          <td data-sort="4">4</td>
+          <td data-sort="0">0</td>
+          <td data-sort="4">4</td>
+          <td data-sort="38">38</td>
+          <td data-sort="9.0">9.0</td>
+          <td data-sort="4.44">4.44</td>
+          <td data-sort="5.3">5.3%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">glow sun drops spf 50 pa glow sunscreen</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf360</td>
+          <td data-sort="4">4</td>
+          <td data-sort="0">0</td>
+          <td data-sort="4">4</td>
+          <td data-sort="2">2</td>
+          <td data-sort="9.0">9.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee hair mask</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf100</td>
+          <td data-sort="4">4</td>
+          <td data-sort="1">1</td>
+          <td data-sort="3">3</td>
+          <td data-sort="4">4</td>
+          <td data-sort="6.5">6.5</td>
+          <td data-sort="0">–</td>
+          <td data-sort="25.0">25.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">mcaffeine shades hd hydra gloss lip oil ph tint shift 01</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="4">4</td>
+          <td data-sort="2">2</td>
+          <td data-sort="2">2</td>
+          <td data-sort="4">4</td>
+          <td data-sort="9.5">9.5</td>
+          <td data-sort="5.0">5.0</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee body butter with berries</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="4">4</td>
+          <td data-sort="2">2</td>
+          <td data-sort="2">2</td>
+          <td data-sort="2">2</td>
+          <td data-sort="8.5">8.5</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">by the blues brightening body scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCFMUWB0415F0175</td>
+          <td data-sort="3">3</td>
+          <td data-sort="0">0</td>
+          <td data-sort="3">3</td>
+          <td data-sort="100">100</td>
+          <td data-sort="8.76">8.76</td>
+          <td data-sort="4.57">4.57</td>
+          <td data-sort="7.0">7.0%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">advanced hair growth 20 caffexil serum</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf274</td>
+          <td data-sort="3">3</td>
+          <td data-sort="2">2</td>
+          <td data-sort="1">1</td>
+          <td data-sort="108">108</td>
+          <td data-sort="8.44">8.44</td>
+          <td data-sort="4.49">4.49</td>
+          <td data-sort="17.6">17.6%</td>
+          <td><span class="risk-pill risk-warning">Watch</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">caramel crunch exfoliating soap</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf397_WB</td>
+          <td data-sort="3">3</td>
+          <td data-sort="1">1</td>
+          <td data-sort="2">2</td>
+          <td data-sort="76">76</td>
+          <td data-sort="8.01">8.01</td>
+          <td data-sort="4.32">4.32</td>
+          <td data-sort="17.1">17.1%</td>
+          <td><span class="risk-pill risk-warning">Watch</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">rush</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MGKIT65_RUSH_S</td>
+          <td data-sort="3">3</td>
+          <td data-sort="0">0</td>
+          <td data-sort="3">3</td>
+          <td data-sort="102">102</td>
+          <td data-sort="8.1">8.1</td>
+          <td data-sort="4.44">4.44</td>
+          <td data-sort="16.7">16.7%</td>
+          <td><span class="risk-pill risk-warning">Watch</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">naked detox green tea face wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf53</td>
+          <td data-sort="3">3</td>
+          <td data-sort="1">1</td>
+          <td data-sort="2">2</td>
+          <td data-sort="75">75</td>
+          <td data-sort="9.05">9.05</td>
+          <td data-sort="4.41">4.41</td>
+          <td data-sort="5.3">5.3%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">oo7</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf349</td>
+          <td data-sort="3">3</td>
+          <td data-sort="2">2</td>
+          <td data-sort="1">1</td>
+          <td data-sort="35">35</td>
+          <td data-sort="6.91">6.91</td>
+          <td data-sort="4.29">4.29</td>
+          <td data-sort="34.3">34.3%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">all in one coffee body mask</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf161</td>
+          <td data-sort="3">3</td>
+          <td data-sort="1">1</td>
+          <td data-sort="2">2</td>
+          <td data-sort="1">1</td>
+          <td data-sort="10.0">10.0</td>
+          <td data-sort="5.0">5.0</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">espresso body wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf107</td>
+          <td data-sort="3">3</td>
+          <td data-sort="1">1</td>
+          <td data-sort="2">2</td>
+          <td data-sort="22">22</td>
+          <td data-sort="7.73">7.73</td>
+          <td data-sort="3.45">3.45</td>
+          <td data-sort="22.7">22.7%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">lip juice vanilla cocoa lip balm with peptides</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf343</td>
+          <td data-sort="3">3</td>
+          <td data-sort="1">1</td>
+          <td data-sort="2">2</td>
+          <td data-sort="3">3</td>
+          <td data-sort="9.33">9.33</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">green tea under eye patches 15 pairs</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">15MCaf225</td>
+          <td data-sort="3">3</td>
+          <td data-sort="1">1</td>
+          <td data-sort="2">2</td>
+          <td data-sort="65">65</td>
+          <td data-sort="7.98">7.98</td>
+          <td data-sort="4.14">4.14</td>
+          <td data-sort="15.4">15.4%</td>
+          <td><span class="risk-pill risk-warning">Watch</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">black tea complex retinol 0 3 face serum</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="3">3</td>
+          <td data-sort="1">1</td>
+          <td data-sort="2">2</td>
+          <td data-sort="1">1</td>
+          <td data-sort="10.0">10.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">naked raw coffee face scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf42</td>
+          <td data-sort="2">2</td>
+          <td data-sort="0">0</td>
+          <td data-sort="2">2</td>
+          <td data-sort="188">188</td>
+          <td data-sort="8.68">8.68</td>
+          <td data-sort="4.45">4.45</td>
+          <td data-sort="8.5">8.5%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">glow boost 5percent niacinamide green tea oil free moisturizer</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf221_WB</td>
+          <td data-sort="2">2</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="60">60</td>
+          <td data-sort="8.52">8.52</td>
+          <td data-sort="4.36">4.36</td>
+          <td data-sort="10.0">10.0%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee sheet mask with hyaluronic acid</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf170</td>
+          <td data-sort="2">2</td>
+          <td data-sort="0">0</td>
+          <td data-sort="2">2</td>
+          <td data-sort="10">10</td>
+          <td data-sort="9.4">9.4</td>
+          <td data-sort="4.62">4.62</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee body shimmer</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf163_WB</td>
+          <td data-sort="2">2</td>
+          <td data-sort="0">0</td>
+          <td data-sort="2">2</td>
+          <td data-sort="5">5</td>
+          <td data-sort="7.0">7.0</td>
+          <td data-sort="3.0">3.0</td>
+          <td data-sort="40.0">40.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">clear glow 2 kojic acid 1 niacinamide de pigmentation cream</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf303</td>
+          <td data-sort="2">2</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="3">3</td>
+          <td data-sort="0.67">0.67</td>
+          <td data-sort="0">–</td>
+          <td data-sort="100.0">100.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">de tan oil control coffee sunscreen spf 50 pa</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf145_N</td>
+          <td data-sort="2">2</td>
+          <td data-sort="0">0</td>
+          <td data-sort="2">2</td>
+          <td data-sort="120">120</td>
+          <td data-sort="8.52">8.52</td>
+          <td data-sort="4.42">4.42</td>
+          <td data-sort="9.2">9.2%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">choco lip balm spf 20</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf238</td>
+          <td data-sort="2">2</td>
+          <td data-sort="0">0</td>
+          <td data-sort="2">2</td>
+          <td data-sort="2">2</td>
+          <td data-sort="7.0">7.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="50.0">50.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">choco body lotion</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf60 (+1 more)</td>
+          <td data-sort="2">2</td>
+          <td data-sort="0">0</td>
+          <td data-sort="2">2</td>
+          <td data-sort="27">27</td>
+          <td data-sort="8.37">8.37</td>
+          <td data-sort="4.26">4.26</td>
+          <td data-sort="11.1">11.1%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">pore clearing coffee cookie clay face mask</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf388</td>
+          <td data-sort="2">2</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="230">230</td>
+          <td data-sort="8.3">8.3</td>
+          <td data-sort="4.39">4.39</td>
+          <td data-sort="12.2">12.2%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">mcaffeine shades velvet blur matte liquid lipstick rosewood 03</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="2">2</td>
+          <td data-sort="0">0</td>
+          <td data-sort="2">2</td>
+          <td data-sort="3">3</td>
+          <td data-sort="9.0">9.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee face serum</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="2">2</td>
+          <td data-sort="0">0</td>
+          <td data-sort="2">2</td>
+          <td data-sort="1">1</td>
+          <td data-sort="9.0">9.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">mcaffeine shades velvet blur matte liquid lipstick muted rose 02</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="2">2</td>
+          <td data-sort="2">2</td>
+          <td data-sort="0">0</td>
+          <td data-sort="6">6</td>
+          <td data-sort="9.67">9.67</td>
+          <td data-sort="4.6">4.6</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">exfoliating shower routine</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="2">2</td>
+          <td data-sort="0">0</td>
+          <td data-sort="2">2</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="100.0">100.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">hydra rush body serum spray tropical splash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="2">2</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="8.0">8.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">advanced hair fall control caffexil shampoo</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="2">2</td>
+          <td data-sort="0">0</td>
+          <td data-sort="2">2</td>
+          <td data-sort="108">108</td>
+          <td data-sort="7.57">7.57</td>
+          <td data-sort="4.09">4.09</td>
+          <td data-sort="23.1">23.1%</td>
+          <td><span class="risk-pill risk-warning">Watch</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">naked raw coffee face serum</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="2">2</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="8.0">8.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">black tea under eye patches 15 pairs</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">15MCaf263</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="1">1</td>
+          <td data-sort="39">39</td>
+          <td data-sort="9.1">9.1</td>
+          <td data-sort="4.41">4.41</td>
+          <td data-sort="2.6">2.6%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">fierce</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf350</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="1">1</td>
+          <td data-sort="11">11</td>
+          <td data-sort="6.45">6.45</td>
+          <td data-sort="3.57">3.57</td>
+          <td data-sort="36.4">36.4%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">lip brightening treatment spf 50 with vitamin c e</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf344</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="2">2</td>
+          <td data-sort="6.0">6.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="50.0">50.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">2 salicylic acid zinc pca matcha tea clear skin acne pads 40 qty</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">40MCaf272</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="1">1</td>
+          <td data-sort="45">45</td>
+          <td data-sort="8.53">8.53</td>
+          <td data-sort="4.39">4.39</td>
+          <td data-sort="13.3">13.3%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">blueberry blast body wash without box</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf280_WB</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="1">1</td>
+          <td data-sort="202">202</td>
+          <td data-sort="8.98">8.98</td>
+          <td data-sort="4.44">4.44</td>
+          <td data-sort="7.4">7.4%</td>
+          <td><span class="risk-pill risk-good">Healthy</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">mcaffeine shades velvet blur matte liquid lipstick subtle sangria 06</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="8">8</td>
+          <td data-sort="7.62">7.62</td>
+          <td data-sort="3.86">3.86</td>
+          <td data-sort="25.0">25.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">mcaffeine shades velvet blur matte liquid lipstick passionate crimson 05</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="1">1</td>
+          <td data-sort="11">11</td>
+          <td data-sort="7.73">7.73</td>
+          <td data-sort="4.44">4.44</td>
+          <td data-sort="27.3">27.3%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">mcaffeine shades velvet blur matte liquid lipstick iconic pink 04</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="8.0">8.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coconut cookie body scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="8.0">8.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee body washes trio</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="1">1</td>
+          <td data-sort="9">9</td>
+          <td data-sort="8.78">8.78</td>
+          <td data-sort="4.67">4.67</td>
+          <td data-sort="11.1">11.1%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">assorted coffee bathing soap trio</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="1">1</td>
+          <td data-sort="2">2</td>
+          <td data-sort="9.0">9.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">naked raw coffee body scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="32">32</td>
+          <td data-sort="9.25">9.25</td>
+          <td data-sort="4.58">4.58</td>
+          <td data-sort="3.1">3.1%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">coffee sheet mask with coconut water</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="1">1</td>
+          <td data-sort="6">6</td>
+          <td data-sort="7.0">7.0</td>
+          <td data-sort="4.6">4.6</td>
+          <td data-sort="33.3">33.3%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">naked detox green tea night gel</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="1">1</td>
+          <td data-sort="7">7</td>
+          <td data-sort="8.14">8.14</td>
+          <td data-sort="1.0">1.0</td>
+          <td data-sort="14.3">14.3%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Mcaffeine">
+          <td class="col-product">naked and raw coffee scalp scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="1">1</td>
+          <td data-sort="2">2</td>
+          <td data-sort="9.0">9.0</td>
+          <td data-sort="0">–</td>
+          <td data-sort="0">0.0%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Hyphen">
+          <td class="col-product">no more oily skin bundle for oily to combination skin</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPCOMB002B003</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="29">29</td>
+          <td data-sort="7.45">7.45</td>
+          <td data-sort="4.18">4.18</td>
+          <td data-sort="27.6">27.6%</td>
+          <td><span class="risk-pill risk-low-sample">Low sample</span></td>
+        </tr>
+        <tr data-brand="Hyphen">
+          <td class="col-product">all i need sunscreen spf 50 pa</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">–</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="5017">5,017</td>
+          <td data-sort="8.26">8.26</td>
+          <td data-sort="4.5">4.5</td>
+          <td data-sort="15.3">15.3%</td>
+          <td><span class="risk-pill risk-warning">Watch</span></td>
+        </tr>
+        <tr data-brand="Hyphen">
+          <td class="col-product">vitamin infused peptide lip balm marshmallow</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">–</td>
+          <td data-sort="1">1</td>
+          <td data-sort="1">1</td>
+          <td data-sort="0">0</td>
+          <td data-sort="242">242</td>
+          <td data-sort="8.01">8.01</td>
+          <td data-sort="4.4">4.4</td>
+          <td data-sort="16.5">16.5%</td>
+          <td><span class="risk-pill risk-warning">Watch</span></td>
+        </tr></tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Unmatched product names (top 40 by complaint volume)</h2>
+    <p class="hint">These didn't resolve to an nps_product entry after name normalization - usually because the
+      ticket's product name and the NPS survey's product name diverge (e.g. an ingredient-led ticket name vs a
+      marketing name). Needs a manual SKU-level mapping to close.</p>
+    <div class="table-scroll">
+    <table id="unmatched-table">
+      <thead><tr>
+        <th data-type="text">Product</th>
+        <th data-type="text">Brand</th>
+        <th data-type="text">SKU</th>
+        <th data-type="num">Complaints</th>
+      </tr></thead>
+      <tbody><tr data-brand="Hyphen">
+          <td class="col-product">double shot face serum</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX038F050</td>
+          <td data-sort="3329">3,329</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">dual phase de pigmentation serum</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX0046F0030</td>
+          <td data-sort="1539">1,539</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">advanced glow serum with 3 tranexamic acid 2 kojic acid</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX020F030</td>
+          <td data-sort="697">697</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">all i need sunscreen spf50 pa</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX004F050</td>
+          <td data-sort="514">514</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">anti acne face serum with 10 azelaic acid 2 salicylic acid</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX013F030</td>
+          <td data-sort="486">486</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">by the blues brightening perfume body lotion</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf401 (+2 more)</td>
+          <td data-sort="387">387</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">10 peptide with 2 copper peptide face serum</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX031F030 (+1 more)</td>
+          <td data-sort="361">361</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">choco body butter</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf48</td>
+          <td data-sort="337">337</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">brightening face serum 5 niacinamide 1 alpha arbutin 25 kakadu plum</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX003F030</td>
+          <td data-sort="335">335</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">espresso coffee body wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf107</td>
+          <td data-sort="321">321</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">brightening raspberry body wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf383_WB</td>
+          <td data-sort="314">314</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">vip hazel lip balm with 1 vit e 2 squalane peptides</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX022F010</td>
+          <td data-sort="250">250</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">coffee body scrub</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf40 (+1 more)</td>
+          <td data-sort="222">222</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">ceramides milky toner essence with 5 rice water blend</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX027F100</td>
+          <td data-sort="209">209</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">super glow flash facial 25 aha bha pha face mask</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">mcaf375</td>
+          <td data-sort="183">183</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">brightening body wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf383_WB</td>
+          <td data-sort="162">162</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">blueberry blast body wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf280_WB</td>
+          <td data-sort="134">134</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">sun glaze mist face sunscreen spf 50 pa spray</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf364</td>
+          <td data-sort="126">126</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">rice water brightening cleanser</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX017F100</td>
+          <td data-sort="126">126</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">sun bath spf body sunscreen 80 pa spray</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf365</td>
+          <td data-sort="121">121</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">ultra light water sunscreen spf 50 pa for uva uvb protection</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX008F050</td>
+          <td data-sort="113">113</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">barrier repair moisturizer normal to dry</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX001F050</td>
+          <td data-sort="106">106</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">brightening raspberry spf 50 pa body sunscreen lotion</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf385</td>
+          <td data-sort="105">105</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">vip vintage lip balm with 1 vit e 2 squalane peptides</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX024F010</td>
+          <td data-sort="99">99</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">vip marshmallow lip balm with 1 vit e 2 squalane peptides</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX023F010</td>
+          <td data-sort="98">98</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">exfoliating caramel crunch body wash</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf397_WB</td>
+          <td data-sort="97">97</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">7 ceramides nmf face moisturizer rich pillow cream</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX028F050</td>
+          <td data-sort="97">97</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">fein men written by women</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MGKIT64_SWM_S</td>
+          <td data-sort="91">91</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">10 vit c serum with 1 vit e ferulic acid</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX045F020</td>
+          <td data-sort="90">90</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">mcaffeine green tea face serum with multi peptides</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">–</td>
+          <td data-sort="85">85</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">ice dunk cooling face mask 31 cooling actives</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX035F050</td>
+          <td data-sort="83">83</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">10 magnesium body lotion</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">Mcaf398</td>
+          <td data-sort="77">77</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">choco body lotion pack of 2</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">CMB466</td>
+          <td data-sort="77">77</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">clarifying acne cleanser with 2 salicylic acid</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX012F100</td>
+          <td data-sort="73">73</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">green tea 15 vitamin c face serum</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf189</td>
+          <td data-sort="71">71</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">10 fermented rice water brightening cleanser 1 vitamin c 0 5 glycolic acid</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX017F200</td>
+          <td data-sort="69">69</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">rush perfume gift set for women</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MGKIT65_RUSH_S</td>
+          <td data-sort="66">66</td>
+        </tr><tr data-brand="Mcaffeine">
+          <td class="col-product">coffee face mask</td>
+          <td class="col-brand">Mcaffeine</td>
+          <td class="col-sku">MCaf46 (+1 more)</td>
+          <td data-sort="65">65</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">vip orchid lip balm 1 vit e peptides</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX042F010</td>
+          <td data-sort="64">64</td>
+        </tr><tr data-brand="Hyphen">
+          <td class="col-product">mango lip screen spf 50 pa with 2 kojic acid</td>
+          <td class="col-brand">Hyphen</td>
+          <td class="col-sku">HYPMUBX034F010</td>
+          <td data-sort="61">61</td>
+        </tr></tbody>
+    </table>
+    </div>
+  </div>
+
+  <footer>Regenerated daily at 3:00 AM IST by generate_nps_issue_report.py</footer>
+</div>
+<script>
+(function() {
+  function wireSort(table) {
+    var tbody = table.tBodies[0];
+    var headers = table.tHead.rows[0].cells;
+    Array.prototype.forEach.call(headers, function(th, idx) {
+      var dir = 1;
+      th.addEventListener('click', function() {
+        var rows = Array.prototype.slice.call(tbody.rows);
+        var type = th.getAttribute('data-type');
+        rows.sort(function(a, b) {
+          var av = a.cells[idx], bv = b.cells[idx];
+          if (type === 'num') {
+            var an = parseFloat(av.getAttribute('data-sort') || av.textContent) || 0;
+            var bn = parseFloat(bv.getAttribute('data-sort') || bv.textContent) || 0;
+            return (an - bn) * dir;
+          }
+          return av.textContent.localeCompare(bv.textContent) * dir;
+        });
+        rows.forEach(function(r) { tbody.appendChild(r); });
+        dir *= -1;
+      });
+    });
+  }
+  wireSort(document.getElementById('main-table'));
+  wireSort(document.getElementById('unmatched-table'));
+
+  var mainBody = document.getElementById('main-table').tBodies[0];
+  var unmatchedBody = document.getElementById('unmatched-table').tBodies[0];
+  var search = document.getElementById('search');
+  var brandFilter = document.getElementById('brand-filter');
+  var activeBrand = 'all';
+
+  function applyFilters() {
+    var q = search.value.trim().toLowerCase();
+    Array.prototype.forEach.call(mainBody.rows, function(r) {
+      var name = r.cells[0].textContent.toLowerCase();
+      var brandOk = activeBrand === 'all' || r.getAttribute('data-brand').indexOf(activeBrand) !== -1;
+      r.style.display = (name.indexOf(q) === -1 || !brandOk) ? 'none' : '';
+    });
+    Array.prototype.forEach.call(unmatchedBody.rows, function(r) {
+      var brandOk = activeBrand === 'all' || r.getAttribute('data-brand').indexOf(activeBrand) !== -1;
+      r.style.display = brandOk ? '' : 'none';
+    });
+  }
+
+  search.addEventListener('input', applyFilters);
+  brandFilter.addEventListener('click', function(e) {
+    var btn = e.target.closest('.brand-btn');
+    if (!btn) return;
+    Array.prototype.forEach.call(brandFilter.querySelectorAll('.brand-btn'), function(b) {
+      b.classList.toggle('active', b === btn);
+    });
+    activeBrand = btn.getAttribute('data-brand');
+    applyFilters();
+  });
+})();
+</script>
+</body>
+</html>

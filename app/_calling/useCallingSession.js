@@ -331,9 +331,11 @@ export function useCallingSession(processKey, { getPendingBox, getDateBounds } =
       if (agentStatus !== 'Offline') syncPresenceToServer(agentStatus);
     };
     heartbeatTickRef.current = tick;
-    const t = setInterval(() => {
-      if (!document.hidden) tick();
-    }, 2 * 60 * 1000);
+    // NOT gated on document.hidden, unlike the presence-read/version-check polls below - this
+    // heartbeat is what keeps agent_presence fresh for assign_leads.py's eligibility check, so
+    // it must keep firing even while the tab is backgrounded (dialer app, other window, etc.)
+    // or an agent looks "stale" and silently stops receiving new leads despite still working.
+    const t = setInterval(tick, 2 * 60 * 1000);
     return () => clearInterval(t);
   }, [agentStatus, googleUser, syncPresenceToServer]);
 

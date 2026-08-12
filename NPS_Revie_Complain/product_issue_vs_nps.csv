@@ -1,0 +1,138 @@
+product,brand,sku_code,sku_variant_count,issue_count,product_issues,packaging_issues,nps_responses,avg_overall_nps,avg_packaging_score,avg_product_nps,promoters,passives,detractors,detractor_rate_pct
+summer breeze perfume body lotion,Mcaffeine,MCaf371,2,803,192,611,1778,8.65,4.53,8.73,1325,261,192,10.8
+sweet escape perfume body lotion,Mcaffeine,MCaf370,3,656,185,471,2126,8.58,4.52,8.63,1541,345,240,11.3
+guava tini de tan body wash,Mcaffeine,Mcaf396_WB,2,462,120,342,3220,8.45,4.4,8.47,2220,583,417,13.0
+coffee face wash,Mcaffeine,50MCaf41_WB_F,5,214,30,184,821,8.37,4.28,8.07,569,137,115,14.0
+sun bath spf 80 pa body sunscreen spray,Mcaffeine,MCaf365,1,211,29,182,62,6.9,4.32,6.68,28,17,17,27.4
+take a dip triple action deo body wash,Mcaffeine,Mcaf408_WB,1,200,94,106,1859,8.32,4.29,8.28,1285,301,273,14.7
+golden hour glow screen spf 50 pa,Hyphen,HYPMUBX033F040,1,175,63,112,624,7.82,4.36,7.71,362,134,128,20.5
+brightening raspberry rush body scrub,Mcaffeine,MCaf382_WB,1,167,4,163,323,8.93,4.38,8.89,245,54,24,7.4
+brightening raspberry rush serum body lotion spf 50 pa,Mcaffeine,MCaf385,1,165,48,117,497,8.34,4.34,8.44,339,93,65,13.1
+sun milk 100 mineral sunscreen spf 50 pa,Hyphen,HYPMUBX030F050,1,162,85,77,435,7.96,4.36,7.72,254,100,81,18.6
+naked rich choco body butter,Mcaffeine,MCaf48,1,145,7,138,120,8.49,4.44,8.49,84,22,14,11.7
+high shine perfector hair spray,Mcaffeine,Mcaf406,1,130,20,110,502,8.08,4.27,7.72,325,86,91,18.1
+coffee under eye cream,Mcaffeine,15MCaf62,2,123,25,98,140,8.24,4.47,8.09,96,20,24,17.1
+sun glaze mist spf 50 pa sunscreen spray,Mcaffeine,MCaf364,1,116,18,98,32,6.72,3.07,6.34,16,5,11,34.4
+coffee body wash with berries,Mcaffeine,MCaf212_WB,3,107,6,101,92,8.82,4.62,8.85,69,15,8,8.7
+blueberry breeze body scrub,Mcaffeine,MCaf285_WB,1,94,7,87,145,9.03,4.56,8.97,119,17,9,6.2
+by the blues perfume body lotion,Mcaffeine,Mcaf401,1,81,11,70,1943,8.5,4.45,8.59,1369,339,235,12.1
+blueberry swirl serum body lotion,Mcaffeine,MCaf298_WB,1,76,13,63,126,8.95,4.44,8.97,106,11,9,7.1
+11 aha bha skin smoothening strawberry body lotion,Mcaffeine,MCaf402,1,74,21,53,324,8.64,4.47,8.58,247,44,33,10.2
+2 salicylic acid niacinamide matcha tea face wash,Mcaffeine,MCaf270,1,59,20,39,143,8.28,4.39,7.96,96,29,18,12.6
+brightening raspberry rush body wash,Mcaffeine,MCaf383_WB,3,58,4,54,589,8.58,4.41,8.58,428,100,61,10.4
+matte max velvet touch sunscreen spf 70 pa,Hyphen,HYPMUBX026F030,1,57,26,31,284,8.46,4.37,8.42,188,61,35,12.3
+coffee body wash with almonds,Mcaffeine,MCaf208_WB,1,54,2,52,29,8.55,4.37,8.36,20,7,2,6.9
+naked and raw coffee body scrub,Mcaffeine,55MCaf40,1,49,3,46,842,8.57,4.49,8.66,610,136,96,11.4
+vitamin infused peptide dewy prep,Hyphen,HYPMUBX025F010,1,48,4,44,47,8.62,4.31,8.43,29,14,4,8.5
+coffee body lotion,Mcaffeine,250MCaf59_WB,2,45,2,43,6,5.67,,5.67,3,0,3,50.0
+0 1 retinal reset serum pro,Hyphen,HYPMUBX016F030,1,43,18,25,264,8.58,4.46,8.34,186,45,33,12.5
+blueberry swirl deep moisturizing body butter,Mcaffeine,MCaf345_WB,1,40,4,36,32,9.19,4.43,9.33,28,3,1,3.1
+caramel crunch exfoliating body wash,Mcaffeine,Mcaf397_WB,1,39,8,31,1303,8.64,4.42,8.69,959,209,135,10.4
+glow boost grapefruit body wash,Mcaffeine,MCaf384_WB,1,38,1,37,44,8.89,4.27,8.65,35,5,4,9.1
+green tea face wash,Mcaffeine,MCaf53,2,32,2,30,15,8.33,4.2,7.6,11,1,3,20.0
+island fresh triple action deo body wash,Mcaffeine,Mcaf409_WB,1,30,11,19,458,8.57,4.35,8.46,337,69,52,11.4
+take it easy 10 magnesium body lotion,Mcaffeine,Mcaf398,1,30,6,24,456,8.69,4.48,8.77,338,73,45,9.9
+coffee body lotion pack of 2,Mcaffeine,,0,28,4,24,1,9.0,,9.0,1,0,0,0.0
+caramel eclairs coffee body scrub,Mcaffeine,Mcaf407,1,27,7,20,253,8.91,4.57,8.84,197,38,18,7.1
+water light gel oil free coffee moisturizer,Mcaffeine,MCaf83_N,1,24,10,14,87,8.8,4.44,8.68,64,18,5,5.7
+super glow flash facial mask,Mcaffeine,MCaf375,1,24,15,9,359,7.96,4.25,7.72,216,75,68,18.9
+berries brightening coffee face scrub,Mcaffeine,MCaf369,1,22,8,14,87,8.64,4.38,8.54,63,18,6,6.9
+choco tinted lip balm with berries,Mcaffeine,MCaf240,1,19,3,16,6,7.83,,7.83,3,1,2,33.3
+gua sha green quartz,Mcaffeine,MTOOL2_GS,1,19,1,18,2,9.5,5.0,9.5,2,0,0,0.0
+high shine glossing shampoo,Mcaffeine,Mcaf404,1,19,8,11,502,8.94,4.53,8.9,383,89,30,6.0
+coffee body wash with cocoa,Mcaffeine,MCaf209_WB,1,19,1,18,45,8.24,4.64,8.44,35,3,7,15.6
+clear glow 1 kojic acid alpha arbutin daily brightening sunscreen,Mcaffeine,MCaf302,1,19,8,11,399,8.38,4.31,8.29,283,60,56,14.0
+vanilla dream deep moisturizing body butter,Mcaffeine,MCaf346_WB,1,17,3,14,2,5.0,,5.0,1,0,1,50.0
+coffee body scrub with berries,Mcaffeine,100MCaf199,1,16,0,16,106,8.45,4.42,8.51,72,21,13,12.3
+green tea vitamin c serum,Mcaffeine,3MCaf189,1,16,10,6,106,8.42,4.44,8.25,76,16,14,13.2
+0 05 retinal reset serum,Hyphen,HYPMUBX015F030,1,16,6,10,96,8.68,4.55,8.63,67,20,9,9.4
+daily glow green tea sunscreen spf 50 pa,Mcaffeine,MCaf220,1,15,6,9,94,8.7,4.4,8.74,59,29,6,6.4
+shimmer body butter,Mcaffeine,MCaf234_WB,1,14,7,7,86,8.63,4.59,8.94,63,14,9,10.5
+high shine intensifier conditioner,Mcaffeine,Mcaf405,1,12,4,8,272,8.94,4.55,9.03,208,45,19,7.0
+black tea complex night cream,Mcaffeine,MCaf259,1,12,7,5,275,8.74,4.52,8.65,198,54,23,8.4
+naked raw coffee face mask,Mcaffeine,MCaf46,2,11,1,10,79,8.18,4.19,7.72,53,15,11,13.9
+coconut cream body wash,Mcaffeine,MCaf281_WB,1,11,1,10,2,8.0,,8.0,1,1,0,0.0
+glow boost grapefruit body scrub,Mcaffeine,MCaf381_WB,1,10,1,9,2,9.5,,9.5,2,0,0,0.0
+green tea under eye cream,Mcaffeine,,0,10,1,9,31,8.06,4.54,7.69,23,2,6,19.4
+green tea oil free moisturizer,Mcaffeine,,0,10,3,7,5,8.4,,8.4,3,1,1,20.0
+vitamin infused peptide lip balm peach,Hyphen,HYPMUBX006F010,1,9,5,4,33,8.09,4.35,8.33,20,7,6,18.2
+pore clearing coffee cookie face scrub,Mcaffeine,MCaf387,1,8,1,7,163,9.01,4.62,9.12,131,24,8,4.9
+naked and raw coffee face wash,Mcaffeine,15SMCaf41,1,8,2,6,76,8.59,4.32,8.36,55,13,8,10.5
+5 aha coffee underarm roll on,Mcaffeine,MCaf278,1,8,3,5,213,8.75,4.46,8.68,154,41,18,8.5
+skin bounce moisturizing cream,Mcaffeine,,0,8,5,3,3,10.0,,10.0,3,0,0,0.0
+the addiction collection gift set,Mcaffeine,,0,7,0,7,45,7.98,4.32,7.84,28,10,7,15.6
+midnight in bombay,Mcaffeine,,0,7,3,4,44,8.11,4.46,8.12,32,5,7,15.9
+naked raw coffee face wash,Mcaffeine,MCaf41,1,7,1,6,360,8.72,4.39,8.62,276,55,29,8.1
+ceramide intense barrier repair cream,Mcaffeine,MCaf82_N,1,7,2,5,4,7.5,,7.5,3,0,1,25.0
+coffee sugar body scrub with coconut,Mcaffeine,MCaf205,1,7,1,6,1,7.0,,7.0,0,1,0,0.0
+vitamin infused peptide lip balm vanilla,Hyphen,HYPMUBX005F010,1,7,5,2,46,8.35,4.68,8.07,28,12,6,13.0
+coffee lip scrub,Mcaffeine,5SMcaf122_F,2,6,1,5,48,8.94,4.5,8.83,36,10,2,4.2
+jade roller face massager,Mcaffeine,MTOOL1_JD_N_S,1,6,2,4,2,9.5,5.0,9.0,2,0,0,0.0
+smoking pumpkin spice body scrub,Mcaffeine,MCaf286_WB,1,6,0,6,2,10.0,,10.0,2,0,0,0.0
+bite of desire,Mcaffeine,,0,6,0,6,28,8.39,4.33,7.96,19,5,4,14.3
+coffee sugar body scrub with pomegranate,Mcaffeine,MCaf206,1,6,2,4,5,7.2,3.5,6.8,2,2,1,20.0
+guava fizz de tan soap,Mcaffeine,3MCaf394,1,6,5,1,268,7.7,4.44,7.74,170,37,61,22.8
+mcaffeine shades lip cheek glow tint raspberry 03,Mcaffeine,,0,6,3,3,1,10.0,,10.0,1,0,0,0.0
+lip juice tinted lip balm berry blush,Mcaffeine,MCaf341,1,5,1,4,69,9.16,4.54,9.1,58,7,4,5.8
+cherry wine,Mcaffeine,MCaf354,1,5,0,5,48,8.17,4.57,8.11,31,10,7,14.6
+clear glow 1 kojic acid daily brightening face wash,Mcaffeine,MCaf299,1,5,5,0,245,8.4,4.38,8.45,173,41,31,12.7
+lip juice tinted lip balm watermelon pop,Mcaffeine,MCaf340,1,5,3,2,1,6.0,,6.0,0,0,1,100.0
+coffee hydrogel under eye patches 15 pairs,Mcaffeine,15MCaf177,1,5,1,4,320,8.46,4.35,8.21,222,58,40,12.5
+kombucha hydra repair face moisturizer with hyaluronic acid ceramides,Mcaffeine,,0,5,2,3,1,10.0,4.0,10.0,1,0,0,0.0
+guava tini de tan body scrub,Mcaffeine,MCFMUBX0418F0100,1,4,0,4,96,8.64,4.38,8.53,74,11,11,11.5
+vanilla dream serum body lotion spf 30,Mcaffeine,MCaf296_WB,1,4,1,3,4,5.75,,5.75,2,0,2,50.0
+naked raw coffee body polishing oil,Mcaffeine,MCaf64,1,4,1,3,43,9.33,4.69,9.47,36,5,2,4.7
+pumpkin spice latte body wash without box,Mcaffeine,MCaf279_WB,1,4,1,3,3,9.67,,9.67,3,0,0,0.0
+lip juice tinted lip balm caramel toffee,Mcaffeine,MCaf342,1,4,1,3,4,7.5,,7.5,1,2,1,25.0
+vanilla muse,Mcaffeine,MCaf353,1,4,0,4,30,8.1,4.24,8.17,20,2,8,26.7
+slow kiss,Mcaffeine,MCaf351,1,4,2,2,25,7.16,4.08,7.32,11,8,6,24.0
+naked and raw coffee face scrub,Mcaffeine,15SMCaf42,1,4,0,4,38,9.0,4.44,9.14,28,8,2,5.3
+glow sun drops spf 50 pa glow sunscreen,Mcaffeine,MCaf360,1,4,0,4,2,9.0,,9.0,2,0,0,0.0
+coffee hair mask,Mcaffeine,MCaf100,1,4,1,3,4,6.5,,6.5,1,2,1,25.0
+mcaffeine shades hd hydra gloss lip oil ph tint shift 01,Mcaffeine,,0,4,2,2,4,9.5,5.0,9.5,4,0,0,0.0
+coffee body butter with berries,Mcaffeine,,0,4,2,2,2,8.5,,8.5,1,1,0,0.0
+by the blues brightening body scrub,Mcaffeine,MCFMUWB0415F0175,1,3,0,3,100,8.76,4.57,8.83,74,19,7,7.0
+advanced hair growth 20 caffexil serum,Mcaffeine,MCaf274,1,3,2,1,108,8.44,4.49,8.21,76,13,19,17.6
+caramel crunch exfoliating soap,Mcaffeine,Mcaf397_WB,1,3,1,2,76,8.01,4.32,7.75,50,13,13,17.1
+rush,Mcaffeine,MGKIT65_RUSH_S,1,3,0,3,102,8.1,4.44,8.21,62,23,17,16.7
+naked detox green tea face wash,Mcaffeine,MCaf53,1,3,1,2,75,9.05,4.41,9.19,56,15,4,5.3
+oo7,Mcaffeine,MCaf349,1,3,2,1,35,6.91,4.29,6.37,18,5,12,34.3
+all in one coffee body mask,Mcaffeine,MCaf161,1,3,1,2,1,10.0,5.0,10.0,1,0,0,0.0
+espresso body wash,Mcaffeine,MCaf107,1,3,1,2,22,7.73,3.45,8.09,11,6,5,22.7
+lip juice vanilla cocoa lip balm with peptides,Mcaffeine,MCaf343,1,3,1,2,3,9.33,,9.33,3,0,0,0.0
+green tea under eye patches 15 pairs,Mcaffeine,15MCaf225,1,3,1,2,65,7.98,4.14,7.92,41,14,10,15.4
+black tea complex retinol 0 3 face serum,Mcaffeine,,0,3,1,2,1,10.0,,10.0,1,0,0,0.0
+naked raw coffee face scrub,Mcaffeine,MCaf42,1,2,0,2,188,8.68,4.45,8.77,144,28,16,8.5
+glow boost 5percent niacinamide green tea oil free moisturizer,Mcaffeine,MCaf221_WB,1,2,1,1,60,8.52,4.36,8.44,46,8,6,10.0
+coffee sheet mask with hyaluronic acid,Mcaffeine,Mcaf170,1,2,0,2,10,9.4,4.62,9.6,10,0,0,0.0
+coffee body shimmer,Mcaffeine,MCaf163_WB,1,2,0,2,5,7.0,3.0,6.0,1,2,2,40.0
+clear glow 2 kojic acid 1 niacinamide de pigmentation cream,Mcaffeine,MCaf303,1,2,1,1,3,0.67,,0.67,0,0,3,100.0
+de tan oil control coffee sunscreen spf 50 pa,Mcaffeine,MCaf145_N,1,2,0,2,120,8.52,4.42,8.45,87,22,11,9.2
+choco lip balm spf 20,Mcaffeine,MCaf238,1,2,0,2,2,7.0,,7.0,1,0,1,50.0
+choco body lotion,Mcaffeine,MCaf60,2,2,0,2,27,8.37,4.26,4.75,18,6,3,11.1
+pore clearing coffee cookie clay face mask,Mcaffeine,MCaf388,1,2,1,1,230,8.3,4.39,8.22,160,42,28,12.2
+mcaffeine shades velvet blur matte liquid lipstick rosewood 03,Mcaffeine,,0,2,0,2,3,9.0,,9.0,2,1,0,0.0
+coffee face serum,Mcaffeine,,0,2,0,2,1,9.0,,9.0,1,0,0,0.0
+mcaffeine shades velvet blur matte liquid lipstick muted rose 02,Mcaffeine,,0,2,2,0,6,9.67,4.6,9.67,5,1,0,0.0
+exfoliating shower routine,Mcaffeine,,0,2,0,2,1,0.0,,0.0,0,0,1,100.0
+hydra rush body serum spray tropical splash,Mcaffeine,,0,2,1,1,1,8.0,,8.0,0,1,0,0.0
+advanced hair fall control caffexil shampoo,Mcaffeine,,0,2,0,2,108,7.57,4.09,7.37,69,14,25,23.1
+naked raw coffee face serum,Mcaffeine,,0,2,1,1,1,8.0,,8.0,0,1,0,0.0
+black tea under eye patches 15 pairs,Mcaffeine,15MCaf263,1,1,0,1,39,9.1,4.41,8.92,30,8,1,2.6
+fierce,Mcaffeine,MCaf350,1,1,0,1,11,6.45,3.57,6.18,5,2,4,36.4
+lip brightening treatment spf 50 with vitamin c e,Mcaffeine,MCaf344,1,1,1,0,2,6.0,,6.0,1,0,1,50.0
+2 salicylic acid zinc pca matcha tea clear skin acne pads 40 qty,Mcaffeine,40MCaf272,1,1,0,1,45,8.53,4.39,8.33,32,7,6,13.3
+blueberry blast body wash without box,Mcaffeine,MCaf280_WB,1,1,0,1,202,8.98,4.44,8.92,161,26,15,7.4
+mcaffeine shades velvet blur matte liquid lipstick subtle sangria 06,Mcaffeine,,0,1,1,0,8,7.62,3.86,7.0,6,0,2,25.0
+mcaffeine shades velvet blur matte liquid lipstick passionate crimson 05,Mcaffeine,,0,1,0,1,11,7.73,4.44,7.3,8,0,3,27.3
+mcaffeine shades velvet blur matte liquid lipstick iconic pink 04,Mcaffeine,,0,1,0,1,1,8.0,,8.0,0,1,0,0.0
+coconut cookie body scrub,Mcaffeine,,0,1,0,1,1,8.0,,8.0,0,1,0,0.0
+coffee body washes trio,Mcaffeine,,0,1,0,1,9,8.78,4.67,8.78,7,1,1,11.1
+assorted coffee bathing soap trio,Mcaffeine,,0,1,0,1,2,9.0,,9.0,1,1,0,0.0
+naked raw coffee body scrub,Mcaffeine,,0,1,1,0,32,9.25,4.58,9.1,29,2,1,3.1
+coffee sheet mask with coconut water,Mcaffeine,,0,1,0,1,6,7.0,4.6,8.17,3,1,2,33.3
+naked detox green tea night gel,Mcaffeine,,0,1,0,1,7,8.14,1.0,9.5,6,0,1,14.3
+naked and raw coffee scalp scrub,Mcaffeine,,0,1,0,1,2,9.0,,9.0,1,1,0,0.0
+no more oily skin bundle for oily to combination skin,Hyphen,HYPCOMB002B003,1,1,1,0,29,7.45,4.18,7.41,16,5,8,27.6
+all i need sunscreen spf 50 pa,Hyphen,,0,1,1,0,5017,8.26,4.5,8.3,3220,1031,766,15.3
+vitamin infused peptide lip balm marshmallow,Hyphen,,0,1,1,0,242,8.01,4.4,7.87,149,53,40,16.5
