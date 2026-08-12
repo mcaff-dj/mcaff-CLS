@@ -45,14 +45,15 @@ const CARD_TABS = {
     { key: 'lipbalms', label: 'Lip Balms' },
     { key: 'scrubs', label: 'Scrubs' },
   ],
-  // 'overview' is the Calling Team's own summary view; every other entry is one of the
-  // Calling CRM's processes, generated from callingProcesses.json so granting a process here
-  // and the CRM's own Process switcher can't drift apart. A row in report_tab_permissions
-  // (card 'calling', tab '<process key>') is what "this agent is invited to this process"
-  // means - see that file's ACCESS note.
+  // 'overview' and 'exports' are the Calling Team's own sidebar views; every other entry is
+  // one of the Calling CRM's processes, generated from callingProcesses.json so granting a
+  // process here and the CRM's own Process switcher can't drift apart. A row in
+  // report_tab_permissions (card 'calling', tab '<process key>') is what "this agent is
+  // invited to this process" means - see that file's ACCESS note.
   calling: [
     { key: 'overview', label: 'Overview' },
     ...require('./callingProcesses.json').processes.map(p => ({ key: p.key, label: p.label })),
+    { key: 'exports', label: 'Exports' },
   ],
   // Mirrors app/deepdive/DeepdiveClient.js's own TABS array (a React page, not a
   // gen_panels.py-generated tab bar) - keep those two in sync by hand.
