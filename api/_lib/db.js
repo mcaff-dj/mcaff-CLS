@@ -2247,6 +2247,101 @@ async function fetchAllNdrLeadDates() {
   return out;
 }
 
+// Refund CSV export (Calling Team "Exports" tab) - reads PEP_CLS.refund_all_brands, a table
+// fed by GoKwik refund records across every brand storefront (see
+// api/refund/gokwik-initiate.js for the refund-INITIATION side of this data; nothing in this
+// app writes refund_all_brands itself). See
+// docs/superpowers/specs/2026-08-12-refund-export-design.md for the full column/format audit
+// this is built from.
+//
+// created_at/refunded_at are VARCHAR, not real timestamps, and mix two real formats in the
+// data - both day-first: 'D/M/YYYY h:mm AM/PM' and 'DD-MM-YYYY HH:MM'. STR_TO_DATE returns
+// NULL on a non-matching format rather than erroring, so COALESCE picks whichever pattern
+// actually matched a given row.
+const REFUND_EXPORT_CREATED_AT_EXPR =
+  "COALESCE(STR_TO_DATE(created_at, '%d/%c/%Y %h:%i %p'), STR_TO_DATE(created_at, '%d-%m-%Y %H:%i'))";
+
+const REFUND_EXPORT_BASE_COLUMNS = [
+  's_no', 'order_number', 'payment_id', 'platform_order_number', 'rrn_no', 'refund_id',
+  'reference_id', 'amount', 'created_at', 'auto_refund', 'refund_type', 'status',
+  'is_chargeback', 'chargeback_case_id', 'chargeback_case_status', 'moid', 'initiated_by',
+  'refunded_at', 'transaction_payment_id', 'source', 'refund_request_description',
+];
+// Admin-only - api/refund-export.js decides whether to ask for these from session.isAdmin.
+const REFUND_EXPORT_PII_COLUMNS = [
+  'customer_name', 'customer_phone', 'customer_email', 'shipping_address', 'billing_address',
+];
+// Sized from the actual table: measured avg row 438 bytes / true max 1104 bytes across all
+// 90k+ rows (all 26 columns) - 10k rows is ~4.4MB expected, safely under Lambda's 6MB response
+// ceiling. See the design doc for the full measurement.
+const REFUND_EXPORT_MAX_ROWS = 10000;
+
+// Splits a comma-separated query-param value into a trimmed, deduped, non-empty list. ''/null/
+// undefined and a value that's only commas/whitespace all mean "no filter on this column".
+function splitRefundExportFilterList(value) {
+  if (!value) return [];
+  const seen = new Set();
+  for (const raw of String(value).split(',')) {
+    const v = raw.trim();
+    if (v) seen.add(v);
+  }
+  return [...seen];
+}
+
+// Builds the WHERE clause + positional params shared by the count and row queries below.
+// `from`/`to` must already be validated 'YYYY-MM-DD' strings - validating that shape is
+// api/refund-export.js's job, since it's the one place that can return a 400 with a useful
+// message; this function only enforces that a range was supplied at all; it has no HTTP
+// response to give a caller so callers that skip validation get a plain thrown Error instead.
+//
+// `to` is compared as the START of the day AFTER `to` (a half-open interval), not
+// `<= '<to> 23:59:59'` - a bare `<=` against a literal date string compares against midnight
+// and would exclude every row with a nonzero time component, silently turning a same-day
+// range (from=to) into zero rows.
+function buildRefundExportWhere({ from, to, status, refundType, source }) {
+  if (!from || !to) throw new Error('from and to are required');
+  const clauses = [
+    `${REFUND_EXPORT_CREATED_AT_EXPR} >= ?`,
+    `${REFUND_EXPORT_CREATED_AT_EXPR} < DATE_ADD(?, INTERVAL 1 DAY)`,
+  ];
+  const params = [from, to];
+
+  for (const [column, raw] of [['status', status], ['refund_type', refundType], ['source', source]]) {
+    const values = splitRefundExportFilterList(raw);
+    if (values.length) {
+      clauses.push(`${column} IN (${values.map(() => '?').join(',')})`);
+      params.push(...values);
+    }
+  }
+  return { where: clauses.join(' AND '), params };
+}
+
+async function getRefundExportCount(filters) {
+  const { where, params } = buildRefundExportWhere(filters);
+  const pool = await getPool();
+  const [rows] = await pool.execute(`SELECT COUNT(*) AS n FROM refund_all_brands WHERE ${where}`, params);
+  return rows[0].n;
+}
+
+// includePii must come from session.isAdmin at the call site (api/refund-export.js) - this
+// function trusts its caller completely, same as every other data-fetcher in this file.
+async function getRefundExportRows(filters, { includePii } = {}) {
+  const { where, params } = buildRefundExportWhere(filters);
+  const columns = includePii
+    ? [...REFUND_EXPORT_BASE_COLUMNS, ...REFUND_EXPORT_PII_COLUMNS]
+    : REFUND_EXPORT_BASE_COLUMNS;
+  const columnList = columns.map((c) => `\`${c}\``).join(', ');
+  const pool = await getPool();
+  // REFUND_EXPORT_MAX_ROWS is a fixed internal constant, never user input - safe to
+  // interpolate directly rather than as a bound parameter (mysql2 prepared statements are
+  // inconsistent about accepting a placeholder in LIMIT across versions).
+  const [rows] = await pool.execute(
+    `SELECT ${columnList} FROM refund_all_brands WHERE ${where} ORDER BY ${REFUND_EXPORT_CREATED_AT_EXPR} LIMIT ${REFUND_EXPORT_MAX_ROWS}`,
+    params
+  );
+  return rows;
+}
+
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
@@ -2263,7 +2358,10 @@ module.exports = {
   getLiveEscalationAssignments, resolveEscalationAssignmentsBulk, setEscalationTags,
   getEligibleOrders, getFreshLeads, getEscalationOrderIndex, getEscalationOrdersForExport,
   getEscalationOrdersFingerprint,
-  // Exported for api/_lib/db.retry.test.js and db.cache.test.js only - nothing in the app calls
-  // these directly.
+  REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
+  getRefundExportCount, getRefundExportRows,
+  // Exported for api/_lib/db.retry.test.js, db.cache.test.js and db.refundExport.test.js only -
+  // nothing in the app calls these directly.
   isPoolExhausted, withPgConnectRetry, toTransactionModePooler, cachedRead, invalidateCache, CACHE_TTL_MS,
+  buildRefundExportWhere,
 };
