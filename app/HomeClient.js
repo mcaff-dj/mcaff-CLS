@@ -49,9 +49,7 @@ var CALLING_TEAM_SUBITEMS = {
   rto: { label: 'RTO-Calling', text: 'RTO CRM Agent & Refund Portal', url: '/rto-crm' },
   ndr: { label: 'NDR-Calling', text: 'NDR Calling Agent Portal', url: '/ndr-calling' },
   escalation: { label: 'Escalation', text: 'Escalation Agent Portal', url: '/escalation' },
-  // No url yet, so selectCallingTeamView falls through to the placeholder panel. Give it a
-  // url once there's a real page; CSV download today lives inside each process's own screen.
-  exports: { label: 'Exports', text: 'Exports workspace is coming soon.' }
+  exports: { label: 'Exports', text: 'Refund Export', url: '/refund-export' }
 };
 
 function selectCallingTeamView(view) {
