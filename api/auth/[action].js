@@ -8,22 +8,61 @@ const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/se
 
 const PRESENCE_STATUSES = new Set(['Online', 'Busy', 'OnCall', 'Offline']);
 const GH_REPO = 'mcaff-dj/mcaff-CLS';
-const GH_ASSIGN_WORKFLOW = 'assign-leads.yml';
-// Per-process assign workflow, for the /processPresence path below. Only processes with
-// their own cron-driven assignment script need an entry; rto's own immediate trigger goes
-// through the global /presence path instead (see handlePresence).
+// Per-process assign workflow, for the /processPresence path below. Only processes still
+// running their cron-driven assignment on GitHub Actions need an entry here - rto moved
+// to AWS Lambda on 2026-08-13 (see lambda/README.md) and no longer goes through this at
+// all; its own immediate trigger (see triggerImmediateRtoAssignment below) invokes that
+// Lambda directly instead, through the global /presence path (see handlePresence).
 const PROCESS_ASSIGN_WORKFLOW = { ndr: 'assign-ndr-leads.yml' };
 
-// Fires the same assign-leads workflow the 5-minute cron runs, on demand, so an agent
-// who comes online with an empty queue doesn't have to wait for the next scheduled pass
-// (scheduled runs on this repo can lag well past their nominal 5-minute cadence under
-// GitHub's best-effort cron scheduling). Needs a GitHub PAT (Actions: write on this repo
-// only) in GH_ACTIONS_TOKEN - best-effort: if it's not configured, or the dispatch call
-// fails, this silently no-ops and the agent just gets picked up by the next scheduled run
-// instead, so a missing/expired token never blocks the agent from working.
-async function triggerImmediateAssignment(workflowFile = GH_ASSIGN_WORKFLOW) {
+const RTO_ASSIGN_LAMBDA = 'mcaff-cls-assign-leads';
+let _lambdaClient = null;
+function lambdaClient() {
+  if (!_lambdaClient) {
+    const { LambdaClient } = require('@aws-sdk/client-lambda');
+    _lambdaClient = new LambdaClient({});
+  }
+  return _lambdaClient;
+}
+
+// Invokes the RTO assign-leads Lambda directly, on demand, so an agent who comes online
+// with an empty queue doesn't have to wait for the next 5-minute EventBridge Scheduler
+// tick. Replaces the old GitHub Actions workflow_dispatch call now that RTO's recurring
+// assignment itself runs on that same Lambda (see lambda/README.md) - dispatching the
+// GitHub workflow here as well would have kept running assign-leads.yml's assign-rto job
+// on the self-hosted runner on every empty-queue heartbeat, redundant with the Lambda's
+// own schedule (this was caught in production on 2026-08-13 - see the chat thread).
+// InvocationType 'Event' is fire-and-forget, same semantics as the old dispatch call:
+// this returns as soon as the invoke is *accepted*, not when the assignment run finishes.
+// Best-effort: if the invoke call fails (e.g. a permissions gap), this silently no-ops and
+// the agent just gets picked up by the Lambda's own next scheduled run instead, so a
+// misconfigured setup never blocks the agent from working.
+async function triggerImmediateRtoAssignment() {
+  try {
+    const { InvokeCommand } = require('@aws-sdk/client-lambda');
+    const resp = await lambdaClient().send(new InvokeCommand({
+      FunctionName: RTO_ASSIGN_LAMBDA,
+      InvocationType: 'Event',
+    }));
+    if (resp.StatusCode !== 202) {
+      console.error('triggerImmediateRtoAssignment: unexpected StatusCode', resp.StatusCode);
+    }
+  } catch (e) {
+    console.error('triggerImmediateRtoAssignment error:', e.message || e);
+  }
+}
+
+// Fires a still-on-GitHub-Actions process's own assign workflow on demand - same
+// "don't make an agent wait for the next scheduled pass" reasoning as
+// triggerImmediateRtoAssignment above, just for whichever process's workflow hasn't
+// moved to Lambda yet (currently only NDR - see PROCESS_ASSIGN_WORKFLOW). Needs a GitHub
+// PAT (Actions: write on this repo only) in GH_ACTIONS_TOKEN - best-effort: if it's not
+// configured, or the dispatch call fails, this silently no-ops and the agent just gets
+// picked up by the next scheduled run instead, so a missing/expired token never blocks
+// the agent from working.
+async function triggerImmediateAssignment(workflowFile) {
   const token = process.env.GH_ACTIONS_TOKEN;
-  if (!token) return;
+  if (!token || !workflowFile) return;
   try {
     const resp = await fetch(
       `https://api.github.com/repos/${GH_REPO}/actions/workflows/${workflowFile}/dispatches`,
@@ -313,7 +352,7 @@ async function handlePresence(req, res) {
   }
   await upsertAgentPresence(targetEmail, targetName, body.status);
   if (body.status === 'Online' && body.pendingBox === 0) {
-    triggerImmediateAssignment().catch(() => {});
+    triggerImmediateRtoAssignment().catch(() => {});
   }
   res.status(200).json({ ok: true });
 }

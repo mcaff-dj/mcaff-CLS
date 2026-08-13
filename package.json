@@ -8,19 +8,20 @@
     "build": "next build"
   },
   "dependencies": {
-    "mysql2": "^3.11.0",
-    "pg": "^8.13.0",
-    "@aws-sdk/client-secrets-manager": "^3.600.0",
+    "@aws-sdk/client-lambda": "^3.1109.0",
     "@aws-sdk/client-s3": "^3.600.0",
-    "@aws-sdk/s3-request-presigner": "^3.600.0",
+    "@aws-sdk/client-secrets-manager": "^3.600.0",
     "@aws-sdk/cloudfront-signer": "^3.600.0",
-    "google-auth-library": "^9.14.1",
+    "@aws-sdk/s3-request-presigner": "^3.600.0",
+    "canvas-confetti": "^1.9.2",
     "express": "^4.19.2",
-    "serverless-http": "^3.2.0",
+    "google-auth-library": "^9.14.1",
+    "mysql2": "^3.11.0",
     "next": "^14.2.15",
+    "pg": "^8.13.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "canvas-confetti": "^1.9.2"
+    "serverless-http": "^3.2.0"
   },
   "devDependencies": {
     "autoprefixer": "^10.4.20",
