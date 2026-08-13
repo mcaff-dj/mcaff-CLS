@@ -19,5 +19,7 @@ import assign_ndr_leads  # noqa: E402
 
 
 def handler(event, context):
+    print("assign-ndr-leads: starting run")
     assign_ndr_leads.main()
+    print("assign-ndr-leads: run finished")
     return {"ok": True}
