@@ -23,5 +23,7 @@ import assign_leads  # noqa: E402
 
 
 def handler(event, context):
+    print("assign-leads: starting run")
     assign_leads.main()
+    print("assign-leads: run finished")
     return {"ok": True}
