@@ -23,28 +23,33 @@ and live:
   assignment trigger moved to Lambda invocation at the same time, avoiding the mistake
   made with `assign-rto` (fixed only after the fact there).
 
-  **Found during that verification, not fixed as part of this migration**: of 24 leads
-  assigned in the verifying test run, only 7 landed in Postgres `ndr_lead_assignments`;
-  cross-checking further, 88 of 1,104 AWBs the sheet shows assigned to one agent don't
-  exist in Postgres under any email at all. This is a pre-existing gap in
-  `assign_ndr_leads.py`'s own Postgres bookkeeping (likely the same `ON CONFLICT ... DO
-  NOTHING`-hits-a-stale-row pattern as the RTO issue below, un-related to which
-  infrastructure runs the script) - identical behavior on GitHub or Lambda, so it didn't
-  block cutover. The part that matters to agents (the sheet write) was confirmed
-  correct. Worth a separate look, same category as the RTO item below.
-
 Both `assign-rto` and `assign-ndr` share one workflow file and one `on: schedule:`
 trigger in `assign-leads.yml`, so stopping either on GitHub needed a job-level `if:`,
 not commenting out the shared schedule block (which would have stopped both).
 
-## The RTO Postgres schema issue found during migration (unrelated to infra choice)
+## Two Postgres bugs found during migration, both since fixed (2026-08-13)
 
-`record_lead_assignments()`'s `ON CONFLICT (order_id)` upsert failed on every call
-before 2026-08-12's `reassigned_away_at`/partial-unique-index rework (see git history) -
-same code, same failure on GitHub or Lambda. Already fixed upstream by the time this
-migration reached it; mentioned here only because a first attempt at this migration
-(built from a 339-commit-stale local clone) nearly re-broke it with an already-obsolete
-patch. See the incident note below.
+**RTO** - `record_lead_assignments()`'s `ON CONFLICT (order_id)` upsert failed on every
+call before 2026-08-12's `reassigned_away_at`/partial-unique-index rework (see git
+history) - same code, same failure on GitHub or Lambda. Already fixed upstream (by
+Vikash) by the time this migration reached it; mentioned here only because a first
+attempt at this migration (built from a 339-commit-stale local clone) nearly re-broke it
+with an already-obsolete patch - see the incident note below. Verified after the fact:
+zero `order_id`s currently have more than one live row, so nothing further needed here.
+
+**NDR** - `record_new_assignments()` never had the equivalent fix: it only ever `INSERT
+... ON CONFLICT (awb_number) WHERE reassigned_away_at IS NULL DO NOTHING`, with no step
+to retire an existing live row first. Whenever a lead was reassigned after its first
+agent's cycle ended, the sheet correctly showed the new agent while the insert silently
+conflicted with the still-live old row and got dropped - Postgres stayed stuck on the
+stale agent forever, invisibly. Found via write-path verification during cutover: of 24
+leads assigned in one test, only 7 landed in Postgres; a full sheet-vs-Postgres
+cross-check found 402 of 2,009 assigned AWBs system-wide affected (264 missing from
+Postgres entirely, 138 stuck under a stale agent). Fixed by adding the same
+retire-then-insert transaction RTO already had, and backfilled all 402 rows to match the
+sheet's current (correct) state - true historical `assigned_at` for the backfilled rows
+is unrecoverable, stamped `now()` as an explicit approximation rather than fabricated.
+Verified after backfill: zero missing, zero mismatched, zero invariant violations.
 
 ## Why these jobs specifically
 

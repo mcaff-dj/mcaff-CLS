@@ -187,11 +187,21 @@ def record_new_assignments(new_assignments):
     """Mirrors each freshly-assigned (awb_number, email) into Postgres ndr_lead_assignments -
     NDR's own equivalent of assign_leads.py's record_lead_assignments, a parallel write
     alongside the sheet, not a replacement (see api/_lib/db.js's claimNdrLead, which the Call
-    modal's own claim-on-open path uses for the exact same table). ON CONFLICT targets the
-    partial unique index on (awb_number) WHERE reassigned_away_at IS NULL, so this is a safe
-    no-op for an awb somehow already claimed. Best-effort: a Postgres write failure here must
-    never undo or block the sheet write that already succeeded - the sheet is what the CRM
-    reads from, this is just history."""
+    modal's own claim-on-open path uses for the exact same table).
+
+    Retires any existing live row for the same awb_number (stamping reassigned_away_at)
+    BEFORE inserting the new one, in the same transaction - same fix assign_leads.py's own
+    record_lead_assignments already got for the identical bug (see lambda/README.md's
+    2026-08-13 NDR Postgres gap note). Without this, a plain INSERT ... ON CONFLICT DO
+    NOTHING silently drops the new assignment whenever an older live row already exists for
+    that awb_number - a lead reassigned after its first agent's cycle ended would have the
+    sheet correctly show the new agent while Postgres stayed stuck on the old one forever,
+    invisibly (confirmed in production: 88 of 1,104 AWBs checked for one agent had no
+    Postgres row at all, and others were found live under a stale prior agent). Retiring
+    first ensures the new insert never conflicts.
+
+    Best-effort: a Postgres write failure here must never undo or block the sheet write
+    that already succeeded - the sheet is what the CRM reads from, this is just history."""
     if not new_assignments:
         return
     conn_str = os.environ.get("POSTGRES_URL")
@@ -201,6 +211,13 @@ def record_new_assignments(new_assignments):
     try:
         with psycopg.connect(conn_str) as conn:
             with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    UPDATE ndr_lead_assignments SET reassigned_away_at = now()
+                    WHERE awb_number = %s AND reassigned_away_at IS NULL
+                    """,
+                    [(awb,) for awb, _email in new_assignments],
+                )
                 cur.executemany(
                     """
                     INSERT INTO ndr_lead_assignments (awb_number, email)
