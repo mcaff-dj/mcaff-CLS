@@ -1,0 +1,58 @@
+name: Deploy cron-job Lambdas
+
+# Fires only when someone actually changes sync-lead-assignments' own logic - a handful of
+# pushes a month, not a schedule. The daily cadence itself lives on EventBridge Scheduler
+# now (see lambda/deploy_infra.sh), not here - that's the whole point of this migration
+# (see lambda/README.md): GitHub Actions minutes are only spent on an actual code change,
+# never on the recurring invocation.
+#
+# assign-leads.yml is NOT part of this yet (see lambda/README.md's Status section) - its
+# paths are deliberately not listed below, so a push to scripts/assign_leads.py or its
+# NDR counterpart doesn't accidentally deploy anything to that Lambda before that
+# migration is actually decided and coordinated.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/sync_lead_assignments_to_mysql.py'
+      - 'scripts/sync_agent_presence_log_to_mysql.py'
+      - 'scripts/mysql_lib.py'
+      - 'lambda/sync_lead_assignments/**'
+      - 'lambda/build.sh'
+
+permissions:
+  id-token: write   # OIDC -> assume the AWS role below, no stored AWS keys
+  contents: read
+
+concurrency:
+  group: deploy-cron-lambdas
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build sync-lead-assignments Lambda zip
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y zip
+          bash lambda/build.sh sync_lead_assignments
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::157320387454:role/github-actions-mcaff-cls-deploy
+          aws-region: ap-south-1
+
+      - name: Update sync-lead-assignments Lambda code
+        run: |
+          aws lambda update-function-code --function-name mcaff-cls-sync-lead-assignments \
+            --zip-file fileb://lambda/dist/sync_lead_assignments.zip
+          aws lambda wait function-updated --function-name mcaff-cls-sync-lead-assignments

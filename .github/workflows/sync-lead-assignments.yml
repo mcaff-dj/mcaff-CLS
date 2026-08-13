@@ -1,9 +1,12 @@
 name: Sync calling CRM data to MySQL
 
 on:
-  schedule:
-    - cron: '30 3 * * *'   # 9:00am IST daily (3:30 UTC)
-  workflow_dispatch: {}      # manual "Run workflow" button
+  # schedule disabled 2026-08-13: this job moved to AWS Lambda + EventBridge Scheduler
+  # (see lambda/README.md) - runs daily there instead, at zero GitHub Actions cost.
+  # workflow_dispatch is kept as a manual fallback.
+  # schedule:
+  #   - cron: '30 3 * * *'   # 9:00am IST daily (3:30 UTC)
+  workflow_dispatch: {}      # manual "Run workflow" button - fallback only, not routine
 
 permissions:
   contents: read
