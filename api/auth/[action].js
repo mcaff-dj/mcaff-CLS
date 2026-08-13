@@ -8,14 +8,17 @@ const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/se
 
 const PRESENCE_STATUSES = new Set(['Online', 'Busy', 'OnCall', 'Offline']);
 const GH_REPO = 'mcaff-dj/mcaff-CLS';
-// Per-process assign workflow, for the /processPresence path below. Only processes still
-// running their cron-driven assignment on GitHub Actions need an entry here - rto moved
-// to AWS Lambda on 2026-08-13 (see lambda/README.md) and no longer goes through this at
-// all; its own immediate trigger (see triggerImmediateRtoAssignment below) invokes that
-// Lambda directly instead, through the global /presence path (see handlePresence).
-const PROCESS_ASSIGN_WORKFLOW = { ndr: 'assign-ndr-leads.yml' };
-
 const RTO_ASSIGN_LAMBDA = 'mcaff-cls-assign-leads';
+// Per-process assign target, for the /processPresence path below. rto moved to AWS Lambda
+// on 2026-08-13, ndr followed the same day (see lambda/README.md) - both now go through
+// triggerImmediateLambdaAssignment below instead of a GitHub Actions dispatch. Only a
+// process still running its cron-driven assignment on GitHub Actions would need an entry
+// in PROCESS_ASSIGN_WORKFLOW instead - currently none do. rto's own immediate trigger
+// doesn't go through this map at all; it's called unconditionally from the global
+// /presence path (see handlePresence) rather than per-process.
+const PROCESS_ASSIGN_LAMBDA = { ndr: 'mcaff-cls-assign-ndr-leads' };
+const PROCESS_ASSIGN_WORKFLOW = {};
+
 let _lambdaClient = null;
 function lambdaClient() {
   if (!_lambdaClient) {
@@ -25,38 +28,39 @@ function lambdaClient() {
   return _lambdaClient;
 }
 
-// Invokes the RTO assign-leads Lambda directly, on demand, so an agent who comes online
+// Invokes the given assign-leads Lambda directly, on demand, so an agent who comes online
 // with an empty queue doesn't have to wait for the next 5-minute EventBridge Scheduler
-// tick. Replaces the old GitHub Actions workflow_dispatch call now that RTO's recurring
-// assignment itself runs on that same Lambda (see lambda/README.md) - dispatching the
-// GitHub workflow here as well would have kept running assign-leads.yml's assign-rto job
-// on the self-hosted runner on every empty-queue heartbeat, redundant with the Lambda's
-// own schedule (this was caught in production on 2026-08-13 - see the chat thread).
-// InvocationType 'Event' is fire-and-forget, same semantics as the old dispatch call:
-// this returns as soon as the invoke is *accepted*, not when the assignment run finishes.
-// Best-effort: if the invoke call fails (e.g. a permissions gap), this silently no-ops and
-// the agent just gets picked up by the Lambda's own next scheduled run instead, so a
-// misconfigured setup never blocks the agent from working.
-async function triggerImmediateRtoAssignment() {
+// tick. Replaces the old GitHub Actions workflow_dispatch call now that each process's
+// recurring assignment itself runs on that same Lambda (see lambda/README.md) -
+// dispatching the GitHub workflow here as well would have kept running assign-leads.yml's
+// job on the self-hosted runner on every empty-queue heartbeat, redundant with the
+// Lambda's own schedule (this was caught in production for rto on 2026-08-13 - see the
+// chat thread - and fixed for ndr at the same time it was cut over, rather than repeating
+// that mistake). InvocationType 'Event' is fire-and-forget, same semantics as the old
+// dispatch call: this returns as soon as the invoke is *accepted*, not when the
+// assignment run finishes. Best-effort: if the invoke call fails (e.g. a permissions
+// gap), this silently no-ops and the agent just gets picked up by the Lambda's own next
+// scheduled run instead, so a misconfigured setup never blocks the agent from working.
+async function triggerImmediateLambdaAssignment(functionName) {
   try {
     const { InvokeCommand } = require('@aws-sdk/client-lambda');
     const resp = await lambdaClient().send(new InvokeCommand({
-      FunctionName: RTO_ASSIGN_LAMBDA,
+      FunctionName: functionName,
       InvocationType: 'Event',
     }));
     if (resp.StatusCode !== 202) {
-      console.error('triggerImmediateRtoAssignment: unexpected StatusCode', resp.StatusCode);
+      console.error(`triggerImmediateLambdaAssignment(${functionName}): unexpected StatusCode`, resp.StatusCode);
     }
   } catch (e) {
-    console.error('triggerImmediateRtoAssignment error:', e.message || e);
+    console.error(`triggerImmediateLambdaAssignment(${functionName}) error:`, e.message || e);
   }
 }
 
 // Fires a still-on-GitHub-Actions process's own assign workflow on demand - same
 // "don't make an agent wait for the next scheduled pass" reasoning as
-// triggerImmediateRtoAssignment above, just for whichever process's workflow hasn't
-// moved to Lambda yet (currently only NDR - see PROCESS_ASSIGN_WORKFLOW). Needs a GitHub
-// PAT (Actions: write on this repo only) in GH_ACTIONS_TOKEN - best-effort: if it's not
+// triggerImmediateLambdaAssignment above, just for whichever process's workflow hasn't
+// moved to Lambda yet (currently none - see PROCESS_ASSIGN_WORKFLOW). Needs a GitHub PAT
+// (Actions: write on this repo only) in GH_ACTIONS_TOKEN - best-effort: if it's not
 // configured, or the dispatch call fails, this silently no-ops and the agent just gets
 // picked up by the next scheduled run instead, so a missing/expired token never blocks
 // the agent from working.
@@ -352,7 +356,7 @@ async function handlePresence(req, res) {
   }
   await upsertAgentPresence(targetEmail, targetName, body.status);
   if (body.status === 'Online' && body.pendingBox === 0) {
-    triggerImmediateRtoAssignment().catch(() => {});
+    triggerImmediateLambdaAssignment(RTO_ASSIGN_LAMBDA).catch(() => {});
   }
   res.status(200).json({ ok: true });
 }
@@ -498,7 +502,9 @@ async function handleProcessPresence(req, res) {
     res.status(400).json({ error: e.message || 'Could not update availability' });
     return;
   }
-  if (body.status === 'Online' && PROCESS_ASSIGN_WORKFLOW[body.processKey]) {
+  if (body.status === 'Online' && PROCESS_ASSIGN_LAMBDA[body.processKey]) {
+    triggerImmediateLambdaAssignment(PROCESS_ASSIGN_LAMBDA[body.processKey]).catch(() => {});
+  } else if (body.status === 'Online' && PROCESS_ASSIGN_WORKFLOW[body.processKey]) {
     triggerImmediateAssignment(PROCESS_ASSIGN_WORKFLOW[body.processKey]).catch(() => {});
   }
   res.status(200).json({ ok: true, processKey: body.processKey, status: body.status });

@@ -107,9 +107,8 @@ aws lambda wait function-updated --function-name "$FN_SYNC" --region "$AWS_REGIO
 aws lambda update-function-configuration --function-name "$FN_SYNC" --region "$AWS_REGION" \
   --environment "Variables={POSTGRES_URL=${POSTGRES_URL},MYSQL_HOST=${MYSQL_HOST},MYSQL_USER=${MYSQL_USER},MYSQL_PASSWORD=${MYSQL_PASSWORD},MYSQL_DATABASE=${MYSQL_DATABASE},MYSQL_PORT=${MYSQL_PORT}}"
 
-# ---- 7. EventBridge Scheduler: assign-leads every 5 min, assign-ndr-leads every 5 min
-#          (created DISABLED - see README.md's Status, NDR's write path isn't verified
-#          yet), sync-lead-assignments daily 9:00am IST (3:30 UTC). ----
+# ---- 7. EventBridge Scheduler: assign-leads every 5 min, assign-ndr-leads every 5 min,
+#          sync-lead-assignments daily 9:00am IST (3:30 UTC). ----
 aws scheduler create-schedule-group --name mcaff-cls-cron 2>/dev/null || true
 
 ASSIGN_ARN="arn:aws:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${FN_ASSIGN}"
@@ -157,11 +156,11 @@ aws scheduler update-schedule --name assign-leads-every-5-min --group-name mcaff
   --region "$AWS_REGION"
 
 aws scheduler create-schedule --name assign-ndr-leads-every-5-min --group-name mcaff-cls-cron \
-  --schedule-expression "rate(5 minutes)" --flexible-time-window '{"Mode": "OFF"}' --state DISABLED \
+  --schedule-expression "rate(5 minutes)" --flexible-time-window '{"Mode": "OFF"}' --state ENABLED \
   --target "{\"Arn\": \"${NDR_ARN}\", \"RoleArn\": \"${SCHED_ROLE_ARN}\"}" \
   --region "$AWS_REGION" 2>/dev/null || \
 aws scheduler update-schedule --name assign-ndr-leads-every-5-min --group-name mcaff-cls-cron \
-  --schedule-expression "rate(5 minutes)" --flexible-time-window '{"Mode": "OFF"}' --state DISABLED \
+  --schedule-expression "rate(5 minutes)" --flexible-time-window '{"Mode": "OFF"}' --state ENABLED \
   --target "{\"Arn\": \"${NDR_ARN}\", \"RoleArn\": \"${SCHED_ROLE_ARN}\"}" \
   --region "$AWS_REGION"
 
@@ -175,6 +174,5 @@ aws scheduler update-schedule --name sync-lead-assignments-daily --group-name mc
   --region "$AWS_REGION"
 
 echo ""
-echo "Done. All three Lambdas are deployed. assign-leads and sync-lead-assignments are"
-echo "scheduled and live; assign-ndr-leads is created but its schedule is DISABLED until"
-echo "its write path is verified (see README.md's Status section)."
+echo "Done. All three Lambdas are deployed and their EventBridge schedules are live:"
+echo "assign-leads and assign-ndr-leads every 5 minutes, sync-lead-assignments daily."

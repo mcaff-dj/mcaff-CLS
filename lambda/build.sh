@@ -11,8 +11,9 @@
 #
 # Usage:
 #   ./build.sh assign_leads
+#   ./build.sh assign_ndr_leads
 #   ./build.sh sync_lead_assignments
-#   ./build.sh            # builds both
+#   ./build.sh            # builds all three
 set -euo pipefail
 
 LAMBDA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,6 +45,25 @@ build_assign_leads() {
   echo "-> $OUT_DIR/assign_leads.zip"
 }
 
+build_assign_ndr_leads() {
+  echo "=== Building assign_ndr_leads.zip ==="
+  work="$(mktemp -d)"
+  mkdir -p "$work/scripts"
+
+  cp "$LAMBDA_DIR/assign_ndr_leads/handler.py" "$work/handler.py"
+  cp "$REPO_ROOT/scripts/assign_ndr_leads.py" \
+     "$REPO_ROOT/scripts/lib.py" \
+     "$work/scripts/"
+
+  pip3 install --disable-pip-version-check --only-binary=:all: \
+    --platform manylinux2014_x86_64 --python-version 3.12 --implementation cp --abi cp312 \
+    -t "$work" psycopg[binary] requests cryptography
+
+  ( cd "$work" && zip -r -q "$OUT_DIR/assign_ndr_leads.zip" . )
+  rm -rf "$work"
+  echo "-> $OUT_DIR/assign_ndr_leads.zip"
+}
+
 build_sync_lead_assignments() {
   echo "=== Building sync_lead_assignments.zip ==="
   work="$(mktemp -d)"
@@ -66,7 +86,8 @@ build_sync_lead_assignments() {
 
 case "${1:-all}" in
   assign_leads) build_assign_leads ;;
+  assign_ndr_leads) build_assign_ndr_leads ;;
   sync_lead_assignments) build_sync_lead_assignments ;;
-  all) build_assign_leads; build_sync_lead_assignments ;;
-  *) echo "Usage: $0 [assign_leads|sync_lead_assignments]" >&2; exit 1 ;;
+  all) build_assign_leads; build_assign_ndr_leads; build_sync_lead_assignments ;;
+  *) echo "Usage: $0 [assign_leads|assign_ndr_leads|sync_lead_assignments]" >&2; exit 1 ;;
 esac
