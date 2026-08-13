@@ -10,6 +10,17 @@ permissions:
 
 jobs:
   assign-rto:
+    # Skipped on the schedule trigger as of 2026-08-13: this job moved to AWS Lambda +
+    # EventBridge Scheduler (see lambda/README.md), which now runs it every 5 minutes
+    # instead. Running both here and there on the same schedule would race two
+    # independent processes deciding lead assignments against the same live sheet/DB -
+    # exactly what assign_leads.py's own docstring says a single-process design avoids.
+    # workflow_dispatch is left working (github.event_name is 'workflow_dispatch', not
+    # 'schedule') as a manual fallback - e.g. if the Lambda needs to be paused.
+    #
+    # assign-ndr below is untouched and still runs here on schedule - NDR hasn't been
+    # cut over yet, see lambda/README.md's Status section.
+    if: github.event_name != 'schedule'
     runs-on: self-hosted
     concurrency:
       group: assign-leads

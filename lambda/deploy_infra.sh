@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# ONE-TIME bootstrap: creates the IAM role, both Lambda functions, and their EventBridge
-# Scheduler schedules. Run this once from an environment already authenticated to the
+# ONE-TIME bootstrap: creates the IAM role, all three Lambda functions, and their
+# EventBridge Scheduler schedules. Run this once from an environment already
+# authenticated to the
 # mcaff-CLS AWS account (AWS CloudShell is the easiest option - it has python3, pip3, zip,
 # and your console login already wired up, so nothing to install locally).
 #
@@ -75,7 +76,23 @@ aws lambda update-function-configuration --function-name "$FN_ASSIGN" --region "
 aws lambda put-function-concurrency --function-name "$FN_ASSIGN" \
   --reserved-concurrent-executions 1 --region "$AWS_REGION"
 
-# ---- 5. sync-lead-assignments Lambda ----
+# ---- 5. assign-ndr-leads Lambda (independent of assign_leads.py - see its own module
+#          docstring - so it only needs POSTGRES_URL and GOOGLE_SA_KEY, no MYSQL_*/GOKWIK_*) ----
+FN_NDR=mcaff-cls-assign-ndr-leads
+if ! aws lambda get-function --function-name "$FN_NDR" >/dev/null 2>&1; then
+  aws lambda create-function --function-name "$FN_NDR" \
+    --runtime python3.12 --handler handler.handler --role "$ROLE_ARN" \
+    --timeout 120 --memory-size 256 --region "$AWS_REGION" \
+    --zip-file "fileb://$DIST/assign_ndr_leads.zip"
+else
+  aws lambda update-function-code --function-name "$FN_NDR" \
+    --zip-file "fileb://$DIST/assign_ndr_leads.zip" --region "$AWS_REGION"
+fi
+aws lambda wait function-updated --function-name "$FN_NDR" --region "$AWS_REGION"
+aws lambda update-function-configuration --function-name "$FN_NDR" --region "$AWS_REGION" \
+  --environment "Variables={GOOGLE_SA_KEY_JSON=${GOOGLE_SA_KEY},POSTGRES_URL=${POSTGRES_URL}}"
+
+# ---- 6. sync-lead-assignments Lambda ----
 FN_SYNC=mcaff-cls-sync-lead-assignments
 if ! aws lambda get-function --function-name "$FN_SYNC" >/dev/null 2>&1; then
   aws lambda create-function --function-name "$FN_SYNC" \
@@ -90,14 +107,16 @@ aws lambda wait function-updated --function-name "$FN_SYNC" --region "$AWS_REGIO
 aws lambda update-function-configuration --function-name "$FN_SYNC" --region "$AWS_REGION" \
   --environment "Variables={POSTGRES_URL=${POSTGRES_URL},MYSQL_HOST=${MYSQL_HOST},MYSQL_USER=${MYSQL_USER},MYSQL_PASSWORD=${MYSQL_PASSWORD},MYSQL_DATABASE=${MYSQL_DATABASE},MYSQL_PORT=${MYSQL_PORT}}"
 
-# ---- 6. EventBridge Scheduler: assign-leads every 5 min, sync-lead-assignments daily
-#          9:00am IST (3:30 UTC) - identical cadence to the two GitHub Actions crons. ----
+# ---- 7. EventBridge Scheduler: assign-leads every 5 min, assign-ndr-leads every 5 min
+#          (created DISABLED - see README.md's Status, NDR's write path isn't verified
+#          yet), sync-lead-assignments daily 9:00am IST (3:30 UTC). ----
 aws scheduler create-schedule-group --name mcaff-cls-cron 2>/dev/null || true
 
 ASSIGN_ARN="arn:aws:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${FN_ASSIGN}"
+NDR_ARN="arn:aws:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${FN_NDR}"
 SYNC_ARN="arn:aws:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${FN_SYNC}"
 
-# A dedicated role lets EventBridge Scheduler invoke these two Lambdas specifically.
+# A dedicated role lets EventBridge Scheduler invoke these three Lambdas specifically.
 SCHED_ROLE_NAME="mcaff-cls-scheduler-invoke-role"
 cat > /tmp/scheduler-trust.json <<'EOF'
 {
@@ -115,7 +134,7 @@ cat > /tmp/scheduler-invoke-policy.json <<EOF
   "Statement": [{
     "Effect": "Allow",
     "Action": "lambda:InvokeFunction",
-    "Resource": ["${ASSIGN_ARN}", "${SYNC_ARN}"]
+    "Resource": ["${ASSIGN_ARN}", "${NDR_ARN}", "${SYNC_ARN}"]
   }]
 }
 EOF
@@ -137,6 +156,15 @@ aws scheduler update-schedule --name assign-leads-every-5-min --group-name mcaff
   --target "{\"Arn\": \"${ASSIGN_ARN}\", \"RoleArn\": \"${SCHED_ROLE_ARN}\"}" \
   --region "$AWS_REGION"
 
+aws scheduler create-schedule --name assign-ndr-leads-every-5-min --group-name mcaff-cls-cron \
+  --schedule-expression "rate(5 minutes)" --flexible-time-window '{"Mode": "OFF"}' --state DISABLED \
+  --target "{\"Arn\": \"${NDR_ARN}\", \"RoleArn\": \"${SCHED_ROLE_ARN}\"}" \
+  --region "$AWS_REGION" 2>/dev/null || \
+aws scheduler update-schedule --name assign-ndr-leads-every-5-min --group-name mcaff-cls-cron \
+  --schedule-expression "rate(5 minutes)" --flexible-time-window '{"Mode": "OFF"}' --state DISABLED \
+  --target "{\"Arn\": \"${NDR_ARN}\", \"RoleArn\": \"${SCHED_ROLE_ARN}\"}" \
+  --region "$AWS_REGION"
+
 aws scheduler create-schedule --name sync-lead-assignments-daily --group-name mcaff-cls-cron \
   --schedule-expression "cron(30 3 * * ? *)" --flexible-time-window '{"Mode": "OFF"}' \
   --target "{\"Arn\": \"${SYNC_ARN}\", \"RoleArn\": \"${SCHED_ROLE_ARN}\"}" \
@@ -147,5 +175,6 @@ aws scheduler update-schedule --name sync-lead-assignments-daily --group-name mc
   --region "$AWS_REGION"
 
 echo ""
-echo "Done. Both Lambdas are deployed and scheduled."
-echo "Next: disable the old crons so the two jobs don't double-run (see README.md in this folder)."
+echo "Done. All three Lambdas are deployed. assign-leads and sync-lead-assignments are"
+echo "scheduled and live; assign-ndr-leads is created but its schedule is DISABLED until"
+echo "its write path is verified (see README.md's Status section)."

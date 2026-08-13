@@ -1,22 +1,32 @@
 name: Deploy cron-job Lambdas
 
-# Fires only when someone actually changes sync-lead-assignments' own logic - a handful of
-# pushes a month, not a schedule. The daily cadence itself lives on EventBridge Scheduler
-# now (see lambda/deploy_infra.sh), not here - that's the whole point of this migration
-# (see lambda/README.md): GitHub Actions minutes are only spent on an actual code change,
-# never on the recurring invocation.
+# Fires only when someone actually changes assign-leads' or sync-lead-assignments' own
+# logic - a handful of pushes a month, not a schedule. The recurring cadence itself lives
+# on EventBridge Scheduler now (see lambda/deploy_infra.sh), not here - that's the whole
+# point of this migration (see lambda/README.md): GitHub Actions minutes are only spent
+# on an actual code change, never on the recurring invocation.
 #
-# assign-leads.yml is NOT part of this yet (see lambda/README.md's Status section) - its
-# paths are deliberately not listed below, so a push to scripts/assign_leads.py or its
-# NDR counterpart doesn't accidentally deploy anything to that Lambda before that
-# migration is actually decided and coordinated.
+# Rebuilds and redeploys BOTH live Lambdas whenever any of the paths below change, even
+# if only one Lambda's own files were touched - simpler and safer than trying to track
+# which paths belong to which function (mysql_lib.py is shared by both), at the cost of a
+# few extra seconds of redundant redeploy.
+#
+# assign_ndr_leads.py is NOT part of this yet (see lambda/README.md's Status section) -
+# its path is deliberately not listed below, so a push to it doesn't deploy anything to
+# that Lambda before NDR's own migration is decided.
 on:
   push:
     branches: [main]
     paths:
+      - 'scripts/assign_leads.py'
+      - 'scripts/lib.py'
+      - 'scripts/mysql_lib.py'
+      - 'scripts/lead_priority.py'
       - 'scripts/sync_lead_assignments_to_mysql.py'
       - 'scripts/sync_agent_presence_log_to_mysql.py'
-      - 'scripts/mysql_lib.py'
+      - 'api/_lib/callingProcesses.json'
+      - 'api/_lib/leadAssignmentRules.json'
+      - 'lambda/assign_leads/**'
       - 'lambda/sync_lead_assignments/**'
       - 'lambda/build.sh'
 
@@ -40,9 +50,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build sync-lead-assignments Lambda zip
+      - name: Build Lambda zips
         run: |
           sudo apt-get update -y && sudo apt-get install -y zip
+          bash lambda/build.sh assign_leads
           bash lambda/build.sh sync_lead_assignments
 
       - name: Configure AWS credentials
@@ -50,6 +61,12 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::157320387454:role/github-actions-mcaff-cls-deploy
           aws-region: ap-south-1
+
+      - name: Update assign-leads Lambda code
+        run: |
+          aws lambda update-function-code --function-name mcaff-cls-assign-leads \
+            --zip-file fileb://lambda/dist/assign_leads.zip
+          aws lambda wait function-updated --function-name mcaff-cls-assign-leads
 
       - name: Update sync-lead-assignments Lambda code
         run: |
