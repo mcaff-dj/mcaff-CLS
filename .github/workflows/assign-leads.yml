@@ -1,9 +1,15 @@
 name: Assign RTO leads to online agents
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'   # every 5 minutes
-  workflow_dispatch: {}      # manual "Run workflow" button
+  # schedule disabled 2026-08-13: this job moved to AWS Lambda + EventBridge Scheduler
+  # (see lambda/README.md) - assign_leads.py now runs every 5 minutes there instead, at
+  # zero GitHub Actions cost. Running both on the same schedule would race two independent
+  # processes deciding lead assignments against the same live sheet/DB, which is exactly
+  # what assign_leads.py's own docstring says this design avoids. workflow_dispatch is kept
+  # as a manual fallback (e.g. if the Lambda needs to be paused for some reason).
+  # schedule:
+  #   - cron: '*/5 * * * *'   # every 5 minutes
+  workflow_dispatch: {}      # manual "Run workflow" button - fallback only, not routine
 
 permissions:
   contents: read

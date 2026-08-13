@@ -330,22 +330,35 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
     ]
     if not rows:
         return
-    with psycopg.connect(conn_str) as conn:
-        with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO lead_assignments (order_id, email, assigned_at, awb_code, rto_reason, delivery_partner)
-                VALUES (%s, %s, now(), %s, %s, %s)
-                ON CONFLICT (order_id) DO UPDATE SET
-                    email = EXCLUDED.email,
-                    assigned_at = now(),
-                    awb_code = COALESCE(EXCLUDED.awb_code, lead_assignments.awb_code),
-                    rto_reason = COALESCE(EXCLUDED.rto_reason, lead_assignments.rto_reason),
-                    delivery_partner = COALESCE(EXCLUDED.delivery_partner, lead_assignments.delivery_partner)
-                """,
-                rows,
-            )
-        conn.commit()
+    # Best-effort, same fail-open philosophy as record_reassignment_attempt below: this
+    # INSERT currently errors on every call (lead_assignments has no unique/exclusion
+    # constraint on order_id for ON CONFLICT to target - see the 281 pre-existing duplicate
+    # order_id rows found 2026-08-13, which is what's blocking that constraint from just being
+    # added back). That's a real, separate schema problem to fix, but until it is, letting it
+    # crash the whole run also silently skips record_reassignment_attempt below (never marks
+    # the old agent as excluded from a Connected=No lead) and the final per-agent summary -
+    # neither of which should depend on this table being healthy.
+    try:
+        with psycopg.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO lead_assignments (order_id, email, assigned_at, awb_code, rto_reason, delivery_partner)
+                    VALUES (%s, %s, now(), %s, %s, %s)
+                    ON CONFLICT (order_id) DO UPDATE SET
+                        email = EXCLUDED.email,
+                        assigned_at = now(),
+                        awb_code = COALESCE(EXCLUDED.awb_code, lead_assignments.awb_code),
+                        rto_reason = COALESCE(EXCLUDED.rto_reason, lead_assignments.rto_reason),
+                        delivery_partner = COALESCE(EXCLUDED.delivery_partner, lead_assignments.delivery_partner)
+                    """,
+                    rows,
+                )
+            conn.commit()
+    except Exception as e:
+        print(f"  (record_lead_assignments upsert failed: {e} - assignments already written to "
+              f"the sheet are unaffected, but this run's Postgres bookkeeping is incomplete "
+              f"until lead_assignments has a real unique constraint on order_id)")
 
 
 PROCESS_KEY = "rto"  # this script assigns the RTO process's leads; see callingProcesses.json
