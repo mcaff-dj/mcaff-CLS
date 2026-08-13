@@ -32,4 +32,5 @@ def handler(event, context):
         traceback.print_exc()
 
     sync_agent_presence_log_to_mysql.main()
+    print("sync-lead-assignments: daily run finished")
     return {"ok": True}
