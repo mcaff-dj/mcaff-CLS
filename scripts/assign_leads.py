@@ -52,9 +52,12 @@ originally) bought nothing - and worse, stamping S/T/U on such a row would have 
 agent's real Attempt/Disposition/remarks, rather than a row that's about to be wiped blank for
 its new agent anyway.
 
-Before a still-unassigned PREPAID lead enters the pool, its refund status is checked against
-GoKwik (see resolve_refund_statuses) - a customer who's already been refunded should never be
-called about their order again. GoKwik doesn't recognise the sheet's own Order ID, so the check
+Before a PREPAID lead enters the pool - or, just as much, before an already-assigned PREPAID
+lead that hasn't been called yet keeps counting toward its agent's load - its refund status is
+checked against GoKwik (see resolve_refund_statuses) - a customer who's already been refunded
+should never be called about their order again, whether the refund landed before assignment or
+after (see HYP42591650, refunded the same day it was assigned, caught only because the agent
+called it and disposed it by hand). GoKwik doesn't recognise the sheet's own Order ID, so the check
 first resolves it to GoKwik's numeric platformOrderId via Item_level_data (see
 lookup_platform_order_ids). A confirmed refund gets S/T/U stamped "Already Refunded" on the
 sheet - permanently marking the row worked to every other reader, not just skipped this once -
@@ -942,11 +945,14 @@ def _main(conn):
         tier = priority_tier(payment_method, cell(row, COL_RTO_REASON))
 
         # Prepaid only - COD has nothing paid upfront to refund before delivery, so there is
-        # nothing for GoKwik to have already refunded. Checked only for a lead that would
-        # otherwise enter the assignment pool this run; an already-assigned pending lead is
-        # left alone regardless; a genuinely disposed one was already skipped above.
-        if is_unassigned and is_prepaid(payment_method) and refund_known_already(i, order_id):
-            continue  # never enters the unassigned pool - no agent ever sees it
+        # nothing for GoKwik to have already refunded. Checked for a fresh unassigned lead
+        # AND for one already sitting assigned-but-uncalled in an agent's queue: a refund can
+        # land after assignment but before the agent's call (confirmed for real on
+        # HYP42591650 - assigned, refunded same day, agent only caught it by calling and
+        # disposing "Already Refunded" by hand). A genuinely disposed lead was already
+        # skipped above, so this can't re-check one that's already been worked.
+        if is_prepaid(payment_method) and refund_known_already(i, order_id):
+            continue  # stamped "Already Refunded" below - never enters the pool, doesn't count toward load
 
         if is_unassigned:
             unassigned_pending.append((i, rto_initiated_date, order_id, tier))
