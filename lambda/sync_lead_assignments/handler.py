@@ -22,6 +22,7 @@ import sync_agent_presence_log_to_mysql  # noqa: E402
 
 
 def handler(event, context):
+    print("sync-lead-assignments: starting daily run")
     try:
         sync_lead_assignments_to_mysql.main()
     except Exception:
