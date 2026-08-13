@@ -42,8 +42,8 @@ Imagine a school where homework has to be marked.
 | **The Google Sheet** | The big notice board | One giant table. Every returned parcel is one row on it. |
 | **The Robot** (`assign_leads.py`) | The teacher handing out homework | Every 5 minutes, it looks at who's present and shares out the unclaimed work. |
 | **The CRM Website** (`RtoCrmClient.js`) | Each student's own desk | Where an agent sees their calls, dials, and writes the result. |
-| **Postgres** | The class register | Remembers who is online right now, and who was given which parcel and when. |
-| **MySQL** | The school archive room | Where old records are moved every night so they're kept safely forever. |
+| **Postgres** | The class register | Remembers who is online right now, and the admin's own settings for the team. |
+| **MySQL** | The permanent record book | Who was given which parcel, when, and how the call went — kept forever, no copying step. |
 
 One important word you'll see everywhere:
 
@@ -148,7 +148,7 @@ flowchart TD
     D --> E["4️⃣ Sort what's left<br/>by importance"]
     E --> F["5️⃣ Deal them out,<br/>one each, in a circle"]
     F --> G["✍️ Write the emails<br/>into Column Q"]
-    G --> H["🗒️ Note the time<br/>in the register"]
+    G --> H["🗒️ Note the time<br/>in the permanent record book"]
     H --> Z2(["✅ Done"])
 
     style S fill:#c7d2fe,stroke:#4338ca,color:#000
@@ -361,64 +361,38 @@ about it.
 
 ---
 
-## 10. Where the data lives — the three drawers
+## 10. Where the data lives — the two drawers
 
-Every finished call ends up in **three** places. This sounds wasteful. It isn't —
-each one has a different job.
+Every finished call ends up in **two** places. Each one has a different job.
 
 ```mermaid
 flowchart LR
     A["✍️ Agent clicks<br/>Submit"] --> B["📋 Google Sheet<br/>(the notice board)"]
-    A --> C["🗄️ Postgres<br/>(the register)"]
-    C -->|"every night<br/>at 9am"| D["🏛️ MySQL<br/>(the archive)"]
+    A --> C["🏛️ MySQL<br/>(the permanent record book)"]
 
     B -.-> B1["Everyone can look at it.<br/>Easy to read and fix by hand."]
-    C -.-> C1["Powers the live dashboards.<br/>Fast for counting things."]
-    D -.-> D1["Kept forever.<br/>For long-term reports."]
+    C -.-> C1["Powers the live dashboards.<br/>Kept forever - no copying step."]
 
     style B fill:#bbf7d0,stroke:#15803d,color:#000
-    style C fill:#c7d2fe,stroke:#4338ca,color:#000
-    style D fill:#e9d5ff,stroke:#7e22ce,color:#000
+    style C fill:#e9d5ff,stroke:#7e22ce,color:#000
 ```
 
 **Why not just one?** Because they're good at different things:
 
 - The **Sheet** is something any human can open and read. But asking it
   *"what was our connect rate at 3pm on Tuesday?"* is painfully slow.
-- **Postgres** answers questions like that instantly. But it's the working copy, and
-  we don't want it swelling forever.
-- **MySQL** is the long-term filing cabinet where the other big company reports live.
+- **MySQL** answers questions like that instantly, and it's the SAME copy the
+  dashboards and the long-term reports both read - there used to be a third drawer
+  (Postgres) with a nightly copy-then-delete step moving records into MySQL behind it,
+  but that copy was only ever needed because the working copy couldn't be trusted to
+  hold everything forever. Writing straight to MySQL removed the need for the copy
+  entirely, not just the copy itself.
 
-### The nightly tidy-up
+### The settings that live in Postgres
 
-Every night at **9:00 AM IST** a script does the housekeeping:
-
-```mermaid
-flowchart TD
-    A["🌙 9am — script runs"] --> B["Copy yesterday's<br/>finished calls to MySQL"]
-    B --> C["Also copy anything<br/>older than 30 days"]
-    C --> D{"Did all the copies<br/>definitely land?"}
-    D -->|"✅ Yes"| E["🗑️ Only now delete<br/>the old ones from Postgres"]
-    D -->|"❌ No"| F["🛑 Delete nothing.<br/>Try again tomorrow"]
-
-    style E fill:#bbf7d0,stroke:#15803d,color:#000
-    style F fill:#fed7aa,stroke:#c2410c,color:#000
-```
-
-Read that carefully — it's the single most important safety rule in the whole system:
-
-> **Nothing is ever deleted from one place until it has been confirmed as safely
-> arrived in the other.**
-
-It doesn't delete "everything older than 30 days" as a separate step. It deletes
-**exactly the specific rows it just watched land safely.** So a row can never fall
-through the crack between the two.
-
-### The settings that live in Postgres too
-
-Alongside the call records, Postgres holds the settings an admin can change from the CRM —
-kept there, rather than in a file, precisely because they must be changeable without a
-developer and readable by the Robot:
+Postgres still holds the settings an admin can change from the CRM, and who's online
+right now - kept there, rather than in a file, precisely because they must be
+changeable without a developer and readable by the Robot:
 
 | Table | Holds | Changed from |
 |---|---|---|
@@ -818,8 +792,6 @@ typed out, and adds the `+91` country code automatically.
 | Page checks who's online | **every 30 seconds** | Keeps the team roster live |
 | Page checks for updates | **every 3 minutes** | Cheap; catches a new version quickly |
 | Leads per agent, maximum | **20** | A realistic amount to get through |
-| Nightly copy to the archive | **9:00 AM IST daily** | Start of the business day, after the previous day has closed |
-| How long records stay live | **30 days** | Then archived and cleared out |
 
 ---
 
@@ -844,7 +816,6 @@ flowchart TD
     subgraph R["🤖 The robots (run on a schedule)"]
       C1["scripts/assign_leads.py<br/>— hands out leads, every 5 min<br/>(inside business hours)"]
       C2["scripts/lead_priority.py<br/>— the sorting rules"]
-      C3["scripts/sync_lead_assignments_to_mysql.py<br/>— nightly archiving"]
     end
 
     subgraph K["📖 The shared rulebooks"]

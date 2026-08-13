@@ -361,7 +361,7 @@ async function handlePresence(req, res) {
   res.status(200).json({ ok: true });
 }
 
-// Exposes assign_leads.py's assigned_at stamps (see the lead_assignments table comment
+// Exposes assign_leads.py's assigned_at stamps (see the CLS_RTO_calling table comment
 // in api/_lib/db.js). Authenticated, not admin-only.
 async function handleRecentAssignments(req, res) {
   if (req.method !== 'GET') {
@@ -401,8 +401,8 @@ async function handleLeadDates(req, res) {
   res.status(200).json({ leadDates });
 }
 
-// Records the disposal side of a lead's lifecycle in Postgres (assigned_at is
-// assign_leads.py's side of the same row - see the lead_assignments comment in
+// Records the disposal side of a lead's lifecycle in MySQL (assigned_at is
+// assign_leads.py's side of the same row - see the CLS_RTO_calling comment in
 // api/_lib/db.js), called from rto-crm.html's submitDisp() alongside its existing
 // direct-to-Sheet write. Any signed-in agent may call this for their own disposition -
 // not admin-only, since every agent disposes their own leads routinely.

@@ -6,7 +6,14 @@ All three cron jobs from `assign-leads.yml` and `sync-lead-assignments.yml` are 
 and live:
 
 - **`sync-lead-assignments.yml` (daily)** — EventBridge Scheduler + Lambda. GitHub's
-  `schedule:` trigger is disabled, `workflow_dispatch:` kept as a manual fallback.
+  `schedule:` trigger is disabled, `workflow_dispatch:` kept as a manual fallback. This
+  Lambda (`mcaff-cls-sync-lead-assignments`) originally ran two jobs; it now only runs
+  the agent-presence-log sync - the lead-assignments half was retired once
+  `lead_assignments` moved OFF Postgres onto MySQL `CLS_RTO_calling` directly (see
+  `scripts/migrate_cls_rto_calling_schema.py` /
+  `migrate_lead_assignments_to_cls_rto_calling.py`), leaving nothing for a daily copy to
+  do. The Lambda/schedule name is a leftover from before that; not renamed to avoid
+  re-touching live infra for a cosmetic reason.
 - **`assign-leads.yml`'s `assign-rto` job (every 5 minutes)** — EventBridge Scheduler +
   Lambda. Talked to Vikash first, since it moved off his self-hosted runner. Two real
   bugs were found and fixed during testing before cutover: the package was missing the

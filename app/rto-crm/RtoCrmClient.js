@@ -50,14 +50,14 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
     // Connected=No reassignment preview - see leadAssignmentRules.json's _reassignNote and
     // assign_leads.py's REASSIGN_BACKLOG_CUTOFF/REASSIGN_RETRY_CAP. This preview can only
     // exclude the CURRENT agent (the one who just failed to connect) - it has no client-side
-    // visibility into lead_assignments' retired cycles (that history lives only in Postgres,
+    // visibility into CLS_RTO_calling's retired cycles (that history lives only in MySQL,
     // read directly by the Python cron), so it can't enforce the retry cap across older attempts
     // the way the real writer does. A lead the real cron would already treat as cap-reached
     // may still show one more predicted reassignment here.
     const REASSIGN_BACKLOG_CUTOFF_DATE = new Date(leadAssignmentRules.reassignBacklogCutoff);
     // Rolling hold (unlike the fixed cutoff above): a Connected=No lead isn't previewed as a
     // reassignment until this many hours have passed since its real assigned_at (leadDates,
-    // from Postgres's lead_assignments_current - NOT rowDate/Calling Date). Mirrors
+    // from MySQL's CLS_RTO_calling live cycle - NOT rowDate/Calling Date). Mirrors
     // assign_leads.py's REASSIGN_MIN_HOLD_HOURS/fetch_current_assignment_times exactly.
     const REASSIGN_MIN_HOLD_MS = (leadAssignmentRules.reassignMinHoldHours || 0) * 3600000;
 
@@ -838,7 +838,7 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
         }
         writeToSheetRow(dispTkt.orderNumber, dispTkt.rawIndex, sheetUpdates);
 
-        // Mirror the disposal into Postgres's lead_assignments table (assigned_at's
+        // Mirror the disposal into MySQL's CLS_RTO_calling table (assigned_at's
         // counterpart - see api/_lib/db.js), same submit action as the Sheet write above -
         // awaited (with one retry, see postJsonWithRetry) so a failure is actually visible
         // to the agent instead of vanishing silently. The Sheet write already landed above

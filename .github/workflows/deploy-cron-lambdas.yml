@@ -20,7 +20,6 @@ on:
       - 'scripts/lib.py'
       - 'scripts/mysql_lib.py'
       - 'scripts/lead_priority.py'
-      - 'scripts/sync_lead_assignments_to_mysql.py'
       - 'scripts/sync_agent_presence_log_to_mysql.py'
       - 'api/_lib/callingProcesses.json'
       - 'api/_lib/leadAssignmentRules.json'

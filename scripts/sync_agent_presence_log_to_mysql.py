@@ -1,17 +1,15 @@
 """Mirrors Postgres's agent_presence_log (see api/_lib/db.js's ensurePgSchema - the
 append-only history of every agent status transition, written by upsertAgentPresence)
-into MySQL's PEP_CLS.agent_presence_log, the same way sync_lead_assignments_to_mysql.py
-mirrors lead_assignments into PEP_CLS.CLS_RTO_calling: Postgres stays the live/working
-copy, MySQL is where this data survives long-term for reporting.
+into MySQL's PEP_CLS.agent_presence_log: Postgres stays the live/working copy, MySQL is
+where this data survives long-term for reporting.
 
-Unlike lead_assignments there's no "yesterday" business window to key off - a status
-change is an event, not something with its own retention date - so this instead tracks
-progress with a plain high-water mark: the largest `id` already in MySQL. Every run pulls
-whatever's newer than that from Postgres and appends it. Rows are never updated once
-written (a status transition is immutable history), so this is a plain INSERT IGNORE,
-not an upsert - and unlike lead_assignments, nothing is ever deleted from Postgres's
-agent_presence_log by this script; it's low-volume (one row per real status change, not
-per heartbeat) so there's no bloat pressure to purge it.
+There's no "yesterday" business window to key off - a status change is an event, not
+something with its own retention date - so this instead tracks progress with a plain
+high-water mark: the largest `id` already in MySQL. Every run pulls whatever's newer than
+that from Postgres and appends it. Rows are never updated once written (a status
+transition is immutable history), so this is a plain INSERT IGNORE, not an upsert - and
+nothing is ever deleted from Postgres's agent_presence_log by this script; it's low-volume
+(one row per real status change, not per heartbeat) so there's no bloat pressure to purge it.
 """
 import os
 import sys

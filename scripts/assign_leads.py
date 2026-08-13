@@ -33,7 +33,7 @@ Connected=No).
 The one exception: a lead whose Connected column reads "No" - the agent actually called and
 didn't reach the customer - is eligible to be handed to a DIFFERENT agent, up to
 REASSIGN_RETRY_CAP distinct agents total ever trying the same lead. Every agent who already
-failed to connect is excluded from receiving it again (lead_assignments in Postgres keeps one
+failed to connect is excluded from receiving it again (MySQL CLS_RTO_calling keeps one
 row per agent who has held the lead - reassigning stamps the outgoing agent's row
 reassigned_away_at instead of overwriting it, so that history is never lost) - "old owner
 never gets the same lead back." Only leads whose own Calling Date is on
@@ -41,8 +41,8 @@ or after REASSIGN_BACKLOG_CUTOFF are eligible - a fixed, one-time boundary chose
 shipped, not a rolling window, so the large pre-existing backlog of already-Connected=No leads
 is left exactly as it was, while every lead called from that date onward is eligible
 indefinitely. A reassigned lead gets Q and R:U wiped back to blank so it looks like a fresh,
-never-called lead to its new agent - the previous attempt's history survives only in Postgres,
-not on the row itself. A prepaid Connected=No lead that clears both of those tests is then
+never-called lead to its new agent - the previous attempt's history survives only in
+CLS_RTO_calling, not on the row itself. A prepaid Connected=No lead that clears both of those tests is then
 checked against GoKwik the same as a fresh one (see the next paragraph) - it can have been
 refunded through a channel other than this agent's own disposition, and reassigning it would
 just have a second agent call a customer who's already been made whole. That check deliberately
@@ -84,6 +84,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pymysql
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -453,28 +454,23 @@ def flush_gokwik_refund_cache(dirty, conn=None):
             conn.rollback()
 
 
-def fetch_reassignment_attempts(conn=None):
+def fetch_reassignment_attempts():
     """{order_id: {emails}} of every agent a lead has ever been reassigned AWAY from - the
-    rows lead_assignments keeps with reassigned_away_at set (see api/_lib/db.js's
-    ensurePgSchema: reassigning stamps the old agent's row rather than overwriting it, so
-    that table holds one row per agent who ever tried a lead, not just its current one).
-    Returns {} (never raises) if POSTGRES_URL isn't configured or the query fails - a lookup
-    failure here should fail open (treat every lead as having no reassignment history yet,
-    exactly the pre-this-feature behavior) rather than block the whole run.
-
-    conn: reuse main()'s already-open connection instead of opening a new one - see
-    _pg_cursor. Optional so this stays directly callable on its own (REPL, one-off script)."""
-    conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str and conn is None:
-        return {}
+    rows CLS_RTO_calling (MySQL) keeps with reassigned_away_at set (see
+    scripts/migrate_cls_rto_calling_schema.py: reassigning stamps the old agent's row rather
+    than overwriting it, so that table holds one row per agent who ever tried a lead, not
+    just its current one).
+    Returns {} (never raises) if MYSQL_* credentials aren't configured or the query fails -
+    a lookup failure here should fail open (treat every lead as having no reassignment
+    history yet, exactly the pre-this-feature behavior) rather than block the whole run."""
     try:
-        with _pg_cursor(conn_str, conn) as cur:
-            cur.execute("SELECT order_id, email FROM lead_assignments WHERE reassigned_away_at IS NOT NULL")
-            rows = cur.fetchall()
+        rows = mysql_lib.query(
+            "SELECT order_id, agent_email FROM CLS_RTO_calling WHERE reassigned_away_at IS NOT NULL"
+        )
     except Exception as e:
-        print(f"  (lead_assignments reassignment-history fetch failed: {e} - treating as no prior attempts)")
-        if conn is not None:
-            conn.rollback()
+        print(f"  (CLS_RTO_calling reassignment-history fetch failed: {e} - treating as no prior attempts)")
+        return {}
+    if rows is None:
         return {}
     attempts_by_order = {}
     for order_id, email in rows:
@@ -482,33 +478,34 @@ def fetch_reassignment_attempts(conn=None):
     return attempts_by_order
 
 
-def fetch_current_assignment_times(conn=None):
-    """{order_id: assigned_at} (naive UTC datetime) for every lead's CURRENT live assignment
-    cycle - the lead_assignments row with reassigned_away_at IS NULL (see api/_lib/db.js's
-    ensurePgSchema: exactly one such row can exist per order_id at a time). Used only to hold a
-    Connected=No lead back from reassignment until its current agent has had a full
-    REASSIGN_MIN_HOLD_HOURS to actually reach the customer - without this, a lead could be
-    reassigned minutes after its original assignment, before the agent ever had a fair shot.
-    Same fail-open contract as fetch_reassignment_attempts: {} (never raises) if POSTGRES_URL
-    isn't configured or the query fails, so a lookup problem here never blocks the whole run -
-    it just means the hold can't be enforced this run, same as before this existed.
-
-    conn: see fetch_reassignment_attempts - reuse main()'s connection when given."""
-    conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str and conn is None:
-        return {}
+def fetch_current_assignment_times():
+    """{order_id: assigned_at} (UTC-aware datetime) for every lead's CURRENT live assignment
+    cycle - the CLS_RTO_calling row with reassigned_away_at IS NULL (exactly one such row can
+    exist per order_id - see migrate_cls_rto_calling_schema.py's live_order_id unique index).
+    Used only to hold a Connected=No lead back from reassignment until its current agent has
+    had a full REASSIGN_MIN_HOLD_HOURS to actually reach the customer - without this, a lead
+    could be reassigned minutes after its original assignment, before the agent ever had a
+    fair shot.
+    Same fail-open contract as fetch_reassignment_attempts: {} (never raises) if MYSQL_*
+    credentials aren't configured or the query fails, so a lookup problem here never blocks
+    the whole run - it just means the hold can't be enforced this run, same as before this
+    existed."""
     try:
-        with _pg_cursor(conn_str, conn) as cur:
-            cur.execute("SELECT order_id, assigned_at FROM lead_assignments WHERE reassigned_away_at IS NULL")
-            rows = cur.fetchall()
+        rows = mysql_lib.query(
+            "SELECT order_id, assigned_at FROM CLS_RTO_calling WHERE reassigned_away_at IS NULL"
+        )
     except Exception as e:
-        print(f"  (lead_assignments current-assignment-time fetch failed: {e} - treating as no hold)")
-        if conn is not None:
-            conn.rollback()
+        print(f"  (CLS_RTO_calling current-assignment-time fetch failed: {e} - treating as no hold)")
         return {}
-    # assigned_at comes back tz-aware (TIMESTAMPTZ) - kept that way, same as checked_at in
-    # _cached_refund_status above, so it compares directly against datetime.now(timezone.utc).
-    return dict(rows)
+    if rows is None:
+        return {}
+    # MySQL DATETIME carries no timezone - assigned_at comes back NAIVE from pymysql, but every
+    # value this table has ever stored (this script's own writes below, and the original
+    # Postgres TIMESTAMPTZ history carried over by migrate_lead_assignments_to_cls_rto_calling.py)
+    # is a UTC instant with the offset already dropped, never server-local wall-clock. Reattach
+    # tzinfo=UTC explicitly (rather than trust MySQL's session time_zone, which this app doesn't
+    # control) so this compares correctly against datetime.now(timezone.utc) below.
+    return {order_id: (dt.replace(tzinfo=timezone.utc) if dt else dt) for order_id, dt in rows}
 
 
 def fetch_online_agents(process_key=None, conn=None):
@@ -599,26 +596,25 @@ def fetch_online_agents(process_key=None, conn=None):
 
 
 def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
-                            reassign_info_by_row, conn=None):
-    """Stamps assigned_at=now() for every lead just assigned, keyed by the sheet's own Order
-    ID, so rto-crm.html's resetStalePendingLeads() can tell a fresh assignment apart from a
-    genuinely stale one (the lead's own Calling Date can't do this - the backlog this script
-    distributes is old by definition). Best-effort: if POSTGRES_URL isn't configured,
-    silently skips (fetch_online_agents() would already have returned [] in that case, so in
-    practice this only runs when the DB is reachable anyway).
+                            reassign_info_by_row):
+    """Stamps assigned_at=<now, UTC> for every lead just assigned, keyed by the sheet's own
+    Order ID, so rto-crm.html's resetStalePendingLeads() can tell a fresh assignment apart
+    from a genuinely stale one (the lead's own Calling Date can't do this - the backlog this
+    script distributes is old by definition). Best-effort: if MYSQL_* credentials aren't
+    configured, silently skips.
 
     Handles BOTH halves of a reassignment, in ONE transaction, because they are only correct
     together: first stamp reassigned_away_at on the outgoing agent's row (retiring their
     cycle and preserving how it went), then write the incoming agent's row. Splitting these
     across two connections - as an earlier version did - risks landing the retire without
     the insert, leaving a lead with no live cycle at all: invisible to
-    recentAssignments/KPIs, even though the sheet says it is assigned. Postgres either takes
+    recentAssignments/KPIs, even though the sheet says it is assigned. MySQL either takes
     both or neither.
 
-    That order also matters within the transaction: lead_assignments_order_id_current_key and
-    lead_assignments_awb_code_key (see api/_lib/db.js's ensurePgSchema) each permit only one
-    live row per lead / per AWB, and a reassigned lead's successive cycles share both values,
-    so the outgoing cycle has to leave those indexes before the incoming one can enter.
+    That order also matters within the transaction: live_order_id_key and live_awb_code_key
+    (see migrate_cls_rto_calling_schema.py) each permit only one live row per lead / per AWB,
+    and a reassigned lead's successive cycles share both values, so the outgoing cycle has to
+    leave those indexes before the incoming one can enter.
 
     The retire matches on order_id alone - never on the outgoing agent's email. At most one
     live row exists per order_id, so it is already unambiguous, and matching email too would
@@ -626,28 +622,26 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
     fail to retire the row - which would then collide on the unique index and abort every
     assignment in this batch.
 
-    The insert stays an upsert on the live-cycle index, exactly as before this table was
-    re-grained: a genuinely new assignment inserts, while a lead that somehow already has a
-    live row (the same Order ID appearing on two sheet rows, most plausibly) updates it
-    rather than raising a unique violation and losing the whole batch. COALESCE on
-    awb_code/rto_reason/delivery_partner so a re-run never clobbers a value already recorded
-    by the disposal write path (api/_lib/db.js's recordLeadDisposition) with a blank one.
+    The insert is plain, NOT `ON DUPLICATE KEY UPDATE` - deliberately, unlike the Postgres
+    version this replaces. Postgres's `ON CONFLICT (order_id) WHERE ...` targets ONE named
+    partial index; MySQL's upsert fires on ANY unique key collision on the table, and this
+    table has two (live_order_id_key AND live_awb_code_key). An upsert here could land on an
+    AWB collision instead - two different leads' rows sharing one live AWB, a genuine data
+    error - and silently splice this row's agent/timestamp onto the OTHER lead's order_id
+    rather than raising. So a collision is caught and inspected: on live_order_id_key (this
+    lead's Order ID already has a live row - e.g. the same Order ID on two sheet rows) it
+    falls back to an UPDATE, same net effect as the old upsert; any other key (i.e.
+    live_awb_code_key) is left to raise and abort the batch, exactly as it would have under
+    Postgres's index.
 
     Also stamps awb_code, rto_reason (the sheet's own Column D - see
     lead_priority.COL_RTO_REASON), and delivery_partner (derived from awb_code via
     lead_priority.prefix_rule_partner - the same rule api/_lib/db.js's JS mirror uses for
-    leads recorded via the disposal path instead) so downstream reporting
-    (scripts/sync_lead_assignments_to_mysql.py) can key on any of them without a separate
-    sheet lookup.
-
-    conn: reuse main()'s already-open connection instead of opening a new one - see
-    _pg_cursor's comment on why every caller sharing it must roll back on failure. This one
-    still commits/rolls back explicitly itself either way (rather than leaning on a bare
-    `with` exit like the read-only fetch_* functions above) because on a shared conn the
-    caller keeps using that connection afterwards, so leaving it mid-transaction on the way
-    out isn't an option."""
-    conn_str = os.environ.get("POSTGRES_URL")
-    if (not conn_str and conn is None) or not assignments:
+    leads recorded via the disposal path instead)."""
+    if not assignments:
+        return
+    cred = mysql_lib.get_credential()
+    if cred is None:
         return
     order_id_by_row = {row_index: order_id for row_index, _rto_initiated_date, order_id, _tier in unassigned_pending}
     rows = [
@@ -669,39 +663,47 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
         for row_index, (_old_agent, order_id) in reassign_info_by_row.items()
         if row_index in assignments
     ]
-    owns_conn = conn is None
-    if owns_conn:
-        conn = lib.get_pg_connection(conn_str)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)  # see fetch_current_assignment_times: stored naive-but-UTC
+    conn = pymysql.connect(
+        host=cred["host"], user=cred["user"], password=cred["password"],
+        database=cred["database"], port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
+    )
     try:
-        with conn.cursor() as cur:
-            if retiring:
-                cur.executemany(
+        cur = conn.cursor()
+        if retiring:
+            cur.executemany(
+                "UPDATE CLS_RTO_calling SET reassigned_away_at = %s WHERE order_id = %s AND reassigned_away_at IS NULL",
+                [(now, order_id) for (order_id,) in retiring],
+            )
+        for order_id, email, awb_code, rto_reason, delivery_partner in rows:
+            try:
+                cur.execute(
                     """
-                    UPDATE lead_assignments SET reassigned_away_at = now()
+                    INSERT INTO CLS_RTO_calling (order_id, agent_email, assigned_at, awb_code, rto_reason, delivery_partner)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (order_id, email, now, awb_code, rto_reason, delivery_partner),
+                )
+            except pymysql.err.IntegrityError as e:
+                if "live_order_id_key" not in str(e):
+                    raise  # a different unique key collided (live_awb_code_key) - a real error, not this lead's own re-run
+                cur.execute(
+                    """
+                    UPDATE CLS_RTO_calling SET
+                        agent_email = %s, assigned_at = %s,
+                        awb_code = COALESCE(%s, awb_code),
+                        rto_reason = COALESCE(%s, rto_reason),
+                        delivery_partner = COALESCE(%s, delivery_partner)
                     WHERE order_id = %s AND reassigned_away_at IS NULL
                     """,
-                    retiring,
+                    (email, now, awb_code, rto_reason, delivery_partner, order_id),
                 )
-            cur.executemany(
-                """
-                INSERT INTO lead_assignments (order_id, email, assigned_at, awb_code, rto_reason, delivery_partner)
-                VALUES (%s, %s, now(), %s, %s, %s)
-                ON CONFLICT (order_id) WHERE reassigned_away_at IS NULL DO UPDATE SET
-                    email = EXCLUDED.email,
-                    assigned_at = now(),
-                    awb_code = COALESCE(EXCLUDED.awb_code, lead_assignments.awb_code),
-                    rto_reason = COALESCE(EXCLUDED.rto_reason, lead_assignments.rto_reason),
-                    delivery_partner = COALESCE(EXCLUDED.delivery_partner, lead_assignments.delivery_partner)
-                """,
-                rows,
-            )
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
-        if owns_conn:
-            conn.close()
+        conn.close()
 
 
 PROCESS_KEY = "rto"  # this script assigns the RTO process's leads; see callingProcesses.json
@@ -826,9 +828,9 @@ def _main(conn):
     rows = values[1:]  # skip header
     print(f"  {len(rows)} data rows")
 
-    print("Fetching prior Connected=No reassignment history from Postgres...")
-    attempts_by_order = fetch_reassignment_attempts(conn=conn)
-    current_assigned_at_by_order = fetch_current_assignment_times(conn=conn)
+    print("Fetching prior Connected=No reassignment history from MySQL...")
+    attempts_by_order = fetch_reassignment_attempts()
+    current_assigned_at_by_order = fetch_current_assignment_times()
 
     print("Fetching cached GoKwik refund-check results from Postgres...")
     gokwik_cache = fetch_gokwik_refund_cache(conn=conn)
@@ -1069,7 +1071,7 @@ def _main(conn):
     # reassignment (retire the old agent's cycle, record the new one) happen inside this one
     # call, in one transaction - see its docstring for why they can't be separated.
     record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
-                            reassign_info_by_row, conn=conn)
+                            reassign_info_by_row)
 
     per_agent = {}
     for email in assignments.values():

@@ -97,7 +97,7 @@ Four separate stores. Getting these confused is the easiest way to write a wrong
 |---|---|---|---|
 | `PEP_CLS` | `users`, `permissions`, `report_tab_permissions`, `audit_log` | The app's own auth | [db.js](../api/_lib/db.js) `ensureSchema()` |
 | `PEP_CLS` | `CLS_KYC_mCaff`, `CLS_KYC_Hyphen` | Column-for-column mirror of each brand's ticket sheet | External (not this repo) |
-| `PEP_CLS` | `CLS_RTO_calling` | Archived disposed CRM leads | [sync_lead_assignments_to_mysql.py](../scripts/sync_lead_assignments_to_mysql.py) |
+| `PEP_CLS` | `CLS_RTO_calling` | RTO CRM lead assignment/disposition history — one row per assignment CYCLE (see §CRM below) | [assign_leads.py](../scripts/assign_leads.py) (assignment) + [db.js](../api/_lib/db.js) `recordLeadDisposition` (disposal) |
 | `PEP_CLS` | `agent_presence_log` | Archived agent status transitions | [sync_agent_presence_log_to_mysql.py](../scripts/sync_agent_presence_log_to_mysql.py) |
 | `mcaff_dwh` | `nps_delivery`, `nps_product` | Survey responses | External |
 | `mcaff_dwh` | `mcaff_tickets`, `hyphen_tickets`, `*_tickets_csat` | Tickets + CSAT | External |
@@ -112,9 +112,18 @@ Two different credential paths reach MySQL:
 
 ### Postgres (Supabase) — CRM operational state only
 
-`agent_presence`, `agent_presence_log`, `lead_assignments`. Schema bootstrapped
-idempotently by [db.js `ensurePgSchema()`](../api/_lib/db.js#L143). Reached three ways:
-the Lambda via `pg`, the cron scripts via `psycopg`, both using `POSTGRES_URL`.
+`agent_presence`, `agent_presence_log`, `calling_business_hours`, `calling_agent_process`,
+`calling_process_dispositions`, `ndr_lead_assignments`. Schema bootstrapped idempotently by
+[db.js `ensurePgSchema()`](../api/_lib/db.js#L143). Reached two ways: the Lambda via `pg`, the
+cron scripts via `psycopg`, both using `POSTGRES_URL`.
+
+`lead_assignments` (RTO's own assignment/disposition history) used to live here too, but moved
+onto MySQL `PEP_CLS.CLS_RTO_calling` — Supabase's storage quota made a Postgres table that grows
+forever untenable, and the daily Postgres→MySQL archival sync it needed added a layer this
+removes entirely. See [migrate_cls_rto_calling_schema.py](../scripts/migrate_cls_rto_calling_schema.py)
+/ [migrate_lead_assignments_to_cls_rto_calling.py](../scripts/migrate_lead_assignments_to_cls_rto_calling.py).
+`ndr_lead_assignments` is NDR's own equivalent table and stays on Postgres — it never had RTO's
+growth/quota pressure.
 
 `agent_presence_log` has two readers now, not just the archival sync to MySQL (above):
 `getAgentPresenceLogSummary` ([db.js](../api/_lib/db.js), see *Overview tab — Agent Performance
@@ -290,7 +299,7 @@ engineering essentials:
 | Presence + disposal | [api/auth/[action].js](../api/auth/%5Baction%5D.js) | `presence`, `recordDisposition`, `recentAssignments` |
 | Assignment cron | [assign_leads.py](../scripts/assign_leads.py) | Every 5 min |
 | Shared rules | [lead_priority.py](../scripts/lead_priority.py) + [leadAssignmentRules.json](../api/_lib/leadAssignmentRules.json) | |
-| Manager dashboard | [CallingOverviewClient.js](../app/calling-overview/CallingOverviewClient.js) | Aggregates from `lead_assignments` |
+| Manager dashboard | [CallingOverviewClient.js](../app/calling-overview/CallingOverviewClient.js) | Aggregates from MySQL `CLS_RTO_calling` |
 
 **One theme only.** [globals.css](../app/globals.css) still carries a `body.theme-light`-gated
 override block (ported from the original inline `<style>`), but there is no longer any code
@@ -371,14 +380,14 @@ name/tooltip promise ("Reassign Only"). Absent/unset for an agent means no restr
 
 **Reassignment hold** (`reassignMinHoldHours` in `leadAssignmentRules.json`, currently 24): a
 Connected=No lead isn't even offered to `build_assignment_queue` as a reassignment candidate
-until this many hours have passed since its real `assigned_at` (the live `lead_assignments` row,
+until this many hours have passed since its real `assigned_at` (the live `CLS_RTO_calling` row,
 `reassigned_away_at IS NULL` — not Calling Date, which only gates the one-time
 `reassignBacklogCutoff` migration boundary). Unlike the cutoff/retry-cap, this is a **rolling**
 window and nothing is stamped when a lead fails it — it's simply left out of both the
 reassignment pool and `current_load` for this run, and re-enters the same check next run.
-`scripts/assign_leads.py`'s `fetch_current_assignment_times()` reads it fresh from Postgres each
+`scripts/assign_leads.py`'s `fetch_current_assignment_times()` reads it fresh from MySQL each
 run; `RtoCrmClient.js`'s preview reads the same timestamp off `leadDates` (already fetched for
-the Overview tab's date-scoping, via `lead_assignments_current`).
+the Overview tab's date-scoping, via `getAllLeadDates`/`fetchAllLeadDates` in `db.js`).
 
 `RtoCrmClient.js`'s `predictedAssignments` mirrors all of the above (`matchesSpecialist`/
 `withinPrepaidTarget`/`matchesReassignPaymentMode`/`tryAssign`, reading `prepaidPct`/
@@ -386,7 +395,7 @@ the Overview tab's date-scoping, via `lead_assignments_current`).
 `processAgents` the same way `maxQuota` already was) — same two-languages-one-rulebook caveat as
 the rest of this section applies. One known preview gap remains Python-only: the retry-cap
 (`REASSIGN_RETRY_CAP`) still can't be enforced client-side, since the full cross-run reassignment
-history lives only in Postgres.
+history lives only in MySQL `CLS_RTO_calling`.
 
 ### Overview tab — Agent Performance Summary
 
@@ -434,12 +443,12 @@ and nowhere else needs re-deriving it).
   two different subsets of one agent's tickets. This is why the table's "Total Leads Assigned"
   and the KPI row's "Total Assigned" tile can legitimately disagree — the KPI tiles stayed on
   Calling Date/Order Date, so the two are now answering genuinely different questions.
-- **Both dates come from `lead_assignments_current`** (the live-cycle view — see the
-  Connected=No reassignment notes below for what "cycle" means; a reassigned lead's PAST cycles
-  are deliberately excluded here, unlike `getCallingOverviewStats`' disposed/connected/refunded
-  metrics, which read every cycle for call-volume KPIs. This function instead answers "which
-  scope does the cycle the sheet is currently showing fall into", and the sheet only ever shows
-  the live cycle, so matching that grain is what keeps a lead's date attribution from
+- **Both dates come from `CLS_RTO_calling` filtered to the live cycle** (`reassigned_away_at IS
+  NULL` — see the Connected=No reassignment notes below for what "cycle" means); a reassigned
+  lead's PAST cycles are deliberately excluded here, unlike `getCallingOverviewStats`'
+  disposed/connected/refunded metrics, which read every cycle for call-volume KPIs. This function
+  instead answers "which scope does the cycle the sheet is currently showing fall into", and the
+  sheet only ever shows the live cycle, so matching that grain is what keeps a lead's date attribution from
   accidentally landing on a retired cycle's numbers), via a new unbounded read: `getAllLeadDates()`
   (`api/_lib/db.js`, returns `{order_id: {assignedAt, disposedAt}}`) → `GET /api/auth/leadDates`
   (same auth level as the pre-existing, previously-unused-by-this-page `recentAssignments`
@@ -693,7 +702,7 @@ disposition — COD is never checked, since nothing was paid upfront to refund p
    one batched `set_sheet_values_batch` call (S/T are exactly what the `is_disposed` check
    elsewhere in this file treats as "already worked," so this is a permanent mark, not a
    one-run skip) — the row never reaches `unassigned_pending`, never gets a Column Q write,
-   never reaches `lead_assignments`. Rows whose S **already** reads `ALREADY_REFUNDED` are
+   never reaches `CLS_RTO_calling`. Rows whose S **already** reads `ALREADY_REFUNDED` are
    excluded from the write: a Connected=No row keeps its "No" forever, so it re-enters the
    reassignment branch on every run, and with a permanently-cached refund it would otherwise
    rewrite the same three cells with the same three values every 5 minutes forever.
@@ -788,25 +797,30 @@ Connected column reads "No" is eligible to go to a *different* agent, up to
   tests and a lead either of them rejects is left alone for good, so there is nothing to learn
   from GoKwik about it. See *Why it's deferred, batched and parallel* above - this ordering was
   originally the other way round and was most of an 8-13 minute run.
-- **`lead_assignments` keeps one row per assignment *cycle*** — reassigning stamps the outgoing
-  agent's row `reassigned_away_at` rather than overwriting it, so every prior agent stays
+- **MySQL `CLS_RTO_calling` keeps one row per assignment *cycle*** — reassigning stamps the
+  outgoing agent's row `reassigned_away_at` rather than overwriting it, so every prior agent stays
   permanently excluded, not just the most recent one. Fetched once per run
   (`fetch_reassignment_attempts`, reading the `reassigned_away_at IS NOT NULL` rows) and written
   by `record_lead_assignments` right after the sheet write, which retires the outgoing cycle and
-  records the incoming one **in a single transaction** — separating them risks a lead with no
-  live cycle at all (invisible to `recentAssignments`/KPIs while the sheet says it's assigned),
-  and the partial unique indexes require the outgoing cycle to leave before the incoming one can
-  enter. This replaces a separate `lead_reassignment_attempts` table that held just
-  `(order_id, email)` per failed attempt; keeping the real row instead of a bare marker means each
-  past attempt retains its own disposition/connected/disposed_at — which also fixed a lead keeping
-  its *previous* agent's stale disposition in Postgres after being reassigned.
-- **`lead_assignments_current`** (view: `reassigned_away_at IS NULL`) is the live cycle of each
-  lead — one row per `order_id`, enforced by `lead_assignments_order_id_current_key`, i.e. exactly
-  what the table held when `order_id` was its primary key. Readers asking about a lead's current
-  state use the view; readers counting *call outcomes* (disposed, connect rate, refunds, the
-  hourly dial series, the partner breakdown) read the base table, so an earlier agent's real
-  attempt on a reassigned lead still counts. See `getCallingOverviewStats` in `api/_lib/db.js`,
-  which applies both grains in one pass.
+  records the incoming one **in one transaction** — separating them risks a lead with no live
+  cycle at all (invisible to `recentAssignments`/KPIs while the sheet says it's assigned), and the
+  unique indexes (`live_order_id_key`/`live_awb_code_key` — generated-column emulation of a
+  Postgres partial index, since MySQL has no `WHERE` on a unique index; see
+  `migrate_cls_rto_calling_schema.py`) require the outgoing cycle to leave before the incoming
+  one can enter. This table originally lived on Postgres (`lead_assignments`), moved to MySQL to
+  drop the daily archival sync Supabase's storage quota required — see
+  `migrate_lead_assignments_to_cls_rto_calling.py` for the one-time data move, which folded in a
+  now-retired `lead_reassignment_attempts` side-table the same way the Postgres version once did.
+  Keeping the real row instead of a bare marker means each past attempt retains its own
+  disposition/connected/disposed_at — which also fixed a lead keeping its *previous* agent's stale
+  disposition after being reassigned.
+- **The live cycle of each lead** is `CLS_RTO_calling WHERE reassigned_away_at IS NULL` — one row
+  per `order_id`, enforced by the `live_order_id_key` unique index, i.e. exactly what the table
+  held when `order_id` was its primary key (before the cycle-shape migration). Readers asking
+  about a lead's current state filter to this; readers counting *call outcomes* (disposed,
+  connect rate, refunds, the hourly dial series, the partner breakdown) read every cycle, so an
+  earlier agent's real attempt on a reassigned lead still counts. See `getCallingOverviewStats` in
+  `api/_lib/db.js`, which applies both grains in one pass.
 - **`build_assignment_queue` gained `excluded_by_row: {row_index: {emails}}`.** The old
   shrinking-`agent_cycle`-list loop couldn't express "skip this agent for this lead only," so
   the core loop was rewritten to a per-lead cursor over a fixed `agent_order` array — verified
@@ -829,7 +843,7 @@ Connected column reads "No" is eligible to go to a *different* agent, up to
   genuinely fresh lead, not the previous agent's Connected/Attempt/Disposition/remarks.
 - **The JS preview (`predictedAssignments`) is a deliberate approximation**, not a full port:
   it excludes the *current* agent for a Connected=No ticket, but has no client-side visibility
-  into `lead_assignments`' retired cycles (Postgres-only, read by the Python cron directly), so it
+  into `CLS_RTO_calling`'s retired cycles (MySQL-only, read by the Python cron directly), so it
   cannot enforce the retry cap across older attempts. A `row.isReassignment` flag drives a
   "🔁 Reassign" badge in the Admin "Next to Assign" table. Known, accepted drift — see
   `REASSIGN_BACKLOG_CUTOFF_DATE`'s comment in `RtoCrmClient.js`.

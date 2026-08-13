@@ -65,13 +65,14 @@ build_assign_ndr_leads() {
 }
 
 build_sync_lead_assignments() {
+  # Name is a leftover from when this Lambda also synced lead_assignments (see its
+  # handler.py) - now only the agent-presence-log sync remains.
   echo "=== Building sync_lead_assignments.zip ==="
   work="$(mktemp -d)"
   mkdir -p "$work/scripts"
 
   cp "$LAMBDA_DIR/sync_lead_assignments/handler.py" "$work/handler.py"
-  cp "$REPO_ROOT/scripts/sync_lead_assignments_to_mysql.py" \
-     "$REPO_ROOT/scripts/sync_agent_presence_log_to_mysql.py" \
+  cp "$REPO_ROOT/scripts/sync_agent_presence_log_to_mysql.py" \
      "$REPO_ROOT/scripts/mysql_lib.py" \
      "$work/scripts/"
 

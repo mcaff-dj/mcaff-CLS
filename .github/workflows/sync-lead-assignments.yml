@@ -30,19 +30,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # continue-on-error so a lead-assignments hiccup (e.g. a transient DB
-      # timeout) doesn't also block the unrelated presence-log sync below.
-      - name: Sync yesterday's disposed leads
-        continue-on-error: true
-        env:
-          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
-          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
-          MYSQL_USER: ${{ secrets.MYSQL_USER }}
-          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
-          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
-          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
-        run: python scripts/sync_lead_assignments_to_mysql.py
-
+      # lead_assignments no longer syncs Postgres -> MySQL here: it moved OFF Postgres onto
+      # MySQL CLS_RTO_calling directly (assign_leads.py and api/_lib/db.js both write/read
+      # MySQL now - see migrate_cls_rto_calling_schema.py / migrate_lead_assignments_to_cls_rto_calling.py),
+      # so there is nothing left for a daily sync to do.
       - name: Sync new agent presence log rows
         env:
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
