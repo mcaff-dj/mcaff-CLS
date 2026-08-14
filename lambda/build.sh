@@ -36,9 +36,15 @@ build_assign_leads() {
      "$REPO_ROOT/api/_lib/leadAssignmentRules.json" \
      "$work/api/_lib/"
 
+  # pymysql: assign_leads.py imports it directly (not just via mysql_lib's own lazy
+  # import) since lead_assignments moved onto MySQL CLS_RTO_calling directly - this was
+  # missing here (caught live in production: mcaff-cls-assign-leads crashed on every
+  # invocation with ImportModuleError after that move shipped, because this build
+  # function was never updated to match - it had been manually patched during earlier
+  # testing but that fix was never made permanent here).
   pip3 install --disable-pip-version-check --only-binary=:all: \
     --platform manylinux2014_x86_64 --python-version 3.12 --implementation cp --abi cp312 \
-    -t "$work" psycopg[binary] requests cryptography
+    -t "$work" psycopg[binary] requests cryptography pymysql
 
   ( cd "$work" && zip -r -q "$OUT_DIR/assign_leads.zip" . )
   rm -rf "$work"
