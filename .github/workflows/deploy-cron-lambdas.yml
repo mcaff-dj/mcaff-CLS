@@ -61,20 +61,29 @@ jobs:
           role-to-assume: arn:aws:iam::157320387454:role/github-actions-mcaff-cls-deploy
           aws-region: ap-south-1
 
+      # --query restricts printed output to non-secret fields only. update-function-code's
+      # full response includes Environment.Variables in PLAINTEXT (MYSQL_PASSWORD, every
+      # GOKWIK_*_APPSECRET, etc.) - GitHub only auto-masks a value if it's referenced via
+      # secrets.X in THIS workflow, which none of these are, so an unrestricted response
+      # here would print every one of those secrets straight into a log the whole team can
+      # read. Caught in production on 2026-08-14 - see lambda/README.md.
       - name: Update assign-leads Lambda code
         run: |
           aws lambda update-function-code --function-name mcaff-cls-assign-leads \
-            --zip-file fileb://lambda/dist/assign_leads.zip
+            --zip-file fileb://lambda/dist/assign_leads.zip \
+            --query "{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus,CodeSha256:CodeSha256}"
           aws lambda wait function-updated --function-name mcaff-cls-assign-leads
 
       - name: Update assign-ndr-leads Lambda code
         run: |
           aws lambda update-function-code --function-name mcaff-cls-assign-ndr-leads \
-            --zip-file fileb://lambda/dist/assign_ndr_leads.zip
+            --zip-file fileb://lambda/dist/assign_ndr_leads.zip \
+            --query "{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus,CodeSha256:CodeSha256}"
           aws lambda wait function-updated --function-name mcaff-cls-assign-ndr-leads
 
       - name: Update sync-lead-assignments Lambda code
         run: |
           aws lambda update-function-code --function-name mcaff-cls-sync-lead-assignments \
-            --zip-file fileb://lambda/dist/sync_lead_assignments.zip
+            --zip-file fileb://lambda/dist/sync_lead_assignments.zip \
+            --query "{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus,CodeSha256:CodeSha256}"
           aws lambda wait function-updated --function-name mcaff-cls-sync-lead-assignments

@@ -63,14 +63,17 @@ if ! aws lambda get-function --function-name "$FN_ASSIGN" >/dev/null 2>&1; then
   aws lambda create-function --function-name "$FN_ASSIGN" \
     --runtime python3.12 --handler handler.handler --role "$ROLE_ARN" \
     --timeout 60 --memory-size 256 --region "$AWS_REGION" \
-    --zip-file "fileb://$DIST/assign_leads.zip"
+    --zip-file "fileb://$DIST/assign_leads.zip" >/dev/null
 else
   aws lambda update-function-code --function-name "$FN_ASSIGN" \
-    --zip-file "fileb://$DIST/assign_leads.zip" --region "$AWS_REGION"
+    --zip-file "fileb://$DIST/assign_leads.zip" --region "$AWS_REGION" >/dev/null
 fi
 aws lambda wait function-updated --function-name "$FN_ASSIGN" --region "$AWS_REGION"
+# >/dev/null: the response echoes back every Environment.Variables value in plaintext -
+# see the workflow's own comment on this same issue, caught in production 2026-08-14.
 aws lambda update-function-configuration --function-name "$FN_ASSIGN" --region "$AWS_REGION" \
-  --environment "Variables={GOOGLE_SA_KEY_JSON=${GOOGLE_SA_KEY},POSTGRES_URL=${POSTGRES_URL},MYSQL_HOST=${MYSQL_HOST},MYSQL_USER=${MYSQL_USER},MYSQL_PASSWORD=${MYSQL_PASSWORD},MYSQL_DATABASE=${MYSQL_DATABASE},MYSQL_PORT=${MYSQL_PORT},GOKWIK_HYPHEN_APPID=${GOKWIK_HYPHEN_APPID},GOKWIK_HYPHEN_APPSECRET=${GOKWIK_HYPHEN_APPSECRET},GOKWIK_FIEN_APPID=${GOKWIK_FIEN_APPID},GOKWIK_FIEN_APPSECRET=${GOKWIK_FIEN_APPSECRET},GOKWIK_MCAFFEINE_APPID=${GOKWIK_MCAFFEINE_APPID},GOKWIK_MCAFFEINE_APPSECRET=${GOKWIK_MCAFFEINE_APPSECRET}}"
+  --environment "Variables={GOOGLE_SA_KEY_JSON=${GOOGLE_SA_KEY},POSTGRES_URL=${POSTGRES_URL},MYSQL_HOST=${MYSQL_HOST},MYSQL_USER=${MYSQL_USER},MYSQL_PASSWORD=${MYSQL_PASSWORD},MYSQL_DATABASE=${MYSQL_DATABASE},MYSQL_PORT=${MYSQL_PORT},GOKWIK_HYPHEN_APPID=${GOKWIK_HYPHEN_APPID},GOKWIK_HYPHEN_APPSECRET=${GOKWIK_HYPHEN_APPSECRET},GOKWIK_FIEN_APPID=${GOKWIK_FIEN_APPID},GOKWIK_FIEN_APPSECRET=${GOKWIK_FIEN_APPSECRET},GOKWIK_MCAFFEINE_APPID=${GOKWIK_MCAFFEINE_APPID},GOKWIK_MCAFFEINE_APPSECRET=${GOKWIK_MCAFFEINE_APPSECRET}}" \
+  >/dev/null
 # Reserved concurrency = 1: same purpose as the workflow's `concurrency: group: assign-leads`
 # - stops a slow run overlapping the next 5-minute tick.
 aws lambda put-function-concurrency --function-name "$FN_ASSIGN" \
@@ -83,14 +86,15 @@ if ! aws lambda get-function --function-name "$FN_NDR" >/dev/null 2>&1; then
   aws lambda create-function --function-name "$FN_NDR" \
     --runtime python3.12 --handler handler.handler --role "$ROLE_ARN" \
     --timeout 120 --memory-size 256 --region "$AWS_REGION" \
-    --zip-file "fileb://$DIST/assign_ndr_leads.zip"
+    --zip-file "fileb://$DIST/assign_ndr_leads.zip" >/dev/null
 else
   aws lambda update-function-code --function-name "$FN_NDR" \
-    --zip-file "fileb://$DIST/assign_ndr_leads.zip" --region "$AWS_REGION"
+    --zip-file "fileb://$DIST/assign_ndr_leads.zip" --region "$AWS_REGION" >/dev/null
 fi
 aws lambda wait function-updated --function-name "$FN_NDR" --region "$AWS_REGION"
 aws lambda update-function-configuration --function-name "$FN_NDR" --region "$AWS_REGION" \
-  --environment "Variables={GOOGLE_SA_KEY_JSON=${GOOGLE_SA_KEY},POSTGRES_URL=${POSTGRES_URL}}"
+  --environment "Variables={GOOGLE_SA_KEY_JSON=${GOOGLE_SA_KEY},POSTGRES_URL=${POSTGRES_URL}}" \
+  >/dev/null
 
 # ---- 6. sync-lead-assignments Lambda ----
 FN_SYNC=mcaff-cls-sync-lead-assignments
@@ -98,14 +102,15 @@ if ! aws lambda get-function --function-name "$FN_SYNC" >/dev/null 2>&1; then
   aws lambda create-function --function-name "$FN_SYNC" \
     --runtime python3.12 --handler handler.handler --role "$ROLE_ARN" \
     --timeout 120 --memory-size 256 --region "$AWS_REGION" \
-    --zip-file "fileb://$DIST/sync_lead_assignments.zip"
+    --zip-file "fileb://$DIST/sync_lead_assignments.zip" >/dev/null
 else
   aws lambda update-function-code --function-name "$FN_SYNC" \
-    --zip-file "fileb://$DIST/sync_lead_assignments.zip" --region "$AWS_REGION"
+    --zip-file "fileb://$DIST/sync_lead_assignments.zip" --region "$AWS_REGION" >/dev/null
 fi
 aws lambda wait function-updated --function-name "$FN_SYNC" --region "$AWS_REGION"
 aws lambda update-function-configuration --function-name "$FN_SYNC" --region "$AWS_REGION" \
-  --environment "Variables={POSTGRES_URL=${POSTGRES_URL},MYSQL_HOST=${MYSQL_HOST},MYSQL_USER=${MYSQL_USER},MYSQL_PASSWORD=${MYSQL_PASSWORD},MYSQL_DATABASE=${MYSQL_DATABASE},MYSQL_PORT=${MYSQL_PORT}}"
+  --environment "Variables={POSTGRES_URL=${POSTGRES_URL},MYSQL_HOST=${MYSQL_HOST},MYSQL_USER=${MYSQL_USER},MYSQL_PASSWORD=${MYSQL_PASSWORD},MYSQL_DATABASE=${MYSQL_DATABASE},MYSQL_PORT=${MYSQL_PORT}}" \
+  >/dev/null
 
 # ---- 7. EventBridge Scheduler: assign-leads every 5 min, assign-ndr-leads every 5 min,
 #          sync-lead-assignments daily 9:00am IST (3:30 UTC). ----
