@@ -4,15 +4,22 @@ history alike) into MySQL PEP_CLS.CLS_RTO_calling, now that migrate_cls_rto_call
 has given it the same per-cycle shape. Run that schema script (and confirm it printed "already
 fully migrated") before this one.
 
-Dedup against what's already there: CLS_RTO_calling has held one row per order_id since the
-old daily sync (scripts/sync_lead_assignments_to_mysql.py), upserting each lead's LATEST
-disposed cycle and overwriting whatever was there before - so for any order_id already present
-in MySQL, the Postgres row with disposed_at set is the SAME logical row, not a new one. That
-row is UPDATEd in place (filling reassigned_away_at/rto_reason/new_order_id/delivery_partner,
-which the old sync never carried) rather than re-inserted, or the live_order_id unique index
-would reject the duplicate outright. Every OTHER Postgres row for that lead - a retired earlier
-cycle, or the live still-being-worked cycle - has no MySQL counterpart at all and is a plain
-INSERT.
+Dedup against what's already there - THREE cases, not two, because the app has been writing
+CLS_RTO_calling directly (not just the old archival sync) since cutover:
+
+1. Old daily sync already archived this exact disposed cycle (order_id present, Postgres row's
+   own disposed_at set): UPDATE in place (filling reassigned_away_at/rto_reason/new_order_id/
+   delivery_partner, which the old sync never carried) rather than re-inserted, or the
+   live_order_id unique index would reject the duplicate outright.
+2. The live app (assign_leads.py / recordLeadDisposition) already wrote a NEWER row for this
+   order_id straight into MySQL post-cutover, but this Postgres row is a still-open
+   (reassigned_away_at IS NULL) snapshot from BEFORE cutover: inserting it as live too would
+   collide on live_order_id_key, and it would be wrong regardless - MySQL's own row is the
+   newer truth. Inserted as a RETIRED cycle instead, its reassigned_away_at stamped to
+   whichever MySQL row's assigned_at superseded it - preserves the pre-cutover history (who
+   held this lead before) without contesting who holds it now.
+3. Everything else - a retired earlier cycle, or a genuinely new order_id - has no MySQL
+   counterpart at all and is a plain INSERT, unchanged.
 
 Known, pre-existing limitation this migration cannot fix: the old sync's upsert only ever kept
 a lead's LATEST disposed cycle - if a lead was somehow disposed, reassigned, and disposed again
@@ -91,26 +98,33 @@ def main():
     )
     try:
         cur = conn.cursor()
-        cur.execute(f"SELECT order_id FROM `{TABLE}`")
-        already_archived = {r[0] for r in cur.fetchall()}
-        print(f"{len(already_archived)} order_id(s) already present in {SCHEMA}.{TABLE}.")
+        cur.execute(f"SELECT order_id, assigned_at FROM `{TABLE}`")
+        existing = dict(cur.fetchall())
+        print(f"{len(existing)} order_id(s) already present in {SCHEMA}.{TABLE}.")
 
-        to_update, to_insert = [], []
+        to_update, to_insert, stale_live = [], [], 0
         for row in pg_rows:
             (order_id, email, assigned_at, reassigned_away_at, disposed_at, disposition,
              agent_remarks, connected, attempt, refund_amount, awb_code, rto_reason,
              new_order_id, delivery_partner) = row
-            if disposed_at is not None and order_id in already_archived:
+            if disposed_at is not None and order_id in existing:
                 to_update.append((reassigned_away_at, rto_reason, new_order_id, delivery_partner, order_id))
-            else:
-                to_insert.append((
-                    order_id, email, assigned_at, reassigned_away_at, disposed_at, disposition,
-                    agent_remarks, connected, attempt, refund_amount, awb_code, rto_reason,
-                    new_order_id, delivery_partner,
-                ))
+                continue
+            if reassigned_away_at is None and order_id in existing:
+                # Case 2 above: this Postgres row still thinks it's live, but MySQL already
+                # has a newer row for this order_id (written directly, post-cutover). Concede
+                # "who holds it now" to MySQL - retire this snapshot as of when that happened.
+                reassigned_away_at = existing[order_id]
+                stale_live += 1
+            to_insert.append((
+                order_id, email, assigned_at, reassigned_away_at, disposed_at, disposition,
+                agent_remarks, connected, attempt, refund_amount, awb_code, rto_reason,
+                new_order_id, delivery_partner,
+            ))
 
         print(f"\n  already archived, backfilling new columns : {len(to_update)}")
-        print(f"  new rows to insert (live + retired history) : {len(to_insert)}")
+        print(f"  new rows to insert (live + retired history) : {len(to_insert)}"
+              + (f"  ({stale_live} of these retired as superseded-by-MySQL, not live)" if stale_live else ""))
         if to_insert:
             print("\n  sample of rows to insert:")
             for r in to_insert[:5]:
