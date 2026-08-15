@@ -50,7 +50,7 @@ variables on the API Lambda:
 | `ADMIN_EMAILS` | Comma-separated emails auto-promoted to admin (with access to every report) on first login — bootstraps the first admin(s) since there's no self-serve signup |
 | `RESEND_API_KEY` | [Resend](https://resend.com) API key — sends the "you've been invited / your access changed" email when an admin invites/updates a user at `/admin.html`. Optional: invites still work without it, just silently skip the email. |
 | `FROM_EMAIL` | Optional sender address for invite emails (defaults to Resend's shared `onboarding@resend.dev` sandbox sender). Set this to an address on a domain you've verified in Resend for better deliverability. |
-| `ESCALATION_SHEETS_CLIENT_EMAIL` / `ESCALATION_SHEETS_PRIVATE_KEY` | Service-account credentials for the Escalation desk's Google Sheet (`api/_lib/escalationSheet.js`) — a different sheet and service account from NDR/RTO's own (`GOOGLE_SHEETS_CLIENT_EMAIL`/`_PRIVATE_KEY`, set the same way but not listed here since neither is read directly by this file). Must already have Editor access on that spreadsheet. |
+| `ESCALATION_SHEETS_CLIENT_EMAIL` / `ESCALATION_SHEETS_PRIVATE_KEY` | Optional override for the Escalation desk's Google Sheet (`api/_lib/escalationSheet.js`) — falls back to `GOOGLE_SHEETS_CLIENT_EMAIL`/`_PRIVATE_KEY` (same as NDR/RTO) when unset, verified to already have access on that spreadsheet too. Only set these if the escalation sheet ever needs a dedicated service account of its own. |
 
 ## Data & privacy
 

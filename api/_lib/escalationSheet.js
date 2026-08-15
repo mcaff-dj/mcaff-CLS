@@ -3,11 +3,12 @@
 // api/ndr/sheet.js and api/rto/sheet.js already talk to THEIR sheets: a JWT service-account
 // token + plain fetch against the Sheets REST API, no extra dependency needed.
 //
-// This is a DIFFERENT spreadsheet with a DIFFERENT dedicated service account
-// (ESCALATION_SHEETS_CLIENT_EMAIL/_PRIVATE_KEY) from the one NDR/RTO's sheet proxies use - the
-// standalone app's own .env.local confirmed a distinct service account (datafetchcls@...) already
-// has Editor access on this sheet, and reusing the app-wide credential without confirming it also
-// has access here would just trade one unverified assumption for another.
+// Uses the SAME service account as NDR/RTO's own sheet proxies (GOOGLE_SHEETS_CLIENT_EMAIL/
+// _PRIVATE_KEY) - verified live (a real 200 reading this exact sheet) that datafetchcls@...
+// already has access here too, so provisioning a second secret pair for the same account
+// bought nothing. ESCALATION_SHEETS_CLIENT_EMAIL/_PRIVATE_KEY still override if ever set -
+// e.g. if this sheet later needs a dedicated account of its own - but nothing has to be
+// provisioned for the common case.
 //
 // SHEET_ID/TAB_NAME are constants, not env-configurable - same reasoning as NDR_SHEET_ID in
 // api/ndr/sheet.js: an allowlisted, hardcoded target so a permitted-but-malicious request can't
@@ -20,9 +21,9 @@ const TAB_NAME = 'HYPHEN';
 let _client = null;
 function getClient() {
   if (_client) return _client;
-  const email = process.env.ESCALATION_SHEETS_CLIENT_EMAIL;
-  const key = (process.env.ESCALATION_SHEETS_PRIVATE_KEY || '').replace(/\\n/g, '\n');
-  if (!email || !key) throw new Error('Missing ESCALATION_SHEETS_CLIENT_EMAIL / ESCALATION_SHEETS_PRIVATE_KEY env vars');
+  const email = process.env.ESCALATION_SHEETS_CLIENT_EMAIL || process.env.GOOGLE_SHEETS_CLIENT_EMAIL;
+  const key = (process.env.ESCALATION_SHEETS_PRIVATE_KEY || process.env.GOOGLE_SHEETS_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+  if (!email || !key) throw new Error('Missing GOOGLE_SHEETS_CLIENT_EMAIL / GOOGLE_SHEETS_PRIVATE_KEY env vars');
   _client = new JWT({ email, key, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
   return _client;
 }
