@@ -22,11 +22,18 @@ def test_fetch_online_agents_fails_open_without_mysql_creds():
     import os
     old = {k: os.environ.pop(k, None) for k in
            ("MYSQL_HOST", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE")}
+    # mysql_lib.get_credential() calls _load_env_local() first, which re-populates these
+    # exact env vars from the repo's real .env.local if it's missing them - on a real dev
+    # checkout that file has live production MYSQL_* creds, so without forcing this flag
+    # this "missing creds" test would silently connect to the live database instead.
+    old_env_loaded = assign_leads.mysql_lib._env_local_loaded
+    assign_leads.mysql_lib._env_local_loaded = True
     try:
         result = assign_leads.fetch_online_agents()
         assert result == ([], {}, {}, {}, {}), \
             "missing MySQL creds must fail open, not raise"
     finally:
+        assign_leads.mysql_lib._env_local_loaded = old_env_loaded
         for k, v in old.items():
             if v is not None:
                 os.environ[k] = v
@@ -104,14 +111,20 @@ def test_shared_conn_not_closed_by_pg_cursor():
 def test_no_conn_no_env_fails_open_without_touching_pg():
     # No POSTGRES_URL in the environment and no conn passed - must return the fail-open
     # default without ever calling lib.get_pg_connection (which would try a real network
-    # connection at import time otherwise).
+    # connection at import time otherwise). fetch_reassignment_attempts/
+    # fetch_current_assignment_times now go through mysql_lib.query() (CLS_RTO_calling moved
+    # onto MySQL), whose get_credential() calls _load_env_local() - same live-DB exposure as
+    # the MySQL-creds test above, so the same guard is needed here too.
     import os
     old = os.environ.pop("POSTGRES_URL", None)
+    old_env_loaded = assign_leads.mysql_lib._env_local_loaded
+    assign_leads.mysql_lib._env_local_loaded = True
     try:
         assert assign_leads.fetch_reassignment_attempts() == {}
         assert assign_leads.fetch_current_assignment_times() == {}
         assert assign_leads.fetch_gokwik_refund_cache() == {}
     finally:
+        assign_leads.mysql_lib._env_local_loaded = old_env_loaded
         if old is not None:
             os.environ["POSTGRES_URL"] = old
 

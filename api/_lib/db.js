@@ -631,7 +631,14 @@ async function upsertAgentPresence(email, name, status) {
   // Only log an actual transition (including an agent's very first report), not every
   // periodic heartbeat re-sending the same status - see agent_presence_log's comment.
   if (prevStatus !== status) {
-    await sql`INSERT INTO agent_presence_log (email, name, status, changed_at) VALUES (${email}, ${name}, ${status}, ${now})`;
+    // Swallow rather than propagate: the agent_presence upsert above already succeeded, so
+    // a problem with this history-only insert (e.g. schema drift) should degrade to "history
+    // has a gap," not fail the live status write and 500 every status-change request.
+    try {
+      await sql`INSERT INTO agent_presence_log (email, name, status, changed_at) VALUES (${email}, ${name}, ${status}, ${now})`;
+    } catch (e) {
+      console.error('agent_presence_log insert failed (presence itself is recorded):', e.message);
+    }
   }
 }
 

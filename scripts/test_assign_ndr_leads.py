@@ -15,11 +15,18 @@ def test_fetch_online_ndr_agents_fails_open_without_mysql_creds():
     import os
     old = {k: os.environ.pop(k, None) for k in
            ("MYSQL_HOST", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE")}
+    # mysql_lib.get_credential() calls _load_env_local() first, which re-populates these
+    # exact env vars from the repo's real .env.local if it's missing them - on a real dev
+    # checkout that file has live production MYSQL_* creds, so without forcing this flag
+    # this "missing creds" test would silently connect to the live database instead.
+    old_env_loaded = assign_ndr_leads.mysql_lib._env_local_loaded
+    assign_ndr_leads.mysql_lib._env_local_loaded = True
     try:
         result = assign_ndr_leads.fetch_online_ndr_agents()
         assert result == ([], {}, {}, {}, {}, {}), \
             "missing MySQL creds must fail open, not raise"
     finally:
+        assign_ndr_leads.mysql_lib._env_local_loaded = old_env_loaded
         for k, v in old.items():
             if v is not None:
                 os.environ[k] = v
