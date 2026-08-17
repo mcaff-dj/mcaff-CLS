@@ -98,7 +98,8 @@ Four separate stores. Getting these confused is the easiest way to write a wrong
 | `PEP_CLS` | `users`, `permissions`, `report_tab_permissions`, `audit_log` | The app's own auth | [db.js](../api/_lib/db.js) `ensureSchema()` |
 | `PEP_CLS` | `CLS_KYC_mCaff`, `CLS_KYC_Hyphen` | Column-for-column mirror of each brand's ticket sheet | External (not this repo) |
 | `PEP_CLS` | `CLS_RTO_calling` | RTO CRM lead assignment/disposition history — one row per assignment CYCLE (see §CRM below) | [assign_leads.py](../scripts/assign_leads.py) (assignment) + [db.js](../api/_lib/db.js) `recordLeadDisposition` (disposal) |
-| `PEP_CLS` | `agent_presence_log` | Archived agent status transitions | [sync_agent_presence_log_to_mysql.py](../scripts/sync_agent_presence_log_to_mysql.py) |
+| `PEP_CLS` | `agent_presence` | Live per-agent status (Online/Busy/OnCall/Offline), one row per agent | [db.js](../api/_lib/db.js) `upsertAgentPresence` |
+| `PEP_CLS` | `agent_presence_log` | Append-only history of every agent status transition | [db.js](../api/_lib/db.js) `upsertAgentPresence` |
 | `mcaff_dwh` | `nps_delivery`, `nps_product` | Survey responses | External |
 | `mcaff_dwh` | `mcaff_tickets`, `hyphen_tickets`, `*_tickets_csat` | Tickets + CSAT | External |
 | `mcaff_prod` | `Item_level_data` | ~50M order rows, for AWB→city/state | External |
@@ -112,8 +113,8 @@ Two different credential paths reach MySQL:
 
 ### Postgres (Supabase) — CRM operational state only
 
-`agent_presence`, `agent_presence_log`, `calling_business_hours`, `calling_agent_process`,
-`calling_process_dispositions`, `ndr_lead_assignments`. Schema bootstrapped idempotently by
+`calling_business_hours`, `calling_agent_process`, `calling_process_dispositions`,
+`ndr_lead_assignments`. Schema bootstrapped idempotently by
 [db.js `ensurePgSchema()`](../api/_lib/db.js#L143). Reached two ways: the Lambda via `pg`, the
 cron scripts via `psycopg`, both using `POSTGRES_URL`.
 
@@ -122,13 +123,16 @@ onto MySQL `PEP_CLS.CLS_RTO_calling` — Supabase's storage quota made a Postgre
 forever untenable, and the daily Postgres→MySQL archival sync it needed added a layer this
 removes entirely. See [migrate_cls_rto_calling_schema.py](../scripts/migrate_cls_rto_calling_schema.py)
 / [migrate_lead_assignments_to_cls_rto_calling.py](../scripts/migrate_lead_assignments_to_cls_rto_calling.py).
-`ndr_lead_assignments` is NDR's own equivalent table and stays on Postgres — it never had RTO's
-growth/quota pressure.
+`agent_presence`/`agent_presence_log` made the same move onto MySQL `PEP_CLS` (see the table
+above) for the same reason; their old Postgres tables are left in place, untouched, but no
+longer read or written by this app. `ndr_lead_assignments` is NDR's own equivalent table and
+stays on Postgres — it never had RTO's growth/quota pressure.
 
-`agent_presence_log` has two readers now, not just the archival sync to MySQL (above):
-`getAgentPresenceLogSummary` ([db.js](../api/_lib/db.js), see *Overview tab — Agent Performance
-Summary* below) reads it live, per request, to derive each agent's today's login time and
-break-time total for the RTO CRM Overview tab.
+`agent_presence_log` is written directly by `upsertAgentPresence` (MySQL, above) whenever an
+agent's status actually changes, and read live, per request, by `getAgentPresenceLogSummary`
+([db.js](../api/_lib/db.js), see *Overview tab — Agent Performance Summary* below) to derive
+each agent's today's login time and break-time total for the RTO CRM Overview tab. There is no
+longer a separate archival sync between the two — `db.js` is the only writer.
 
 **Why Postgres at all** when everything else is MySQL: it predates the MySQL app schema
 and was never migrated. The `pgSql` tagged-template shim exists purely so call sites look
@@ -986,7 +990,7 @@ unambiguous format, so [`lib.CREATED_AT_PATTERN`](../scripts/lib.py#L23) is the 
 | [assign-leads.yml](../.github/workflows/assign-leads.yml) | `*/5 * * * *` | Round-robin RTO leads |
 | [refresh.yml](../.github/workflows/refresh.yml) | `30 8` + `30 21` UTC | Regenerate brand reports (3 AM IST run also re-queries NPS) |
 | [export-resolved-tickets.yml](../.github/workflows/export-resolved-tickets.yml) | `30 */2` | Flowcall → sheets → dashboards |
-| [sync-lead-assignments.yml](../.github/workflows/sync-lead-assignments.yml) | `30 3` (9 AM IST) | CRM Postgres → MySQL archive |
+| `sync-lead-assignments.yml` (RETIRED 2026-08-17) | — | Was CRM Postgres → MySQL archive; deleted once `db.js` started writing `agent_presence_log` to MySQL directly — see [lambda/README.md](../lambda/README.md) |
 | [refresh-deepdive.yml](../.github/workflows/refresh-deepdive.yml) | dispatch only | Rebuild Deep Dive |
 | [deploy.yml](../.github/workflows/deploy.yml) | push to `api/**` | Update Lambda |
 
