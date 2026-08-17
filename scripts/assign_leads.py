@@ -514,8 +514,8 @@ def fetch_online_agents(process_key=None, conn=None):
 
     Two things have to be true, and they answer different questions:
 
-      * agent_presence  - "are they actually at their desk?" One row per agent, refreshed by
-        the CRM's heartbeat, so staleness is meaningful here.
+      * agent_presence (MySQL) - "are they actually at their desk?" One row per agent, refreshed
+        by the CRM's heartbeat, so staleness is meaningful here.
       * calling_agent_process - "are they available for THIS process, and for how many leads?"
         One row per (agent, process). It has no heartbeat, so on its own it would keep somebody
         Online forever after an admin set it once.
@@ -536,44 +536,47 @@ def fetch_online_agents(process_key=None, conn=None):
     means unrestricted" contract: an agent with no row, or an empty/NULL value, is eligible for
     a reassignment of either payment type, same as before this column existed.
 
-    Returns ([], {}, {}, {}, {}) (not an error) if POSTGRES_URL isn't configured, so a missing
-    secret fails safe - no assignment - rather than crashing the whole run.
+    Returns ([], {}, {}, {}, {}) (not an error) if MYSQL_* credentials aren't configured -
+    that's the true fail-safe case, since agent_presence itself is unreachable. A missing
+    POSTGRES_URL (with a process_key given) is a smaller-blast-radius gap: agents are still
+    read from agent_presence and DO get leads assigned, just without any per-process
+    quotas/specializations/hard filters applied - the pre-per-process global-presence
+    behaviour, not a no-assignment fail-safe.
 
     conn: reuse main()'s already-open connection instead of opening a new one - see
     _pg_cursor. Optional so this stays directly callable on its own (REPL, one-off script).
     """
+    cred = mysql_lib.get_credential()
+    if cred is None:
+        print("MYSQL_* credentials not configured - cannot determine online agents.")
+        return [], {}, {}, {}, {}
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=STALE_MINUTES)
+    rows = mysql_lib.query(
+        "SELECT email FROM agent_presence WHERE status = %s AND updated_at >= %s ORDER BY email",
+        ("Online", cutoff),
+    )
+    present = [row[0].lower() for row in (rows or [])]
+
+    if not process_key:
+        return present, {}, {}, {}, {}
+
     conn_str = os.environ.get("POSTGRES_URL")
     if not conn_str and conn is None:
-        print("POSTGRES_URL not configured - cannot determine online agents.")
-        return [], {}, {}, {}, {}
-    with _pg_cursor(conn_str, conn) as cur:
-        cur.execute(
-            """
-            SELECT email FROM agent_presence
-            WHERE status = 'Online' AND updated_at >= now() - interval '%s minutes'
-            ORDER BY email
-            """,
-            (STALE_MINUTES,),
-        )
-        present = [row[0].lower() for row in cur.fetchall()]
-
-        if not process_key:
-            return present, {}, {}, {}, {}
-
-        try:
+        print("POSTGRES_URL not configured - using global presence only.")
+        return present, {}, {}, {}, {}
+    try:
+        with _pg_cursor(conn_str, conn) as cur:
             cur.execute(
                 "SELECT email, status, max_quota, prepaid_pct, priority_rto_reasons, "
                 "reassign_payment_mode FROM calling_agent_process WHERE process_key = %s",
                 (process_key,),
             )
             per_process = cur.fetchall()
-        except Exception as e:
-            # Table not created yet (no admin has opened the panel) - fall back rather than
-            # refuse to assign, which would stop the queue over a missing config table.
-            print(f"  (calling_agent_process unavailable: {e} - using global presence)")
-            if conn is not None:
-                conn.rollback()
-            return present, {}, {}, {}, {}
+    except Exception as e:
+        print(f"  (calling_agent_process unavailable: {e} - using global presence)")
+        if conn is not None:
+            conn.rollback()
+        return present, {}, {}, {}, {}
 
     if not per_process:
         print(f"  no per-process availability set for '{process_key}' - using global presence")

@@ -86,4 +86,12 @@ jobs:
         env:
           GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          # fetch_online_ndr_agents reads agent_presence from MySQL now (moved off Postgres,
+          # same as assign-rto above) - without these, this manual fallback fails open with
+          # zero online agents and assigns nothing, silently.
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
         run: python -u scripts/assign_ndr_leads.py

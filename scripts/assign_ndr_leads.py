@@ -20,11 +20,15 @@ own assign_leads.py uses. current_load is read straight off the sheet (a count o
 already carrying that agent's email in Agent Name) rather than a separate Postgres tally.
 """
 import os
-from datetime import datetime
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import psycopg
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib
+import mysql_lib
 
 PROCESS_KEY = "ndr"
 SPREADSHEET_ID = "12p3rlXyE0PDx3BMqBpl3CUo5YD3uVzQun1HFPizpSeI"
@@ -116,32 +120,33 @@ def parse_latest_ndr_date(raw):
 def fetch_online_ndr_agents():
     """([email, ...] eligible now, {email: max_quota}, {email: [bucket, ...]}, {email: [reason,
     ...]}, {email: 'Prepaid'|'COD'}, {email: 'Hyphen'|'mCaffeine'}). Eligibility is the same
-    intersection RTO's own fetch_online_agents uses: heartbeat-fresh in agent_presence AND
-    marked Online for this process_key in calling_agent_process. A process with no per-process
-    rows set yet falls back to global presence, matching the pre-per-process behaviour.
-    attempt_filters is {email: [bucket, ...]} from attempt_count_filter, reason_filters is
-    {email: [reason substring, ...]} (already lowercased) from ndr_reason_filter,
-    payment_mode_filters/brand_filters are {email: value} from ndr_payment_mode_filter/
-    ndr_brand_filter - an agent absent from any of these (or with an empty value) is
-    unrestricted, same "absent means no restriction" contract as RTO's reassign_payment_mode.
-    Returns ([], {}, {}, {}, {}, {}) if POSTGRES_URL isn't configured, so a missing secret fails
-    safe - no assignment, not a crash."""
+    intersection RTO's own fetch_online_agents uses: heartbeat-fresh in agent_presence (MySQL)
+    AND marked Online for this process_key in calling_agent_process. A process with no
+    per-process rows set yet falls back to global presence, matching the pre-per-process
+    behaviour. attempt_filters is {email: [bucket, ...]} from attempt_count_filter,
+    reason_filters is {email: [reason substring, ...]} (already lowercased) from
+    ndr_reason_filter, payment_mode_filters/brand_filters are {email: value} from
+    ndr_payment_mode_filter/ndr_brand_filter - an agent absent from any of these (or with an
+    empty value) is unrestricted, same "absent means no restriction" contract as RTO's
+    reassign_payment_mode. Returns ([], {}, {}, {}, {}, {}) if MySQL creds aren't configured,
+    so a missing secret fails safe - no assignment, not a crash."""
+    cred = mysql_lib.get_credential()
+    if cred is None:
+        print("MYSQL_* credentials not configured - cannot determine online agents.")
+        return [], {}, {}, {}, {}, {}
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=STALE_MINUTES)
+    rows = mysql_lib.query(
+        "SELECT email FROM agent_presence WHERE status = %s AND updated_at >= %s ORDER BY email",
+        ("Online", cutoff),
+    )
+    present = {row[0].lower() for row in (rows or [])}
+
     conn_str = os.environ.get("POSTGRES_URL")
     if not conn_str:
-        print("POSTGRES_URL not configured - cannot determine online agents.")
-        return [], {}, {}, {}, {}, {}
+        print("POSTGRES_URL not configured - using global presence only.")
+        return sorted(present), {}, {}, {}, {}, {}
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT email FROM agent_presence
-                WHERE status = 'Online' AND updated_at >= now() - interval '%s minutes'
-                ORDER BY email
-                """,
-                (STALE_MINUTES,),
-            )
-            present = {row[0].lower() for row in cur.fetchall()}
-
             try:
                 cur.execute(
                     "SELECT email, status, max_quota, attempt_count_filter, ndr_reason_filter, "

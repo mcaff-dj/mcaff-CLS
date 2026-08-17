@@ -619,18 +619,26 @@ async function logAccess(userId, email, cardKey, ip) {
 // presence - not spoof anyone else's (the gap that made the old Supabase anon-key
 // design insecure).
 async function upsertAgentPresence(email, name, status) {
-  await ensurePgSchema();
-  const { rows: prevRows } = await pgSql`SELECT status FROM agent_presence WHERE email = ${email}`;
+  await ensureSchema();
+  const { rows: prevRows } = await sql`SELECT status FROM agent_presence WHERE email = ${email}`;
   const prevStatus = prevRows[0]?.status;
-  await pgSql`
+  const now = new Date();
+  await sql`
     INSERT INTO agent_presence (email, name, status, updated_at)
-    VALUES (${email}, ${name}, ${status}, now())
-    ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, status = EXCLUDED.status, updated_at = now()
+    VALUES (${email}, ${name}, ${status}, ${now})
+    ON DUPLICATE KEY UPDATE name = VALUES(name), status = VALUES(status), updated_at = VALUES(updated_at)
   `;
   // Only log an actual transition (including an agent's very first report), not every
   // periodic heartbeat re-sending the same status - see agent_presence_log's comment.
   if (prevStatus !== status) {
-    await pgSql`INSERT INTO agent_presence_log (email, name, status, changed_at) VALUES (${email}, ${name}, ${status}, now())`;
+    // Swallow rather than propagate: the agent_presence upsert above already succeeded, so
+    // a problem with this history-only insert (e.g. schema drift) should degrade to "history
+    // has a gap," not fail the live status write and 500 every status-change request.
+    try {
+      await sql`INSERT INTO agent_presence_log (email, name, status, changed_at) VALUES (${email}, ${name}, ${status}, ${now})`;
+    } catch (e) {
+      console.error('agent_presence_log insert failed (presence itself is recorded):', e.message);
+    }
   }
 }
 
@@ -638,8 +646,8 @@ async function upsertAgentPresence(email, name, status) {
 // roster table (rto-crm.html) show each agent's real Postgres-backed presence
 // instead of the mock/local status it falls back to before anyone's ever reported in.
 async function getAllAgentPresence() {
-  await ensurePgSchema();
-  const { rows } = await pgSql`SELECT email, name, status, updated_at FROM agent_presence`;
+  await ensureSchema();
+  const { rows } = await sql`SELECT email, name, status, updated_at FROM agent_presence`;
   const out = {};
   for (const r of rows) out[r.email.toLowerCase()] = { status: r.status, updatedAt: r.updated_at };
   return out;
@@ -701,7 +709,7 @@ function istDayKey(date) {
   return Math.floor((date.getTime() + IST_OFFSET_MS) / 86400000);
 }
 async function getAgentPresenceLogSummary(dateFrom, dateTo) {
-  await ensurePgSchema();
+  await ensureSchema();
   const { from, to } = dateBounds(dateFrom, dateTo);
   const now = new Date();
   // `to` for a range like "Today" is end-of-day (dateBounds' 23:59:59.999) - a point still in
@@ -716,17 +724,19 @@ async function getAgentPresenceLogSummary(dateFrom, dateTo) {
   // the range" left to carry a status in FROM.
   let priorRows = [];
   if (from) {
-    ({ rows: priorRows } = await pgSql`
-      SELECT DISTINCT ON (email) email, status
-      FROM agent_presence_log
-      WHERE changed_at < ${from}
-      ORDER BY email, changed_at DESC
+    ({ rows: priorRows } = await sql`
+      SELECT email, status FROM (
+        SELECT email, status,
+               ROW_NUMBER() OVER (PARTITION BY email ORDER BY changed_at DESC) AS rn
+        FROM agent_presence_log
+        WHERE changed_at < ${from}
+      ) t WHERE rn = 1
     `);
   }
-  const { rows: rangeRows } = await pgSql`
+  const { rows: rangeRows } = await sql`
     SELECT email, status, changed_at
     FROM agent_presence_log
-    WHERE (${from}::timestamptz IS NULL OR changed_at >= ${from}) AND changed_at <= ${rangeEnd}
+    WHERE (${from} IS NULL OR changed_at >= ${from}) AND changed_at <= ${rangeEnd}
     ORDER BY email ASC, changed_at ASC
   `;
 

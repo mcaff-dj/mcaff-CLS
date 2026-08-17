@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# ONE-TIME bootstrap: creates the IAM role, all three Lambda functions, and their
-# EventBridge Scheduler schedules. Run this once from an environment already
-# authenticated to the
+# ONE-TIME bootstrap: creates the IAM role, the two active Lambda functions
+# (assign-leads, assign-ndr-leads), and their EventBridge Scheduler schedules. The
+# sync-lead-assignments sections below are RETIRED (2026-08-17, see comments at each) and
+# commented out - kept only as a historical record of what this script once also deployed.
+# Run this once from an environment already authenticated to the
 # mcaff-CLS AWS account (AWS CloudShell is the easiest option - it has python3, pip3, zip,
 # and your console login already wired up, so nothing to install locally).
 #
@@ -79,8 +81,9 @@ aws lambda update-function-configuration --function-name "$FN_ASSIGN" --region "
 aws lambda put-function-concurrency --function-name "$FN_ASSIGN" \
   --reserved-concurrent-executions 1 --region "$AWS_REGION"
 
-# ---- 5. assign-ndr-leads Lambda (independent of assign_leads.py - see its own module
-#          docstring - so it only needs POSTGRES_URL and GOOGLE_SA_KEY, no MYSQL_*/GOKWIK_*) ----
+# ---- 5. assign-ndr-leads Lambda (independent of assign_leads.py's lead_priority.py/GoKwik
+#          needs - see its own module docstring - but it DOES need MYSQL_* now:
+#          fetch_online_ndr_agents reads agent_presence from MySQL, same as assign_leads) ----
 FN_NDR=mcaff-cls-assign-ndr-leads
 if ! aws lambda get-function --function-name "$FN_NDR" >/dev/null 2>&1; then
   aws lambda create-function --function-name "$FN_NDR" \
@@ -93,34 +96,45 @@ else
 fi
 aws lambda wait function-updated --function-name "$FN_NDR" --region "$AWS_REGION"
 aws lambda update-function-configuration --function-name "$FN_NDR" --region "$AWS_REGION" \
-  --environment "Variables={GOOGLE_SA_KEY_JSON=${GOOGLE_SA_KEY},POSTGRES_URL=${POSTGRES_URL}}" \
+  --environment "Variables={GOOGLE_SA_KEY_JSON=${GOOGLE_SA_KEY},POSTGRES_URL=${POSTGRES_URL},MYSQL_HOST=${MYSQL_HOST},MYSQL_USER=${MYSQL_USER},MYSQL_PASSWORD=${MYSQL_PASSWORD},MYSQL_DATABASE=${MYSQL_DATABASE},MYSQL_PORT=${MYSQL_PORT}}" \
   >/dev/null
 
 # ---- 6. sync-lead-assignments Lambda ----
+# RETIRED 2026-08-17 - sync_agent_presence_log_to_mysql.py deleted, this Lambda's zip can
+# no longer be built (build.sh has no sync_lead_assignments target). The already-deployed
+# Lambda/schedule still exist in AWS and are not deleted by this script or this comment -
+# see lambda/README.md's Rollback section. FN_SYNC/SYNC_ARN are left defined (uncommented)
+# below since the EventBridge invoke-permission policy further down still names that ARN
+# for the still-live (if now unmanaged-by-this-script) Lambda; only the actual build/deploy
+# calls that depend on the no-longer-buildable zip are commented out.
 FN_SYNC=mcaff-cls-sync-lead-assignments
-if ! aws lambda get-function --function-name "$FN_SYNC" >/dev/null 2>&1; then
-  aws lambda create-function --function-name "$FN_SYNC" \
-    --runtime python3.12 --handler handler.handler --role "$ROLE_ARN" \
-    --timeout 120 --memory-size 256 --region "$AWS_REGION" \
-    --zip-file "fileb://$DIST/sync_lead_assignments.zip" >/dev/null
-else
-  aws lambda update-function-code --function-name "$FN_SYNC" \
-    --zip-file "fileb://$DIST/sync_lead_assignments.zip" --region "$AWS_REGION" >/dev/null
-fi
-aws lambda wait function-updated --function-name "$FN_SYNC" --region "$AWS_REGION"
-aws lambda update-function-configuration --function-name "$FN_SYNC" --region "$AWS_REGION" \
-  --environment "Variables={POSTGRES_URL=${POSTGRES_URL},MYSQL_HOST=${MYSQL_HOST},MYSQL_USER=${MYSQL_USER},MYSQL_PASSWORD=${MYSQL_PASSWORD},MYSQL_DATABASE=${MYSQL_DATABASE},MYSQL_PORT=${MYSQL_PORT}}" \
-  >/dev/null
+# if ! aws lambda get-function --function-name "$FN_SYNC" >/dev/null 2>&1; then
+#   aws lambda create-function --function-name "$FN_SYNC" \
+#     --runtime python3.12 --handler handler.handler --role "$ROLE_ARN" \
+#     --timeout 120 --memory-size 256 --region "$AWS_REGION" \
+#     --zip-file "fileb://$DIST/sync_lead_assignments.zip" >/dev/null
+# else
+#   aws lambda update-function-code --function-name "$FN_SYNC" \
+#     --zip-file "fileb://$DIST/sync_lead_assignments.zip" --region "$AWS_REGION" >/dev/null
+# fi
+# aws lambda wait function-updated --function-name "$FN_SYNC" --region "$AWS_REGION"
+# aws lambda update-function-configuration --function-name "$FN_SYNC" --region "$AWS_REGION" \
+#   --environment "Variables={POSTGRES_URL=${POSTGRES_URL},MYSQL_HOST=${MYSQL_HOST},MYSQL_USER=${MYSQL_USER},MYSQL_PASSWORD=${MYSQL_PASSWORD},MYSQL_DATABASE=${MYSQL_DATABASE},MYSQL_PORT=${MYSQL_PORT}}" \
+#   >/dev/null
 
-# ---- 7. EventBridge Scheduler: assign-leads every 5 min, assign-ndr-leads every 5 min,
-#          sync-lead-assignments daily 9:00am IST (3:30 UTC). ----
+# ---- 7. EventBridge Scheduler: assign-leads every 5 min, assign-ndr-leads every 5 min.
+#          sync-lead-assignments-daily's own create/update-schedule calls are commented out
+#          below (RETIRED 2026-08-17, same reasoning as section 6) - its already-created
+#          schedule keeps running unmanaged by this script until manually deleted. ----
 aws scheduler create-schedule-group --name mcaff-cls-cron 2>/dev/null || true
 
 ASSIGN_ARN="arn:aws:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${FN_ASSIGN}"
 NDR_ARN="arn:aws:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${FN_NDR}"
 SYNC_ARN="arn:aws:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${FN_SYNC}"
 
-# A dedicated role lets EventBridge Scheduler invoke these three Lambdas specifically.
+# A dedicated role lets EventBridge Scheduler invoke these three Lambdas specifically
+# (SYNC_ARN's schedule is retired - see above - but the already-existing schedule still
+# needs permission to invoke its still-existing Lambda, hence keeping it in this policy).
 SCHED_ROLE_NAME="mcaff-cls-scheduler-invoke-role"
 cat > /tmp/scheduler-trust.json <<'EOF'
 {
@@ -169,15 +183,20 @@ aws scheduler update-schedule --name assign-ndr-leads-every-5-min --group-name m
   --target "{\"Arn\": \"${NDR_ARN}\", \"RoleArn\": \"${SCHED_ROLE_ARN}\"}" \
   --region "$AWS_REGION"
 
-aws scheduler create-schedule --name sync-lead-assignments-daily --group-name mcaff-cls-cron \
-  --schedule-expression "cron(30 3 * * ? *)" --flexible-time-window '{"Mode": "OFF"}' \
-  --target "{\"Arn\": \"${SYNC_ARN}\", \"RoleArn\": \"${SCHED_ROLE_ARN}\"}" \
-  --region "$AWS_REGION" 2>/dev/null || \
-aws scheduler update-schedule --name sync-lead-assignments-daily --group-name mcaff-cls-cron \
-  --schedule-expression "cron(30 3 * * ? *)" --flexible-time-window '{"Mode": "OFF"}' \
-  --target "{\"Arn\": \"${SYNC_ARN}\", \"RoleArn\": \"${SCHED_ROLE_ARN}\"}" \
-  --region "$AWS_REGION"
+# RETIRED 2026-08-17 - sync_agent_presence_log_to_mysql.py deleted, this Lambda's zip can
+# no longer be built (build.sh has no sync_lead_assignments target). The already-deployed
+# Lambda/schedule still exist in AWS and are not deleted by this script or this comment -
+# see lambda/README.md's Rollback section.
+# aws scheduler create-schedule --name sync-lead-assignments-daily --group-name mcaff-cls-cron \
+#   --schedule-expression "cron(30 3 * * ? *)" --flexible-time-window '{"Mode": "OFF"}' \
+#   --target "{\"Arn\": \"${SYNC_ARN}\", \"RoleArn\": \"${SCHED_ROLE_ARN}\"}" \
+#   --region "$AWS_REGION" 2>/dev/null || \
+# aws scheduler update-schedule --name sync-lead-assignments-daily --group-name mcaff-cls-cron \
+#   --schedule-expression "cron(30 3 * * ? *)" --flexible-time-window '{"Mode": "OFF"}' \
+#   --target "{\"Arn\": \"${SYNC_ARN}\", \"RoleArn\": \"${SCHED_ROLE_ARN}\"}" \
+#   --region "$AWS_REGION"
 
 echo ""
-echo "Done. All three Lambdas are deployed and their EventBridge schedules are live:"
-echo "assign-leads and assign-ndr-leads every 5 minutes, sync-lead-assignments daily."
+echo "Done. Two Lambdas are deployed and their EventBridge schedules are live:"
+echo "assign-leads and assign-ndr-leads, both every 5 minutes. (sync-lead-assignments is"
+echo "retired - its own Lambda/schedule sections above are commented out, not re-created here.)"

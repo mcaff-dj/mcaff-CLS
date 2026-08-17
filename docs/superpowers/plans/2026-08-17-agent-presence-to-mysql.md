@@ -785,21 +785,39 @@ git commit -m "chore: retire the Postgres -> MySQL agent_presence_log archival s
 
 - [ ] **Step 4: Full cutover checklist (you run this, in order)**
 
-This restates the spec's Sequencing section as an execution checklist:
+This restates the spec's Sequencing section as an execution checklist. **Steps 1-4 happen
+before merging this branch to main** — they're live-database operations that have to be
+done first, not steps paced out after the code lands. Merging isn't a step you can defer
+independently of them: `deploy.yml`/`deploy-cron-lambdas.yml` auto-deploy on merge (see step
+6), so anything not yet true in the database by the time you merge is now live-broken.
 
-1. Task 1 already ran once (`agent_presence` + `changed_at` index created).
-2. Task 2's backfill script, `--apply`, at least once.
-3. Re-run Task 2's backfill script `--apply` one more time, immediately before step 4.
-4. Run Task 1's script with the id-conversion flag:
+1. (before merging) Task 1 already ran once (`agent_presence` + `changed_at` index created).
+2. (before merging) Task 2's backfill script, `--apply`, at least once.
+3. (before merging) Re-run Task 2's backfill script `--apply` one more time, immediately
+   before step 4.
+4. (before merging) Run Task 1's script with the id-conversion flag:
    `python scripts/migrate_agent_presence_schema.py --apply --convert-id` — dry-run it first
    without `--apply` to confirm the plan contains exactly one step (`convert
    agent_presence_log.id to AUTO_INCREMENT`) before applying.
-5. Deploy Task 3 (Lambda `api/` bundle) and Task 4/5 (cron scripts) together.
-6. Verify: roster page shows correct live agent status; RTO CRM Overview tab's per-agent
+5. (before merging) Verification gate — confirm steps 1-4 actually landed, rather than
+   trusting memory, before merging code that assumes they did. Against MySQL:
+   `SELECT COUNT(*) FROM agent_presence` (expect a non-zero count) and `SHOW COLUMNS FROM
+   agent_presence_log LIKE 'id'` (expect `Extra` to contain `auto_increment`). Also update
+   the LIVE `mcaff-cls-assign-ndr-leads` Lambda's environment variables now, adding
+   `MYSQL_HOST`/`MYSQL_USER`/`MYSQL_PASSWORD`/`MYSQL_DATABASE`/`MYSQL_PORT` (via `aws lambda
+   update-function-configuration`, or by re-running `lambda/deploy_infra.sh`'s env-var-
+   setting logic for that function) — code alone does not change an already-deployed
+   Lambda's environment, and without these `fetch_online_ndr_agents` fails open silently
+   (zero NDR leads ever assigned again) the moment the new code below goes live.
+6. Merge this branch to main. There is no separate manual "now deploy" action to take:
+   `deploy.yml` and `deploy-cron-lambdas.yml` both auto-deploy within about a minute of
+   anything landing on `main`, so merging IS the deploy — Task 3 (Lambda `api/` bundle) and
+   Task 4/5 (cron scripts) go out together, automatically, as soon as this merges.
+7. Verify: roster page shows correct live agent status; RTO CRM Overview tab's per-agent
    login/break-time numbers for a known past date range match what they showed before
    cutover; both `assign_leads.py` and `assign_ndr_leads.py` (run manually or via their next
    scheduled invocation) report the expected set of online agents in their console output.
-7. Once verified, Task 6 Steps 1-3 above retire the old sync job.
+8. Once verified, Task 6 Steps 1-3 above retire the old sync job.
 
 No step in this task is run by the assistant — every command here is for the user to execute
 against the real database and deployed app.

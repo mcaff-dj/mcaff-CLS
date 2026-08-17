@@ -6,10 +6,11 @@ moved off the self-hosted runner's schedule.
 
 Directory layout this expects at the Lambda task root (see ../build.sh):
     handler.py
-    scripts/assign_ndr_leads.py, lib.py
-Deliberately minimal - assign_ndr_leads.py is independent of lead_priority.py/mysql_lib.py
-(see its own module docstring), so unlike assign_leads this package needs neither those two
-files nor api/_lib/*.json.
+    scripts/assign_ndr_leads.py, lib.py, mysql_lib.py
+Deliberately minimal - assign_ndr_leads.py is independent of lead_priority.py (see its own
+module docstring), so unlike assign_leads this package needs neither that file nor
+api/_lib/*.json. It DOES need mysql_lib.py: fetch_online_ndr_agents reads agent_presence
+from MySQL now, the same as assign_leads.
 """
 import sys
 from pathlib import Path
