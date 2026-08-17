@@ -640,6 +640,31 @@ async function upsertAgentPresence(email, name, status) {
       console.error('agent_presence_log insert failed (presence itself is recorded):', e.message);
     }
   }
+
+  // TEMPORARY (2026-08-17): also write Postgres agent_presence, which assign_ndr_leads.py
+  // was reverted to read from - the live mcaff-cls-assign-ndr-leads Lambda is missing the
+  // MYSQL_* env vars this migration's MySQL read path needs (see
+  // docs/superpowers/plans/2026-08-17-agent-presence-to-mysql.md's cutover checklist step
+  // 5), and NDR assignment cannot wait for that AWS-side fix. Postgres's own write path
+  // stopped when this file cut over to MySQL, so without this it would serve a snapshot
+  // frozen at cutover time forever - not "no data", but WRONG data. Remove this block (and
+  // revert assign_ndr_leads.py back to MySQL) once the Lambda's env vars are fixed - RTO's
+  // own read path never used Postgres for this and needs no such revert.
+  try {
+    await ensurePgSchema();
+    const { rows: prevPgRows } = await pgSql`SELECT status FROM agent_presence WHERE email = ${email}`;
+    const prevPgStatus = prevPgRows[0]?.status;
+    await pgSql`
+      INSERT INTO agent_presence (email, name, status, updated_at)
+      VALUES (${email}, ${name}, ${status}, ${now})
+      ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, status = EXCLUDED.status, updated_at = EXCLUDED.updated_at
+    `;
+    if (prevPgStatus !== status) {
+      await pgSql`INSERT INTO agent_presence_log (email, name, status, changed_at) VALUES (${email}, ${name}, ${status}, ${now})`;
+    }
+  } catch (e) {
+    console.error('TEMPORARY Postgres agent_presence dual-write failed (MySQL write above already succeeded):', e.message);
+  }
 }
 
 // Returns every agent's last-reported status, keyed by lowercase email - lets the
