@@ -155,7 +155,7 @@ async function withPgTransaction(work) {
 // the writer's OWN next read correct immediately, which is what the agent who just clicked
 // sees). If cross-container freshness ever matters, move this to Redis or a LISTEN/NOTIFY
 // channel rather than shortening the TTL to nothing.
-const CACHE_TTL_MS = 30000;
+const CACHE_TTL_MS = 300000;
 const readCache = new Map();
 
 function cachedRead(key, fn) {
