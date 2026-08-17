@@ -58,11 +58,16 @@ build_assign_ndr_leads() {
   cp "$LAMBDA_DIR/assign_ndr_leads/handler.py" "$work/handler.py"
   cp "$REPO_ROOT/scripts/assign_ndr_leads.py" \
      "$REPO_ROOT/scripts/lib.py" \
+     "$REPO_ROOT/scripts/mysql_lib.py" \
      "$work/scripts/"
 
+  # pymysql: assign_ndr_leads.py's fetch_online_ndr_agents now reads agent_presence from
+  # MySQL via mysql_lib.query() (moved off Postgres) - same missing-dependency mistake
+  # build_assign_leads above already made and documents; copying mysql_lib.py without also
+  # installing pymysql would leave this Lambda ImportError-ing on every invocation too.
   pip3 install --disable-pip-version-check --only-binary=:all: \
     --platform manylinux2014_x86_64 --python-version 3.12 --implementation cp --abi cp312 \
-    -t "$work" psycopg[binary] requests cryptography
+    -t "$work" psycopg[binary] requests cryptography pymysql
 
   ( cd "$work" && zip -r -q "$OUT_DIR/assign_ndr_leads.zip" . )
   rm -rf "$work"
