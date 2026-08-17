@@ -6,8 +6,9 @@
 // Actions: agents | orders | assign | tag | update | bulk-update | import | export | sample
 //
 // Data source is the live Google Sheet the standalone app read/wrote directly (see
-// api/_lib/escalationSheet.js) rather than Postgres - row identity here is the sheet's own
-// rowNumber, not a parentOrder key. Every route sits behind the same session/permission gate
+// api/_lib/escalationSheet.js) rather than Postgres - row identity here is a "tab:rowNumber"
+// key (two tabs, HYPHEN and mCaffeine, share one row-number space), not a parentOrder key. Every
+// route sits behind the same session/permission gate
 // api/ndr/sheet.js uses for its own proxy: a valid session, the 'calling' card, and - when
 // tab-level restrictions are set on the account - the 'escalation' tab.
 const { getSession } = require('../_lib/session');

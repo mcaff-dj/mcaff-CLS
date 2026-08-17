@@ -10,13 +10,23 @@
 // e.g. if this sheet later needs a dedicated account of its own - but nothing has to be
 // provisioned for the common case.
 //
-// SHEET_ID/TAB_NAME are constants, not env-configurable - same reasoning as NDR_SHEET_ID in
+// SHEET_ID/TAB_NAMES are constants, not env-configurable - same reasoning as NDR_SHEET_ID in
 // api/ndr/sheet.js: an allowlisted, hardcoded target so a permitted-but-malicious request can't
 // repurpose this service account's access against an unrelated sheet.
 const { JWT } = require('google-auth-library');
 
 const SHEET_ID = '1fopbKSrg-U9ixZi6Tfq13Q7mzRMPtceXkfEuN4Wko-w';
-const TAB_NAME = 'HYPHEN';
+const TAB_NAMES = ['HYPHEN', 'mCaffeine'];
+
+// rowNumber is opaque past this file's own boundary (client + API just carry it back and forth),
+// so a plain sheet row can't identify a row once two tabs are in play - prefix it with the tab
+// name instead. Every read/write below goes through makeKey/parseKey to stay tab-aware.
+function makeKey(tab, row) { return `${tab}:${row}`; }
+function parseKey(key) {
+  const s = String(key);
+  const i = s.lastIndexOf(':');
+  return { tab: s.slice(0, i), row: Number(s.slice(i + 1)) };
+}
 
 let _client = null;
 function getClient() {
@@ -82,8 +92,8 @@ const COLUMNS = [
   'awb', 'status', 'notes', 'assignedAgent', 'tagsRaw', 'ticketNumber',
 ];
 
-function rowToObject(row, rowNumber) {
-  const obj = { rowNumber };
+function rowToObject(row, tab, row1Indexed) {
+  const obj = { rowNumber: makeKey(tab, row1Indexed) };
   COLUMNS.forEach((key, i) => { obj[key] = row[i] || ''; });
   obj.tags = obj.tagsRaw ? obj.tagsRaw.split(',').map((s) => s.trim()).filter(Boolean) : [];
   delete obj.tagsRaw;
@@ -91,71 +101,82 @@ function rowToObject(row, rowNumber) {
 }
 
 async function getEligibleOrders() {
-  const rows = await sheetsGet(`'${TAB_NAME}'!A2:Z`);
-  return rows
-    .map((row, i) => rowToObject(row, i + 2)) // +2: skip header, 1-indexed sheet rows
-    .filter((o) => {
-      const n = o.statusAsPerAwb.toLowerCase();
-      const q = o.updateFromLogistics.toLowerCase();
-      return n.includes('rto') && q.includes('rto') && !o.status;
-    });
+  const perTab = await Promise.all(TAB_NAMES.map(async (tab) => {
+    const rows = await sheetsGet(`'${tab}'!A2:Z`);
+    return rows.map((row, i) => rowToObject(row, tab, i + 2)); // +2: skip header, 1-indexed sheet rows
+  }));
+  return perTab.flat().filter((o) => {
+    const n = o.statusAsPerAwb.toLowerCase();
+    const q = o.updateFromLogistics.toLowerCase();
+    return n.includes('rto') && q.includes('rto') && !o.status;
+  });
 }
 
 // Write New Order Id / AWB / Status / Notes into columns T/U/V/W for one row.
 async function updateOrder(rowNumber, { newOrderId, newAwb, newStatus, notes = '' }) {
-  await sheetsUpdate(`'${TAB_NAME}'!T${rowNumber}:W${rowNumber}`, [newOrderId, newAwb, newStatus, notes]);
+  const { tab, row } = parseKey(rowNumber);
+  await sheetsUpdate(`'${tab}'!T${row}:W${row}`, [newOrderId, newAwb, newStatus, notes]);
 }
 
-// Write many rows in a single request (avoids per-row API round-trips / rate limits).
+// Write many rows in a single request (avoids per-row API round-trips / rate limits). Ranges
+// carry their own tab name, so updates spanning both tabs still land in one batchUpdate call.
 async function batchUpdateOrders(updates) {
-  const data = updates.map((u) => ({
-    range: `'${TAB_NAME}'!T${u.rowNumber}:W${u.rowNumber}`,
-    values: [[u.newOrderId ?? '-', u.newAwb ?? '-', u.newStatus ?? '', u.notes ?? '']],
-  }));
+  const data = updates.map((u) => {
+    const { tab, row } = parseKey(u.rowNumber);
+    return {
+      range: `'${tab}'!T${row}:W${row}`,
+      values: [[u.newOrderId ?? '-', u.newAwb ?? '-', u.newStatus ?? '', u.notes ?? '']],
+    };
+  });
   await sheetsBatchUpdate(data);
   return updates.length;
 }
 
 // Lookup index for matching CSV rows back to sheet rows.
 async function getSheetIndex() {
-  const rows = await sheetsGet(`'${TAB_NAME}'!A2:Z`);
   const byParent = new Map();
   const byParentAwb = new Map();
-  rows.forEach((row, i) => {
-    const o = rowToObject(row, i + 2);
-    const parent = String(o.parentOrder || '').trim().toLowerCase();
-    const awb = String(o.awbNumber || '').trim().toLowerCase();
-    if (!parent) return;
-    if (!byParent.has(parent)) byParent.set(parent, o.rowNumber);
-    if (awb) byParentAwb.set(`${parent}||${awb}`, o.rowNumber);
-  });
+  await Promise.all(TAB_NAMES.map(async (tab) => {
+    const rows = await sheetsGet(`'${tab}'!A2:Z`);
+    rows.forEach((row, i) => {
+      const o = rowToObject(row, tab, i + 2);
+      const parent = String(o.parentOrder || '').trim().toLowerCase();
+      const awb = String(o.awbNumber || '').trim().toLowerCase();
+      if (!parent) return;
+      if (!byParent.has(parent)) byParent.set(parent, o.rowNumber);
+      if (awb) byParentAwb.set(`${parent}||${awb}`, o.rowNumber);
+    });
+  }));
   return { byParent, byParentAwb };
 }
 
 // Column X, one email per row (blank = unassigned) - read as a map keyed by row number so the
 // client can merge it onto whatever getEligibleOrders() just returned.
 async function getAssignments() {
-  const rows = await sheetsGet(`'${TAB_NAME}'!X2:X`);
+  const perTab = await Promise.all(TAB_NAMES.map(async (tab) => {
+    const rows = await sheetsGet(`'${tab}'!X2:X`);
+    return rows.map((row, i) => ({ key: makeKey(tab, i + 2), email: (row[0] || '').trim() }));
+  }));
   const assignments = {};
-  rows.forEach((row, i) => {
-    const email = (row[0] || '').trim();
-    if (email) assignments[i + 2] = { agentId: email };
-  });
+  perTab.flat().forEach(({ key, email }) => { if (email) assignments[key] = { agentId: email }; });
   return assignments;
 }
 
 async function assignOrder(rowNumber, email) {
-  await sheetsUpdate(`'${TAB_NAME}'!X${rowNumber}`, [email]);
+  const { tab, row } = parseKey(rowNumber);
+  await sheetsUpdate(`'${tab}'!X${row}`, [email]);
 }
 
 async function unassignOrder(rowNumber) {
-  await sheetsUpdate(`'${TAB_NAME}'!X${rowNumber}`, ['']);
+  const { tab, row } = parseKey(rowNumber);
+  await sheetsUpdate(`'${tab}'!X${row}`, ['']);
 }
 
 // Column Y, comma-joined tag keys - replaces the order's whole tag set (the client always sends
 // the full set after each toggle, so there's no add/remove distinction to keep straight here).
 async function setTags(rowNumber, tags) {
-  await sheetsUpdate(`'${TAB_NAME}'!Y${rowNumber}`, [(tags || []).join(',')]);
+  const { tab, row } = parseKey(rowNumber);
+  await sheetsUpdate(`'${tab}'!Y${row}`, [(tags || []).join(',')]);
 }
 
 // Same eligible rows the queue itself reads - the CSV export only ever uses 3 of their columns
