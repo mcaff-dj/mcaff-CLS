@@ -18,6 +18,41 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import assign_leads  # noqa: E402
 
 
+def test_fetch_online_agents_fails_open_without_mysql_creds():
+    import os
+    old = {k: os.environ.pop(k, None) for k in
+           ("MYSQL_HOST", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE")}
+    try:
+        result = assign_leads.fetch_online_agents()
+        assert result == ([], {}, {}, {}, {}), \
+            "missing MySQL creds must fail open, not raise"
+    finally:
+        for k, v in old.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_fetch_online_agents_reads_mysql_not_postgres():
+    calls = []
+    orig_get_cred = assign_leads.mysql_lib.get_credential
+    orig_query = assign_leads.mysql_lib.query
+    assign_leads.mysql_lib.get_credential = lambda: {
+        "host": "h", "user": "u", "password": "p", "database": "PEP_CLS", "port": 3306,
+    }
+    assign_leads.mysql_lib.query = lambda sql, params=None, database=None: (
+        calls.append((sql, params)) or [("a@x.com",), ("b@x.com",)]
+    )
+    try:
+        present, quotas, prepaid, specs, modes = assign_leads.fetch_online_agents()
+        assert present == ["a@x.com", "b@x.com"]
+        assert quotas == {} and prepaid == {} and specs == {} and modes == {}
+        assert len(calls) == 1
+        assert "agent_presence" in calls[0][0]
+    finally:
+        assign_leads.mysql_lib.get_credential = orig_get_cred
+        assign_leads.mysql_lib.query = orig_query
+
+
 class FakeCursor:
     def __init__(self, rows=None, raise_on_execute=False):
         self.rows = rows or []
