@@ -69,6 +69,16 @@ ALTER TABLE agent_presence_log MODIFY id INT AUTO_INCREMENT;
 This only produces the correct next value if run **after** the final backfill (MySQL auto-sets
 the next AUTO_INCREMENT value to `MAX(id) + 1` at ALTER time) — see Sequencing below.
 
+Both DDL statements live in a standalone script, `scripts/migrate_agent_presence_schema.py`,
+matching this codebase's established pattern for this class of change (see
+`migrate_cls_rto_calling_schema.py`): dry-run by default, `--apply` to execute, every step
+guarded by an `information_schema` check so it's safe to re-run and skips whatever's already
+applied. This is **not** added to `db.js`'s `ensureSchema()` — that function only ever
+bootstraps `PEP_CLS`'s original fresh-schema tables (`users`, `permissions`, `audit_log`,
+`report_tab_permissions`); every table that started life elsewhere and was moved onto MySQL
+(`CLS_RTO_calling`) got its own one-off schema script instead, and `agent_presence`/
+`agent_presence_log` follow the same precedent.
+
 Both new writes use `new Date()` JS values for `updated_at`/`changed_at` (never SQL `NOW()`),
 matching the existing naive-but-UTC DATETIME convention already used for
 `CLS_RTO_calling.assigned_at`/`disposed_at` (see `recordLeadDisposition` in `db.js`, and
@@ -96,10 +106,8 @@ async function upsertAgentPresence(email, name, status) {
 }
 ```
 
-No `ensurePgSchema()`/`ensureSchema()` call needed inside this function once the tables exist
-via the app's normal MySQL `ensureSchema()` bootstrap (add the `CREATE TABLE IF NOT EXISTS
-agent_presence` statement there, same single-flight-guarded pattern already used for
-`CLS_RTO_calling` etc.).
+No `ensurePgSchema()`/`ensureSchema()` call needed inside this function — the tables are
+created ahead of time by the standalone schema script (above), not by app-side bootstrap.
 
 ### Read path (`db.js`)
 
@@ -171,14 +179,15 @@ maintenance window.
 
 ## Sequencing (must happen in this order)
 
-1. Add `agent_presence` to MySQL `ensureSchema()`; ship (dead code path — nothing reads/writes
-   it yet).
-2. Run backfill script with `--apply`. Re-run it (idempotent) as many times as convenient.
-3. Immediately before deploying step 4: run the backfill script one final time to minimize the
-   gap.
-4. `ALTER TABLE agent_presence_log MODIFY id INT AUTO_INCREMENT` — must run after the final
-   backfill so the next auto-assigned id is correct, and before step 5 starts inserting rows
-   without an explicit `id`.
+1. Run `migrate_agent_presence_schema.py --apply`: creates `agent_presence` (empty, unused
+   until step 5).
+2. Run the backfill script with `--apply`. Re-run it (idempotent) as many times as convenient.
+3. Immediately before step 4: run the backfill script one final time to minimize the gap.
+4. Run `migrate_agent_presence_schema.py --apply` again — this time it performs the
+   `agent_presence_log` id → `AUTO_INCREMENT` step (its `information_schema` guard skips the
+   already-applied `agent_presence` creation from step 1). Must run after the final backfill
+   so the next auto-assigned id is correct, and before step 5 starts inserting rows without an
+   explicit `id`.
 5. Deploy the `db.js` + Python script changes (write and read paths cut over to MySQL) in one
    release. Lambda deploys atomically per invocation — there is no mixed old/new code path
    mid-request, so no dual-write period is needed.
