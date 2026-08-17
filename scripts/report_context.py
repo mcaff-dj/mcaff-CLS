@@ -9,6 +9,9 @@ for that shared script scope.
 """
 import math
 import re
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def ci_key(value, cache):
@@ -80,6 +83,33 @@ PARTNER_NORM_MAP = {
     "Xpressbees Surface": "Xpressbees",
     "na": "(blank)",
 }
+
+_SKU_TITLE_MAP = None
+
+
+def sku_title_map():
+    """SKU (casefold) -> canonical Product Name, from SKU master.xlsx's `Product variant
+    SKU` -> `Product title` columns at the repo root. First-seen title wins per SKU (same
+    convention as ci_key), so the handful of SKUs the master itself lists under more than
+    one title resolve to whichever row came first rather than flapping between runs.
+    mCaffeine-only: build_cross_filter_panel/the SKU drill-down engine only apply this to
+    the "prod" column for brands whose Ctx passes one in (see Ctx.__init__)."""
+    global _SKU_TITLE_MAP
+    if _SKU_TITLE_MAP is not None:
+        return _SKU_TITLE_MAP
+    path = REPO_ROOT / "SKU master.xlsx"
+    if not path.exists():
+        _SKU_TITLE_MAP = {}
+        return _SKU_TITLE_MAP
+    import openpyxl
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    m = {}
+    for title, sku in wb.worksheets[0].iter_rows(min_row=2, values_only=True):
+        if not sku or not title:
+            continue
+        m.setdefault(str(sku).strip().casefold(), str(title).strip())
+    _SKU_TITLE_MAP = m
+    return _SKU_TITLE_MAP
 
 
 def h_enc(s):
@@ -222,6 +252,15 @@ class Ctx:
         # index, so a brand missing either key simply never normalizes that column.
         self._cat_i = self.col.get("cat", -1)
         self._partner_i = self.col.get("partner", -1)
+        # Product Name is free text a rep typed per ticket, so the same SKU accrues several
+        # near-duplicate spellings over time (size suffix, rebrand, typo) - the "same SKU,
+        # different product name" rows seen in the Product/Suggestion panels and the
+        # SKU->Product drill-down. Swap in the SKU master's canonical title when the row's
+        # SKU is in it, so every ticket for a SKU rolls up under one name; brands without a
+        # master file (sku_title_map() empty) fall through to the raw cell value unchanged.
+        self._prod_i = self.col.get("prod", -1)
+        self._sku_i = self.col.get("sku", -1)
+        self._sku_titles = sku_title_map() if brand.get("brand") == "mcaffeine" else {}
 
     def cell(self, row, i):
         if row is None:
@@ -246,6 +285,12 @@ class Ctx:
         elif i == self._partner_i:
             if isinstance(v, str):
                 return _PARTNER_NORM_MAP_CI.get(v.casefold(), v)
+        elif i == self._prod_i and self._sku_titles and isinstance(v, str) and v.strip():
+            sku_val = row[self._sku_i] if isinstance(row, list) and 0 <= self._sku_i < len(row) else None
+            if isinstance(sku_val, str):
+                canon = self._sku_titles.get(sku_val.strip().casefold())
+                if canon:
+                    return canon
         return v
 
     def count_by(self, data, i):

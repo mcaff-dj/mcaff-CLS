@@ -6,3 +6,4 @@
 cryptography>=42.0
 requests>=2.31
 pymysql>=1.1
+openpyxl>=3.1

@@ -838,6 +838,12 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
 
     Returns None if the given subset has no data for this period_list (nothing to render).
     """
+    # Tickets with no SKU recorded at all have nothing to drill down BY - they'd otherwise
+    # collapse into their own "(blank)" pseudo-SKU row (see _norm below) that's just noise
+    # next to real SKUs. Dropped here, upstream of both passes, so neither the SKUS list nor
+    # the ticket combos ever see it.
+    subset = [r for r in subset if str(ctx.cell(r, ctx.col["sku"])).strip()]
+
     n = len(period_list)
     LP = n - 1  # last period index (last month, or last week-of-this-month)
 
