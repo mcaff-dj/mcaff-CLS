@@ -66,6 +66,18 @@ directly:
 ALTER TABLE agent_presence_log MODIFY id INT AUTO_INCREMENT;
 ```
 
+`getAgentPresenceLogSummary`'s two queries (below) filter `agent_presence_log` by `changed_at`
+alone, no `email` predicate — the same shape Postgres's hand-run
+`2026-08-10_add_agent_presence_log_changed_at_index.sql` documents as unable to use the
+existing `(email, changed_at)` composite index (a composite index can't serve a query with no
+leading-column predicate, and reversing it doesn't help an `ORDER BY` in the other direction
+either). MySQL's `agent_presence_log` has only that same composite index today. Invisible at
+966 rows; the same bottleneck as Postgres's once this grows. The schema script also adds:
+
+```sql
+CREATE INDEX IF NOT EXISTS agent_presence_log_changed_at_idx ON agent_presence_log (changed_at);
+```
+
 This only produces the correct next value if run **after** the final backfill (MySQL auto-sets
 the next AUTO_INCREMENT value to `MAX(id) + 1` at ALTER time) — see Sequencing below.
 
