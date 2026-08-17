@@ -64,17 +64,51 @@ def ensure_ticket_number_header(tab):
     print(f"  wrote 'Ticket Number' header at {tab}!{TICKET_NUMBER_COL}1")
 
 
+EXISTING_TICKETS_CHUNK_SIZE = 5000  # see get_existing_ticket_numbers
+
+# 300s, not lib.get_sheet_values' own 120s default - reads against this sheet started
+# timing out at every size tried (bounded 32k-row, 5k-row chunks, even a bare 2-cell
+# read), well past when the sheet was last this size and these same calls were fast. If
+# that's the sheet having gotten genuinely heavier to serve (not throttling - a plain
+# rate-limit would reject fast, not hang), a longer single-request budget is the correct
+# response; it does nothing for actual throttling, which no client-side timeout can fix.
+SHEET_READ_TIMEOUT_SEC = 300
+
+
 def get_existing_ticket_numbers(tab):
-    values = lib.get_sheet_values(SPREADSHEET_ID, f"'{tab}'!{TICKET_NUMBER_COL}2:{TICKET_NUMBER_COL}")
-    return {row[0] for row in values if row and row[0]}
+    # Read in chunks, not one 'Z2:Z{last_row}' call - bounding the range (vs. the
+    # original open-ended 'Z2:Z') fixed the timeout at 28-31k rows, but at 32k+ rows even
+    # the BOUNDED single-request read started timing out (5/5 attempts, ~120s each) -
+    # fetching this many cells of one column in one response is what's slow, not whether
+    # the range has an end. Chunking sidesteps that regardless of which it actually is.
+    last_row = get_last_data_row(tab)
+    if last_row < 2:
+        return set()
+    existing = set()
+    row = 2
+    while row <= last_row:
+        end = min(row + EXISTING_TICKETS_CHUNK_SIZE - 1, last_row)
+        values = lib.get_sheet_values(
+            SPREADSHEET_ID, f"'{tab}'!{TICKET_NUMBER_COL}{row}:{TICKET_NUMBER_COL}{end}",
+            timeout_sec=SHEET_READ_TIMEOUT_SEC,
+        )
+        existing.update(r[0] for r in values if r and r[0])
+        row = end + 1
+    return existing
 
 
 def get_last_data_row(tab):
-    # Column A ("Added date") is blank on every pre-existing row in these tabs,
-    # so it can't anchor the last-row lookup the way lib.get_last_data_row
-    # assumes - use column B ("Query Class"), populated on every real row.
-    values = lib.get_sheet_values(SPREADSHEET_ID, f"'{tab}'!B:B")
-    return len(values) if values else 0
+    # The grid's own row COUNT (a metadata call, no cell data - same call
+    # set_sheet_rows_at_row already uses in lib.py to decide whether to grow the grid
+    # before writing), not a column read. Reliable here because every append grows the
+    # grid to exactly match written rows, so grid size tracks last-data-row tightly.
+    # An open-ended column read (e.g. the previous 'B:B' - column A ("Added date") is
+    # blank on every pre-existing row, so B ("Query Class") was used as the real anchor)
+    # started timing out once this tab passed ~30k rows: Sheets Value ranges API resolves
+    # an unbounded column against the full grid extent, which is the expensive part, not
+    # the actual data. A metadata call stays cheap regardless of row count.
+    _, grid_props = lib._get_sheet_gid_and_grid(SPREADSHEET_ID, tab)
+    return grid_props.get("rowCount", 0)
 
 
 def fetch_today_delivery_tickets(table, since=None):
