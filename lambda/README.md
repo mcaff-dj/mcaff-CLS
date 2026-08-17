@@ -1,19 +1,19 @@
 # Cron jobs on Lambda, not GitHub Actions
 
-## Status (2026-08-13)
+## Status (2026-08-17)
 
-All three cron jobs from `assign-leads.yml` and `sync-lead-assignments.yml` are migrated
-and live:
+Two cron jobs from `assign-leads.yml` are migrated and live; `sync-lead-assignments.yml`
+is fully retired:
 
-- **`sync-lead-assignments.yml` (daily)** — EventBridge Scheduler + Lambda. GitHub's
-  `schedule:` trigger is disabled, `workflow_dispatch:` kept as a manual fallback. This
-  Lambda (`mcaff-cls-sync-lead-assignments`) originally ran two jobs; it now only runs
-  the agent-presence-log sync - the lead-assignments half was retired once
-  `lead_assignments` moved OFF Postgres onto MySQL `CLS_RTO_calling` directly (see
-  `scripts/migrate_cls_rto_calling_schema.py` /
-  `migrate_lead_assignments_to_cls_rto_calling.py`), leaving nothing for a daily copy to
-  do. The Lambda/schedule name is a leftover from before that; not renamed to avoid
-  re-touching live infra for a cosmetic reason.
+- **`sync-lead-assignments.yml` (RETIRED 2026-08-17)** — Was daily EventBridge Scheduler +
+  Lambda, but the script `scripts/sync_agent_presence_log_to_mysql.py` was a one-way
+  Postgres → MySQL archival sync. Once `api/_lib/db.js` writes `agent_presence_log`
+  directly to MySQL (Task 3), this sync became dead code — the script never archives
+  anything new, its high-water mark never advances, and the Lambda itself is no longer
+  built or deployed. The already-deployed `mcaff-cls-sync-lead-assignments` Lambda
+  function continues to run harmlessly from its self-contained deployment (bundled copy
+  of the script inside its zip) until manually deleted in AWS — see Rollback section
+  below.
 - **`assign-leads.yml`'s `assign-rto` job (every 5 minutes)** — EventBridge Scheduler +
   Lambda. Talked to Vikash first, since it moved off his self-hosted runner. Two real
   bugs were found and fixed during testing before cutover: the package was missing the
@@ -77,20 +77,19 @@ already has). Combined those four cost ~400 Actions min/month - not worth that r
 
 ## What's here
 
-- `assign_leads/handler.py`, `assign_ndr_leads/handler.py`,
-  `sync_lead_assignments/handler.py` - thin Lambda entrypoints. Each imports the real
-  `scripts/*.py` unmodified - no forked/duplicated logic anywhere.
+- `assign_leads/handler.py`, `assign_ndr_leads/handler.py` - thin Lambda entrypoints.
+  Each imports the real `scripts/*.py` unmodified - no forked/duplicated logic anywhere.
 - `build.sh` - assembles each deployment zip (code + manylinux-wheel deps) from the
   repo's actual `scripts/`. **Always run this from an up-to-date checkout** - `git fetch`
   / `git log -- <path>` the specific files first if there's any doubt; building from a
   stale clone is exactly what went wrong the first time `assign-leads`'s migration was
   attempted (see incident note below).
-- `deploy_infra.sh` - **one-time** bootstrap: IAM role, all three Lambda functions,
-  EventBridge Scheduler schedules (all created `ENABLED` - reflects current live state,
-  not a fresh from-scratch bootstrap sequence). Not meant to be re-run as-is against an
-  already-live setup.
-- `../.github/workflows/deploy-cron-lambdas.yml` - ongoing: redeploys code to all three
-  Lambdas whenever someone pushes a change to any of their relevant files.
+- `deploy_infra.sh` - **one-time** bootstrap: IAM role, two active Lambda functions +
+  one retired sync Lambda, EventBridge Scheduler schedules (all created `ENABLED` -
+  reflects current live state, not a fresh from-scratch bootstrap sequence). Not meant
+  to be re-run as-is against an already-live setup.
+- `../.github/workflows/deploy-cron-lambdas.yml` - ongoing: redeploys code to the two
+  active Lambdas whenever someone pushes a change to any of their relevant files.
 
 ## Incident note (2026-08-13)
 
@@ -105,8 +104,7 @@ migrated, after the `assign-rto` instant-assignment trigger was initially missed
 
 ## Rollback
 
-If any live Lambda misbehaves: remove its `if: github.event_name != 'schedule'` line
-from `assign-leads.yml` (or re-enable `sync-lead-assignments.yml`'s `schedule:` block),
-disable the corresponding EventBridge schedule, and - if it's `assign-rto`/`assign-ndr` -
-revert `api/auth/[action].js`'s trigger back to a GitHub `workflow_dispatch` call for
-that process. Nothing is deleted in any case, only triggers toggled.
+If any live Lambda misbehaves: disable the corresponding EventBridge schedule, and if
+it's `assign-rto`/`assign-ndr` revert `api/auth/[action].js`'s trigger back to a GitHub
+`workflow_dispatch` call. Re-enable its `if: github.event_name != 'schedule'` line in
+`assign-leads.yml`. Nothing is deleted in any case, only triggers toggled.

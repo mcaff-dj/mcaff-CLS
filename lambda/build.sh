@@ -12,8 +12,7 @@
 # Usage:
 #   ./build.sh assign_leads
 #   ./build.sh assign_ndr_leads
-#   ./build.sh sync_lead_assignments
-#   ./build.sh            # builds all three
+#   ./build.sh            # builds all
 set -euo pipefail
 
 LAMBDA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,31 +69,9 @@ build_assign_ndr_leads() {
   echo "-> $OUT_DIR/assign_ndr_leads.zip"
 }
 
-build_sync_lead_assignments() {
-  # Name is a leftover from when this Lambda also synced lead_assignments (see its
-  # handler.py) - now only the agent-presence-log sync remains.
-  echo "=== Building sync_lead_assignments.zip ==="
-  work="$(mktemp -d)"
-  mkdir -p "$work/scripts"
-
-  cp "$LAMBDA_DIR/sync_lead_assignments/handler.py" "$work/handler.py"
-  cp "$REPO_ROOT/scripts/sync_agent_presence_log_to_mysql.py" \
-     "$REPO_ROOT/scripts/mysql_lib.py" \
-     "$work/scripts/"
-
-  pip3 install --disable-pip-version-check --only-binary=:all: \
-    --platform manylinux2014_x86_64 --python-version 3.12 --implementation cp --abi cp312 \
-    -t "$work" psycopg[binary] pymysql
-
-  ( cd "$work" && zip -r -q "$OUT_DIR/sync_lead_assignments.zip" . )
-  rm -rf "$work"
-  echo "-> $OUT_DIR/sync_lead_assignments.zip"
-}
-
 case "${1:-all}" in
   assign_leads) build_assign_leads ;;
   assign_ndr_leads) build_assign_ndr_leads ;;
-  sync_lead_assignments) build_sync_lead_assignments ;;
-  all) build_assign_leads; build_assign_ndr_leads; build_sync_lead_assignments ;;
-  *) echo "Usage: $0 [assign_leads|assign_ndr_leads|sync_lead_assignments]" >&2; exit 1 ;;
+  all) build_assign_leads; build_assign_ndr_leads ;;
+  *) echo "Usage: $0 [assign_leads|assign_ndr_leads]" >&2; exit 1 ;;
 esac
