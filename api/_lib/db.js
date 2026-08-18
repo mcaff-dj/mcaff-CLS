@@ -1097,7 +1097,22 @@ const DELIVERY_ESCALATION_MAX_EXPORT = 5000;
 // field) reads "Forced to be marked as RTO" - the logistics pipeline's own flag for an RTO it
 // forced rather than one worked normally. Split into its own tab/view so those don't sit mixed
 // into Fresh's ordinary RTO rows.
-const DE_FORCED_RTO_WHERE = `tat = 'Forced to be marked as RTO'`;
+// Two independent signals, unioned: the logistics/courier pipeline's own flag (tat, mirrored in
+// from the sheet - see scripts/backfill_delivery_escalation_from_sheet.py) OR an agent disposing
+// the ticket as RTO through the app (outcome). They usually agree (12,388 of 12,389 agent-RTO
+// dispositions already carry tat='Forced to be marked as RTO', backfilled from the same sheet
+// snapshot), but an agent's dispose is immediate while tat is only as fresh as the last backfill
+// run - the OR means a just-disposed RTO lands here right away instead of waiting for the next
+// logistics snapshot to catch up.
+//
+// `outcome IS NOT NULL AND` guards the two outcome comparisons deliberately: most rows have
+// outcome NULL (never disposed), and `NULL = 'RTO'` evaluates to NULL, not FALSE, in SQL's
+// three-valued logic - every consumer of this constant wraps it in NOT(...) (see DE_FRESH_WHERE
+// below), and NOT(NULL) is ALSO NULL, which a WHERE clause treats as non-matching. Without the
+// guard, that NULL poisoned the whole NOT() for every blank-outcome row and wrongly excluded
+// all of Fresh's ordinary (never-disposed) tickets, not just the RTO ones this was meant to
+// catch - caught live: stats.fresh dropped from ~3645 to 2 before this guard was added.
+const DE_FORCED_RTO_WHERE = `(tat = 'Forced to be marked as RTO' OR (outcome IS NOT NULL AND (outcome = 'RTO' OR outcome LIKE 'RTO > %')))`;
 
 // A ticket is Fresh while its outcome is blank (never disposed), RTO (an RTO'd order can still
 // be re-shipped and later delivered, so it isn't terminal), or Escalated (still waiting on the
@@ -1125,21 +1140,25 @@ const DE_TAT_BUCKET_SQL = `CASE
     ELSE 'Greater than 10 days'
   END`;
 
-// Same day-bucket boundaries as DE_TAT_BUCKET_SQL above, but for the Overview's day-wise table
-// (getDeliveryEscalationDaywiseStats): a ticket with no disposed_at yet buckets by days elapsed
-// AS OF TODAY (COALESCE to CURDATE()) instead of falling into 'unresolved' - an open ticket has
-// a real, growing age, and dumping it into 'unresolved' hid exactly the aging tickets ops needs
-// to see. 'unresolved' survives only for rows with no added_date at all (no start point to
-// measure age from); those have no Query date to sit under either, so in practice they never
-// surface as a row in that table - the label stays only for column parity with DE_TAT_BUCKET_SQL.
-// Forced RTO is its own bucket, not a day-difference, same flag as DE_FORCED_RTO_WHERE.
+// For the Overview's day-wise table (getDeliveryEscalationDaywiseStats). 'unresolved' is
+// exactly the Fresh tab's own population (DE_FRESH_WHERE: outcome blank/RTO/Escalated, minus
+// Forced RTO, which is its own bucket below) - a ticket sitting in Fresh sits in 'unresolved'
+// here too, whole and un-split, rather than being sliced into the age buckets by how long it's
+// been open. Everything that reaches the DATEDIFF buckets below is therefore Delivered (the
+// only outcome left once Forced RTO and Fresh are both accounted for), so those buckets now
+// measure actual resolution time (disposed_at minus added_date) - the same figure
+// DE_TAT_BUCKET_SQL already reports per-row for Resolved, just grouped by day here. The
+// disposed_at/added_date IS NULL branch is a defensive catch-all for a Delivered row somehow
+// missing one of those dates (2 rows total right now, see getDeliveryEscalationDaywiseStats'
+// own missingDateCount) - it can't be dated, so it can't be aged either.
 const DE_DAYWISE_BUCKET_SQL = `CASE
     WHEN ${DE_FORCED_RTO_WHERE} THEN 'Forced to be marked as RTO'
-    WHEN added_date IS NULL THEN 'unresolved'
-    WHEN DATEDIFF(COALESCE(disposed_at, CURDATE()), added_date) <= 2 THEN 'Within 48 hrs'
-    WHEN DATEDIFF(COALESCE(disposed_at, CURDATE()), added_date) <= 4 THEN 'Within 2-4 days'
-    WHEN DATEDIFF(COALESCE(disposed_at, CURDATE()), added_date) <= 8 THEN '4-8 days'
-    WHEN DATEDIFF(COALESCE(disposed_at, CURDATE()), added_date) <= 10 THEN '8-10 days'
+    WHEN ${DE_FRESH_WHERE} THEN 'unresolved'
+    WHEN disposed_at IS NULL OR added_date IS NULL THEN 'unresolved'
+    WHEN DATEDIFF(disposed_at, added_date) <= 2 THEN 'Within 48 hrs'
+    WHEN DATEDIFF(disposed_at, added_date) <= 4 THEN 'Within 2-4 days'
+    WHEN DATEDIFF(disposed_at, added_date) <= 8 THEN '4-8 days'
+    WHEN DATEDIFF(disposed_at, added_date) <= 10 THEN '8-10 days'
     ELSE 'Greater than 10 days'
   END`;
 // Fixed column set for that table, in ascending-severity display order (not alphabetical) -
