@@ -967,31 +967,25 @@ async function disposeNdrLead(awbNumber, disposition, agentRemarks) {
 
 // Delivery-Escalation's own durable record on MySQL (see
 // scripts/create_delivery_escalation_table.py) - the same role CLS_RTO_calling plays for RTO,
-// but with no per-cycle/reassignment shape: this process has no round-robin assignment robot
-// and no "Connected: No -> try someone else" reassignment path (see
-// api/_lib/callingProcesses.json's "deliveryescalation" entry), so claim and resolve are the
-// only two writes this table ever needs, and both fully upsert - one row per (brand, awb_code).
-//
-// Resolve does NOT depend on claim having already run: it upserts the same way claim does, so
-// a ticket claimed before this table existed, or whose claim write silently failed, still gets
-// a row the moment it's resolved - same "if assign_leads.py never recorded this order_id, the
-// plain-INSERT path creates the row now" reasoning as recordLeadDisposition above. agent_email/
-// assigned_at are write-once (an already-set value is never overwritten by a later call, same
-// contract as the sheet's own Column Q), but the descriptive columns (order_id, delivery
-// partner, query fields...) are refreshed every call since they're read straight from the
-// sheet each time and can't legitimately go stale-then-wrong.
-function upsertDeliveryEscalationTicket(ticket, { agentEmail, outcome, agentRemarks, disposed } = {}) {
+// but written only once a ticket reaches a TERMINAL outcome (Delivered or RTO - see
+// DeliveryEscalationClient.js's TERMINAL_OUTCOMES), not on every dispose: a non-terminal
+// outcome like Escalated stays sheet-only, still live in the Fresh tab, until it's later
+// re-disposed as one of the two terminal ones. No claim-time write either - this process has
+// no round-robin robot and no per-cycle/reassignment shape, so there's nothing to record until
+// the ticket is actually done. One row per (brand, awb_code); upserts rather than requiring a
+// prior row to exist, since a ticket can go straight from unclaimed to a terminal dispose in
+// one action (claim-on-open, then Resolve).
+async function disposeDeliveryEscalationTicket(ticket, email, outcome, agentRemarks) {
   const { brand, orderId, awbCode, deliveryPartner, queryClass, queryCategory, whName, statusAsPerAwb, tat } = ticket;
   const now = new Date();
-  return sql`
+  await sql`
     INSERT INTO Delivery_escalation
       (brand, order_id, awb_code, delivery_partner, query_class, query_category, wh_name,
        status_as_per_awb, tat, agent_email, assigned_at, outcome, agent_remarks, disposed_at)
     VALUES (
       ${brand}, ${orderId}, ${awbCode || null}, ${deliveryPartner || null}, ${queryClass || null},
       ${queryCategory || null}, ${whName || null}, ${statusAsPerAwb || null}, ${tat || null},
-      ${agentEmail || null}, ${agentEmail ? now : null},
-      ${outcome || null}, ${agentRemarks || null}, ${disposed ? now : null}
+      ${email || null}, ${now}, ${outcome || null}, ${agentRemarks || null}, ${now}
     )
     ON DUPLICATE KEY UPDATE
       order_id = VALUES(order_id),
@@ -1003,18 +997,10 @@ function upsertDeliveryEscalationTicket(ticket, { agentEmail, outcome, agentRema
       tat = VALUES(tat),
       agent_email = IF(agent_email IS NULL OR agent_email = '', VALUES(agent_email), agent_email),
       assigned_at = IF(agent_email IS NULL OR agent_email = '', VALUES(assigned_at), assigned_at),
-      outcome = COALESCE(VALUES(outcome), outcome),
-      agent_remarks = COALESCE(VALUES(agent_remarks), agent_remarks),
-      disposed_at = COALESCE(VALUES(disposed_at), disposed_at)
+      outcome = VALUES(outcome),
+      agent_remarks = VALUES(agent_remarks),
+      disposed_at = VALUES(disposed_at)
   `;
-}
-
-async function claimDeliveryEscalationTicket(ticket, email) {
-  await upsertDeliveryEscalationTicket(ticket, { agentEmail: email });
-}
-
-async function disposeDeliveryEscalationTicket(ticket, email, outcome, agentRemarks) {
-  await upsertDeliveryEscalationTicket(ticket, { agentEmail: email, outcome, agentRemarks, disposed: true });
 }
 
 // dateFrom/dateTo are inclusive "YYYY-MM-DD" strings (or null for unbounded), interpreted
@@ -1743,7 +1729,7 @@ module.exports = {
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions,
   claimNdrLead, disposeNdrLead,
-  claimDeliveryEscalationTicket, disposeDeliveryEscalationTicket,
+  disposeDeliveryEscalationTicket,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,
   // Exported for api/_lib/db.retry.test.js, db.cache.test.js and db.refundExport.test.js only -

@@ -77,11 +77,23 @@ async function fetchTab(tab) {
   return { tab, rows: rows.map((row, idx) => mapRow(row, startRow + idx, tab)), totalRows };
 }
 
-// Mirrors a claim/resolve into MySQL PEP_CLS.Delivery_escalation (see
+// A ticket disposed with either of these top-level outcomes is DONE - it moves into MySQL
+// (see recordDeliveryEscalationTicket) and off the Fresh tab into Resolved. Any other outcome
+// (e.g. Escalated) is treated as still-open: it stays sheet-only and keeps showing in Fresh
+// until it's re-disposed as one of these two. Matched against the disposition path's TOP-LEVEL
+// label (outcomeTopLevel below), not the full " > " path, so "Delivered > <some sub-reason>"
+// still counts if the admin ever nests something under it.
+const TERMINAL_OUTCOMES = ['Delivered', 'RTO'];
+function outcomeTopLevel(t) {
+  return (t.outcome || '').split(' > ')[0].trim();
+}
+
+// Moves a terminally-disposed ticket into MySQL PEP_CLS.Delivery_escalation (see
 // api/delivery-escalation/record.js) - a parallel write alongside the sheet write, not a
 // replacement: the sheet stays what this UI reads from, MySQL is the durable/queryable history
-// side (same role CLS_RTO_calling plays for RTO). Best-effort by design - a failure here must
-// never undo or block a sheet write that already succeeded, so callers only log, never throw.
+// side (same role CLS_RTO_calling plays for RTO). Only called for a TERMINAL_OUTCOMES dispose -
+// see saveAction. Best-effort by design - a failure here must never undo or block a sheet write
+// that already succeeded, so callers only log, never throw.
 async function recordDeliveryEscalationTicket(body) {
   try {
     const r = await fetch('/api/delivery-escalation/record', {
@@ -99,8 +111,8 @@ async function recordDeliveryEscalationTicket(body) {
 }
 
 // The subset of ticket fields Delivery_escalation actually stores - kept separate from the
-// full mapRow shape so a claim/dispose call never accidentally ships internal-only fields
-// (id, rowNum, tab) as if they were sheet columns.
+// full mapRow shape so a dispose call never accidentally ships internal-only fields (id,
+// rowNum, tab) as if they were sheet columns.
 function ticketSnapshot(t) {
   return {
     brand: t.brand, orderId: t.orderId, awbCode: t.awb, deliveryPartner: t.deliveryPartner,
@@ -254,7 +266,6 @@ export default function DeliveryEscalationClient() {
         await writeCells(t.tab, [{ range: `${COL_AGENT}${t.rowNum}`, values: [googleUser.email] }]);
         ticket = { ...t, assignedAgent: googleUser.email };
         setTickets(prev => prev.map(x => x.id === t.id ? ticket : x));
-        recordDeliveryEscalationTicket({ action: 'claim', ticket: ticketSnapshot(ticket), email: googleUser.email });
       } catch (e) {
         showToast(`⚠️ Could not claim ticket: ${e.message}`);
       }
@@ -283,8 +294,9 @@ export default function DeliveryEscalationClient() {
       await writeCells(detailTkt.tab, ranges);
       const updatedTicket = { ...detailTkt, actionDate, outcome, remarks: remarks.trim(), ...(claimNow ? { assignedAgent: googleUser.email } : {}) };
       setTickets(prev => prev.map(x => x.id === detailTkt.id ? updatedTicket : x));
-      if (claimNow) recordDeliveryEscalationTicket({ action: 'claim', ticket: ticketSnapshot(updatedTicket), email: googleUser.email });
-      recordDeliveryEscalationTicket({ action: 'dispose', ticket: ticketSnapshot(updatedTicket), outcome, agentRemarks: remarks.trim() });
+      if (TERMINAL_OUTCOMES.includes(outcomeTopLevel(updatedTicket))) {
+        recordDeliveryEscalationTicket({ ticket: ticketSnapshot(updatedTicket), outcome, agentRemarks: remarks.trim() });
+      }
       showToast('Resolution saved');
       setDetailTkt(null);
     } catch (e) {
@@ -302,8 +314,12 @@ export default function DeliveryEscalationClient() {
   const scopedTickets = useMemo(() => tickets.filter(inMyScope), [tickets, myScopeEmail]);
   const total = scopedTickets.length;
   const assigned = useMemo(() => scopedTickets.filter(t => t.assignedAgent).length, [scopedTickets]);
-  const resolved = useMemo(() => scopedTickets.filter(t => t.outcome).length, [scopedTickets]);
-  const freshCount = useMemo(() => scopedTickets.filter(t => t.assignedAgent && !t.outcome).length, [scopedTickets]);
+  // Resolved = a TERMINAL dispose (Delivered/RTO) - the same set that gets moved into MySQL.
+  const resolved = useMemo(() => scopedTickets.filter(t => TERMINAL_OUTCOMES.includes(outcomeTopLevel(t))).length, [scopedTickets]);
+  // Fresh = still needs work: never disposed, OR disposed as Escalated (not done, just waiting
+  // on the delivery partner) - anything else non-terminal would land here too by the same rule,
+  // but today's only non-terminal outcome is Escalated.
+  const freshCount = useMemo(() => scopedTickets.filter(t => t.assignedAgent && !TERMINAL_OUTCOMES.includes(outcomeTopLevel(t))).length, [scopedTickets]);
   const unassignedCount = total - assigned;
   const resolutionRate = assigned > 0 ? Math.round((resolved / assigned) * 100) : 0;
 
@@ -323,8 +339,8 @@ export default function DeliveryEscalationClient() {
   }, [scopedTickets, search, brandFilter, agentFilter]);
 
   const rowsForTab = useMemo(() => {
-    if (tab === 'fresh') return filteredBase.filter(t => t.assignedAgent && !t.outcome);
-    if (tab === 'resolved') return filteredBase.filter(t => t.outcome);
+    if (tab === 'fresh') return filteredBase.filter(t => t.assignedAgent && !TERMINAL_OUTCOMES.includes(outcomeTopLevel(t)));
+    if (tab === 'resolved') return filteredBase.filter(t => TERMINAL_OUTCOMES.includes(outcomeTopLevel(t)));
     return filteredBase;
   }, [filteredBase, tab]);
 
