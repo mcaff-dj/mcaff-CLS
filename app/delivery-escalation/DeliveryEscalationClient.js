@@ -41,9 +41,10 @@ function mapRow(row, readOnly) {
     id: row.id, mysqlId: row.id, readOnly,
     brand: row.brand, orderId: row.order_id, awb: row.awb_code || '',
     deliveryPartner: row.delivery_partner || '', queryClass: row.query_class || '',
-    queryCategory: row.query_category || '', whName: row.wh_name || '',
+    queryCategory: row.query_category || '',
     statusAsPerAwb: row.status_as_per_awb || '', tat: row.tat || '',
     ticketNumber: row.ticket_number || '', assignedAgent: row.agent_email || '',
+    addedDate: row.added_date ? new Date(row.added_date).toLocaleDateString('en-GB') : '',
     actionDate: row.disposed_at ? new Date(row.disposed_at).toLocaleDateString('en-GB') : '',
     outcome: row.outcome || '', childDisposition: row.child_disposition || '',
     remarks: row.agent_remarks || '',
@@ -259,7 +260,7 @@ function csvCell(v) {
 const EXPORT_COLUMNS = [
   ['Brand', 'brand'], ['Order ID', 'orderId'], ['AWB', 'awb'], ['Ticket Number', 'ticketNumber'],
   ['Delivery Partner', 'deliveryPartner'], ['Query Class', 'queryClass'],
-  ['Query Category', 'queryCategory'], ['WH Name', 'whName'],
+  ['Query Category', 'queryCategory'], ['Added Date', 'addedDate'],
   ['TAT', 'tat'], ['Times Contacted', 'contactCount'], ['First Contact', 'firstContactDate'],
   ['Agent Name', 'assignedAgent'],
   ['Action Date', 'actionDate'], ['Outcome', 'outcome'],
@@ -970,7 +971,7 @@ export default function DeliveryEscalationClient() {
                           <th className="py-3 px-4 text-left font-medium">AWB</th>
                           <th className="py-3 px-4 text-left font-medium">Delivery Partner</th>
                           <th className="py-3 px-4 text-left font-medium">Query Category</th>
-                          <th className="py-3 px-4 text-left font-medium">WH Name</th>
+                          <th className="py-3 px-4 text-left font-medium">Added Date</th>
                           <th className="py-3 px-4 text-left font-medium">TAT</th>
                           <th className="py-3 px-4 text-left font-medium">Times Contacted</th>
                           <th className="py-3 px-4 text-left font-medium">First Contact</th>
@@ -990,7 +991,7 @@ export default function DeliveryEscalationClient() {
                               <td className="py-3 px-4 text-zinc-300 font-mono text-[12px]">{t.awb}</td>
                               <td className="py-3 px-4 text-zinc-400">{t.deliveryPartner}</td>
                               <td className="py-3 px-4 text-zinc-400">{t.queryCategory}</td>
-                              <td className="py-3 px-4 text-zinc-400">{t.whName}</td>
+                              <td className="py-3 px-4 text-zinc-400 whitespace-nowrap">{t.addedDate || '—'}</td>
                               <td className="py-3 px-4 text-zinc-400">{t.tat}</td>
                               <td className="py-3 px-4 text-zinc-400 tabular-nums">
                                 {t.contactCount === '' ? '—' : (
