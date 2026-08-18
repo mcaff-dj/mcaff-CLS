@@ -1160,14 +1160,22 @@ async function getDeliveryEscalationStats(opts = {}) {
 // many tickets share an AWB. Counted per DISTINCT AWB (one parcel = one customer here), not per
 // ticket, so a customer who came 5 times is one entry in the 5-9 bucket rather than five.
 //
-// "Still not resolved" = no ticket for that AWB has a Delivered outcome. Judged across the
-// customer's whole history, not per ticket: if any of their contacts ended in a delivery, the
-// complaint did get resolved, however many times they had to chase it.
+// "Still not resolved" = the AWB still has at least one ticket sitting in the Fresh tab, i.e.
+// the same DE_FRESH_WHERE that tab lists by. Judged across the customer's whole history rather
+// than per ticket, so one customer is one entry however many tickets they raised - but unlike a
+// "never delivered" test, a customer whose parcel was delivered yet still has an Escalated
+// ticket open does count, because there is genuinely still something open for them.
 //
 // Grouped off the aggregate rather than the stored contact_count so the two can never disagree
 // mid-window (contact_count is refreshed by the cron sync; this is exact as of right now).
+//
+// Uses pool.execute with an interpolated DE_FRESH_WHERE rather than the sql`` tag: that tag
+// turns every ${} into a bound parameter, which would send the predicate as a string literal
+// instead of SQL. Reusing the constant is the point - "unresolved" here is exactly what the
+// Fresh tab lists, so the two can never drift apart if that definition changes.
 async function getDeliveryEscalationRepeatStats() {
-  const { rows } = await sql`
+  const pool = await getPool();
+  const [rows] = await pool.execute(`
     SELECT CASE WHEN times = 1 THEN '1 time'
                 WHEN times BETWEEN 2 AND 4 THEN '2-4 times'
                 WHEN times BETWEEN 5 AND 9 THEN '5-9 times'
@@ -1177,15 +1185,15 @@ async function getDeliveryEscalationRepeatStats() {
     FROM (
       SELECT awb_code,
              COUNT(*) AS times,
-             MAX(outcome = 'Delivered' OR outcome LIKE 'Delivered > %') AS ever_delivered
+             MAX(${DE_FRESH_WHERE}) AS has_open
       FROM Delivery_escalation
       WHERE awb_code IS NOT NULL AND awb_code <> ''
       GROUP BY awb_code
     ) per_awb
-    WHERE ever_delivered = 0
+    WHERE has_open = 1
     GROUP BY bucket
     ORDER BY sort_key
-  `;
+  `);
   return rows.map((r) => ({ bucket: r.bucket, customers: Number(r.customers) || 0 }));
 }
 
