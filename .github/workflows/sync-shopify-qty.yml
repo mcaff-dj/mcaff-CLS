@@ -1,0 +1,52 @@
+name: Sync Shopify day-wise SKU quantity to sheet
+
+on:
+  schedule:
+    - cron: '30 23 * * *'   # 5:00 AM IST (23:30 UTC) - syncs yesterday IST
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "YYYY-MM-DD to sync; leave blank for yesterday IST"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-shopify-qty
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Sync Mcaff tab
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+        run: python scripts/sync_shopify_qty_to_sheet.py --tab Mcaff ${{ github.event.inputs.date && format('--date {0}', github.event.inputs.date) || '' }}
+
+      - name: Sync Hyphen tab
+        env:
+          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+        run: python scripts/sync_shopify_qty_to_sheet.py --tab Hyphen ${{ github.event.inputs.date && format('--date {0}', github.event.inputs.date) || '' }}
