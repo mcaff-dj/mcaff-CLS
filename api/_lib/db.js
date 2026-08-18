@@ -1111,15 +1111,20 @@ async function getDeliveryEscalationPage(view, opts = {}) {
 // describe the whole table (35k+ rows) instead of whatever subset happened to be loaded.
 // SUM(<condition>) counts matching rows; mysql2 hands those back as strings/Decimals, hence
 // the Number() coercion.
+// Counted by DISTINCT awb_code, not row count - the same AWB can legitimately have more than
+// one row (both brands, or a re-shipped order; ~4.7k AWBs currently do), and counting rows would
+// double-count those. COUNT(DISTINCT ...) already ignores NULL/blank awb_code on its own, so a
+// ticket with no AWB at all (144 rows currently) doesn't land in any bucket, including total -
+// this reports "how many distinct parcels", not "how many rows".
 async function getDeliveryEscalationStats(opts = {}) {
   const { clauses, params } = deFilterSql(opts);
   const where = clauses.length ? clauses.join(' AND ') : '1 = 1';
   const pool = await getPool();
   const [rows] = await pool.execute(
-    `SELECT COUNT(*) AS total,
-            SUM(agent_email IS NOT NULL AND agent_email != '') AS assigned,
-            SUM(${DE_RESOLVED_WHERE}) AS resolved,
-            SUM(${DE_FRESH_WHERE}) AS fresh
+    `SELECT COUNT(DISTINCT awb_code) AS total,
+            COUNT(DISTINCT CASE WHEN agent_email IS NOT NULL AND agent_email != '' THEN awb_code END) AS assigned,
+            COUNT(DISTINCT CASE WHEN ${DE_RESOLVED_WHERE} THEN awb_code END) AS resolved,
+            COUNT(DISTINCT CASE WHEN ${DE_FRESH_WHERE} THEN awb_code END) AS fresh
      FROM Delivery_escalation WHERE ${where}`, params);
   const r = rows[0] || {};
   return {
