@@ -1,15 +1,21 @@
-// The only way the browser reaches MySQL PEP_CLS.Delivery_escalation (see
-// scripts/create_delivery_escalation_table.py and api/_lib/db.js's
-// disposeDeliveryEscalationTicket) - same permission gate as api/delivery-escalation/sheet.js.
-// Called once, from DeliveryEscalationClient.js's saveAction, only when a ticket is disposed
-// with a TERMINAL outcome (Delivered or RTO) - not on claim, and not for a non-terminal outcome
-// like Escalated, which stays sheet-only. This table is a parallel write alongside the Google
-// Sheet, not a replacement: the sheet stays what the UI actually reads from; this is the
-// durable/queryable history side, same role MySQL's CLS_RTO_calling plays for RTO. GET returns
-// this table's rows - the Resolved tab reads them from here, not the sheet, since a sheet row
-// ages out of the client's own row-count cap while this table keeps the full history.
+// The only way the browser reaches MySQL PEP_CLS.Delivery_escalation - same permission gate as
+// api/delivery-escalation/sheet.js. GET returns both the Resolved tab's rows (outcome =
+// Delivered only - see getDeliveryEscalationHistory) and the Fresh tab's rows (outcome blank or
+// RTO - see getDeliveryEscalationFresh); this table is what BOTH tabs read from now, not the
+// sheet, since a sheet row ages out of the client's own row-count cap while this table keeps
+// the full history.
+//
+// POST action 'claim'/'dispose' is the Fresh tab's own claim/resolve, MySQL-only - no sheet
+// write at all, same model as CLS_RTO_calling's own claim/dispose (see
+// claimDeliveryEscalationTicketById/disposeDeliveryEscalationTicketById). Any other POST body
+// falls through to the older ticket-snapshot dispose (disposeDeliveryEscalationTicket) - kept
+// for now as a fallback, though nothing in DeliveryEscalationClient.js calls it any more since
+// Fresh moved off the sheet.
 const { getSession } = require('../_lib/session');
-const { disposeDeliveryEscalationTicket, getDeliveryEscalationHistory } = require('../_lib/db');
+const {
+  disposeDeliveryEscalationTicket, getDeliveryEscalationHistory,
+  getDeliveryEscalationFresh, claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
+} = require('../_lib/db');
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'deliveryescalation';
@@ -32,8 +38,8 @@ module.exports = async (req, res) => {
 
   if (req.method === 'GET') {
     try {
-      const rows = await getDeliveryEscalationHistory();
-      res.status(200).json({ rows });
+      const [rows, freshRows] = await Promise.all([getDeliveryEscalationHistory(), getDeliveryEscalationFresh()]);
+      res.status(200).json({ rows, freshRows });
     } catch (e) {
       console.error('api/delivery-escalation/record GET error:', e);
       res.status(500).json({ error: e.message || 'Could not load Delivery-Escalation history' });
@@ -46,7 +52,29 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const { ticket, outcome, agentRemarks } = req.body || {};
+  const { action, id, ticket, outcome, agentRemarks } = req.body || {};
+
+  // Fresh tab's claim/dispose, MySQL-only (no sheet write) - see db.js's
+  // claimDeliveryEscalationTicketById/disposeDeliveryEscalationTicketById.
+  if (action === 'claim' || action === 'dispose') {
+    if (!id) {
+      res.status(400).json({ error: 'id is required' });
+      return;
+    }
+    try {
+      if (action === 'claim') {
+        await claimDeliveryEscalationTicketById(id, session.email);
+      } else {
+        await disposeDeliveryEscalationTicketById(id, session.email, outcome, agentRemarks);
+      }
+      res.status(200).json({ ok: true });
+    } catch (e) {
+      console.error(`api/delivery-escalation/record ${action} error:`, e);
+      res.status(500).json({ error: e.message || `Could not ${action} Delivery-Escalation ticket` });
+    }
+    return;
+  }
+
   if (!ticket || !ticket.brand || !ticket.orderId) {
     res.status(400).json({ error: 'ticket.brand and ticket.orderId are required' });
     return;

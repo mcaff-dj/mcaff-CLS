@@ -109,3 +109,40 @@ def query(sql, params=None, database=None):
     cur = conn.cursor()
     cur.execute(sql, params or ())
     return cur.fetchall()
+
+
+def execute(sql, params=None, database=None):
+    """INSERT/UPDATE/DDL counterpart to query() - same shared connection and None-if-no-creds
+    contract, but commits (query() never does, since every existing caller only SELECTs)."""
+    global _current_db
+    cred = get_credential()
+    if cred is None:
+        return None
+    conn = _get_connection(cred)
+    target_db = database or cred["database"]
+    if _current_db != target_db:
+        conn.select_db(target_db)
+        _current_db = target_db
+    cur = conn.cursor()
+    cur.execute(sql, params or ())
+    conn.commit()
+    return cur.rowcount
+
+
+def executemany(sql, seq_of_params, database=None):
+    """Bulk counterpart to execute() - pymysql special-cases a plain 'INSERT ... VALUES (...)'
+    statement (ON DUPLICATE KEY UPDATE clause included) into one multi-row INSERT instead of
+    one round-trip per row, which is what makes a many-thousand-row backfill practical."""
+    global _current_db
+    cred = get_credential()
+    if cred is None:
+        return None
+    conn = _get_connection(cred)
+    target_db = database or cred["database"]
+    if _current_db != target_db:
+        conn.select_db(target_db)
+        _current_db = target_db
+    cur = conn.cursor()
+    cur.executemany(sql, seq_of_params)
+    conn.commit()
+    return cur.rowcount

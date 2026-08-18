@@ -16,6 +16,27 @@ it, and nobody notices until month-end.
 
 The sheet has no column holding ticket_number, so column Z is added purely as
 an internal dedup key - each run reads it to skip tickets already pasted.
+
+Each new row is ALSO mirrored into MySQL PEP_CLS.Delivery_escalation - the same A:K columns
+this job writes to the sheet (brand/order_id/awb_code/delivery_partner/query_class/
+query_category/wh_name, plus added_date/order_date/order_month/query_date/query_month) plus
+ticket_number (sheet column Z, this job's own dedup key) - see
+alter_delivery_escalation_add_sync_columns.py for the columns this needed that the table didn't
+already have.
+
+NOT a merge with the dispose-flow row for the same ticket, even though the table's own
+`dedup_key` generated column (live schema, not reflected in create_delivery_escalation_table.py)
+was clearly built to make that possible - it's IF(ticket_number is set, brand+ticket_number,
+brand+awb_code). This job supplies ticket_number, so its rows key off the ticket_number branch.
+api/_lib/db.js's disposeDeliveryEscalationTicket does NOT put ticket_number in its own INSERT
+(despite having it on the ticket object via ticketSnapshot), so ITS rows key off the awb_code
+branch instead. Different dedup_key -> a ticket this job pre-inserts and later gets resolved by
+an agent ends up as TWO rows, not one filled-in row. Fixing this means adding ticket_number to
+disposeDeliveryEscalationTicket's INSERT - deliberately not done here, out of this change's
+scope.
+
+Best-effort, same as that JS side's own mirror write: a MySQL failure here is logged and
+skipped, never allowed to undo or block the sheet write that already succeeded.
 """
 import argparse
 import sys
@@ -202,6 +223,43 @@ def build_sheet_row(row):
     return row_out
 
 
+DELIVERY_ESCALATION_INSERT = """
+    INSERT INTO Delivery_escalation
+        (brand, order_id, awb_code, delivery_partner, query_class, query_category,
+         wh_name, ticket_number, added_date, order_date, order_month, query_date, query_month)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON DUPLICATE KEY UPDATE
+        order_id = VALUES(order_id), delivery_partner = VALUES(delivery_partner),
+        query_class = VALUES(query_class), query_category = VALUES(query_category),
+        wh_name = VALUES(wh_name), ticket_number = VALUES(ticket_number),
+        added_date = VALUES(added_date), order_date = VALUES(order_date),
+        order_month = VALUES(order_month), query_date = VALUES(query_date),
+        query_month = VALUES(query_month)
+"""
+
+
+def build_delivery_escalation_row(row, tab):
+    """Same field mapping as build_sheet_row (see its comments for what each source column
+    means), but as raw values for MySQL - real DATE objects for added_date/order_date/query_date,
+    not the sheet's display-formatted strings, since this copy needs to stay queryable."""
+    (ticket_number, subcategory, order_name, disposition_order,
+     awb, partner, order_date, created_at, resolved_at, warehouse) = row
+    parent_order = order_name or disposition_order or ""
+    return (
+        tab, parent_order, awb or None, partner or None, "Delivery",
+        subcategory or None, warehouse or None, ticket_number,
+        resolved_at, order_date, format_month(order_date), created_at, format_month(created_at),
+    )
+
+
+def upsert_delivery_escalation_rows(rows, tab):
+    for r in rows:
+        try:
+            mysql_lib.execute(DELIVERY_ESCALATION_INSERT, build_delivery_escalation_row(r, tab), database="PEP_CLS")
+        except Exception as e:
+            print(f"  WARNING: Delivery_escalation mirror failed for ticket {r[0]}: {e}")
+
+
 def pick_formula_sources(block, first_col=FORMULA_FIRST_COL, first_row=2):
     """col_index -> 1-based row number to drag that column's formula from.
 
@@ -277,13 +335,18 @@ def sync_tab(tab, dry_run, since=None):
     db_rows = fetch_today_delivery_tickets(table, since=since)
     print(f"  {len(db_rows)} Delivery-class tickets resolved {'since ' + since if since else 'today'} in DB")
 
-    new_rows = [build_sheet_row(r) for r in db_rows if r[0] not in existing]
+    new_db_rows = [list(r) for r in db_rows if r[0] not in existing]
+    new_rows = [build_sheet_row(r) for r in new_db_rows]
     print(f"  {len(new_rows)} new rows to {'would append' if dry_run else 'append'}")
 
     if not new_rows:
         return
 
     fill_missing_awb(new_rows)
+    # fill_missing_awb only patches the built sheet row (index 4) - carry any backfilled AWB
+    # back onto the raw DB row (index 4 there too) so the MySQL mirror below gets it too.
+    for db_row, sheet_row in zip(new_db_rows, new_rows):
+        db_row[4] = sheet_row[4]
 
     if dry_run:
         for r in new_rows[:5]:
@@ -292,6 +355,7 @@ def sync_tab(tab, dry_run, since=None):
             print(f"    ... and {len(new_rows) - 5} more")
         start_row = get_last_data_row(tab) + 1
         drag_formulas(tab, start_row, start_row + len(new_rows) - 1, dry_run=True)
+        print(f"  would mirror {len(new_db_rows)} row(s) into MySQL Delivery_escalation")
         return
 
     ensure_ticket_number_header(tab)
@@ -300,6 +364,7 @@ def sync_tab(tab, dry_run, since=None):
     print(f"  wrote rows {start_row}-{start_row + len(new_rows) - 1}")
     # After the value write, never before: the write blanks L:P on these rows.
     drag_formulas(tab, start_row, start_row + len(new_rows) - 1)
+    upsert_delivery_escalation_rows(new_db_rows, tab)
 
 
 def self_check():
@@ -319,6 +384,21 @@ def self_check():
     # MCaff-prefixed orders look up by their bare numeric ID; other brands keep their prefix.
     assert _awb_lookup_key("MCaff9097914") == "9097914"
     assert _awb_lookup_key("HYP37526450") == "HYP37526450"
+    # MySQL mirror row: brand = the tab it came from, ticket_number carried straight through,
+    # order_month/query_month recomputed rather than reusing build_sheet_row's display strings.
+    from datetime import date, datetime
+    row = ("TCK1", "Wrong Pincode", "", "MCaff123", "AWB1", "BlueDart",
+           date(2026, 1, 5), datetime(2026, 1, 6, 10, 0), datetime(2026, 1, 7, 9, 0), "WH1")
+    assert build_delivery_escalation_row(row, "mCaffeine") == (
+        "mCaffeine", "MCaff123", "AWB1", "BlueDart", "Delivery", "Wrong Pincode", "WH1", "TCK1",
+        row[8], row[6], format_month(row[6]), row[7], format_month(row[7]),
+    )
+    # Blank order_name falls back to disposition_order, same as build_sheet_row's parent_order.
+    row2 = ("TCK2", None, "", "HYP999", "", "Delhivery", None, None, None, "")
+    assert build_delivery_escalation_row(row2, "HYPHEN") == (
+        "HYPHEN", "HYP999", None, "Delhivery", "Delivery", None, None, "TCK2",
+        None, None, "", None, "",
+    )
     print("self-check ok")
 
 

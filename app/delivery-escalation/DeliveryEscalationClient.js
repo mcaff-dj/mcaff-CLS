@@ -1,20 +1,24 @@
 'use client';
 
 // Delivery-Escalation's own independent workspace - modeled on app/ndr-calling/NdrCallingClient.js
-// (claim a row, record a resolution, write it straight back to the sheet). Deliberately NOT built
-// on the shared app/_calling/useCallingSession.js: this process has no Postgres-backed roster,
-// presence, quota, business hours, or round-robin assignment robot - see
+// (claim a row, record a resolution). Deliberately NOT built on the shared
+// app/_calling/useCallingSession.js: this process has no Postgres-backed roster, presence,
+// quota, business hours, or round-robin assignment robot - see
 // api/_lib/callingProcesses.json's "deliveryescalation" entry for why. It DOES reuse one piece of
 // app/_calling/CallingAdminPanel.js - useProcessDispositions/ProcessDispositionsCard, the same
 // admin-configurable disposition tree NDR's Admin Panel uses - since an outcome list an admin can
 // shape without a code change is worth the one Postgres table (calling_process_dispositions) it
 // costs; CallingHoursCard and the roster table are NOT used, on purpose. Access is still gated the
 // same way everything else in this app is: report_tab_permissions, checked server-side by
-// api/delivery-escalation/sheet.js.
+// api/delivery-escalation/sheet.js and api/delivery-escalation/record.js.
 //
-// Its source data lives across two Sheet tabs, one per brand (HYPHEN, mCaffeine) - fetched
-// independently and merged into a single list, with Brand (= the tab it came from) as its own
-// filterable column, rather than exposing a tab switcher in the UI.
+// Two data sources, not one: the Sheet (two tabs, one per brand - HYPHEN, mCaffeine, fetched
+// independently and merged) still feeds Overview's aggregate counts (Total/Assigned/
+// Unassigned), same as always. Fresh and Resolved are both MySQL-backed instead (see
+// claimMysqlTicket/disposeMysqlTicket, and api/_lib/db.js's getDeliveryEscalationFresh/
+// getDeliveryEscalationHistory) - outcome blank/RTO is Fresh, outcome Delivered is Resolved;
+// claim and dispose write straight to that row, no sheet cell involved, same model as the RTO
+// calling process's own CLS_RTO_calling table.
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { CustomSelect, CheckIcon, XIcon, RefreshIcon, Overlay } from '../_calling/ui';
 import { useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
@@ -36,9 +40,10 @@ const MAX_ROWS_PER_TAB = 12000;
 // columns (differs between the two tabs; City/State/etc.), not ours to read or touch. Z
 // (Ticket Number) is the one exception in that range - it's the same column, same meaning, on
 // both tabs.
-// Agent Name / Action Date / Outcome / Remarks - the only cells this UI ever writes. Appended
-// fresh after Z (not reusing anything in R:Z) because nothing in that range belongs to this app.
-const COL_AGENT = 'AA', COL_ACTION_DATE = 'AB', COL_OUTCOME = 'AC', COL_REMARKS = 'AD';
+// Agent Name / Action Date / Outcome / Remarks - AA:AD, read-only now (Fresh/Resolved claim and
+// dispose write to MySQL directly, not the sheet - see claimMysqlTicket/disposeMysqlTicket).
+// Still read here because Overview's Assigned/Unassigned counts use assignedAgent off this same
+// sheet-sourced ticket list.
 const WRITE_LAST_COL = 'AD';
 
 async function fetchValues(range) {
@@ -74,66 +79,25 @@ async function fetchTab(tab) {
   const lastRow = totalRows + 1;
   const startRow = Math.max(2, lastRow - MAX_ROWS_PER_TAB + 1);
   // One pass across the full width this UI cares about - the 17 source columns (A:Q) plus the
-  // 4 columns it writes (AA:AD) - rather than two ranges stitched back together per row.
+  // 4 legacy claim/outcome columns (AA:AD, read-only now - see WRITE_LAST_COL) - rather than
+  // two ranges stitched back together per row.
   const rows = await fetchValues(`'${tab}'!A${startRow}:${WRITE_LAST_COL}${lastRow}`);
   return { tab, rows: rows.map((row, idx) => mapRow(row, startRow + idx, tab)), totalRows };
 }
 
-// A ticket disposed with either of these top-level outcomes is DONE - it moves into MySQL
-// (see recordDeliveryEscalationTicket) and off the Fresh tab into Resolved. Any other outcome
-// (e.g. Escalated) is treated as still-open: it stays sheet-only and keeps showing in Fresh
-// until it's re-disposed as one of these two. Matched against the disposition path's TOP-LEVEL
-// label (outcomeTopLevel below), not the full " > " path, so "Delivered > <some sub-reason>"
-// still counts if the admin ever nests something under it.
-const TERMINAL_OUTCOMES = ['Delivered', 'RTO'];
-function outcomeTopLevel(t) {
-  return (t.outcome || '').split(' > ')[0].trim();
-}
 
-// Moves a terminally-disposed ticket into MySQL PEP_CLS.Delivery_escalation (see
-// api/delivery-escalation/record.js) - a parallel write alongside the sheet write, not a
-// replacement: the sheet stays what this UI reads from, MySQL is the durable/queryable history
-// side (same role CLS_RTO_calling plays for RTO). Only called for a TERMINAL_OUTCOMES dispose -
-// see saveAction. Best-effort by design - a failure here must never undo or block a sheet write
-// that already succeeded, so callers only log, never throw.
-async function recordDeliveryEscalationTicket(body) {
-  try {
-    const r = await fetch('/api/delivery-escalation/record', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!r.ok) {
-      const d = await r.json().catch(() => ({}));
-      console.error('recordDeliveryEscalationTicket failed:', d.error || r.status);
-    }
-  } catch (e) {
-    console.error('recordDeliveryEscalationTicket failed:', e.message || e);
-  }
-}
-
-// The subset of ticket fields Delivery_escalation actually stores - kept separate from the
-// full mapRow shape so a dispose call never accidentally ships internal-only fields (id,
-// rowNum, tab) as if they were sheet columns.
-function ticketSnapshot(t) {
-  return {
-    brand: t.brand, orderId: t.orderId, awbCode: t.awb, deliveryPartner: t.deliveryPartner,
-    queryClass: t.queryClass, queryCategory: t.queryCategory, whName: t.whName,
-    statusAsPerAwb: t.statusAsPerAwb, tat: t.tat, ticketNumber: t.ticketNumber,
-  };
-}
-
-// Resolved tab's data source - MySQL PEP_CLS.Delivery_escalation, not the sheet: a sheet row
-// ages out of fetchTab's MAX_ROWS_PER_TAB window once enough newer rows are added above it,
-// which silently dropped old resolved tickets from view (see api/_lib/db.js's
-// getDeliveryEscalationHistory comment). Rows here have no sheet rowNum/tab of their own, so
-// they're mapped with readOnly: true - openAction/saveAction skip the claim/write-back path
-// for them (nothing to write back to; the ticket is already terminal).
-async function fetchResolvedHistory() {
+// Fresh AND Resolved both read from MySQL PEP_CLS.Delivery_escalation now, not the sheet - a
+// sheet row ages out of fetchTab's MAX_ROWS_PER_TAB window once enough newer rows are added
+// above it, which silently dropped old resolved tickets from view (see api/_lib/db.js's
+// getDeliveryEscalationHistory comment). Resolved rows are mapped readOnly: true (outcome is
+// already Delivered, nothing left to action); Fresh rows are actionable via
+// claimMysqlTicket/disposeMysqlTicket below, keyed on this table's own id - there's no sheet
+// rowNum/tab for either any more.
+async function fetchDeliveryEscalationMysql() {
   const r = await fetch('/api/delivery-escalation/record');
-  if (!r.ok) throw new Error(`Resolved history ${r.status}`);
+  if (!r.ok) throw new Error(`Delivery-Escalation history ${r.status}`);
   const d = await r.json();
-  return d.rows || [];
+  return { resolved: d.rows || [], fresh: d.freshRows || [] };
 }
 
 function mapHistoryRow(row, i) {
@@ -147,20 +111,42 @@ function mapHistoryRow(row, i) {
     assignedAgent: row.agent_email || '',
     actionDate: row.disposed_at ? new Date(row.disposed_at).toLocaleDateString('en-GB') : '',
     outcome: row.outcome || '', remarks: row.agent_remarks || '',
+    tatBucket: row.tat_bucket || '',
   };
 }
 
-async function writeCells(tab, ranges) {
-  const r = await fetch('/api/delivery-escalation/sheet', {
+function mapFreshRow(row) {
+  return {
+    id: `fresh-${row.id}`, mysqlId: row.id, tab: null, rowNum: null, readOnly: false,
+    brand: row.brand, orderId: row.order_id, awb: row.awb_code || '',
+    deliveryPartner: row.delivery_partner || '', queryClass: row.query_class || '',
+    queryCategory: row.query_category || '', whName: row.wh_name || '',
+    statusAsPerAwb: row.status_as_per_awb || '', tat: row.tat || '',
+    assignedAgent: row.agent_email || '', outcome: row.outcome || '',
+  };
+}
+
+// Fresh tab's claim/resolve - MySQL-only, no sheet write at all, same model as CLS_RTO_calling's
+// own claim/dispose (see api/_lib/db.js's claimDeliveryEscalationTicketById/
+// disposeDeliveryEscalationTicketById). Unlike the old sheet write path these throw on failure -
+// this IS the write now, not a best-effort mirror alongside one, so a failure has to surface to
+// the agent instead of being silently swallowed.
+async function claimMysqlTicket(id) {
+  const r = await fetch('/api/delivery-escalation/record', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      op: 'batchUpdate', sid: SHEET_ID,
-      data: ranges.map(({ range, values }) => ({ range: `'${tab}'!${range}`, values: [values] })),
-    }),
+    body: JSON.stringify({ action: 'claim', id }),
   });
-  if (!r.ok) throw new Error(`Sheets write ${r.status}`);
-  return r.json();
+  if (!r.ok) throw new Error(`Claim failed ${r.status}`);
+}
+
+async function disposeMysqlTicket(id, outcome, agentRemarks) {
+  const r = await fetch('/api/delivery-escalation/record', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'dispose', id, outcome, agentRemarks }),
+  });
+  if (!r.ok) throw new Error(`Save failed ${r.status}`);
 }
 
 export default function DeliveryEscalationClient() {
@@ -204,6 +190,7 @@ export default function DeliveryEscalationClient() {
   const [tickets, setTickets] = useState([]);
   const [totalRows, setTotalRows] = useState(0);
   const [resolvedTickets, setResolvedTickets] = useState([]);
+  const [freshTickets, setFreshTickets] = useState([]);
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState('—');
   const [syncError, setSyncError] = useState(null);
@@ -212,15 +199,16 @@ export default function DeliveryEscalationClient() {
   const sync = useCallback(async (silent = false) => {
     setSyncing(true);
     try {
-      const settled = await Promise.allSettled([...TABS.map(fetchTab), fetchResolvedHistory()]);
+      const settled = await Promise.allSettled([...TABS.map(fetchTab), fetchDeliveryEscalationMysql()]);
       const tabSettled = settled.slice(0, TABS.length);
-      const historySettled = settled[TABS.length];
+      const mysqlSettled = settled[TABS.length];
       const ok = tabSettled.filter(s => s.status === 'fulfilled').map(s => s.value);
       const failed = tabSettled.filter(s => s.status === 'rejected');
-      if (historySettled.status === 'fulfilled') {
-        setResolvedTickets(historySettled.value.map(mapHistoryRow));
+      if (mysqlSettled.status === 'fulfilled') {
+        setResolvedTickets(mysqlSettled.value.resolved.map(mapHistoryRow));
+        setFreshTickets(mysqlSettled.value.fresh.map(mapFreshRow));
       } else {
-        failed.push(historySettled);
+        failed.push(mysqlSettled);
       }
       if (!ok.length) throw (failed[0]?.reason || new Error('Sync failed'));
       setTickets(ok.flatMap(o => o.rows));
@@ -300,9 +288,9 @@ export default function DeliveryEscalationClient() {
     let ticket = t;
     if (!t.readOnly && !t.assignedAgent && googleUser?.email) {
       try {
-        await writeCells(t.tab, [{ range: `${COL_AGENT}${t.rowNum}`, values: [googleUser.email] }]);
+        await claimMysqlTicket(t.mysqlId);
         ticket = { ...t, assignedAgent: googleUser.email };
-        setTickets(prev => prev.map(x => x.id === t.id ? ticket : x));
+        setFreshTickets(prev => prev.map(x => x.id === t.id ? ticket : x));
       } catch (e) {
         showToast(`⚠️ Could not claim ticket: ${e.message}`);
       }
@@ -319,23 +307,15 @@ export default function DeliveryEscalationClient() {
     setSaving(true);
     try {
       const outcome = dispPath.join(' > ');
-      const now = new Date();
-      const actionDate = `${String(now.getDate()).padStart(2, '0')}-${String(now.getMonth() + 1).padStart(2, '0')}-${now.getFullYear()}`;
-      const claimNow = !detailTkt.assignedAgent && googleUser?.email;
-      const ranges = [
-        { range: `${COL_ACTION_DATE}${detailTkt.rowNum}`, values: [actionDate] },
-        { range: `${COL_OUTCOME}${detailTkt.rowNum}`, values: [outcome] },
-        { range: `${COL_REMARKS}${detailTkt.rowNum}`, values: [remarks.trim()] },
-      ];
-      if (claimNow) ranges.push({ range: `${COL_AGENT}${detailTkt.rowNum}`, values: [googleUser.email] });
-      await writeCells(detailTkt.tab, ranges);
-      const updatedTicket = { ...detailTkt, actionDate, outcome, remarks: remarks.trim(), ...(claimNow ? { assignedAgent: googleUser.email } : {}) };
-      setTickets(prev => prev.map(x => x.id === detailTkt.id ? updatedTicket : x));
-      if (TERMINAL_OUTCOMES.includes(outcomeTopLevel(updatedTicket))) {
-        recordDeliveryEscalationTicket({ ticket: ticketSnapshot(updatedTicket), outcome, agentRemarks: remarks.trim() });
-      }
+      const trimmedRemarks = remarks.trim();
+      await disposeMysqlTicket(detailTkt.mysqlId, outcome, trimmedRemarks);
+      // The disposed ticket now belongs to Resolved (outcome Delivered) or falls out of both
+      // lists entirely (any other outcome, e.g. Escalated) - resync from MySQL instead of
+      // guessing which bucket it moves to client-side.
+      setFreshTickets(prev => prev.filter(x => x.id !== detailTkt.id));
       showToast('Resolution saved');
       setDetailTkt(null);
+      sync(true);
     } catch (e) {
       showToast(`⚠️ Could not save: ${e.message}`);
     } finally {
@@ -350,21 +330,23 @@ export default function DeliveryEscalationClient() {
 
   const scopedTickets = useMemo(() => tickets.filter(inMyScope), [tickets, myScopeEmail]);
   const scopedResolved = useMemo(() => resolvedTickets.filter(inMyScope), [resolvedTickets, myScopeEmail]);
+  // Fresh (MySQL): outcome blank or RTO - see api/_lib/db.js's getDeliveryEscalationFresh.
+  // RTO isn't terminal any more (an RTO'd order can still be re-shipped and later delivered),
+  // so it stays here instead of moving to Resolved.
+  const scopedFresh = useMemo(() => freshTickets.filter(inMyScope), [freshTickets, myScopeEmail]);
   const total = scopedTickets.length;
   const assigned = useMemo(() => scopedTickets.filter(t => t.assignedAgent).length, [scopedTickets]);
-  // Resolved count comes from MySQL (scopedResolved), not the sheet - see fetchResolvedHistory.
+  // Resolved count comes from MySQL (scopedResolved), not the sheet - see
+  // fetchDeliveryEscalationMysql - and is Delivered-only now, RTO no longer counts as resolved.
   const resolved = scopedResolved.length;
-  // Fresh = still needs work: never disposed, OR disposed as Escalated (not done, just waiting
-  // on the delivery partner) - anything else non-terminal would land here too by the same rule,
-  // but today's only non-terminal outcome is Escalated.
-  const freshCount = useMemo(() => scopedTickets.filter(t => t.assignedAgent && !TERMINAL_OUTCOMES.includes(outcomeTopLevel(t))).length, [scopedTickets]);
+  const freshCount = scopedFresh.length;
   const unassignedCount = total - assigned;
   const resolutionRate = assigned > 0 ? Math.round((resolved / assigned) * 100) : 0;
 
   const agentOptions = useMemo(() => {
-    const emails = Array.from(new Set([...scopedTickets, ...scopedResolved].map(t => t.assignedAgent).filter(Boolean)));
+    const emails = Array.from(new Set([...scopedTickets, ...scopedResolved, ...scopedFresh].map(t => t.assignedAgent).filter(Boolean)));
     return [{ value: 'ALL', label: 'All Agents' }, ...emails.sort().map(e => ({ value: e, label: e.split('@')[0] }))];
-  }, [scopedTickets, scopedResolved]);
+  }, [scopedTickets, scopedResolved, scopedFresh]);
 
   const applyFilters = useCallback((list) => {
     const q = search.trim().toLowerCase();
@@ -377,13 +359,14 @@ export default function DeliveryEscalationClient() {
   }, [search, brandFilter, agentFilter]);
 
   const filteredBase = useMemo(() => applyFilters(scopedTickets), [applyFilters, scopedTickets]);
+  const filteredFresh = useMemo(() => applyFilters(scopedFresh), [applyFilters, scopedFresh]);
   const filteredResolved = useMemo(() => applyFilters(scopedResolved), [applyFilters, scopedResolved]);
 
   const rowsForTab = useMemo(() => {
-    if (tab === 'fresh') return filteredBase.filter(t => t.assignedAgent && !TERMINAL_OUTCOMES.includes(outcomeTopLevel(t)));
+    if (tab === 'fresh') return filteredFresh;
     if (tab === 'resolved') return filteredResolved;
     return filteredBase;
-  }, [filteredBase, filteredResolved, tab]);
+  }, [filteredBase, filteredFresh, filteredResolved, tab]);
 
   const totalPages = Math.max(1, Math.ceil(rowsForTab.length / perPage));
   const pageRows = useMemo(() => rowsForTab.slice((page - 1) * perPage, page * perPage), [rowsForTab, page, perPage]);
@@ -393,7 +376,7 @@ export default function DeliveryEscalationClient() {
   // handleDispositions enforces for POST/PUT/DELETE.
   const tabsList = [
     { key: 'overview', label: '📊 Overview', count: total },
-    { key: 'fresh', label: '⚡ Fresh (Assigned)', count: freshCount },
+    { key: 'fresh', label: '⚡ Fresh', count: freshCount },
     { key: 'resolved', label: '✅ Resolved', count: resolved },
     ...(sessionIsAdmin ? [{ key: 'admin', label: '🛡️ Admin Panel', count: (processDispositions || []).length }] : []),
   ];
@@ -549,6 +532,7 @@ export default function DeliveryEscalationClient() {
                           {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">Action Date</th>}
                           {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">Outcome</th>}
                           {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">Remarks</th>}
+                          {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">TAT Bucket</th>}
                           <th className="py-3 px-4 text-right font-medium">Action</th>
                         </tr></thead>
                         <tbody className="divide-y divide-zinc-800/50">
@@ -566,6 +550,7 @@ export default function DeliveryEscalationClient() {
                               {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.actionDate}</td>}
                               {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.outcome}</td>}
                               {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400 max-w-xs truncate" title={t.remarks}>{t.remarks}</td>}
+                              {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.tatBucket}</td>}
                               <td className="py-3 px-4 text-right">
                                 <button
                                   onClick={() => openAction(t)}
@@ -577,7 +562,7 @@ export default function DeliveryEscalationClient() {
                             </tr>
                           ))}
                           {pageRows.length === 0 && (
-                            <tr><td colSpan={tab === 'resolved' ? 13 : 10} className="py-8 text-center text-zinc-500">No tickets in this view.</td></tr>
+                            <tr><td colSpan={tab === 'resolved' ? 14 : 10} className="py-8 text-center text-zinc-500">No tickets in this view.</td></tr>
                           )}
                         </tbody>
                       </table>

@@ -1010,15 +1010,89 @@ async function disposeDeliveryEscalationTicket(ticket, email, outcome, agentRema
 // the full history the sheet can't guarantee. Capped at the same row count as the sheet's own
 // MAX_ROWS_PER_TAB for the same reason: an unbounded read risks the Lambda response payload
 // limit (see api/_lib/escalationSheet.js's own comment on this).
+//
+// Resolved means outcome = Delivered ONLY - RTO is no longer treated as terminal (an RTO'd
+// order can still be re-shipped and later delivered, so it stays in Fresh instead - see
+// getDeliveryEscalationFresh). Matched on the top-level outcome label (outcome = 'Delivered'
+// or 'Delivered > <sub-reason>'), same as the client's own outcomeTopLevel used to.
+//
+// tat_bucket buckets days-to-deliver (disposed_at, when the agent actually marked it Delivered,
+// minus added_date) into the same 6 named buckets the sheet's own column P formula already
+// uses for ITS OWN "Delivered Date minus Query Date" metric - a different basis (that one's
+// fed by the separate logistics pipeline's Delivered Date, this one's the agent's own dispose
+// date against added_date), so this is a distinct figure, not a duplicate of the sheet's TAT.
+// 'unresolved' is reused here for "can't compute" (added_date missing, e.g. on some pre-backfill
+// historical rows) as well as "not yet delivered" - Delivered-only rows are the only ones
+// reaching this query, so the "not yet delivered" case can't actually occur here.
 async function getDeliveryEscalationHistory() {
   const { rows } = await sql`
     SELECT brand, order_id, awb_code, delivery_partner, query_class, query_category, wh_name,
-           status_as_per_awb, tat, agent_email, outcome, agent_remarks, disposed_at
+           status_as_per_awb, tat, agent_email, outcome, agent_remarks, disposed_at,
+           CASE
+             WHEN disposed_at IS NULL OR added_date IS NULL THEN 'unresolved'
+             WHEN DATEDIFF(disposed_at, added_date) <= 2 THEN 'Within 48 hrs'
+             WHEN DATEDIFF(disposed_at, added_date) <= 4 THEN 'Within 2-4 days'
+             WHEN DATEDIFF(disposed_at, added_date) <= 8 THEN '4-8 days'
+             WHEN DATEDIFF(disposed_at, added_date) <= 10 THEN '8-10 days'
+             ELSE 'Greater than 10 days'
+           END AS tat_bucket
     FROM Delivery_escalation
+    WHERE outcome = 'Delivered' OR outcome LIKE 'Delivered > %'
     ORDER BY disposed_at DESC
     LIMIT 12000
   `;
   return rows;
+}
+
+// Delivery-Escalation's Fresh tab - fully MySQL-backed (see api/delivery-escalation/record.js),
+// unlike the old sheet-driven Fresh (Assigned) tab this replaces. A ticket is Fresh whenever
+// its outcome is blank (never disposed), RTO (see getDeliveryEscalationHistory's own comment on
+// why RTO isn't terminal), or Escalated (still waiting on the delivery partner, not done) -
+// anything else (Delivered, or any other disposition) falls out of both this and Resolved.
+//
+// Deliberately no "assigned to me" filter here: claiming only ever happens through THIS table's
+// own agent_email/assigned_at (see claimDeliveryEscalationTicketById) - there's no separate
+// claim-time write anywhere else to filter on, so requiring agent_email would hide every ticket
+// nobody's claimed via this flow yet, which is most of them right after the cron-mirror/backfill
+// populated this table. id is returned as this row's own key - claim/dispose act on it directly,
+// there's no sheet tab/row to reference any more.
+async function getDeliveryEscalationFresh() {
+  const { rows } = await sql`
+    SELECT id, brand, order_id, awb_code, delivery_partner, query_class, query_category,
+           wh_name, status_as_per_awb, tat, ticket_number, agent_email, outcome
+    FROM Delivery_escalation
+    WHERE outcome IS NULL OR outcome = ''
+       OR outcome = 'RTO' OR outcome LIKE 'RTO > %'
+       OR outcome = 'Escalated' OR outcome LIKE 'Escalated > %'
+    ORDER BY id DESC
+    LIMIT 12000
+  `;
+  return rows;
+}
+
+// Claims a Fresh ticket for an agent, MySQL-only - same "first claim wins" shape as the sheet
+// flow's own claim-on-open, just against this row's id instead of a sheet cell. The WHERE guard
+// makes this safe to call unconditionally (no-ops, 0 rows affected, if someone already claimed
+// it) - callers don't need to check assignment first.
+async function claimDeliveryEscalationTicketById(id, email) {
+  await sql`
+    UPDATE Delivery_escalation
+    SET agent_email = ${email}, assigned_at = now()
+    WHERE id = ${id} AND (agent_email IS NULL OR agent_email = '')
+  `;
+}
+
+// Disposes a Fresh ticket directly against its own row - no sheet write at all, same model as
+// CLS_RTO_calling's own claim/dispose. Claims on the agent's own behalf first if nobody has
+// (claim-on-resolve), same as the old sheet flow's claimNow in saveAction.
+async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRemarks) {
+  await sql`
+    UPDATE Delivery_escalation
+    SET outcome = ${outcome || null}, agent_remarks = ${agentRemarks || null}, disposed_at = now(),
+        agent_email = CASE WHEN agent_email IS NULL OR agent_email = '' THEN ${email} ELSE agent_email END,
+        assigned_at = CASE WHEN assigned_at IS NULL THEN now() ELSE assigned_at END
+    WHERE id = ${id}
+  `;
 }
 
 // dateFrom/dateTo are inclusive "YYYY-MM-DD" strings (or null for unbounded), interpreted
@@ -1748,6 +1822,7 @@ module.exports = {
   deleteProcessDisposition, reorderProcessDispositions,
   claimNdrLead, disposeNdrLead,
   disposeDeliveryEscalationTicket, getDeliveryEscalationHistory,
+  getDeliveryEscalationFresh, claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,
   // Exported for api/_lib/db.retry.test.js, db.cache.test.js and db.refundExport.test.js only -
