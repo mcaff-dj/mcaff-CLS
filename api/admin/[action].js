@@ -27,7 +27,9 @@
 //   POST   /api/admin/dispositions    -> add: { processKey, label, description?, parentId? }
 //                                        parentId omitted/null = top-level option; a parent's
 //                                        id = add as its child, at any depth.
-//   PUT    /api/admin/dispositions    -> edit: { processKey, id, label?, description? }
+//   PUT    /api/admin/dispositions    -> edit: { processKey, id, label?, description?,
+//                                        childrenInputType? } - 'single'|'multi'|'text',
+//                                        governs how id's OWN children render to an agent
 //                                        or reorder ONE scope: { processKey, orderedIds: [...],
 //                                        parentId? } - parentId omitted/null reorders the
 //                                        top-level list, set reorders that parent's children.
@@ -461,7 +463,7 @@ async function handleDispositions(req, res, session) {
     try {
       const dispositions = Array.isArray(body.orderedIds)
         ? await reorderProcessDispositions(body.processKey, body.parentId, body.orderedIds)
-        : await updateProcessDisposition(body.processKey, body.id, { label: body.label, description: body.description });
+        : await updateProcessDisposition(body.processKey, body.id, { label: body.label, description: body.description, childrenInputType: body.childrenInputType });
       await logEvent(session.uid, session.email, 'calling', 'disposition-edit',
         Array.isArray(body.orderedIds) ? `${body.processKey}: reordered` : `${body.processKey}: edited #${body.id}`, ip);
       res.status(200).json({ dispositions });

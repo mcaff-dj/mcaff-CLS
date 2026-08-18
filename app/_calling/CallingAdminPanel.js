@@ -450,41 +450,63 @@ function DispRow({ d, list, index, parentId, depth, disp }) {
 // Recursive: renders d's own row, then (if expanded) every child at depth+1 plus an "add child"
 // input scoped to d - so any option, at any depth, can grow its own sub-options the same way a
 // top-level one does.
-function DispNode({ d, list, index, parentId, depth, disp }) {
-  const { expandedDispIds, newChildDrafts, setNewChildDrafts, addDisposition, savingDisposition } = disp;
+function DispNode({ d, list, index, parentId, depth, disp, allowInputTypeControl }) {
+  const { expandedDispIds, newChildDrafts, setNewChildDrafts, addDisposition, savingDisposition, saveDispositionEdit } = disp;
+  const childrenInputType = d.childrenInputType || 'single';
   return (
     <div key={d.id}>
       <DispRow d={d} list={list} index={index} parentId={parentId} depth={depth} disp={disp} />
       {expandedDispIds.has(d.id) && (
         <div className="mt-1.5 space-y-1.5">
+          {allowInputTypeControl && (
+            <div className="flex items-center gap-2" style={{ marginLeft: (depth + 1) * 32 }}>
+              <span className="w-[13px]" />
+              <label className="text-[11px] font-semibold text-zinc-500">Children answer type:</label>
+              <select
+                value={childrenInputType}
+                onChange={(e) => saveDispositionEdit(d.id, { childrenInputType: e.target.value })}
+                className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[12px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+              >
+                <option value="single">Single choice (buttons)</option>
+                <option value="multi">Multiple choice (checkboxes)</option>
+                <option value="text">Free text</option>
+              </select>
+            </div>
+          )}
           {d.children.map((c, ci) => (
-            <DispNode key={c.id} d={c} list={d.children} index={ci} parentId={d.id} depth={depth + 1} disp={disp} />
+            <DispNode key={c.id} d={c} list={d.children} index={ci} parentId={d.id} depth={depth + 1} disp={disp} allowInputTypeControl={allowInputTypeControl} />
           ))}
-          <div className="flex items-center gap-2" style={{ marginLeft: (depth + 1) * 32 }}>
-            <span className="w-[13px]" />
-            <input
-              value={(newChildDrafts[d.id] || {}).label || ''}
-              onChange={(e) => setNewChildDrafts((prev) => ({ ...prev, [d.id]: { label: e.target.value, description: (prev[d.id] || {}).description || '' } }))}
-              onKeyDown={(e) => { if (e.key === 'Enter' && (newChildDrafts[d.id] || {}).label?.trim()) addDisposition(d.id); }}
-              placeholder="New child option"
-              maxLength={120}
-              className="w-[220px] bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-            />
-            <input
-              value={(newChildDrafts[d.id] || {}).description || ''}
-              onChange={(e) => setNewChildDrafts((prev) => ({ ...prev, [d.id]: { label: (prev[d.id] || {}).label || '', description: e.target.value } }))}
-              onKeyDown={(e) => { if (e.key === 'Enter' && (newChildDrafts[d.id] || {}).label?.trim()) addDisposition(d.id); }}
-              placeholder="Description (optional)"
-              className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-            />
-            <button
-              onClick={() => addDisposition(d.id)}
-              disabled={savingDisposition || !(newChildDrafts[d.id] || {}).label?.trim()}
-              className="h-8 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-50 shrink-0"
-            >
-              + Add child
-            </button>
-          </div>
+          {childrenInputType === 'text' ? (
+            <p className="text-[12px] text-zinc-500" style={{ marginLeft: (depth + 1) * 32 + 13 }}>
+              Agents type free text here - no child options to add.
+            </p>
+          ) : (
+            <div className="flex items-center gap-2" style={{ marginLeft: (depth + 1) * 32 }}>
+              <span className="w-[13px]" />
+              <input
+                value={(newChildDrafts[d.id] || {}).label || ''}
+                onChange={(e) => setNewChildDrafts((prev) => ({ ...prev, [d.id]: { label: e.target.value, description: (prev[d.id] || {}).description || '' } }))}
+                onKeyDown={(e) => { if (e.key === 'Enter' && (newChildDrafts[d.id] || {}).label?.trim()) addDisposition(d.id); }}
+                placeholder="New child option"
+                maxLength={120}
+                className="w-[220px] bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[13px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+              />
+              <input
+                value={(newChildDrafts[d.id] || {}).description || ''}
+                onChange={(e) => setNewChildDrafts((prev) => ({ ...prev, [d.id]: { label: (prev[d.id] || {}).label || '', description: e.target.value } }))}
+                onKeyDown={(e) => { if (e.key === 'Enter' && (newChildDrafts[d.id] || {}).label?.trim()) addDisposition(d.id); }}
+                placeholder="Description (optional)"
+                className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-[12px] text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+              />
+              <button
+                onClick={() => addDisposition(d.id)}
+                disabled={savingDisposition || !(newChildDrafts[d.id] || {}).label?.trim()}
+                className="h-8 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[12px] font-bold transition-colors disabled:opacity-50 shrink-0"
+              >
+                + Add child
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -495,7 +517,7 @@ function DispNode({ d, list, index, parentId, depth, disp }) {
 // calling_process_dispositions) - "highly customisable" per the ask: an admin can add, rename,
 // describe, nest (any depth), reorder, and remove options freely, with no seeded default and no
 // fixed count. disp = a useProcessDispositions() return value; processLabel = display name.
-export function ProcessDispositionsCard({ processLabel, disp }) {
+export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeControl = false }) {
   const { processDispositions, dispositionsError, savingDisposition, newDispLabel, setNewDispLabel, newDispDesc, setNewDispDesc, addDisposition } = disp;
   return (
     <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
@@ -534,7 +556,7 @@ export function ProcessDispositionsCard({ processLabel, disp }) {
         ) : processDispositions.length === 0 ? (
           <p className="text-[13px] text-zinc-500">No options added yet - use &quot;+ Add Option&quot; below to add the first one.</p>
         ) : processDispositions.map((d, i) => (
-          <DispNode key={d.id} d={d} list={processDispositions} index={i} parentId={null} depth={0} disp={disp} />
+          <DispNode key={d.id} d={d} list={processDispositions} index={i} parentId={null} depth={0} disp={disp} allowInputTypeControl={allowInputTypeControl} />
         ))}
       </div>
 

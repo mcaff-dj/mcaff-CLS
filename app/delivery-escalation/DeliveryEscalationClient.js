@@ -371,23 +371,48 @@ export default function DeliveryEscalationClient() {
   const [remarks, setRemarks] = useState('');
   const [saving, setSaving] = useState(false);
 
-  // dispLevels[0] is always the top-level list; dispLevels[i] (i>0) only exists once dispPath
-  // has a label at depth i-1 whose node actually has children - the walk stops the moment a
-  // picked node is a leaf, matching however deep this particular branch goes.
-  const dispLevels = [processDispositions || []];
+  // dispLevels[i] = { type: 'single'|'multi'|'text', options }. Level 0 is always 'single' (the
+  // top-level list has no parent to configure it); level i>0's type comes from whichever node
+  // was picked at level i-1 (see api/_lib/db.js's children_input_type - Delivery-Escalation-only
+  // control, see ProcessDispositionsCard's allowInputTypeControl prop below).
+  //
+  // multi and text are always a LEAF - picking a checkbox or typing text never drills into a
+  // further level, even if the underlying option rows have children of their own (those rows
+  // are simply not rendered in that case). single is the only type that keeps walking, exactly
+  // like the old single-path-only behaviour this replaces.
+  //
+  // dispPath itself is unchanged: still one string per level - a label for 'single', a
+  // ", "-joined string of checked labels for 'multi', or whatever was typed for 'text'. That's
+  // deliberate: it's exactly the segment written into outcome (dispPath.join(' > ')) and read
+  // back by openAction's split(' > '), so saving and re-opening needed no changes at all.
+  const dispLevels = [{ type: 'single', options: processDispositions || [] }];
   {
     let nodes = processDispositions || [];
     for (let i = 0; ; i++) {
+      if (dispLevels[i].type !== 'single') break; // multi/text already ended the path
       const node = dispPath[i] ? nodes.find(d => d.label === dispPath[i]) : null;
-      if (!node || !node.children || !node.children.length) break;
+      if (!node) break;
+      const childType = node.childrenInputType || 'single';
+      if (childType !== 'single') {
+        dispLevels.push({ type: childType, options: node.children || [] });
+        break;
+      }
+      if (!node.children || !node.children.length) break; // true leaf, nothing further to pick
       nodes = node.children;
-      dispLevels.push(nodes);
+      dispLevels.push({ type: 'single', options: nodes });
     }
   }
-  // "Complete" once the deepest picked node has no further children to choose - i.e. there's no
-  // extra level beyond what's been picked. Save is disabled until this is true.
-  const dispComplete = dispPath.length > 0 && dispLevels.length === dispPath.length;
+  // "Complete" once every level up to the deepest one has a non-blank value - covers all three
+  // types uniformly, since a 'single' pick is never blank by construction and 'multi'/'text'
+  // are checked here instead of separately.
+  const dispComplete = dispPath.length > 0 && dispLevels.length === dispPath.length && !!(dispPath[dispPath.length - 1] || '').trim();
   const pickDisp = (level, label) => setDispPath(prev => [...prev.slice(0, level), label]);
+  const toggleMultiDisp = (level, label) => setDispPath(prev => {
+    const checked = (prev[level] || '').split(', ').filter(Boolean);
+    const next = checked.includes(label) ? checked.filter(l => l !== label) : [...checked, label];
+    return [...prev.slice(0, level), next.join(', ')];
+  });
+  const setTextDisp = (level, text) => setDispPath(prev => [...prev.slice(0, level), text]);
 
   const openAction = async (t) => {
     let ticket = t;
@@ -771,7 +796,7 @@ export default function DeliveryEscalationClient() {
               )}
 
               {tab === 'admin' && sessionIsAdmin && (
-                <ProcessDispositionsCard processLabel="Delivery-Escalation" disp={disp} />
+                <ProcessDispositionsCard processLabel="Delivery-Escalation" disp={disp} allowInputTypeControl />
               )}
             </div>
           </div>
@@ -807,23 +832,45 @@ export default function DeliveryEscalationClient() {
                 </p>
               ) : (
                 <div className="space-y-2">
-                  {dispLevels.map((nodes, level) => (
-                    <div key={level} className="flex flex-wrap gap-1.5">
-                      {nodes.map(d => (
-                        <button
-                          key={d.id}
-                          type="button"
-                          onClick={() => pickDisp(level, d.label)}
-                          title={d.description || undefined}
-                          className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition-colors ${
-                            dispPath[level] === d.label
-                              ? 'bg-indigo-600 border-indigo-500 text-white'
-                              : 'bg-zinc-950/60 border-zinc-800 text-zinc-300 hover:border-zinc-700'
-                          }`}
-                        >
-                          {d.label}
-                        </button>
-                      ))}
+                  {dispLevels.map((lvl, level) => (
+                    <div key={level}>
+                      {lvl.type === 'text' ? (
+                        <input
+                          type="text"
+                          value={dispPath[level] || ''}
+                          onChange={(e) => setTextDisp(level, e.target.value)}
+                          placeholder="Type the reason…"
+                          className="w-full px-3 py-1.5 text-[12px] bg-zinc-950/60 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                        />
+                      ) : (
+                        <>
+                        {lvl.type === 'multi' && (
+                          <p className="text-[11px] text-zinc-500 mb-1">Select one or more:</p>
+                        )}
+                        <div className="flex flex-wrap gap-1.5">
+                          {lvl.options.map(d => {
+                            const checked = lvl.type === 'multi'
+                              ? (dispPath[level] || '').split(', ').filter(Boolean).includes(d.label)
+                              : dispPath[level] === d.label;
+                            return (
+                              <button
+                                key={d.id}
+                                type="button"
+                                onClick={() => lvl.type === 'multi' ? toggleMultiDisp(level, d.label) : pickDisp(level, d.label)}
+                                title={d.description || undefined}
+                                className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition-colors ${
+                                  checked
+                                    ? 'bg-indigo-600 border-indigo-500 text-white'
+                                    : 'bg-zinc-950/60 border-zinc-800 text-zinc-300 hover:border-zinc-700'
+                                }`}
+                              >
+                                {d.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        </>
+                      )}
                     </div>
                   ))}
                 </div>

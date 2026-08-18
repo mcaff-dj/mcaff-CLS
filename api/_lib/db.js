@@ -444,6 +444,18 @@ async function bootstrapPgSchema() {
   // (pointing at a parent_id that no longer exists) has nowhere left to render.
   await pgSql`ALTER TABLE calling_process_dispositions ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES calling_process_dispositions(id) ON DELETE CASCADE`;
   await pgSql`CREATE INDEX IF NOT EXISTS calling_process_dispositions_parent_idx ON calling_process_dispositions (parent_id, sort_order)`;
+  // What an agent sees when they open THIS row's children: 'single' (buttons, may drill deeper
+  // into whichever child they pick - the only mode that existed before this column, hence the
+  // default) or 'multi' (checkboxes, one or more) or 'text' (free-typed, no picklist at all).
+  // multi/text are always a LEAF - the agent-side picker never drills past one (see
+  // DeliveryEscalationClient.js's dispLevels), so a node with children rows AND
+  // children_input_type='text' simply has those children rows ignored, not rendered.
+  // Delivery-Escalation-only today (see ProcessDispositionsCard's allowInputTypeControl prop) -
+  // the column itself is shared across every process's rows since it lives on this one table,
+  // but NDR/RTO's own admin UI never shows a control to set it, so their rows can only ever
+  // default to 'single' and their existing single-choice behavior is unaffected.
+  await pgSql`ALTER TABLE calling_process_dispositions ADD COLUMN IF NOT EXISTS children_input_type TEXT NOT NULL DEFAULT 'single'`;
+  await pgSql`ALTER TABLE calling_process_dispositions ADD CONSTRAINT calling_process_dispositions_children_input_type_check CHECK (children_input_type IN ('single', 'multi', 'text'))`;
   // Append-only history of every status transition an agent has ever had (Online /
   // Busy / Offline), so agent_presence above can stay a single row per agent while this
   // one answers "when did each change happen" - e.g. for a future audit trail or
@@ -1668,13 +1680,16 @@ async function getProcessDispositions(processKey) {
   await ensurePgSchema();
   if (!processKey) return [];
   const { rows } = await pgSql`
-    SELECT id, parent_id, label, description, sort_order FROM calling_process_dispositions
+    SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
     WHERE process_key = ${processKey}
     ORDER BY sort_order ASC, id ASC
   `;
   const byId = {};
   rows.forEach((r) => {
-    byId[r.id] = { id: r.id, label: r.label, description: r.description || '', sortOrder: r.sort_order, children: [] };
+    byId[r.id] = {
+      id: r.id, label: r.label, description: r.description || '', sortOrder: r.sort_order,
+      childrenInputType: r.children_input_type || 'single', children: [],
+    };
   });
   const roots = [];
   // Two passes rather than one: a child row can appear before its parent in this result set
@@ -1722,17 +1737,21 @@ async function addProcessDisposition(processKey, label, description, createdBy, 
 // label can never be blanked out this way since a disposition must always have a name.
 // Works the same regardless of whether id is a top-level option or a child - nesting depth
 // never changes once an option is created.
-async function updateProcessDisposition(processKey, id, { label, description } = {}) {
+async function updateProcessDisposition(processKey, id, { label, description, childrenInputType } = {}) {
   await ensurePgSchema();
   if (!processKey || !id) throw new Error('processKey and id are required');
   const labelText = label === undefined ? null : String(label).trim();
   if (label !== undefined && !labelText) throw new Error('A disposition label is required');
   if (labelText && labelText.length > DISPOSITION_LABEL_MAX) throw new Error(`Label must be ${DISPOSITION_LABEL_MAX} characters or fewer`);
   const descText = description === undefined ? null : String(description || '').trim();
+  if (childrenInputType !== undefined && !['single', 'multi', 'text'].includes(childrenInputType)) {
+    throw new Error("childrenInputType must be 'single', 'multi', or 'text'");
+  }
   const { rows } = await pgSql`
     UPDATE calling_process_dispositions
     SET label = COALESCE(${labelText}, label),
-        description = COALESCE(${descText}, description)
+        description = COALESCE(${descText}, description),
+        children_input_type = COALESCE(${childrenInputType ?? null}, children_input_type)
     WHERE id = ${id} AND process_key = ${processKey}
     RETURNING id
   `;
