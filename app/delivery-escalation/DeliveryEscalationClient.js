@@ -390,10 +390,19 @@ export default function DeliveryEscalationClient() {
   useEffect(() => { loadPage(true); }, [loadPage]);
   useEffect(() => { loadStats(); }, [loadStats]);
   useEffect(() => { loadDaywise(); }, [loadDaywise]);
+  // New rows land in Fresh from OUTSIDE this page entirely - the 2-hourly cron mirror and any
+  // one-off backfill script write straight to MySQL, with no way to tell an open browser tab
+  // it happened. Polling is the only way this page can find out, so Fresh polls 4x faster than
+  // the other tabs (15s vs 60s) - its own page fetch measures ~200ms (see api/_lib/db.js's
+  // getDeliveryEscalationPage), so the extra frequency costs nothing that matters for a handful
+  // of concurrent agents. This is "shows up automatically within 15s", not a push/instant
+  // update - a genuinely sub-second refresh would need a websocket/SSE channel this app has
+  // nowhere else, for a data source (a 2-hourly cron) where 15s is already effectively instant.
   useEffect(() => {
-    const t = setInterval(() => { if (!document.hidden) refresh(true); }, 60000);
+    const intervalMs = tab === 'fresh' ? 15000 : 60000;
+    const t = setInterval(() => { if (!document.hidden) refresh(true); }, intervalMs);
     return () => clearInterval(t);
-  }, [refresh]);
+  }, [refresh, tab]);
   useEffect(() => {
     const onVisible = () => { if (!document.hidden) refresh(true); };
     document.addEventListener('visibilitychange', onVisible);
