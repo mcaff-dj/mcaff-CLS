@@ -28,7 +28,15 @@
     "NDR's is its own page/folder (app/ndr-calling/) and Escalation's is app/escalation/, neither",
     "a branch of RTO's Process switcher. Both are excluded from that switcher's PROCESSES list in",
     "RtoCrmClient.js, which redirects a stale ?process= link to the real page instead.",
-    "See the plan for splitting Calling processes into their own pages, one folder per process."
+    "See the plan for splitting Calling processes into their own pages, one folder per process.",
+    "",
+    "deliveryescalation is the one exception to everything above about shared team state:",
+    "`businessHours: null` on purpose - it has no auto-assignment robot to gate, and no",
+    "Postgres-backed roster/presence/quota/dispositions either (app/delivery-escalation/",
+    "DeliveryEscalationClient.js manages claim+resolution directly against its own sheet). It",
+    "is still listed here - and still excluded from RtoCrmClient.js's PROCESSES the same way",
+    "NDR/Escalation are - purely so report_tab_permissions/tabs.js can grant access to it",
+    "through the same Admin -> Permissions -> Calling checkboxes every other process uses."
   ],
 
   "processes": [
@@ -70,6 +78,14 @@
         "start": "09:30",
         "end": "18:30"
       }
+    },
+    {
+      "key": "deliveryescalation",
+      "label": "Delivery-Escalation",
+      "icon": "🎫",
+      "implemented": true,
+      "blurb": "Delivery-partner query/escalation tickets (delayed orders, logistics updates) from a Sheet with brand-per-tab source data (HYPHEN / mCaffeine tabs, merged into one list with Brand as a column/filter), worked from its own page at /delivery-escalation (app/delivery-escalation/DeliveryEscalationClient.js). Deliberately standalone, unlike every other process here: no Postgres-backed roster, presence, quota, business hours or auto-assignment robot - agents claim a row and record a resolution directly against the sheet. Gated only by the same site-wide login+permission check every other card/tab already uses (report_tab_permissions), not a Calling-specific table.",
+      "businessHours": null
     },
     {
       "key": "detractor",

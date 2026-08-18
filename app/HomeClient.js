@@ -44,11 +44,17 @@ var NEXT_PAGE_ROUTES = {
 // in from a separately-deployed standalone app. Its source folder is still called "NDR Calling"
 // but it is NOT the NDR process above and shares no data with it - different sheet, different
 // columns, different queue.
+//
+// Delivery-Escalation (app/delivery-escalation/) is a third, unrelated sheet again - delivery-
+// partner query/escalation tickets, brand-tabbed (HYPHEN/mCaffeine). Unlike every other entry
+// here, it has no Postgres-backed roster/presence/business-hours behind it at all - see
+// api/_lib/callingProcesses.json's "deliveryescalation" entry.
 var CALLING_TEAM_SUBITEMS = {
   overview: { label: 'Overview', text: 'Calling Team Overview', url: '/calling-overview' },
   rto: { label: 'RTO-Calling', text: 'RTO CRM Agent & Refund Portal', url: '/rto-crm' },
   ndr: { label: 'NDR-Calling', text: 'NDR Calling Agent Portal', url: '/ndr-calling' },
   escalation: { label: 'Escalation', text: 'Escalation Agent Portal', url: '/escalation' },
+  deliveryescalation: { label: 'Delivery-Escalation', text: 'Delivery-Escalation Agent Portal', url: '/delivery-escalation' },
   exports: { label: 'Exports', text: 'Refund Export', url: '/refund-export' }
 };
 

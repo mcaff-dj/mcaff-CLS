@@ -1623,7 +1623,7 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
       // activeProcess can never make currentProcess resolve to one of them and render RTO's own
       // workspace under another process's key - the redirect effect near activeProcess's own
       // declaration sends a stale link to the real page instead.
-      const OWN_PAGE_PROCESSES = ['ndr', 'escalation'];
+      const OWN_PAGE_PROCESSES = ['ndr', 'escalation', 'deliveryescalation'];
       const PROCESSES = ((!invitedProcessKeys || sessionIsAdmin)
         ? ALL_PROCESSES
         : ALL_PROCESSES.filter(p => invitedProcessKeys.includes(p.value))

@@ -51,6 +51,7 @@ mount('get', '/api/refund-export', '../refund-export.js');
 mount('all', '/api/rto/sheet', '../rto/sheet.js');
 mount('all', '/api/ndr/sheet', '../ndr/sheet.js');
 mount('post', '/api/ndr/lead-assignment', '../ndr/lead-assignment.js');
+mount('all', '/api/delivery-escalation/sheet', '../delivery-escalation/sheet.js');
 
 // The Escalation desk's whole API surface - one dynamic-segment handler, same shape as the
 // two :action mounts above (agents/orders/assign/tag/update/bulk-update/import/export/sample).
