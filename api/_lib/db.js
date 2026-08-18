@@ -1087,11 +1087,12 @@ const DE_DAYWISE_BUCKET_SQL = `CASE
     WHEN DATEDIFF(COALESCE(disposed_at, CURDATE()), added_date) <= 10 THEN '8-10 days'
     ELSE 'Greater than 10 days'
   END`;
-// Fixed, alphabetically-ordered column set for that table - known in advance so a date with a
-// bucket at zero still renders a 0 cell instead of the column vanishing for that row.
+// Fixed column set for that table, in ascending-severity display order (not alphabetical) -
+// known in advance so a date with a bucket at zero still renders a 0 cell instead of the
+// column vanishing for that row.
 const DE_DAYWISE_BUCKETS = [
-  '4-8 days', '8-10 days', 'Forced to be marked as RTO', 'Greater than 10 days',
-  'unresolved', 'Within 2-4 days', 'Within 48 hrs',
+  'Within 48 hrs', 'Within 2-4 days', '4-8 days', '8-10 days', 'Greater than 10 days',
+  'Forced to be marked as RTO', 'unresolved',
 ];
 
 // agent_remarks is unbounded TEXT; the UI truncates its display anyway, so it's cut here too -
@@ -1240,20 +1241,33 @@ async function getDeliveryEscalationRepeatStats() {
 // this isn't scoped to one, since Forced RTO needs a column in the SAME table as Fresh/Resolved
 // rows. brand/agent are the same optional filters the rest of the page already exposes; there is
 // no scopeEmail (see this file's header note on Delivery-Escalation having no per-agent scope).
+//
+// 'unresolved' in this table means "no added_date at all" (DE_DAYWISE_BUCKET_SQL's only branch
+// for it, since an open ticket buckets by age-as-of-today instead) - and a row with no added_date
+// has no Query date to sit under, so it can never appear as one of the per-date `rows` below.
+// It used to be dropped outright: the main query's own WHERE excluded it (needed to GROUP BY a
+// real date), and nothing else ever counted it, so grandTotal.unresolved was always exactly 0 -
+// not because there were none, but because the ones that existed were silently uncounted. A
+// second query (grouped by nothing, since these rows share no date to group by) folds them into
+// the grand total only; they still contribute no per-date row, because there is no date to put
+// one under.
 async function getDeliveryEscalationDaywiseStats(opts = {}) {
   const { brand, agent } = opts;
-  const clauses = ['added_date IS NOT NULL'];
+  const extraClauses = [];
   const params = [];
-  if (brand) { clauses.push('brand = ?'); params.push(brand); }
-  if (agent) { clauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
+  if (brand) { extraClauses.push('brand = ?'); params.push(brand); }
+  if (agent) { extraClauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
+  const extra = extraClauses.length ? ` AND ${extraClauses.join(' AND ')}` : '';
   const pool = await getPool();
   const [rows] = await pool.execute(`
     SELECT DATE_FORMAT(added_date, '%Y-%m-%d') AS d, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(*) AS c
     FROM Delivery_escalation
-    WHERE ${clauses.join(' AND ')}
+    WHERE added_date IS NOT NULL${extra}
     GROUP BY d, bucket
     ORDER BY d
   `, params);
+  const [[{ noDateCount }]] = await pool.execute(
+    `SELECT COUNT(*) AS noDateCount FROM Delivery_escalation WHERE added_date IS NULL${extra}`, params);
 
   const byDate = new Map();
   const grandTotal = {};
@@ -1272,6 +1286,9 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
     grandTotal[r.bucket] += c;
     grandTotalAll += c;
   }
+  const missingDateCount = Number(noDateCount) || 0;
+  grandTotal.unresolved += missingDateCount;
+  grandTotalAll += missingDateCount;
   const rowsOut = [...byDate.values()].map((entry) => ({
     date: entry.date,
     total: entry.total,
@@ -1280,7 +1297,7 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
       b, entry.total ? Math.round((entry.counts[b] / entry.total) * 100) : 0,
     ])),
   }));
-  return { buckets: DE_DAYWISE_BUCKETS, rows: rowsOut, grandTotal, grandTotalAll };
+  return { buckets: DE_DAYWISE_BUCKETS, rows: rowsOut, grandTotal, grandTotalAll, missingDateCount };
 }
 
 async function getDeliveryEscalationAgents() {

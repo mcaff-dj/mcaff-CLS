@@ -24,7 +24,7 @@
 // inside Lambda's 6MB cap however large this table grows. There is no per-agent row scoping:
 // everyone invited to this process sees the whole shared desk, admin or not, since tickets are
 // self-claimed from a common unassigned pool - the Agent filter narrows the view by choice.
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from 'react';
 import { CustomSelect, CheckIcon, XIcon, RefreshIcon, Overlay } from '../_calling/ui';
 import { useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { safeStorage } from '../_calling/util';
@@ -72,6 +72,63 @@ function formatDaywiseDate(d) {
   return new Date(`${d}T00:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+// Sums a set of day-level {counts, total} entries (already computed server-side per day) into
+// one aggregate, recomputing pct against THIS group's own total - the same "% of this row's own
+// total" rule the day rows already use, just applied at whichever level is being summed.
+function sumDaywiseRows(dayRows, buckets) {
+  const counts = {};
+  buckets.forEach((b) => { counts[b] = 0; });
+  let total = 0;
+  for (const r of dayRows) {
+    buckets.forEach((b) => { counts[b] += r.counts[b] || 0; });
+    total += r.total;
+  }
+  const pct = Object.fromEntries(buckets.map((b) => [b, total ? Math.round((counts[b] / total) * 100) : 0]));
+  return { counts, total, pct };
+}
+
+// Groups the flat day-level rows the server returns into Month -> Week -of-month -> Day, purely
+// client-side - the server keeps returning one row per real date (needed for the exact per-day
+// numbers), and this just re-buckets what's already there for the drill-down UI. Week is
+// "days 1-7 of the month = week 1, 8-14 = week 2, ..." rather than a calendar/ISO week
+// (which can straddle two months) - it keeps every week fully nested inside one month, matching
+// month -> week -> day as a strict hierarchy with no row that has two parents.
+function groupDaywiseRows(dayRows, buckets) {
+  const months = new Map();
+  for (const r of dayRows) {
+    const [y, m, d] = r.date.split('-').map(Number);
+    const monthKey = `${y}-${String(m).padStart(2, '0')}`;
+    const weekOfMonth = Math.ceil(d / 7);
+    const weekKey = `${monthKey}-W${weekOfMonth}`;
+    if (!months.has(monthKey)) months.set(monthKey, { key: monthKey, weeks: new Map() });
+    const month = months.get(monthKey);
+    if (!month.weeks.has(weekKey)) month.weeks.set(weekKey, { key: weekKey, weekOfMonth, days: [] });
+    month.weeks.get(weekKey).days.push(r);
+  }
+  return [...months.values()].sort((a, b) => a.key.localeCompare(b.key)).map((month) => {
+    const weeks = [...month.weeks.values()].sort((a, b) => a.weekOfMonth - b.weekOfMonth).map((week) => {
+      const days = [...week.days].sort((a, b) => a.date.localeCompare(b.date));
+      return { ...week, days, ...sumDaywiseRows(days, buckets) };
+    });
+    const allDays = weeks.flatMap((w) => w.days);
+    return { ...month, weeks, ...sumDaywiseRows(allDays, buckets) };
+  });
+}
+
+function formatDaywiseMonth(monthKey) {
+  const [y, m] = monthKey.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+}
+
+// "Week 2 (Jul 8-14)" - the day range read off the week's own first/last day rather than a
+// fixed 7-day span, since a month's final week is often shorter.
+function formatDaywiseWeek(week) {
+  const first = week.days[0]?.date, last = week.days[week.days.length - 1]?.date;
+  const dayNum = (d) => Number(d.split('-')[2]);
+  const range = first && last ? (first === last ? `${dayNum(first)}` : `${dayNum(first)}-${dayNum(last)}`) : '';
+  return `Week ${week.weekOfMonth}${range ? ` (${formatDaywiseDate(first).split(' ')[0]} ${range})` : ''}`;
+}
+
 function filterQuery({ view, search, brand, agent }) {
   const p = new URLSearchParams();
   if (view) p.set('view', view);
@@ -113,6 +170,7 @@ async function fetchDaywiseStats({ brand, agent }) {
     rows: d.rows || [],
     grandTotal: d.grandTotal || {},
     grandTotalAll: d.grandTotalAll || 0,
+    missingDateCount: d.missingDateCount || 0,
   };
 }
 
@@ -305,8 +363,21 @@ export default function DeliveryEscalationClient() {
   const [stats, setStats] = useState({ total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0 });
   const [agents, setAgents] = useState([]);
   const [repeatStats, setRepeatStats] = useState([]);
-  const [daywise, setDaywise] = useState({ buckets: [], rows: [], grandTotal: {}, grandTotalAll: 0 });
+  const [daywise, setDaywise] = useState({ buckets: [], rows: [], grandTotal: {}, grandTotalAll: 0, missingDateCount: 0 });
   const [daywiseLoading, setDaywiseLoading] = useState(false);
+  // Collapsed by default at every level - a flat list of every individual day was the whole
+  // problem being fixed here. Keys are month key ('2026-07') and week key ('2026-07-W2').
+  const [expandedMonths, setExpandedMonths] = useState(() => new Set());
+  const [expandedWeeks, setExpandedWeeks] = useState(() => new Set());
+  const toggleExpanded = (setFn, key) => setFn((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+  const groupedDaywise = useMemo(
+    () => groupDaywiseRows(daywise.rows, daywise.buckets),
+    [daywise.rows, daywise.buckets]
+  );
   const [bulkUploading, setBulkUploading] = useState(false);
   const [bulkResult, setBulkResult] = useState(null);
   const [exporting, setExporting] = useState(false);
@@ -683,16 +754,28 @@ export default function DeliveryEscalationClient() {
 
               {tab === 'overview' && (
                 <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
-                  <div className="flex items-center justify-between gap-2 mb-1">
+                  <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
                     <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500">
                       TAT by Query Date
                     </p>
-                    {daywiseLoading && <span className="text-[11px] text-zinc-600">Loading…</span>}
+                    <div className="flex items-center gap-2">
+                      {daywiseLoading && <span className="text-[11px] text-zinc-600">Loading…</span>}
+                      <CustomSelect
+                        value={brandFilter}
+                        onChange={(v) => { setBrandFilter(v); safeStorage.setItem('de_brand_filter', v); }}
+                        options={[{ value: 'ALL', label: 'All Brands' }, ...BRANDS.map(b => ({ value: b, label: b }))]}
+                        placeholder="Brand"
+                      />
+                    </div>
                   </div>
                   <p className="text-[12px] text-zinc-500 mb-3">
                     Every ticket, bucketed by days since Query Date - resolved tickets use their
                     actual resolution date, still-open tickets use today's date. % is each
                     bucket's share of that date's own total.
+                    {daywise.missingDateCount > 0 && (
+                      <> {daywise.missingDateCount} ticket(s) have no Query date at all and can&apos;t
+                      sit under any date row - counted only in Grand Total &rarr; unresolved.</>
+                    )}
                   </p>
                   <div className="rounded-xl border border-zinc-800/80 overflow-hidden">
                     <div className="overflow-x-auto custom-scroll">
@@ -713,17 +796,59 @@ export default function DeliveryEscalationClient() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-zinc-800/50">
-                          {daywise.rows.map((r) => (
-                            <tr key={r.date} className="hover:bg-zinc-800/30 transition-colors">
-                              <td className="py-2 px-3 text-zinc-300 whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
-                              {daywise.buckets.flatMap((b) => ([
-                                <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">{r.counts[b] || 0}</td>,
-                                <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{r.pct[b] || 0}%</td>,
-                              ]))}
-                              <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{r.total.toLocaleString('en-IN')}</td>
-                            </tr>
-                          ))}
-                          {daywise.rows.length === 0 && (
+                          {groupedDaywise.map((month) => {
+                            const monthOpen = expandedMonths.has(month.key);
+                            return (
+                              <Fragment key={month.key}>
+                                <tr
+                                  onClick={() => toggleExpanded(setExpandedMonths, month.key)}
+                                  className="hover:bg-zinc-800/30 transition-colors cursor-pointer"
+                                >
+                                  <td className="py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">
+                                    <span className="inline-block w-4 text-zinc-500">{monthOpen ? '▾' : '▸'}</span>
+                                    {formatDaywiseMonth(month.key)}
+                                  </td>
+                                  {daywise.buckets.flatMap((b) => ([
+                                    <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60">{month.counts[b] || 0}</td>,
+                                    <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
+                                  ]))}
+                                  <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
+                                </tr>
+                                {monthOpen && month.weeks.map((week) => {
+                                  const weekOpen = expandedWeeks.has(week.key);
+                                  return (
+                                    <Fragment key={week.key}>
+                                      <tr
+                                        onClick={() => toggleExpanded(setExpandedWeeks, week.key)}
+                                        className="hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/30"
+                                      >
+                                        <td className="py-2 px-3 pl-8 text-zinc-300 whitespace-nowrap">
+                                          <span className="inline-block w-4 text-zinc-500">{weekOpen ? '▾' : '▸'}</span>
+                                          {formatDaywiseWeek(week)}
+                                        </td>
+                                        {daywise.buckets.flatMap((b) => ([
+                                          <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">{week.counts[b] || 0}</td>,
+                                          <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{week.pct[b] || 0}%</td>,
+                                        ]))}
+                                        <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{week.total.toLocaleString('en-IN')}</td>
+                                      </tr>
+                                      {weekOpen && week.days.map((r) => (
+                                        <tr key={r.date} className="hover:bg-zinc-800/30 transition-colors">
+                                          <td className="py-2 px-3 pl-14 text-zinc-400 whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
+                                          {daywise.buckets.flatMap((b) => ([
+                                            <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-400 tabular-nums border-l border-zinc-800/60">{r.counts[b] || 0}</td>,
+                                            <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-600 tabular-nums text-[12px]">{r.pct[b] || 0}%</td>,
+                                          ]))}
+                                          <td className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">{r.total.toLocaleString('en-IN')}</td>
+                                        </tr>
+                                      ))}
+                                    </Fragment>
+                                  );
+                                })}
+                              </Fragment>
+                            );
+                          })}
+                          {groupedDaywise.length === 0 && (
                             <tr><td colSpan={daywise.buckets.length * 2 + 2} className="py-8 text-center text-zinc-500">
                               {daywiseLoading ? 'Loading…' : 'No data.'}
                             </td></tr>
