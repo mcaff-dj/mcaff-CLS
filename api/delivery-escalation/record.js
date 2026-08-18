@@ -15,10 +15,15 @@ const { getSession } = require('../_lib/session');
 const {
   disposeDeliveryEscalationTicket, getDeliveryEscalationHistory,
   getDeliveryEscalationFresh, claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
+  bulkDisposeDeliveryEscalationByAwb,
 } = require('../_lib/db');
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'deliveryescalation';
+// Backstop against an accidentally-huge upload hammering the 5-connection MySQL pool with
+// one UPDATE per row, sequentially, inside a single Lambda invocation - see
+// bulkDisposeDeliveryEscalationByAwb's own per-row loop.
+const MAX_BULK_ROWS = 2000;
 
 function checkAccess(session) {
   if (!session) return 'Not authenticated';
@@ -53,6 +58,38 @@ module.exports = async (req, res) => {
   }
 
   const { action, id, ticket, outcome, agentRemarks } = req.body || {};
+
+  // Fresh tab's bulk outcome upload (CSV: AWB, Outcome, optional Remarks) - see db.js's
+  // bulkDisposeDeliveryEscalationByAwb. rows is pre-parsed client-side; this only validates
+  // shape/size, not outcome values (a bulk upload's Outcome text is trusted the same way a
+  // single dispose's dispPath.join(' > ') already is - no disposition-tree validation there
+  // either).
+  if (action === 'bulkDispose') {
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    if (!rows.length) {
+      res.status(400).json({ error: 'rows is required' });
+      return;
+    }
+    if (rows.length > MAX_BULK_ROWS) {
+      res.status(400).json({ error: `Too many rows (${rows.length}) - split into batches of ${MAX_BULK_ROWS} or fewer.` });
+      return;
+    }
+    const clean = rows
+      .map((r) => ({ awb: String(r.awb || '').trim(), outcome: String(r.outcome || '').trim(), remarks: r.remarks ? String(r.remarks).trim() : '' }))
+      .filter((r) => r.awb && r.outcome);
+    if (!clean.length) {
+      res.status(400).json({ error: 'No valid rows (each needs an AWB and an Outcome).' });
+      return;
+    }
+    try {
+      const results = await bulkDisposeDeliveryEscalationByAwb(clean, session.email);
+      res.status(200).json({ results });
+    } catch (e) {
+      console.error('api/delivery-escalation/record bulkDispose error:', e);
+      res.status(500).json({ error: e.message || 'Bulk upload failed' });
+    }
+    return;
+  }
 
   // Fresh tab's claim/dispose, MySQL-only (no sheet write) - see db.js's
   // claimDeliveryEscalationTicketById/disposeDeliveryEscalationTicketById.

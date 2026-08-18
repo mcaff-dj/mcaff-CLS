@@ -149,6 +149,72 @@ async function disposeMysqlTicket(id, outcome, agentRemarks) {
   if (!r.ok) throw new Error(`Save failed ${r.status}`);
 }
 
+// Minimal CSV parser for the Fresh tab's bulk outcome upload - handles quoted fields (commas,
+// escaped "" quotes) since Remarks is free text that could contain either. No library: CSV's
+// quoting rule is the one thing a plain .split(',') gets wrong, and it's small enough that a
+// hand-rolled parser beats a dependency for it.
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQuotes = false; }
+      else field += c;
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ',') {
+      row.push(field); field = '';
+    } else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); field = '';
+      if (row.some(v => v !== '')) rows.push(row);
+      row = [];
+    } else {
+      field += c;
+    }
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+// Header lookup is case/space-insensitive ("AWB Number", "awb", "AWB_Number" all match) since
+// this file is hand-exported by whoever's doing the bulk resolution, not machine-generated.
+function rowsFromBulkCsv(text) {
+  const [header, ...dataRows] = parseCsv(text);
+  if (!header) return [];
+  const norm = (s) => (s || '').trim().toLowerCase().replace(/[\s_]+/g, '');
+  const idx = {};
+  header.forEach((h, i) => { idx[norm(h)] = i; });
+  const awbIdx = idx.awb ?? idx.awbnumber ?? idx.awbcode;
+  const outcomeIdx = idx.outcome;
+  const remarksIdx = idx.remarks;
+  if (awbIdx === undefined || outcomeIdx === undefined) {
+    throw new Error('CSV needs an AWB column and an Outcome column');
+  }
+  return dataRows
+    .map((r) => ({
+      awb: (r[awbIdx] || '').trim(),
+      outcome: (r[outcomeIdx] || '').trim(),
+      remarks: remarksIdx !== undefined ? (r[remarksIdx] || '').trim() : '',
+    }))
+    .filter((r) => r.awb && r.outcome);
+}
+
+// Fresh tab's bulk outcome upload - one call, many (awb, outcome) pairs; see
+// api/_lib/db.js's bulkDisposeDeliveryEscalationByAwb for matching/scoping rules (every row
+// with that AWB, but only if it's still Fresh-eligible).
+async function bulkUploadOutcomes(rows) {
+  const r = await fetch('/api/delivery-escalation/record', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'bulkDispose', rows }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `Bulk upload failed (${r.status})`);
+  return d.results || [];
+}
+
 export default function DeliveryEscalationClient() {
   // Same theme setup as every other Calling page - one theme, always; body.theme-light in
   // app/globals.css repaints the "dark" Tailwind classes used throughout to a light background.
@@ -191,6 +257,9 @@ export default function DeliveryEscalationClient() {
   const [totalRows, setTotalRows] = useState(0);
   const [resolvedTickets, setResolvedTickets] = useState([]);
   const [freshTickets, setFreshTickets] = useState([]);
+  const [bulkUploading, setBulkUploading] = useState(false);
+  const [bulkResult, setBulkResult] = useState(null);
+  const bulkFileInputRef = useRef(null);
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState('—');
   const [syncError, setSyncError] = useState(null);
@@ -320,6 +389,33 @@ export default function DeliveryEscalationClient() {
       showToast(`⚠️ Could not save: ${e.message}`);
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Fresh tab's bulk outcome upload - parses client-side (so a header/column mistake shows up
+  // immediately, before any network call) then sends the whole batch in one request. Resyncs
+  // after so Fresh/Resolved both reflect whatever just moved - same reasoning as saveAction's
+  // own post-dispose sync(true).
+  const handleBulkFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-selecting the same file (e.g. after fixing a typo) later
+    if (!file) return;
+    setBulkUploading(true);
+    setBulkResult(null);
+    try {
+      const text = await file.text();
+      const rows = rowsFromBulkCsv(text);
+      if (!rows.length) throw new Error('No valid rows found - need an AWB and an Outcome column');
+      const results = await bulkUploadOutcomes(rows);
+      const unmatched = results.filter((r) => r.matched === 0);
+      const matchedCount = results.length - unmatched.length;
+      setBulkResult({ total: results.length, matchedCount, unmatched });
+      showToast(`Bulk upload: ${matchedCount}/${results.length} matched`);
+      sync(true);
+    } catch (err) {
+      showToast(`⚠️ Bulk upload failed: ${err.message}`);
+    } finally {
+      setBulkUploading(false);
     }
   };
 
@@ -459,6 +555,19 @@ export default function DeliveryEscalationClient() {
                   ⚠ Showing the most recent {tickets.length.toLocaleString('en-IN')} of {totalRows.toLocaleString('en-IN')} total rows across both tabs - older rows aren&apos;t loaded (payload size cap).
                 </div>
               )}
+              {bulkResult && tab === 'fresh' && (
+                <div className="text-[12px] bg-zinc-900/70 border border-zinc-800 rounded-lg px-3 py-2 flex items-start justify-between gap-3">
+                  <div>
+                    <span className="text-zinc-300 font-semibold">Bulk upload: {bulkResult.matchedCount}/{bulkResult.total} matched.</span>
+                    {bulkResult.unmatched.length > 0 && (
+                      <div className="text-amber-400 mt-1">
+                        Not matched (already resolved, or AWB not found): {bulkResult.unmatched.map(u => u.awb).join(', ')}
+                      </div>
+                    )}
+                  </div>
+                  <button onClick={() => setBulkResult(null)} className="text-zinc-500 hover:text-zinc-300 shrink-0"><XIcon /></button>
+                </div>
+              )}
 
               {tab === 'overview' && (
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
@@ -504,6 +613,25 @@ export default function DeliveryEscalationClient() {
                       />
                       {sessionIsAdmin && (
                         <CustomSelect value={agentFilter} onChange={setAgentFilter} options={agentOptions} placeholder="Agent" />
+                      )}
+                      {tab === 'fresh' && (
+                        <>
+                          <input
+                            ref={bulkFileInputRef}
+                            type="file"
+                            accept=".csv,text/csv"
+                            className="hidden"
+                            onChange={handleBulkFile}
+                          />
+                          <button
+                            onClick={() => bulkFileInputRef.current?.click()}
+                            disabled={bulkUploading}
+                            className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
+                            title="Bulk upload outcomes via CSV (columns: AWB, Outcome, Remarks)"
+                          >
+                            {bulkUploading ? 'Uploading…' : '📤 Bulk Upload'}
+                          </button>
+                        </>
                       )}
                     </div>
                     <div className="flex items-center gap-2 text-[12px] text-zinc-500">

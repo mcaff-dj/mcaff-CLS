@@ -1095,6 +1095,32 @@ async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRema
   `;
 }
 
+// Bulk outcome upload for Fresh tickets (see api/delivery-escalation/record.js's 'bulkDispose'
+// action) - one UPDATE per (awb, outcome) pair, matching EVERY row with that awb_code: an AWB
+// can legitimately repeat (same AWB reused across brands, or a re-shipped order), and there's
+// no brand column in the upload to disambiguate, so every match gets the same outcome. Scoped
+// to Fresh-eligible rows only (outcome blank/RTO/Escalated - same set getDeliveryEscalationFresh
+// lists) so a bad upload can't silently overwrite an already-Delivered ticket's history. Returns
+// how many rows each pair actually changed, so the caller can report AWBs that matched nothing
+// (typo, wrong AWB) or matched zero because every row for that AWB was already resolved.
+async function bulkDisposeDeliveryEscalationByAwb(rows, email) {
+  const results = [];
+  for (const { awb, outcome, remarks } of rows) {
+    const { affectedRows } = await sql`
+      UPDATE Delivery_escalation
+      SET outcome = ${outcome}, agent_remarks = ${remarks || null}, disposed_at = now(),
+          agent_email = CASE WHEN agent_email IS NULL OR agent_email = '' THEN ${email} ELSE agent_email END,
+          assigned_at = CASE WHEN assigned_at IS NULL THEN now() ELSE assigned_at END
+      WHERE awb_code = ${awb}
+        AND (outcome IS NULL OR outcome = ''
+             OR outcome = 'RTO' OR outcome LIKE 'RTO > %'
+             OR outcome = 'Escalated' OR outcome LIKE 'Escalated > %')
+    `;
+    results.push({ awb, outcome, matched: affectedRows || 0 });
+  }
+  return results;
+}
+
 // dateFrom/dateTo are inclusive "YYYY-MM-DD" strings (or null for unbounded), interpreted
 // as IST calendar days (+05:30, matching the hour-of-day bucketing above and the rest of
 // this app's IST convention) rather than UTC days - otherwise "Today"/"Yesterday" would be
@@ -1823,6 +1849,7 @@ module.exports = {
   claimNdrLead, disposeNdrLead,
   disposeDeliveryEscalationTicket, getDeliveryEscalationHistory,
   getDeliveryEscalationFresh, claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
+  bulkDisposeDeliveryEscalationByAwb,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,
   // Exported for api/_lib/db.retry.test.js, db.cache.test.js and db.refundExport.test.js only -
