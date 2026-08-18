@@ -95,9 +95,15 @@ async function fetchTab(tab) {
 // rowNum/tab for either any more.
 async function fetchDeliveryEscalationMysql() {
   const r = await fetch('/api/delivery-escalation/record');
-  if (!r.ok) throw new Error(`Delivery-Escalation history ${r.status}`);
+  if (!r.ok) {
+    // record.js's own catch already puts the real exception message in the body - surface
+    // that instead of just the bare status code, so a failure here is diagnosable from the
+    // toast/error banner alone, without needing Lambda CloudWatch access.
+    const d = await r.json().catch(() => ({}));
+    throw new Error(d.error || `Delivery-Escalation history ${r.status}`);
+  }
   const d = await r.json();
-  return { resolved: d.rows || [], fresh: d.freshRows || [] };
+  return { resolved: d.rows || [], fresh: d.freshRows || [], maxRows: d.maxRows || 0 };
 }
 
 function mapHistoryRow(row, i) {
@@ -257,6 +263,7 @@ export default function DeliveryEscalationClient() {
   const [totalRows, setTotalRows] = useState(0);
   const [resolvedTickets, setResolvedTickets] = useState([]);
   const [freshTickets, setFreshTickets] = useState([]);
+  const [mysqlCapped, setMysqlCapped] = useState(0);
   const [bulkUploading, setBulkUploading] = useState(false);
   const [bulkResult, setBulkResult] = useState(null);
   const bulkFileInputRef = useRef(null);
@@ -274,8 +281,12 @@ export default function DeliveryEscalationClient() {
       const ok = tabSettled.filter(s => s.status === 'fulfilled').map(s => s.value);
       const failed = tabSettled.filter(s => s.status === 'rejected');
       if (mysqlSettled.status === 'fulfilled') {
-        setResolvedTickets(mysqlSettled.value.resolved.map(mapHistoryRow));
-        setFreshTickets(mysqlSettled.value.fresh.map(mapFreshRow));
+        const { resolved, fresh, maxRows } = mysqlSettled.value;
+        setResolvedTickets(resolved.map(mapHistoryRow));
+        setFreshTickets(fresh.map(mapFreshRow));
+        // A list that came back exactly at the cap is truncated, not complete - see
+        // api/_lib/db.js's DELIVERY_ESCALATION_MAX_ROWS for why the cap exists.
+        setMysqlCapped(maxRows > 0 && (resolved.length >= maxRows || fresh.length >= maxRows) ? maxRows : 0);
       } else {
         failed.push(mysqlSettled);
       }
@@ -553,6 +564,11 @@ export default function DeliveryEscalationClient() {
               {totalRows > tickets.length && (
                 <div className="text-[12px] text-amber-400">
                   ⚠ Showing the most recent {tickets.length.toLocaleString('en-IN')} of {totalRows.toLocaleString('en-IN')} total rows across both tabs - older rows aren&apos;t loaded (payload size cap).
+                </div>
+              )}
+              {mysqlCapped > 0 && (tab === 'fresh' || tab === 'resolved') && (
+                <div className="text-[12px] text-amber-400">
+                  ⚠ Showing the most recent {mysqlCapped.toLocaleString('en-IN')} tickets per tab - older ones aren&apos;t loaded (payload size cap). Use search to find a specific AWB or order.
                 </div>
               )}
               {bulkResult && tab === 'fresh' && (

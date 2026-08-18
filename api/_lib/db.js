@@ -1003,6 +1003,21 @@ async function disposeDeliveryEscalationTicket(ticket, email, outcome, agentRema
   `;
 }
 
+// Both Delivery-Escalation reads below are capped at this many rows EACH, and Resolved's
+// free-text agent_remarks is truncated to 300 chars, for one reason: api/delivery-escalation/
+// record.js returns both lists in a SINGLE response, and Lambda hard-caps a synchronous
+// response at 6MB - past that the request dies as an opaque 500 with API Gateway's own generic
+// body, no app-level error to go on (this is exactly how it failed at the previous 12000-row
+// cap: 24000 rows measured 7.64MB). At 5000 each the same payload measures ~3.0MB, and ~4.5MB
+// worst-case once every row has a full 300-char remark - enough headroom that filling in
+// remarks over time can't walk it back over the cliff.
+//
+// The numbers are written as SQL literals, NOT interpolated from this constant: the sql``
+// helper turns every ${} into a prepared-statement placeholder, and mysql2's execute() rejects
+// `LIMIT ?` outright ("Incorrect arguments to mysqld_stmt_execute", verified against this
+// server, MySQL 8.0.45). Keep the literals below in sync with this constant if either changes.
+const DELIVERY_ESCALATION_MAX_ROWS = 5000;
+
 // Delivery-Escalation's Resolved tab reads this, not the sheet - a sheet row ages out of
 // DeliveryEscalationClient.js's own MAX_ROWS_PER_TAB window once enough newer rows are added
 // above it, which silently dropped old resolved tickets from view. MySQL is the durable copy
@@ -1027,7 +1042,8 @@ async function disposeDeliveryEscalationTicket(ticket, email, outcome, agentRema
 async function getDeliveryEscalationHistory() {
   const { rows } = await sql`
     SELECT brand, order_id, awb_code, delivery_partner, query_class, query_category, wh_name,
-           status_as_per_awb, tat, agent_email, outcome, agent_remarks, disposed_at,
+           status_as_per_awb, tat, agent_email, outcome,
+           LEFT(agent_remarks, 300) AS agent_remarks, disposed_at,
            CASE
              WHEN disposed_at IS NULL OR added_date IS NULL THEN 'unresolved'
              WHEN DATEDIFF(disposed_at, added_date) <= 2 THEN 'Within 48 hrs'
@@ -1039,7 +1055,7 @@ async function getDeliveryEscalationHistory() {
     FROM Delivery_escalation
     WHERE outcome = 'Delivered' OR outcome LIKE 'Delivered > %'
     ORDER BY disposed_at DESC
-    LIMIT 12000
+    LIMIT 5000
   `;
   return rows;
 }
@@ -1059,13 +1075,13 @@ async function getDeliveryEscalationHistory() {
 async function getDeliveryEscalationFresh() {
   const { rows } = await sql`
     SELECT id, brand, order_id, awb_code, delivery_partner, query_class, query_category,
-           wh_name, status_as_per_awb, tat, ticket_number, agent_email, outcome
+           wh_name, status_as_per_awb, tat, agent_email, outcome
     FROM Delivery_escalation
     WHERE outcome IS NULL OR outcome = ''
        OR outcome = 'RTO' OR outcome LIKE 'RTO > %'
        OR outcome = 'Escalated' OR outcome LIKE 'Escalated > %'
     ORDER BY id DESC
-    LIMIT 12000
+    LIMIT 5000
   `;
   return rows;
 }
@@ -1849,7 +1865,7 @@ module.exports = {
   claimNdrLead, disposeNdrLead,
   disposeDeliveryEscalationTicket, getDeliveryEscalationHistory,
   getDeliveryEscalationFresh, claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
-  bulkDisposeDeliveryEscalationByAwb,
+  bulkDisposeDeliveryEscalationByAwb, DELIVERY_ESCALATION_MAX_ROWS,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,
   // Exported for api/_lib/db.retry.test.js, db.cache.test.js and db.refundExport.test.js only -

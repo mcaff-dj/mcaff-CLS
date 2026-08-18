@@ -21,6 +21,11 @@ writes ticket_number, so a row lands on Delivery_escalation's generated dedup_ke
 ticket_number branch, not the awb_code branch disposeDeliveryEscalationTicket's inserts use -
 the two won't merge into one row for the same ticket.
 
+--hyphen-csv/--mcaffeine-csv skip the live-sheet fetch entirely and upsert straight from an
+already-exported CSV (same A:Z column layout) - useful for re-running against a sheet export
+someone hand-corrected (e.g. filled in a previously-blank Added Date column) without waiting
+on another live Sheets read.
+
 Dry-run by default (writes the CSV, prints what it would upsert, touches no DB rows);
 --apply performs the upserts.
 """
@@ -59,17 +64,24 @@ DELIVERY_ESCALATION_UPSERT = """
 """
 
 
+DATE_FORMATS = (
+    "%b %d, %Y",  # sync_delivery_tickets_to_sheet.py's own format_date output, e.g. "Aug 18, 2026"
+    "%Y/%m/%d",   # seen on hand-filled Added Date cells in a since-corrected sheet export, e.g. "2026/07/01"
+)
+
+
 def parse_sheet_date(s):
-    """Reverses sync_delivery_tickets_to_sheet.py's format_date ("Aug 18, 2026"). Returns
-    None for blank/unparseable cells - some historical rows predate that format or were
-    entered by hand (build_sheet_row's own comment notes Added Date is blank on real rows)."""
+    """Returns None for blank/unparseable cells - some historical rows predate any known
+    format or were entered by hand in something else entirely."""
     s = (s or "").strip()
     if not s:
         return None
-    try:
-        return datetime.strptime(s, "%b %d, %Y").date()
-    except ValueError:
-        return None
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def fetch_tab_to_csv(tab, out_dir):
@@ -84,7 +96,9 @@ def fetch_tab_to_csv(tab, out_dir):
 
 
 def rows_from_csv(path):
-    with open(path, newline="", encoding="utf-8") as f:
+    # utf-8-sig: transparently strips a BOM if the file has one (seen on exports from
+    # external tools/spreadsheet downloads) and behaves exactly like utf-8 if it doesn't.
+    with open(path, newline="", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
         next(reader, None)  # header
         return list(reader)
@@ -123,6 +137,7 @@ def backfill_tab(tab, csv_path, dry_run):
 def self_check():
     """Offline check of the sheet-cell -> upsert-row mapping - no sheet, no DB."""
     assert parse_sheet_date("Aug 18, 2026") == datetime(2026, 8, 18).date()
+    assert parse_sheet_date("2026/07/01") == datetime(2026, 7, 1).date()
     assert parse_sheet_date("") is None
     assert parse_sheet_date("garbage") is None
 
@@ -141,6 +156,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="Perform the upserts (default is a dry run).")
     ap.add_argument("--out-dir", default=".", help="Where to write the per-tab sheet-export CSVs.")
+    ap.add_argument("--hyphen-csv", help="Use this file instead of fetching HYPHEN from the live sheet.")
+    ap.add_argument("--mcaffeine-csv", help="Use this file instead of fetching mCaffeine from the live sheet.")
     ap.add_argument("--self-check", action="store_true")
     args = ap.parse_args()
     if args.self_check:
@@ -148,9 +165,10 @@ def main():
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    csv_override = {"HYPHEN": args.hyphen_csv, "mCaffeine": args.mcaffeine_csv}
     for tab in TABS:
         print(f"--- {tab} ---")
-        csv_path = fetch_tab_to_csv(tab, out_dir)
+        csv_path = Path(csv_override[tab]) if csv_override[tab] else fetch_tab_to_csv(tab, out_dir)
         backfill_tab(tab, csv_path, dry_run=not args.apply)
 
 

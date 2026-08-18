@@ -15,7 +15,7 @@ const { getSession } = require('../_lib/session');
 const {
   disposeDeliveryEscalationTicket, getDeliveryEscalationHistory,
   getDeliveryEscalationFresh, claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
-  bulkDisposeDeliveryEscalationByAwb,
+  bulkDisposeDeliveryEscalationByAwb, DELIVERY_ESCALATION_MAX_ROWS,
 } = require('../_lib/db');
 
 const CARD_KEY = 'calling';
@@ -44,7 +44,10 @@ module.exports = async (req, res) => {
   if (req.method === 'GET') {
     try {
       const [rows, freshRows] = await Promise.all([getDeliveryEscalationHistory(), getDeliveryEscalationFresh()]);
-      res.status(200).json({ rows, freshRows });
+      // maxRows lets the client tell "this is everything" apart from "this is the cap" and warn
+      // accordingly - both lists are capped to keep this single response under Lambda's 6MB
+      // limit (see DELIVERY_ESCALATION_MAX_ROWS), and a silent truncation reads as real data.
+      res.status(200).json({ rows, freshRows, maxRows: DELIVERY_ESCALATION_MAX_ROWS });
     } catch (e) {
       console.error('api/delivery-escalation/record GET error:', e);
       res.status(500).json({ error: e.message || 'Could not load Delivery-Escalation history' });
