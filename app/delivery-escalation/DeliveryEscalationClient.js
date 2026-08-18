@@ -1,18 +1,23 @@
 'use client';
 
 // Delivery-Escalation's own independent workspace - modeled on app/ndr-calling/NdrCallingClient.js
-// (claim a row, record a resolution, write it straight back to the sheet) but deliberately NOT
-// built on the shared app/_calling/useCallingSession.js / CallingAdminPanel.js pieces every other
-// process uses: this process has no Postgres-backed roster, presence, quota, business hours or
-// dispositions, and no round-robin assignment robot - see api/_lib/callingProcesses.json's
-// "deliveryescalation" entry for why. Access is still gated the same way everything else in this
-// app is: report_tab_permissions, checked server-side by api/delivery-escalation/sheet.js.
+// (claim a row, record a resolution, write it straight back to the sheet). Deliberately NOT built
+// on the shared app/_calling/useCallingSession.js: this process has no Postgres-backed roster,
+// presence, quota, business hours, or round-robin assignment robot - see
+// api/_lib/callingProcesses.json's "deliveryescalation" entry for why. It DOES reuse one piece of
+// app/_calling/CallingAdminPanel.js - useProcessDispositions/ProcessDispositionsCard, the same
+// admin-configurable disposition tree NDR's Admin Panel uses - since an outcome list an admin can
+// shape without a code change is worth the one Postgres table (calling_process_dispositions) it
+// costs; CallingHoursCard and the roster table are NOT used, on purpose. Access is still gated the
+// same way everything else in this app is: report_tab_permissions, checked server-side by
+// api/delivery-escalation/sheet.js.
 //
 // Its source data lives across two Sheet tabs, one per brand (HYPHEN, mCaffeine) - fetched
 // independently and merged into a single list, with Brand (= the tab it came from) as its own
 // filterable column, rather than exposing a tab switcher in the UI.
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { CustomSelect, CheckIcon, XIcon, RefreshIcon, Overlay } from '../_calling/ui';
+import { useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { safeStorage } from '../_calling/util';
 
 const SHEET_ID = '1fopbKSrg-U9ixZi6Tfq13Q7mzRMPtceXkfEuN4Wko-w';
@@ -33,8 +38,6 @@ const MAX_ROWS_PER_TAB = 12000;
 // fresh after Z (not reusing anything in R:Z) because nothing in that range belongs to this app.
 const COL_AGENT = 'AA', COL_ACTION_DATE = 'AB', COL_OUTCOME = 'AC', COL_REMARKS = 'AD';
 const WRITE_LAST_COL = 'AD';
-
-const OUTCOME_OPTIONS = ['Resolved', 'Escalated to Partner', 'Pending Partner Response', 'Closed'];
 
 async function fetchValues(range) {
   const r = await fetch(`/api/delivery-escalation/sheet?op=values&sid=${encodeURIComponent(SHEET_ID)}&range=${encodeURIComponent(range)}`);
@@ -72,6 +75,38 @@ async function fetchTab(tab) {
   // 4 columns it writes (AA:AD) - rather than two ranges stitched back together per row.
   const rows = await fetchValues(`'${tab}'!A${startRow}:${WRITE_LAST_COL}${lastRow}`);
   return { tab, rows: rows.map((row, idx) => mapRow(row, startRow + idx, tab)), totalRows };
+}
+
+// Mirrors a claim/resolve into MySQL PEP_CLS.Delivery_escalation (see
+// api/delivery-escalation/record.js) - a parallel write alongside the sheet write, not a
+// replacement: the sheet stays what this UI reads from, MySQL is the durable/queryable history
+// side (same role CLS_RTO_calling plays for RTO). Best-effort by design - a failure here must
+// never undo or block a sheet write that already succeeded, so callers only log, never throw.
+async function recordDeliveryEscalationTicket(body) {
+  try {
+    const r = await fetch('/api/delivery-escalation/record', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      console.error('recordDeliveryEscalationTicket failed:', d.error || r.status);
+    }
+  } catch (e) {
+    console.error('recordDeliveryEscalationTicket failed:', e.message || e);
+  }
+}
+
+// The subset of ticket fields Delivery_escalation actually stores - kept separate from the
+// full mapRow shape so a claim/dispose call never accidentally ships internal-only fields
+// (id, rowNum, tab) as if they were sheet columns.
+function ticketSnapshot(t) {
+  return {
+    brand: t.brand, orderId: t.orderId, awbCode: t.awb, deliveryPartner: t.deliveryPartner,
+    queryClass: t.queryClass, queryCategory: t.queryCategory, whName: t.whName,
+    statusAsPerAwb: t.statusAsPerAwb, tat: t.tat,
+  };
 }
 
 async function writeCells(tab, ranges) {
@@ -117,6 +152,13 @@ export default function DeliveryEscalationClient() {
 
   const [toast, setToast] = useState(null);
   const showToast = useCallback(m => { setToast(m); setTimeout(() => setToast(null), 3000); }, []);
+
+  // Admin-configurable disposition tree (calling_process_dispositions), the same shared piece
+  // NDR's Admin Panel uses - starts empty, an admin adds whatever outcomes this process needs.
+  // No CallingHoursCard / roster table here on purpose - this process has neither business
+  // hours nor a roster to administer (see the module comment up top).
+  const disp = useProcessDispositions(TAB_KEY, { googleUser, showToast });
+  const { processDispositions } = disp;
 
   const [tickets, setTickets] = useState([]);
   const [totalRows, setTotalRows] = useState(0);
@@ -178,9 +220,32 @@ export default function DeliveryEscalationClient() {
   useEffect(() => { setPage(1); }, [tab, search, brandFilter, agentFilter]);
 
   const [detailTkt, setDetailTkt] = useState(null);
-  const [outcome, setOutcome] = useState('');
+  // The label picked at each depth of the admin-configured disposition tree, e.g.
+  // ["Escalated", "Awaiting Partner"] - same cascading-pick model as NDR's own ndrDispPath.
+  // Truncated whenever a shallower level is re-picked; the written Outcome is this path joined
+  // with " > ", not just the leaf, so a leaf label reused under two different parents (e.g.
+  // "Others") stays unambiguous when read back later.
+  const [dispPath, setDispPath] = useState([]);
   const [remarks, setRemarks] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // dispLevels[0] is always the top-level list; dispLevels[i] (i>0) only exists once dispPath
+  // has a label at depth i-1 whose node actually has children - the walk stops the moment a
+  // picked node is a leaf, matching however deep this particular branch goes.
+  const dispLevels = [processDispositions || []];
+  {
+    let nodes = processDispositions || [];
+    for (let i = 0; ; i++) {
+      const node = dispPath[i] ? nodes.find(d => d.label === dispPath[i]) : null;
+      if (!node || !node.children || !node.children.length) break;
+      nodes = node.children;
+      dispLevels.push(nodes);
+    }
+  }
+  // "Complete" once the deepest picked node has no further children to choose - i.e. there's no
+  // extra level beyond what's been picked. Save is disabled until this is true.
+  const dispComplete = dispPath.length > 0 && dispLevels.length === dispPath.length;
+  const pickDisp = (level, label) => setDispPath(prev => [...prev.slice(0, level), label]);
 
   const openAction = async (t) => {
     let ticket = t;
@@ -189,19 +254,23 @@ export default function DeliveryEscalationClient() {
         await writeCells(t.tab, [{ range: `${COL_AGENT}${t.rowNum}`, values: [googleUser.email] }]);
         ticket = { ...t, assignedAgent: googleUser.email };
         setTickets(prev => prev.map(x => x.id === t.id ? ticket : x));
+        recordDeliveryEscalationTicket({ action: 'claim', ticket: ticketSnapshot(ticket), email: googleUser.email });
       } catch (e) {
         showToast(`⚠️ Could not claim ticket: ${e.message}`);
       }
     }
     setDetailTkt(ticket);
-    setOutcome(ticket.outcome || '');
+    // Best-effort re-walk of a previously-saved "A > B > C" path - if the tree changed since
+    // (an option renamed/removed), this just falls short of dispComplete and the agent re-picks.
+    setDispPath(ticket.outcome ? ticket.outcome.split(' > ').filter(Boolean) : []);
     setRemarks(ticket.remarks || '');
   };
 
   const saveAction = async () => {
-    if (!detailTkt || !outcome) return;
+    if (!detailTkt || !dispComplete) return;
     setSaving(true);
     try {
+      const outcome = dispPath.join(' > ');
       const now = new Date();
       const actionDate = `${String(now.getDate()).padStart(2, '0')}-${String(now.getMonth() + 1).padStart(2, '0')}-${now.getFullYear()}`;
       const claimNow = !detailTkt.assignedAgent && googleUser?.email;
@@ -212,9 +281,10 @@ export default function DeliveryEscalationClient() {
       ];
       if (claimNow) ranges.push({ range: `${COL_AGENT}${detailTkt.rowNum}`, values: [googleUser.email] });
       await writeCells(detailTkt.tab, ranges);
-      setTickets(prev => prev.map(x => x.id === detailTkt.id
-        ? { ...x, actionDate, outcome, remarks: remarks.trim(), ...(claimNow ? { assignedAgent: googleUser.email } : {}) }
-        : x));
+      const updatedTicket = { ...detailTkt, actionDate, outcome, remarks: remarks.trim(), ...(claimNow ? { assignedAgent: googleUser.email } : {}) };
+      setTickets(prev => prev.map(x => x.id === detailTkt.id ? updatedTicket : x));
+      if (claimNow) recordDeliveryEscalationTicket({ action: 'claim', ticket: ticketSnapshot(updatedTicket), email: googleUser.email });
+      recordDeliveryEscalationTicket({ action: 'dispose', ticket: ticketSnapshot(updatedTicket), outcome, agentRemarks: remarks.trim() });
       showToast('Resolution saved');
       setDetailTkt(null);
     } catch (e) {
@@ -261,10 +331,14 @@ export default function DeliveryEscalationClient() {
   const totalPages = Math.max(1, Math.ceil(rowsForTab.length / perPage));
   const pageRows = useMemo(() => rowsForTab.slice((page - 1) * perPage, page * perPage), [rowsForTab, page, perPage]);
 
+  // No per-process admin here (that concept comes from the roster this process doesn't have) -
+  // only a company-wide admin manages the disposition list, same bar api/admin/[action].js's
+  // handleDispositions enforces for POST/PUT/DELETE.
   const tabsList = [
     { key: 'overview', label: '📊 Overview', count: total },
     { key: 'fresh', label: '⚡ Fresh (Assigned)', count: freshCount },
     { key: 'resolved', label: '✅ Resolved', count: resolved },
+    ...(sessionIsAdmin ? [{ key: 'admin', label: '🛡️ Admin Panel', count: (processDispositions || []).length }] : []),
   ];
 
   return (
@@ -462,6 +536,10 @@ export default function DeliveryEscalationClient() {
                   )}
                 </div>
               )}
+
+              {tab === 'admin' && sessionIsAdmin && (
+                <ProcessDispositionsCard processLabel="Delivery-Escalation" disp={disp} />
+              )}
             </div>
           </div>
         )}
@@ -481,12 +559,33 @@ export default function DeliveryEscalationClient() {
             </div>
             <div>
               <label className="text-[12px] font-semibold text-zinc-400 mb-1 block">Outcome</label>
-              <CustomSelect
-                value={outcome}
-                onChange={setOutcome}
-                options={OUTCOME_OPTIONS.map(o => ({ value: o, label: o }))}
-                placeholder="Select outcome"
-              />
+              {(processDispositions || []).length === 0 ? (
+                <p className="text-[12px] text-amber-400 bg-amber-950/30 border border-amber-900/50 rounded-lg px-3 py-2">
+                  No outcomes configured yet - an admin adds them from Admin Panel &rarr; Disposition List.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {dispLevels.map((nodes, level) => (
+                    <div key={level} className="flex flex-wrap gap-1.5">
+                      {nodes.map(d => (
+                        <button
+                          key={d.id}
+                          type="button"
+                          onClick={() => pickDisp(level, d.label)}
+                          title={d.description || undefined}
+                          className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition-colors ${
+                            dispPath[level] === d.label
+                              ? 'bg-indigo-600 border-indigo-500 text-white'
+                              : 'bg-zinc-950/60 border-zinc-800 text-zinc-300 hover:border-zinc-700'
+                          }`}
+                        >
+                          {d.label}
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
             <div>
               <label className="text-[12px] font-semibold text-zinc-400 mb-1 block">Remarks</label>
@@ -502,7 +601,7 @@ export default function DeliveryEscalationClient() {
               <button onClick={() => setDetailTkt(null)} className="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[13px] font-semibold transition-colors">Cancel</button>
               <button
                 onClick={saveAction}
-                disabled={!outcome || saving}
+                disabled={!dispComplete || saving}
                 className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-semibold transition-colors disabled:opacity-50"
               >
                 {saving ? 'Saving…' : 'Save'}
