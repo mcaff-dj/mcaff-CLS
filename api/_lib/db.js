@@ -1003,86 +1003,153 @@ async function disposeDeliveryEscalationTicket(ticket, email, outcome, agentRema
   `;
 }
 
-// Both Delivery-Escalation reads below are capped at this many rows EACH, and Resolved's
-// free-text agent_remarks is truncated to 300 chars, for one reason: api/delivery-escalation/
-// record.js returns both lists in a SINGLE response, and Lambda hard-caps a synchronous
-// response at 6MB - past that the request dies as an opaque 500 with API Gateway's own generic
-// body, no app-level error to go on (this is exactly how it failed at the previous 12000-row
-// cap: 24000 rows measured 7.64MB). At 5000 each the same payload measures ~3.0MB, and ~4.5MB
-// worst-case once every row has a full 300-char remark - enough headroom that filling in
-// remarks over time can't walk it back over the cliff.
+// ---------------------------------------------------------------------------------------
+// Delivery-Escalation reads (Fresh + Resolved tabs, api/delivery-escalation/record.js)
 //
-// The numbers are written as SQL literals, NOT interpolated from this constant: the sql``
-// helper turns every ${} into a prepared-statement placeholder, and mysql2's execute() rejects
-// `LIMIT ?` outright ("Incorrect arguments to mysqld_stmt_execute", verified against this
-// server, MySQL 8.0.45). Keep the literals below in sync with this constant if either changes.
-const DELIVERY_ESCALATION_MAX_ROWS = 5000;
+// Everything below pages, filters and scopes SERVER-side. The previous shape - fetch every
+// row, filter and paginate in the browser - broke on Lambda's 6MB synchronous response cap:
+// 24000 rows measured 7.64MB and died as an opaque 500 with API Gateway's own generic body,
+// no app-level error to debug from. Paging means the response is now one screen of rows
+// (<=200) regardless of how large this table grows, so that ceiling can't be reached again.
+//
+// It also closes a real leak: a non-admin used to receive EVERY row and have other agents'
+// tickets hidden only by client-side filtering, so they were still sitting in the network
+// response. scopeEmail below is applied in SQL, so those rows never leave the database.
+const DELIVERY_ESCALATION_MAX_PER_PAGE = 200;
+// Cap on a CSV export (one response, so still bound by the same 6MB ceiling - at ~300 bytes
+// a row this is ~1.5MB).
+const DELIVERY_ESCALATION_MAX_EXPORT = 5000;
 
-// Delivery-Escalation's Resolved tab reads this, not the sheet - a sheet row ages out of
-// DeliveryEscalationClient.js's own MAX_ROWS_PER_TAB window once enough newer rows are added
-// above it, which silently dropped old resolved tickets from view. MySQL is the durable copy
-// (every terminal dispose is upserted here - see disposeDeliveryEscalationTicket), so it has
-// the full history the sheet can't guarantee. Capped at the same row count as the sheet's own
-// MAX_ROWS_PER_TAB for the same reason: an unbounded read risks the Lambda response payload
-// limit (see api/_lib/escalationSheet.js's own comment on this).
-//
-// Resolved means outcome = Delivered ONLY - RTO is no longer treated as terminal (an RTO'd
-// order can still be re-shipped and later delivered, so it stays in Fresh instead - see
-// getDeliveryEscalationFresh). Matched on the top-level outcome label (outcome = 'Delivered'
-// or 'Delivered > <sub-reason>'), same as the client's own outcomeTopLevel used to.
-//
-// tat_bucket buckets days-to-deliver (disposed_at, when the agent actually marked it Delivered,
-// minus added_date) into the same 6 named buckets the sheet's own column P formula already
-// uses for ITS OWN "Delivered Date minus Query Date" metric - a different basis (that one's
-// fed by the separate logistics pipeline's Delivered Date, this one's the agent's own dispose
-// date against added_date), so this is a distinct figure, not a duplicate of the sheet's TAT.
-// 'unresolved' is reused here for "can't compute" (added_date missing, e.g. on some pre-backfill
-// historical rows) as well as "not yet delivered" - Delivered-only rows are the only ones
-// reaching this query, so the "not yet delivered" case can't actually occur here.
-async function getDeliveryEscalationHistory() {
-  const { rows } = await sql`
-    SELECT brand, order_id, awb_code, delivery_partner, query_class, query_category, wh_name,
-           status_as_per_awb, tat, agent_email, outcome,
-           LEFT(agent_remarks, 300) AS agent_remarks, disposed_at,
-           CASE
-             WHEN disposed_at IS NULL OR added_date IS NULL THEN 'unresolved'
-             WHEN DATEDIFF(disposed_at, added_date) <= 2 THEN 'Within 48 hrs'
-             WHEN DATEDIFF(disposed_at, added_date) <= 4 THEN 'Within 2-4 days'
-             WHEN DATEDIFF(disposed_at, added_date) <= 8 THEN '4-8 days'
-             WHEN DATEDIFF(disposed_at, added_date) <= 10 THEN '8-10 days'
-             ELSE 'Greater than 10 days'
-           END AS tat_bucket
-    FROM Delivery_escalation
-    WHERE outcome = 'Delivered' OR outcome LIKE 'Delivered > %'
-    ORDER BY disposed_at DESC
-    LIMIT 5000
-  `;
-  return rows;
+// A ticket is Fresh while its outcome is blank (never disposed), RTO (an RTO'd order can still
+// be re-shipped and later delivered, so it isn't terminal), or Escalated (still waiting on the
+// delivery partner). Resolved is Delivered ONLY. Matched on the top-level outcome label, so a
+// nested "Delivered > <sub-reason>" still counts.
+const DE_FRESH_WHERE = `(outcome IS NULL OR outcome = ''
+   OR outcome = 'RTO' OR outcome LIKE 'RTO > %'
+   OR outcome = 'Escalated' OR outcome LIKE 'Escalated > %')`;
+const DE_RESOLVED_WHERE = `(outcome = 'Delivered' OR outcome LIKE 'Delivered > %')`;
+const DE_VIEW_WHERE = { fresh: DE_FRESH_WHERE, resolved: DE_RESOLVED_WHERE };
+
+// Days-to-deliver (disposed_at, when the agent actually marked it Delivered, minus added_date)
+// bucketed into the same 6 names the sheet's own column P formula uses for ITS metric - that
+// one is "logistics-fed Delivered Date minus Query Date", this one is the agent's own dispose
+// date against added_date, so it's a distinct figure, not a duplicate. 'unresolved' covers
+// "can't compute" (added_date missing on some pre-backfill rows) as well as "not yet delivered".
+const DE_TAT_BUCKET_SQL = `CASE
+    WHEN disposed_at IS NULL OR added_date IS NULL THEN 'unresolved'
+    WHEN DATEDIFF(disposed_at, added_date) <= 2 THEN 'Within 48 hrs'
+    WHEN DATEDIFF(disposed_at, added_date) <= 4 THEN 'Within 2-4 days'
+    WHEN DATEDIFF(disposed_at, added_date) <= 8 THEN '4-8 days'
+    WHEN DATEDIFF(disposed_at, added_date) <= 10 THEN '8-10 days'
+    ELSE 'Greater than 10 days'
+  END`;
+
+// agent_remarks is unbounded TEXT; the UI truncates its display anyway, so it's cut here too -
+// otherwise one pathological remark could bloat a page response on its own.
+const DE_SELECT_COLUMNS = `id, brand, order_id, awb_code, delivery_partner, query_class,
+    query_category, wh_name, status_as_per_awb, tat, ticket_number, agent_email, outcome,
+    LEFT(agent_remarks, 300) AS agent_remarks, disposed_at, added_date,
+    ${DE_TAT_BUCKET_SQL} AS tat_bucket`;
+
+// Every user-supplied value here becomes a bound parameter - none is ever concatenated into
+// the SQL text. scopeEmail is the forced "only your own tickets" filter for non-admins and is
+// set from the session server-side, never from the request.
+function deFilterSql({ search, brand, agent, scopeEmail } = {}) {
+  const clauses = [];
+  const params = [];
+  if (brand) { clauses.push('brand = ?'); params.push(brand); }
+  if (agent) { clauses.push('agent_email = ?'); params.push(agent); }
+  if (scopeEmail) { clauses.push('LOWER(agent_email) = ?'); params.push(String(scopeEmail).toLowerCase()); }
+  if (search) {
+    // Escape LIKE's own wildcards so a literal % or _ in an AWB/order id searches as itself
+    // rather than as a pattern.
+    const q = `%${String(search).replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+    clauses.push('(awb_code LIKE ? OR order_id LIKE ? OR ticket_number LIKE ?)');
+    params.push(q, q, q);
+  }
+  return { clauses, params };
 }
 
-// Delivery-Escalation's Fresh tab - fully MySQL-backed (see api/delivery-escalation/record.js),
-// unlike the old sheet-driven Fresh (Assigned) tab this replaces. A ticket is Fresh whenever
-// its outcome is blank (never disposed), RTO (see getDeliveryEscalationHistory's own comment on
-// why RTO isn't terminal), or Escalated (still waiting on the delivery partner, not done) -
-// anything else (Delivered, or any other disposition) falls out of both this and Resolved.
-//
-// Deliberately no "assigned to me" filter here: claiming only ever happens through THIS table's
-// own agent_email/assigned_at (see claimDeliveryEscalationTicketById) - there's no separate
-// claim-time write anywhere else to filter on, so requiring agent_email would hide every ticket
-// nobody's claimed via this flow yet, which is most of them right after the cron-mirror/backfill
-// populated this table. id is returned as this row's own key - claim/dispose act on it directly,
-// there's no sheet tab/row to reference any more.
-async function getDeliveryEscalationFresh() {
+function deWhere(view, opts) {
+  const base = DE_VIEW_WHERE[view];
+  if (!base) throw new Error(`Unknown Delivery-Escalation view: ${view}`);
+  const { clauses, params } = deFilterSql(opts);
+  return { where: [base, ...clauses].join(' AND '), params };
+}
+
+// page/perPage are the ONLY values inlined into SQL text rather than bound - mysql2's execute()
+// rejects `LIMIT ?` outright ("Incorrect arguments to mysqld_stmt_execute", verified against
+// this server, MySQL 8.0.45). Both are coerced to integers and clamped here, so nothing
+// caller-supplied can survive into the statement.
+function dePaging(opts = {}) {
+  const perPage = Math.min(Math.max(parseInt(opts.perPage, 10) || 50, 1), DELIVERY_ESCALATION_MAX_PER_PAGE);
+  const page = Math.max(parseInt(opts.page, 10) || 1, 1);
+  return { page, perPage, offset: (page - 1) * perPage };
+}
+
+// Resolved reads newest-disposed first; Fresh has no meaningful disposed_at yet, so it reads
+// newest-row first. id breaks ties so paging can't repeat or skip a row between pages.
+function deOrderBy(view) {
+  return view === 'resolved' ? 'disposed_at DESC, id DESC' : 'id DESC';
+}
+
+// One page of a tab, plus the total matching that same filter - the client needs the total to
+// render page counts, and it must reflect the filters, not the whole table.
+async function getDeliveryEscalationPage(view, opts = {}) {
+  const { where, params } = deWhere(view, opts);
+  const { page, perPage, offset } = dePaging(opts);
+  const pool = await getPool();
+  const [countRows] = await pool.execute(
+    `SELECT COUNT(*) AS total FROM Delivery_escalation WHERE ${where}`, params);
+  const [rows] = await pool.execute(
+    `SELECT ${DE_SELECT_COLUMNS} FROM Delivery_escalation WHERE ${where}
+     ORDER BY ${deOrderBy(view)} LIMIT ${perPage} OFFSET ${offset}`, params);
+  return { rows, total: Number(countRows[0]?.total) || 0, page, perPage };
+}
+
+// Overview's tiles. Counted in SQL rather than by measuring an already-fetched list, so they
+// describe the whole table (35k+ rows) instead of whatever subset happened to be loaded.
+// SUM(<condition>) counts matching rows; mysql2 hands those back as strings/Decimals, hence
+// the Number() coercion.
+async function getDeliveryEscalationStats(opts = {}) {
+  const { clauses, params } = deFilterSql(opts);
+  const where = clauses.length ? clauses.join(' AND ') : '1 = 1';
+  const pool = await getPool();
+  const [rows] = await pool.execute(
+    `SELECT COUNT(*) AS total,
+            SUM(agent_email IS NOT NULL AND agent_email != '') AS assigned,
+            SUM(${DE_RESOLVED_WHERE}) AS resolved,
+            SUM(${DE_FRESH_WHERE}) AS fresh
+     FROM Delivery_escalation WHERE ${where}`, params);
+  const r = rows[0] || {};
+  return {
+    total: Number(r.total) || 0,
+    assigned: Number(r.assigned) || 0,
+    resolved: Number(r.resolved) || 0,
+    fresh: Number(r.fresh) || 0,
+  };
+}
+
+// Populates the admin-only Agent filter. Distinct over a 35k-row table is cheap enough not to
+// need its own index yet.
+async function getDeliveryEscalationAgents() {
   const { rows } = await sql`
-    SELECT id, brand, order_id, awb_code, delivery_partner, query_class, query_category,
-           wh_name, status_as_per_awb, tat, agent_email, outcome
-    FROM Delivery_escalation
-    WHERE outcome IS NULL OR outcome = ''
-       OR outcome = 'RTO' OR outcome LIKE 'RTO > %'
-       OR outcome = 'Escalated' OR outcome LIKE 'Escalated > %'
-    ORDER BY id DESC
-    LIMIT 5000
+    SELECT DISTINCT agent_email FROM Delivery_escalation
+    WHERE agent_email IS NOT NULL AND agent_email != ''
+    ORDER BY agent_email
   `;
+  return rows.map((r) => r.agent_email);
+}
+
+// Rows for a CSV export - the current filter/scope, but every matching row rather than one
+// page, capped so the response still fits the 6MB ceiling. The cap is reported back (see
+// record.js) so a truncated export can say so instead of looking complete.
+async function getDeliveryEscalationExport(view, opts = {}) {
+  const { where, params } = deWhere(view, opts);
+  const pool = await getPool();
+  const [rows] = await pool.execute(
+    `SELECT ${DE_SELECT_COLUMNS} FROM Delivery_escalation WHERE ${where}
+     ORDER BY ${deOrderBy(view)} LIMIT ${DELIVERY_ESCALATION_MAX_EXPORT}`, params);
   return rows;
 }
 
@@ -1863,9 +1930,11 @@ module.exports = {
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions,
   claimNdrLead, disposeNdrLead,
-  disposeDeliveryEscalationTicket, getDeliveryEscalationHistory,
-  getDeliveryEscalationFresh, claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
-  bulkDisposeDeliveryEscalationByAwb, DELIVERY_ESCALATION_MAX_ROWS,
+  disposeDeliveryEscalationTicket,
+  getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
+  getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT,
+  claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
+  bulkDisposeDeliveryEscalationByAwb,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,
   // Exported for api/_lib/db.retry.test.js, db.cache.test.js and db.refundExport.test.js only -

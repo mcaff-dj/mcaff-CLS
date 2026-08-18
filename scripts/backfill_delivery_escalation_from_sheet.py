@@ -5,10 +5,17 @@ sync_delivery_tickets_to_sheet.py appends going forward. Same column set that jo
 (brand/order_id/awb_code/delivery_partner/query_class/query_category/wh_name/ticket_number/
 added_date/order_date/order_month/query_date/query_month) and the same upsert shape, just
 sourced from the sheet itself instead of PEP_CLS hyphen_tickets/mcaff_tickets - this sheet
-also carries rows that predate or fall outside that job's own source query. Does NOT touch
-status_as_per_awb/tat (a separate logistics pipeline's columns) or the dispose-flow fields
-(agent_email/assigned_at/disposed_at/outcome/agent_remarks) - out of scope here, same as the
-cron mirror.
+also carries rows that predate or fall outside that job's own source query. Does NOT touch the
+dispose-flow fields (agent_email/assigned_at/disposed_at/outcome/agent_remarks) - those belong
+to the app, not the sheet.
+
+ALSO mirrors status_as_per_awb (sheet column N) and tat (column P), which the cron sync itself
+can't supply - they're computed by the sheet's own formulas off a separate logistics-tracking
+pipeline, so PEP_CLS hyphen_tickets/mcaff_tickets has no source for them. The app displays both
+columns, and with nothing writing them they stayed NULL on every row. Note these are a
+POINT-IN-TIME snapshot from whenever the export was taken: the logistics pipeline keeps updating
+the sheet afterwards, and nothing propagates those later changes here - re-run this script
+against a fresh export to refresh them.
 
 Two passes, not one read-and-upsert loop: first pulls each tab's full A:Z range into a CSV
 under --out-dir - one read of a ~20k/13k-row tab is the slow, timeout-prone part (see
@@ -52,16 +59,22 @@ CSV_HEADER = [
 DELIVERY_ESCALATION_UPSERT = """
     INSERT INTO Delivery_escalation
         (brand, order_id, awb_code, delivery_partner, query_class, query_category,
-         wh_name, ticket_number, added_date, order_date, order_month, query_date, query_month)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         wh_name, ticket_number, added_date, order_date, order_month, query_date, query_month,
+         status_as_per_awb, tat)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE
         order_id = VALUES(order_id), delivery_partner = VALUES(delivery_partner),
         query_class = VALUES(query_class), query_category = VALUES(query_category),
         wh_name = VALUES(wh_name), ticket_number = VALUES(ticket_number),
         added_date = VALUES(added_date), order_date = VALUES(order_date),
         order_month = VALUES(order_month), query_date = VALUES(query_date),
-        query_month = VALUES(query_month)
+        query_month = VALUES(query_month),
+        status_as_per_awb = VALUES(status_as_per_awb), tat = VALUES(tat)
 """
+
+# Sheet column N ("Status as per AWB") and P ("TAT") - same index on both tabs, verified
+# against the HYPHEN and mCaffeine exports' own headers.
+STATUS_COL, TAT_COL = 13, 15
 
 
 DATE_FORMATS = (
@@ -115,6 +128,7 @@ def build_row(cells, tab):
         v(10) or None, v(25) or None,
         parse_sheet_date(v(0)), parse_sheet_date(v(6)), v(7) or None,
         parse_sheet_date(v(8)), v(9) or None,
+        v(STATUS_COL) or None, v(TAT_COL) or None,
     )
 
 
@@ -143,12 +157,16 @@ def self_check():
 
     row = ["Aug 18, 2026", "Delivery", "Delayed Order", "HYP123", "AWB1", "Delhivery",
            "Aug 10, 2026", "8_Aug'26", "Aug 18, 2026", "8_Aug'26", "WH1"] + [""] * 14 + ["TCK1"]
+    row[STATUS_COL] = "Delivered"
+    row[TAT_COL] = "4-8 days"
     assert build_row(row, "HYPHEN") == (
         "HYPHEN", "HYP123", "AWB1", "Delhivery", "Delivery", "Delayed Order", "WH1", "TCK1",
         datetime(2026, 8, 18).date(), datetime(2026, 8, 10).date(), "8_Aug'26",
-        datetime(2026, 8, 18).date(), "8_Aug'26",
+        datetime(2026, 8, 18).date(), "8_Aug'26", "Delivered", "4-8 days",
     )
     assert build_row([], "HYPHEN") is None  # blank row, nothing to key on
+    # A short row (fewer cells than the status/tat columns) must not IndexError.
+    assert build_row(["", "", "", "ORD1"], "HYPHEN")[13:] == (None, None)
     print("self-check ok")
 
 

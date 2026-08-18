@@ -1,21 +1,28 @@
 // The only way the browser reaches MySQL PEP_CLS.Delivery_escalation - same permission gate as
-// api/delivery-escalation/sheet.js. GET returns both the Resolved tab's rows (outcome =
-// Delivered only - see getDeliveryEscalationHistory) and the Fresh tab's rows (outcome blank or
-// RTO - see getDeliveryEscalationFresh); this table is what BOTH tabs read from now, not the
-// sheet, since a sheet row ages out of the client's own row-count cap while this table keeps
-// the full history.
+// api/delivery-escalation/sheet.js. This table is what BOTH the Fresh and Resolved tabs read
+// from, not the sheet.
 //
-// POST action 'claim'/'dispose' is the Fresh tab's own claim/resolve, MySQL-only - no sheet
-// write at all, same model as CLS_RTO_calling's own claim/dispose (see
-// claimDeliveryEscalationTicketById/disposeDeliveryEscalationTicketById). Any other POST body
-// falls through to the older ticket-snapshot dispose (disposeDeliveryEscalationTicket) - kept
-// for now as a fallback, though nothing in DeliveryEscalationClient.js calls it any more since
-// Fresh moved off the sheet.
+// GET serves three shapes, all paged/filtered/scoped in SQL (see db.js's own header comment on
+// why - Lambda's 6MB response cap, and not leaking other agents' rows to a non-admin):
+//   ?view=fresh|resolved&page&perPage&search&brand&agent -> { rows, total, page, perPage }
+//   ?op=stats                                            -> { stats, agents }
+//   ?op=export&view=...(+ same filters)                  -> { rows, capped }
+//
+// POST action 'claim'/'dispose' is the Fresh tab's own claim/resolve, and 'bulkDispose' its CSV
+// upload - all MySQL-only, no sheet write, same model as CLS_RTO_calling's own claim/dispose.
+// Any other POST body falls through to the older ticket-snapshot dispose
+// (disposeDeliveryEscalationTicket), kept as a fallback though the client no longer calls it.
+//
+// scopeFor() is the security boundary: a non-admin is pinned to their own agent_email in SQL,
+// and the request can NOT override it - `agent` from the query string is only honoured for an
+// admin, who is allowed to filter by anyone.
 const { getSession } = require('../_lib/session');
 const {
-  disposeDeliveryEscalationTicket, getDeliveryEscalationHistory,
-  getDeliveryEscalationFresh, claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
-  bulkDisposeDeliveryEscalationByAwb, DELIVERY_ESCALATION_MAX_ROWS,
+  disposeDeliveryEscalationTicket,
+  getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
+  getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT,
+  claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
+  bulkDisposeDeliveryEscalationByAwb,
 } = require('../_lib/db');
 
 const CARD_KEY = 'calling';
@@ -42,15 +49,48 @@ module.exports = async (req, res) => {
   }
 
   if (req.method === 'GET') {
+    const q = req.query || {};
+    // A non-admin is pinned to their own tickets in SQL; only an admin may filter by agent.
+    const scopeEmail = session.isAdmin ? '' : session.email;
+    const view = q.view || 'fresh';
+    if (view !== 'fresh' && view !== 'resolved') {
+      // A bad query param is the caller's error, not a server fault - answering 500 here would
+      // look identical to a real outage.
+      res.status(400).json({ error: `Unknown view: ${view}` });
+      return;
+    }
+    const filters = {
+      search: q.search || '',
+      brand: q.brand && q.brand !== 'ALL' ? q.brand : '',
+      agent: session.isAdmin && q.agent && q.agent !== 'ALL' ? q.agent : '',
+      scopeEmail,
+    };
     try {
-      const [rows, freshRows] = await Promise.all([getDeliveryEscalationHistory(), getDeliveryEscalationFresh()]);
-      // maxRows lets the client tell "this is everything" apart from "this is the cap" and warn
-      // accordingly - both lists are capped to keep this single response under Lambda's 6MB
-      // limit (see DELIVERY_ESCALATION_MAX_ROWS), and a silent truncation reads as real data.
-      res.status(200).json({ rows, freshRows, maxRows: DELIVERY_ESCALATION_MAX_ROWS });
+      if (q.op === 'stats') {
+        // Agents populate the admin-only filter, so there's nothing to fetch for a non-admin.
+        const [stats, agents] = await Promise.all([
+          getDeliveryEscalationStats({ scopeEmail }),
+          session.isAdmin ? getDeliveryEscalationAgents() : Promise.resolve([]),
+        ]);
+        res.status(200).json({ stats, agents });
+        return;
+      }
+
+      if (q.op === 'export') {
+        const rows = await getDeliveryEscalationExport(view, filters);
+        // capped tells the client the export hit the ceiling, so a partial file can say so
+        // rather than looking like the complete set.
+        res.status(200).json({ rows, capped: rows.length >= DELIVERY_ESCALATION_MAX_EXPORT });
+        return;
+      }
+
+      const result = await getDeliveryEscalationPage(view, {
+        ...filters, page: q.page, perPage: q.perPage,
+      });
+      res.status(200).json(result);
     } catch (e) {
       console.error('api/delivery-escalation/record GET error:', e);
-      res.status(500).json({ error: e.message || 'Could not load Delivery-Escalation history' });
+      res.status(500).json({ error: e.message || 'Could not load Delivery-Escalation tickets' });
     }
     return;
   }
