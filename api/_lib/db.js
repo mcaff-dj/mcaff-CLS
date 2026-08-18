@@ -1070,6 +1070,30 @@ const DE_TAT_BUCKET_SQL = `CASE
     ELSE 'Greater than 10 days'
   END`;
 
+// Same day-bucket boundaries as DE_TAT_BUCKET_SQL above, but for the Overview's day-wise table
+// (getDeliveryEscalationDaywiseStats): a ticket with no disposed_at yet buckets by days elapsed
+// AS OF TODAY (COALESCE to CURDATE()) instead of falling into 'unresolved' - an open ticket has
+// a real, growing age, and dumping it into 'unresolved' hid exactly the aging tickets ops needs
+// to see. 'unresolved' survives only for rows with no added_date at all (no start point to
+// measure age from); those have no Query date to sit under either, so in practice they never
+// surface as a row in that table - the label stays only for column parity with DE_TAT_BUCKET_SQL.
+// Forced RTO is its own bucket, not a day-difference, same flag as DE_FORCED_RTO_WHERE.
+const DE_DAYWISE_BUCKET_SQL = `CASE
+    WHEN ${DE_FORCED_RTO_WHERE} THEN 'Forced to be marked as RTO'
+    WHEN added_date IS NULL THEN 'unresolved'
+    WHEN DATEDIFF(COALESCE(disposed_at, CURDATE()), added_date) <= 2 THEN 'Within 48 hrs'
+    WHEN DATEDIFF(COALESCE(disposed_at, CURDATE()), added_date) <= 4 THEN 'Within 2-4 days'
+    WHEN DATEDIFF(COALESCE(disposed_at, CURDATE()), added_date) <= 8 THEN '4-8 days'
+    WHEN DATEDIFF(COALESCE(disposed_at, CURDATE()), added_date) <= 10 THEN '8-10 days'
+    ELSE 'Greater than 10 days'
+  END`;
+// Fixed, alphabetically-ordered column set for that table - known in advance so a date with a
+// bucket at zero still renders a 0 cell instead of the column vanishing for that row.
+const DE_DAYWISE_BUCKETS = [
+  '4-8 days', '8-10 days', 'Forced to be marked as RTO', 'Greater than 10 days',
+  'unresolved', 'Within 2-4 days', 'Within 48 hrs',
+];
+
 // agent_remarks is unbounded TEXT; the UI truncates its display anyway, so it's cut here too -
 // otherwise one pathological remark could bloat a page response on its own.
 // child_disposition is a generated column derived from outcome (see
@@ -1207,6 +1231,56 @@ async function getDeliveryEscalationRepeatStats() {
     ORDER BY sort_key
   `);
   return rows.map((r) => ({ bucket: r.bucket, customers: Number(r.customers) || 0 }));
+}
+
+// Overview's day-wise TAT table: one row per Query date (added_date), one column per
+// DE_DAYWISE_BUCKET_SQL bucket, each date's own total, and that bucket's % of THAT DATE's total
+// (computed here, not in the browser, so the client only ever renders ready-made numbers).
+// Spans all views (Fresh/Resolved/Forced RTO together) - unlike deWhere/getDeliveryEscalationPage
+// this isn't scoped to one, since Forced RTO needs a column in the SAME table as Fresh/Resolved
+// rows. brand/agent are the same optional filters the rest of the page already exposes; there is
+// no scopeEmail (see this file's header note on Delivery-Escalation having no per-agent scope).
+async function getDeliveryEscalationDaywiseStats(opts = {}) {
+  const { brand, agent } = opts;
+  const clauses = ['added_date IS NOT NULL'];
+  const params = [];
+  if (brand) { clauses.push('brand = ?'); params.push(brand); }
+  if (agent) { clauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
+  const pool = await getPool();
+  const [rows] = await pool.execute(`
+    SELECT DATE_FORMAT(added_date, '%Y-%m-%d') AS d, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(*) AS c
+    FROM Delivery_escalation
+    WHERE ${clauses.join(' AND ')}
+    GROUP BY d, bucket
+    ORDER BY d
+  `, params);
+
+  const byDate = new Map();
+  const grandTotal = {};
+  DE_DAYWISE_BUCKETS.forEach((b) => { grandTotal[b] = 0; });
+  let grandTotalAll = 0;
+  for (const r of rows) {
+    const c = Number(r.c) || 0;
+    if (!byDate.has(r.d)) {
+      const counts = {};
+      DE_DAYWISE_BUCKETS.forEach((b) => { counts[b] = 0; });
+      byDate.set(r.d, { date: r.d, counts, total: 0 });
+    }
+    const entry = byDate.get(r.d);
+    entry.counts[r.bucket] += c;
+    entry.total += c;
+    grandTotal[r.bucket] += c;
+    grandTotalAll += c;
+  }
+  const rowsOut = [...byDate.values()].map((entry) => ({
+    date: entry.date,
+    total: entry.total,
+    counts: entry.counts,
+    pct: Object.fromEntries(DE_DAYWISE_BUCKETS.map((b) => [
+      b, entry.total ? Math.round((entry.counts[b] / entry.total) * 100) : 0,
+    ])),
+  }));
+  return { buckets: DE_DAYWISE_BUCKETS, rows: rowsOut, grandTotal, grandTotalAll };
 }
 
 async function getDeliveryEscalationAgents() {
@@ -2028,13 +2102,14 @@ module.exports = {
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
+  getDeliveryEscalationDaywiseStats,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,
   // Exported for api/_lib/db.retry.test.js, db.cache.test.js, db.refundExport.test.js and
   // db.deliveryEscalation.test.js only - nothing in the app calls these directly.
-  deWhere,
+  deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS,
   isPoolExhausted, withPgConnectRetry, toTransactionModePooler, cachedRead, invalidateCache, CACHE_TTL_MS,
   buildRefundExportWhere,
 };

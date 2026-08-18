@@ -66,6 +66,12 @@ async function getJson(url) {
   return d;
 }
 
+// 'YYYY-MM-DD' (what op=daywise returns) -> 'Jul 10, 2026' for the day-wise TAT table.
+function formatDaywiseDate(d) {
+  if (!d) return d;
+  return new Date(`${d}T00:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 function filterQuery({ view, search, brand, agent }) {
   const p = new URLSearchParams();
   if (view) p.set('view', view);
@@ -92,6 +98,21 @@ async function fetchStats() {
     stats: d.stats || { total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0 },
     agents: d.agents || [],
     repeatStats: d.repeatStats || [],
+  };
+}
+
+// Overview's day-wise TAT table - unlike fetchStats above, this DOES take the page's current
+// brand/agent filters (see record.js's own op=daywise comment on why).
+async function fetchDaywiseStats({ brand, agent }) {
+  const p = new URLSearchParams({ op: 'daywise' });
+  if (brand && brand !== 'ALL') p.set('brand', brand);
+  if (agent && agent !== 'ALL') p.set('agent', agent);
+  const d = await getJson(`/api/delivery-escalation/record?${p}`);
+  return {
+    buckets: d.buckets || [],
+    rows: d.rows || [],
+    grandTotal: d.grandTotal || {},
+    grandTotalAll: d.grandTotalAll || 0,
   };
 }
 
@@ -284,6 +305,8 @@ export default function DeliveryEscalationClient() {
   const [stats, setStats] = useState({ total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0 });
   const [agents, setAgents] = useState([]);
   const [repeatStats, setRepeatStats] = useState([]);
+  const [daywise, setDaywise] = useState({ buckets: [], rows: [], grandTotal: {}, grandTotalAll: 0 });
+  const [daywiseLoading, setDaywiseLoading] = useState(false);
   const [bulkUploading, setBulkUploading] = useState(false);
   const [bulkResult, setBulkResult] = useState(null);
   const [exporting, setExporting] = useState(false);
@@ -345,12 +368,28 @@ export default function DeliveryEscalationClient() {
     }
   }, []);
 
+  // Overview-only, and unlike loadStats DOES take the current brand/agent filters (see
+  // record.js's own op=daywise comment on why) - so it has to reload when either changes, not
+  // just on the same interval/visibility ticks as the rest of the page.
+  const loadDaywise = useCallback(async () => {
+    if (tab !== 'overview') return;
+    setDaywiseLoading(true);
+    try {
+      setDaywise(await fetchDaywiseStats({ brand: brandFilter, agent: agentFilter }));
+    } catch (e) {
+      console.error('Delivery-Escalation daywise stats failed:', e);
+    } finally {
+      setDaywiseLoading(false);
+    }
+  }, [tab, brandFilter, agentFilter]);
+
   const refresh = useCallback(async (silent = true) => {
-    await Promise.all([loadPage(silent), loadStats()]);
-  }, [loadPage, loadStats]);
+    await Promise.all([loadPage(silent), loadStats(), loadDaywise()]);
+  }, [loadPage, loadStats, loadDaywise]);
 
   useEffect(() => { loadPage(true); }, [loadPage]);
   useEffect(() => { loadStats(); }, [loadStats]);
+  useEffect(() => { loadDaywise(); }, [loadDaywise]);
   useEffect(() => {
     const t = setInterval(() => { if (!document.hidden) refresh(true); }, 60000);
     return () => clearInterval(t);
@@ -629,6 +668,74 @@ export default function DeliveryEscalationClient() {
                   <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
                     <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Awaiting Resolution</p>
                     <p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{stats.fresh.toLocaleString('en-IN')}</p>
+                  </div>
+                </div>
+              )}
+
+              {tab === 'overview' && (
+                <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500">
+                      TAT by Query Date
+                    </p>
+                    {daywiseLoading && <span className="text-[11px] text-zinc-600">Loading…</span>}
+                  </div>
+                  <p className="text-[12px] text-zinc-500 mb-3">
+                    Every ticket, bucketed by days since Query Date - resolved tickets use their
+                    actual resolution date, still-open tickets use today's date. % is each
+                    bucket's share of that date's own total.
+                  </p>
+                  <div className="rounded-xl border border-zinc-800/80 overflow-hidden">
+                    <div className="overflow-x-auto custom-scroll">
+                      <table className="w-full text-[13px]">
+                        <thead>
+                          <tr className="border-b border-zinc-800/80 text-zinc-500">
+                            <th rowSpan={2} className="py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">Query date</th>
+                            {daywise.buckets.map((b) => (
+                              <th key={b} colSpan={2} className="py-2 px-3 text-center font-medium border-l border-zinc-800/60 whitespace-nowrap">{b}</th>
+                            ))}
+                            <th rowSpan={2} className="py-2 px-3 text-right font-medium align-bottom border-l border-zinc-800/60 whitespace-nowrap">Grand Total</th>
+                          </tr>
+                          <tr className="border-b border-zinc-800/80 text-zinc-600 text-[11px]">
+                            {daywise.buckets.flatMap((b) => ([
+                              <th key={`${b}-n`} className="py-1 px-3 text-right font-medium border-l border-zinc-800/60"> </th>,
+                              <th key={`${b}-pct`} className="py-1 px-3 text-right font-medium">%</th>,
+                            ]))}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-zinc-800/50">
+                          {daywise.rows.map((r) => (
+                            <tr key={r.date} className="hover:bg-zinc-800/30 transition-colors">
+                              <td className="py-2 px-3 text-zinc-300 whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
+                              {daywise.buckets.flatMap((b) => ([
+                                <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">{r.counts[b] || 0}</td>,
+                                <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{r.pct[b] || 0}%</td>,
+                              ]))}
+                              <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{r.total.toLocaleString('en-IN')}</td>
+                            </tr>
+                          ))}
+                          {daywise.rows.length === 0 && (
+                            <tr><td colSpan={daywise.buckets.length * 2 + 2} className="py-8 text-center text-zinc-500">
+                              {daywiseLoading ? 'Loading…' : 'No data.'}
+                            </td></tr>
+                          )}
+                        </tbody>
+                        {daywise.rows.length > 0 && (
+                          <tfoot>
+                            <tr className="border-t border-zinc-800/80 bg-zinc-950/40 font-semibold">
+                              <td className="py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
+                              {daywise.buckets.flatMap((b) => ([
+                                <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{(daywise.grandTotal[b] || 0).toLocaleString('en-IN')}</td>,
+                                <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">
+                                  {daywise.grandTotalAll ? Math.round(((daywise.grandTotal[b] || 0) / daywise.grandTotalAll) * 100) : 0}%
+                                </td>,
+                              ]))}
+                              <td className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{daywise.grandTotalAll.toLocaleString('en-IN')}</td>
+                            </tr>
+                          </tfoot>
+                        )}
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}

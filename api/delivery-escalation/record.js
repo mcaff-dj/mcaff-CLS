@@ -23,6 +23,7 @@ const {
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
+  getDeliveryEscalationDaywiseStats,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
 } = require('../_lib/db');
@@ -74,6 +75,15 @@ module.exports = async (req, res) => {
           getDeliveryEscalationRepeatStats(),
         ]);
         res.status(200).json({ stats, agents, repeatStats });
+        return;
+      }
+
+      if (q.op === 'daywise') {
+        // Overview's day-wise TAT table - respects the page's current brand/agent filters
+        // (unlike op=stats, which is deliberately whole-desk); view is irrelevant here since it
+        // spans Fresh+Resolved+Forced RTO in one table.
+        const daywise = await getDeliveryEscalationDaywiseStats({ brand: filters.brand, agent: filters.agent });
+        res.status(200).json(daywise);
         return;
       }
 

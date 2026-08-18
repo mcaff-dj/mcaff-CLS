@@ -5,7 +5,7 @@
 // hid every unclaimed ticket from the very people meant to claim them (a newly-invited agent saw
 // an empty page). Access is checkAccess()/report_tab_permissions only - no row-level scope.
 const assert = require('assert');
-const { deWhere } = require('./db');
+const { deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS } = require('./db');
 
 // 1. No filters: the view predicate alone, no agent/scope clause bolted on.
 {
@@ -42,5 +42,22 @@ const { deWhere } = require('./db');
 
 // 5. An unknown view is rejected rather than silently matching everything.
 assert.throws(() => deWhere('everything', {}), /Unknown Delivery-Escalation view/);
+
+// 6. Overview's day-wise bucket: a still-open ticket (no disposed_at yet) must bucket by days
+// elapsed AS OF TODAY, not fall into 'unresolved' - that's the exact regression "assume today's
+// date as delivered" was asked to fix. Guards the SQL text itself since there's no DB here to
+// run the CASE against.
+{
+  assert.ok(DE_DAYWISE_BUCKET_SQL.includes('COALESCE(disposed_at, CURDATE())'),
+    'an unresolved dispose date must fall back to today, not stay NULL');
+  assert.ok(DE_DAYWISE_BUCKET_SQL.includes("added_date IS NULL THEN 'unresolved'"),
+    "'unresolved' must be reserved for a missing added_date, not a missing disposed_at");
+  assert.ok(!/disposed_at IS NULL THEN 'unresolved'/.test(DE_DAYWISE_BUCKET_SQL),
+    'a bare disposed_at IS NULL check must not resurrect the old always-unresolved behaviour');
+  assert.deepStrictEqual(DE_DAYWISE_BUCKETS, [
+    '4-8 days', '8-10 days', 'Forced to be marked as RTO', 'Greater than 10 days',
+    'unresolved', 'Within 2-4 days', 'Within 48 hrs',
+  ]);
+}
 
 console.log('db.deliveryEscalation.test.js: all assertions passed');
