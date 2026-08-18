@@ -86,6 +86,48 @@ def test_fetch_online_agents_fails_open_on_mysql_query_error():
         assign_leads.mysql_lib.query = orig_query
 
 
+def test_resolve_refund_statuses_caps_live_checks_per_run():
+    """The budget cap that keeps a run inside its 60s Lambda timeout (see
+    GOKWIK_MAX_CHECKS_PER_RUN). Three things have to hold together, and getting any one wrong
+    reintroduces the permanent stall it exists to prevent:
+
+      1. No more than the budget is ever checked live (the actual timeout guarantee).
+      2. Orders skipped for budget still get a fail-open False, so they assign as normal
+         rather than being held back.
+      3. Skipped orders are NOT written to the cache - a skipped check is not a verdict, and
+         caching one as "not refunded" would suppress a real refund for hours.
+    """
+    n = assign_leads.GOKWIK_MAX_CHECKS_PER_RUN
+    order_ids = [f"ORD{i:05d}" for i in range(n + 25)]
+
+    orig_lookup = assign_leads.lookup_platform_order_ids
+    orig_creds = assign_leads._gokwik_credentials
+    orig_live = assign_leads._check_gokwik_refund_status_live
+    checked = []
+    assign_leads.lookup_platform_order_ids = lambda ids: ({o: "111" for o in ids}, set())
+    assign_leads._gokwik_credentials = lambda order_id: ("app", "secret")
+
+    def _fake_live(order_id, platform_order_id, credentials):
+        checked.append(order_id)
+        return False
+
+    assign_leads._check_gokwik_refund_status_live = _fake_live
+    try:
+        dirty = {}
+        results = assign_leads.resolve_refund_statuses(set(order_ids), dirty)
+        assert len(checked) == n, f"must check at most the budget, checked {len(checked)}"
+        assert len(results) == len(order_ids), "every order still needs a fail-open answer"
+        assert all(v is False for v in results.values())
+        skipped = sorted(set(order_ids) - set(checked))
+        assert skipped, "test needs some orders to land over budget"
+        assert not any(o in dirty for o in skipped), \
+            "a check skipped for budget must never be cached as a verdict"
+    finally:
+        assign_leads.lookup_platform_order_ids = orig_lookup
+        assign_leads._gokwik_credentials = orig_creds
+        assign_leads._check_gokwik_refund_status_live = orig_live
+
+
 class FakeCursor:
     def __init__(self, rows=None, raise_on_execute=False):
         self.rows = rows or []

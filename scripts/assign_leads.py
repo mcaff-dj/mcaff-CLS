@@ -144,6 +144,39 @@ GOKWIK_CACHE_JITTER = timedelta(hours=1)
 # neighbour to a payments API we don't own.
 GOKWIK_MAX_CONCURRENCY = 8
 
+# Hard ceiling on how many deferred orders one run resolves at all. GOKWIK_MAX_CONCURRENCY
+# above bounds how many checks run AT ONCE; this bounds how much work is attempted AT ALL,
+# which is what actually bounds wall-clock - and this job's wall-clock is not merely a cost,
+# it is a correctness boundary: it runs as an AWS Lambda with a HARD 60s timeout
+# (lambda/deploy_infra.sh), and a Lambda that times out is killed outright, mid-statement,
+# with no cleanup and no partial result.
+#
+# That kill is unusually destructive here because of WHERE it lands. Measured against
+# production: one wave of GOKWIK_MAX_CONCURRENCY calls costs ~1.5s, and a cold cache on a
+# normal day leaves ~1100 orders to check - ~139 waves, ~210s, i.e. 3.5x the entire timeout,
+# spent inside resolve_refund_statuses. flush_gokwik_refund_cache runs AFTER that, and the
+# assignment write after that again, so a run killed there saves NOTHING: no cache entries, no
+# assignments. The next run then faces the identical uncached workload and dies at exactly the
+# same point. Left alone this never recovers on its own - it is a permanent stall, not a slow
+# run, and it presents as "the robot stopped assigning leads" with no error anywhere the team
+# can see. That is precisely what happened on 2026-08-18 (a 35-minute gap, ~1500 leads queued,
+# agents sitting idle at zero load), and it was only broken by running this script by hand off
+# a machine with no timeout.
+#
+# So the work that doesn't fit is simply not attempted this run. That is safe, and deliberately
+# so: an unchecked order fails OPEN (assigned as normal), which is the same tradeoff this whole
+# check already makes for a missing platform ID, absent credentials or a flaky request - see
+# the module docstring. Crucially, an order skipped for BUDGET is not a verdict, so it is never
+# cached; it simply gets resolved on a later run. Because every check that DOES happen is
+# cached, successive runs walk through the backlog instead of re-doing the same head of it, and
+# the set converges without any run ever exceeding its budget.
+#
+# Sized for the 60s timeout with real margin, from measured production numbers: 120 orders is
+# one Item_level_data batch (~2s) plus at most ~15 GoKwik waves (~23s), leaving the rest of the
+# run (a 14k-row sheet read, Postgres/MySQL fetches and the sheet writes - together ~15-20s)
+# comfortable room. Raise this only together with the Lambda's timeout, never on its own.
+GOKWIK_MAX_CHECKS_PER_RUN = 120
+
 # Order IDs per Item_level_data IN (...) batch - a few hundred keeps the statement well inside
 # any max_allowed_packet while still collapsing what used to be one query per lead.
 PLATFORM_ID_BATCH_SIZE = 400
@@ -326,6 +359,25 @@ def resolve_refund_statuses(order_ids, dirty):
     order_ids = sorted(order_ids)
     if not order_ids:
         return {}
+
+    # Everything past this run's budget is left for a later run - see GOKWIK_MAX_CHECKS_PER_RUN.
+    # Applied HERE, before the Item_level_data lookup rather than just before the GoKwik calls,
+    # so BOTH network phases are bounded by this one slice: after a long stall the deferred set
+    # is thousands of orders, and resolving platform IDs for all of them is itself ~2s per
+    # 400-order batch - enough to blow the timeout on its own before a single refund is checked.
+    # Reported rather than silently trimmed: a cap that hides what it dropped reads as
+    # "everything was checked" when it wasn't.
+    over_budget = order_ids[GOKWIK_MAX_CHECKS_PER_RUN:]
+    order_ids = order_ids[:GOKWIK_MAX_CHECKS_PER_RUN]
+    # Fails open, and deliberately NOT added to `dirty`: an order skipped for budget was never
+    # asked about, so it is not a verdict and must not be cached as one - caching it as
+    # "not refunded" would suppress a real refund for hours.
+    results_over_budget = {order_id: False for order_id in over_budget}
+    if over_budget:
+        print(f"  {len(over_budget)} deferred check(s) over this run's "
+              f"{GOKWIK_MAX_CHECKS_PER_RUN}-order budget - not checked, not cached, assigned as "
+              f"normal and re-checked next run.")
+
     print(f"  resolving {len(order_ids)} deferred GoKwik refund check(s)...")
     platform_ids, lookup_failed = lookup_platform_order_ids(order_ids)
 
@@ -362,7 +414,7 @@ def resolve_refund_statuses(order_ids, dirty):
                 cacheable[order_id] = refunded
 
     dirty.update(cacheable)
-    return results
+    return {**results_over_budget, **results}
 
 
 @contextmanager
