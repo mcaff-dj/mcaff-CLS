@@ -1012,9 +1012,14 @@ async function disposeDeliveryEscalationTicket(ticket, email, outcome, agentRema
 // no app-level error to debug from. Paging means the response is now one screen of rows
 // (<=200) regardless of how large this table grows, so that ceiling can't be reached again.
 //
-// It also closes a real leak: a non-admin used to receive EVERY row and have other agents'
-// tickets hidden only by client-side filtering, so they were still sitting in the network
-// response. scopeEmail below is applied in SQL, so those rows never leave the database.
+// Visibility is NOT per-agent here, unlike every other calling process: Delivery-Escalation is
+// one shared desk with no assignment robot, so agents self-claim from the same unassigned pool.
+// An earlier version pinned a non-admin to `agent_email = <their email>`, which made every
+// unclaimed ticket invisible to exactly the people meant to claim it - a freshly-invited agent
+// saw an empty page and zeroed tiles, with no way to ever claim a first ticket. Anyone holding
+// the report_tab_permissions row for this process sees the whole desk; agent_email is who
+// claimed/resolved a row, not who may read it. Paging (below) is what keeps the response inside
+// Lambda's 6MB cap - that part never depended on the scoping.
 const DELIVERY_ESCALATION_MAX_PER_PAGE = 200;
 // Cap on a CSV export (one response, so still bound by the same 6MB ceiling - at ~300 bytes
 // a row this is ~1.5MB).
@@ -1061,14 +1066,13 @@ const DE_SELECT_COLUMNS = `id, brand, order_id, awb_code, delivery_partner, quer
     ${DE_TAT_BUCKET_SQL} AS tat_bucket`;
 
 // Every user-supplied value here becomes a bound parameter - none is ever concatenated into
-// the SQL text. scopeEmail is the forced "only your own tickets" filter for non-admins and is
-// set from the session server-side, never from the request.
-function deFilterSql({ search, brand, agent, scopeEmail } = {}) {
+// the SQL text. `agent` is the optional Agent-filter dropdown, a user's own choice of view -
+// there is no forced per-agent scope (see the header comment above).
+function deFilterSql({ search, brand, agent } = {}) {
   const clauses = [];
   const params = [];
   if (brand) { clauses.push('brand = ?'); params.push(brand); }
-  if (agent) { clauses.push('agent_email = ?'); params.push(agent); }
-  if (scopeEmail) { clauses.push('LOWER(agent_email) = ?'); params.push(String(scopeEmail).toLowerCase()); }
+  if (agent) { clauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
   if (search) {
     // Escape LIKE's own wildcards so a literal % or _ in an AWB/order id searches as itself
     // rather than as a pattern.
@@ -1959,8 +1963,9 @@ module.exports = {
   bulkDisposeDeliveryEscalationByAwb,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,
-  // Exported for api/_lib/db.retry.test.js, db.cache.test.js and db.refundExport.test.js only -
-  // nothing in the app calls these directly.
+  // Exported for api/_lib/db.retry.test.js, db.cache.test.js, db.refundExport.test.js and
+  // db.deliveryEscalation.test.js only - nothing in the app calls these directly.
+  deWhere,
   isPoolExhausted, withPgConnectRetry, toTransactionModePooler, cachedRead, invalidateCache, CACHE_TTL_MS,
   buildRefundExportWhere,
 };

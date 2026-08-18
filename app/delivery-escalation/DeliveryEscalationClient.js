@@ -19,10 +19,11 @@
 // table (the 2-hourly cron mirror, scripts/sync_delivery_tickets_to_sheet.py), but nothing on
 // this page depends on reading it back.
 //
-// Paging, filtering, searching and per-agent scoping all happen SERVER-side (see db.js's own
-// header comment). The browser holds one page of rows, never the whole table - which is what
-// keeps the response inside Lambda's 6MB cap however large this table grows, and what stops a
-// non-admin's response from carrying other agents' tickets at all.
+// Paging, filtering and searching all happen SERVER-side (see db.js's own header comment). The
+// browser holds one page of rows, never the whole table - which is what keeps the response
+// inside Lambda's 6MB cap however large this table grows. There is no per-agent row scoping:
+// everyone invited to this process sees the whole shared desk, admin or not, since tickets are
+// self-claimed from a common unassigned pool - the Agent filter narrows the view by choice.
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { CustomSelect, CheckIcon, XIcon, RefreshIcon, Overlay } from '../_calling/ui';
 import { useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
@@ -445,8 +446,7 @@ export default function DeliveryEscalationClient() {
   };
 
   // All counts come from SQL over the whole table (see fetchStats) rather than from the loaded
-  // page, and the server already scopes a non-admin to their own tickets - there's no
-  // client-side filtering or scoping left to do here.
+  // page - there's no client-side filtering or scoping left to do here.
   const unassignedCount = Math.max(stats.total - stats.assigned, 0);
   const resolutionRate = stats.assigned > 0 ? Math.round((stats.resolved / stats.assigned) * 100) : 0;
 
@@ -597,9 +597,9 @@ export default function DeliveryEscalationClient() {
                         options={[{ value: 'ALL', label: 'All Brands' }, ...BRANDS.map(b => ({ value: b, label: b }))]}
                         placeholder="Brand"
                       />
-                      {sessionIsAdmin && (
-                        <CustomSelect value={agentFilter} onChange={setAgentFilter} options={agentOptions} placeholder="Agent" />
-                      )}
+                      {/* Everyone with access gets this - it is how an agent narrows the shared
+                          desk down to their own tickets now that nothing is hidden from them. */}
+                      <CustomSelect value={agentFilter} onChange={setAgentFilter} options={agentOptions} placeholder="Agent" />
                       {tab === 'fresh' && (
                         <>
                           <input

@@ -216,6 +216,15 @@ async function handlePermissions(req, res) {
   if (req.method === 'PUT') {
     const validKeys = new Set((CARD_TABS[cardKey] || []).map((t) => t.key));
     const tabKeys = Array.isArray(body.tabKeys) ? body.tabKeys.filter((k) => validKeys.has(k)) : [];
+    // Naming specific tabs implies access to the card that contains them. Without this, ticking
+    // (say) Calling -> Delivery-Escalation wrote report_tab_permissions rows while `permissions`
+    // stayed empty, and every gate in the app checks the card FIRST - so the user was told
+    // "You do not have access" despite the checkbox being ticked in the admin UI. An empty
+    // tabKeys means "lift the tab restriction", not "grant the card", so it must not insert:
+    // that would silently hand the whole card to someone who holds none of it.
+    if (tabKeys.length) {
+      await sql`INSERT IGNORE INTO permissions (user_id, card_key) VALUES (${userId}, ${cardKey})`;
+    }
     await setTabPermissions(userId, cardKey, tabKeys);
     res.status(200).json({ ok: true });
     return;

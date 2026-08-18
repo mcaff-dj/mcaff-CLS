@@ -2,8 +2,8 @@
 // api/delivery-escalation/sheet.js. This table is what BOTH the Fresh and Resolved tabs read
 // from, not the sheet.
 //
-// GET serves three shapes, all paged/filtered/scoped in SQL (see db.js's own header comment on
-// why - Lambda's 6MB response cap, and not leaking other agents' rows to a non-admin):
+// GET serves three shapes, all paged/filtered in SQL (see db.js's own header comment on
+// why - Lambda's 6MB response cap):
 //   ?view=fresh|resolved&page&perPage&search&brand&agent -> { rows, total, page, perPage }
 //   ?op=stats                                            -> { stats, agents }
 //   ?op=export&view=...(+ same filters)                  -> { rows, capped }
@@ -13,9 +13,11 @@
 // Any other POST body falls through to the older ticket-snapshot dispose
 // (disposeDeliveryEscalationTicket), kept as a fallback though the client no longer calls it.
 //
-// scopeFor() is the security boundary: a non-admin is pinned to their own agent_email in SQL,
-// and the request can NOT override it - `agent` from the query string is only honoured for an
-// admin, who is allowed to filter by anyone.
+// The security boundary is checkAccess() alone - the report_tab_permissions row for this
+// process. There is deliberately no per-agent row scoping on top of it: this is one shared desk
+// whose tickets are self-claimed from a common unassigned pool, so hiding unclaimed rows from a
+// non-admin left a newly-invited agent with an empty page and nothing to claim. `agent` is a
+// plain filter anyone may use to narrow the view to one person (usually themselves).
 const { getSession } = require('../_lib/session');
 const {
   disposeDeliveryEscalationTicket,
@@ -50,8 +52,6 @@ module.exports = async (req, res) => {
 
   if (req.method === 'GET') {
     const q = req.query || {};
-    // A non-admin is pinned to their own tickets in SQL; only an admin may filter by agent.
-    const scopeEmail = session.isAdmin ? '' : session.email;
     const view = q.view || 'fresh';
     if (view !== 'fresh' && view !== 'resolved' && view !== 'forced_rto') {
       // A bad query param is the caller's error, not a server fault - answering 500 here would
@@ -62,15 +62,15 @@ module.exports = async (req, res) => {
     const filters = {
       search: q.search || '',
       brand: q.brand && q.brand !== 'ALL' ? q.brand : '',
-      agent: session.isAdmin && q.agent && q.agent !== 'ALL' ? q.agent : '',
-      scopeEmail,
+      agent: q.agent && q.agent !== 'ALL' ? q.agent : '',
     };
     try {
       if (q.op === 'stats') {
-        // Agents populate the admin-only filter, so there's nothing to fetch for a non-admin.
+        // Tiles describe the whole desk; agents populates the Agent filter, which everyone with
+        // access now has (it is the only way to get back the old "just my tickets" view).
         const [stats, agents] = await Promise.all([
-          getDeliveryEscalationStats({ scopeEmail }),
-          session.isAdmin ? getDeliveryEscalationAgents() : Promise.resolve([]),
+          getDeliveryEscalationStats(),
+          getDeliveryEscalationAgents(),
         ]);
         res.status(200).json({ stats, agents });
         return;
