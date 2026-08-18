@@ -48,6 +48,11 @@ function mapRow(row, readOnly) {
     outcome: row.outcome || '', childDisposition: row.child_disposition || '',
     remarks: row.agent_remarks || '',
     tatBucket: row.tat_bucket || '',
+    // How many tickets share this AWB, and when the customer FIRST came about it - both are
+    // aggregates maintained by the sync (see scripts/delivery_escalation_contact_stats.py),
+    // not properties of this row alone.
+    contactCount: row.contact_count == null ? '' : row.contact_count,
+    firstContactDate: row.first_added_date ? new Date(row.first_added_date).toLocaleDateString('en-GB') : '',
   };
 }
 
@@ -83,7 +88,11 @@ async function fetchPage({ view, page, perPage, search, brand, agent }) {
 // not derived from the loaded page.
 async function fetchStats() {
   const d = await getJson('/api/delivery-escalation/record?op=stats');
-  return { stats: d.stats || { total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0 }, agents: d.agents || [] };
+  return {
+    stats: d.stats || { total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0 },
+    agents: d.agents || [],
+    repeatStats: d.repeatStats || [],
+  };
 }
 
 // Fresh tab's claim/resolve - MySQL-only, no sheet write at all, same model as CLS_RTO_calling's
@@ -172,7 +181,8 @@ const EXPORT_COLUMNS = [
   ['Brand', 'brand'], ['Order ID', 'orderId'], ['AWB', 'awb'], ['Ticket Number', 'ticketNumber'],
   ['Delivery Partner', 'deliveryPartner'], ['Query Class', 'queryClass'],
   ['Query Category', 'queryCategory'], ['WH Name', 'whName'],
-  ['TAT', 'tat'], ['Agent Name', 'assignedAgent'],
+  ['TAT', 'tat'], ['Times Contacted', 'contactCount'], ['First Contact', 'firstContactDate'],
+  ['Agent Name', 'assignedAgent'],
   ['Action Date', 'actionDate'], ['Outcome', 'outcome'],
   ['Child Disposition', 'childDisposition'], ['Remarks', 'remarks'],
   ['TAT Bucket', 'tatBucket'],
@@ -263,6 +273,7 @@ export default function DeliveryEscalationClient() {
   const [total, setTotal] = useState(0);
   const [stats, setStats] = useState({ total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0 });
   const [agents, setAgents] = useState([]);
+  const [repeatStats, setRepeatStats] = useState([]);
   const [bulkUploading, setBulkUploading] = useState(false);
   const [bulkResult, setBulkResult] = useState(null);
   const [exporting, setExporting] = useState(false);
@@ -314,9 +325,10 @@ export default function DeliveryEscalationClient() {
 
   const loadStats = useCallback(async () => {
     try {
-      const { stats: s, agents: a } = await fetchStats();
+      const { stats: s, agents: a, repeatStats: rs } = await fetchStats();
       setStats(s);
       setAgents(a);
+      setRepeatStats(rs);
     } catch (e) {
       console.error('Delivery-Escalation stats failed:', e);
       setSyncError(e.message || 'Stats failed');
@@ -583,6 +595,36 @@ export default function DeliveryEscalationClient() {
                 </div>
               )}
 
+              {tab === 'overview' && repeatStats.length > 0 && (
+                <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1">
+                    Repeat contacts on unresolved complaints
+                  </p>
+                  <p className="text-[12px] text-zinc-500 mb-3">
+                    Customers counted once per AWB, still waiting on a delivery.
+                  </p>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {repeatStats.map(({ bucket, customers }) => (
+                      <div key={bucket} className="bg-zinc-950/60 rounded-xl px-4 py-3 border border-zinc-800/80">
+                        <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1">
+                          Came {bucket}
+                        </p>
+                        <p className="text-xl font-extrabold text-zinc-100 tabular-nums">
+                          {customers.toLocaleString('en-IN')}
+                        </p>
+                        <p className="text-[11px] text-zinc-500 font-medium mt-0.5">customers</p>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[12px] text-zinc-500 mt-3">
+                    Total unresolved customers:{' '}
+                    <span className="text-zinc-300 font-semibold tabular-nums">
+                      {repeatStats.reduce((sum, r) => sum + r.customers, 0).toLocaleString('en-IN')}
+                    </span>
+                  </p>
+                </div>
+              )}
+
               {listTab && (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 flex-wrap justify-between">
@@ -651,6 +693,8 @@ export default function DeliveryEscalationClient() {
                           <th className="py-3 px-4 text-left font-medium">Query Category</th>
                           <th className="py-3 px-4 text-left font-medium">WH Name</th>
                           <th className="py-3 px-4 text-left font-medium">TAT</th>
+                          <th className="py-3 px-4 text-left font-medium">Times Contacted</th>
+                          <th className="py-3 px-4 text-left font-medium">First Contact</th>
                           <th className="py-3 px-4 text-left font-medium">Agent Name</th>
                           <th className="py-3 px-4 text-left font-medium">Outcome</th>
                           <th className="py-3 px-4 text-left font-medium">Child Disposition</th>
@@ -669,6 +713,14 @@ export default function DeliveryEscalationClient() {
                               <td className="py-3 px-4 text-zinc-400">{t.queryCategory}</td>
                               <td className="py-3 px-4 text-zinc-400">{t.whName}</td>
                               <td className="py-3 px-4 text-zinc-400">{t.tat}</td>
+                              <td className="py-3 px-4 text-zinc-400 tabular-nums">
+                                {t.contactCount === '' ? '—' : (
+                                  <span className={t.contactCount > 1 ? 'text-amber-400 font-semibold' : ''}>
+                                    {t.contactCount}{t.contactCount > 1 ? '×' : ''}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-3 px-4 text-zinc-400">{t.firstContactDate || '—'}</td>
                               <td className="py-3 px-4 text-zinc-400 text-[12px]">{t.assignedAgent ? t.assignedAgent.split('@')[0] : '—'}</td>
                               <td className="py-3 px-4 text-zinc-400">{t.outcome || '—'}</td>
                               <td className="py-3 px-4 text-zinc-400">{t.childDisposition || '—'}</td>
@@ -686,7 +738,7 @@ export default function DeliveryEscalationClient() {
                             </tr>
                           ))}
                           {rows.length === 0 && (
-                            <tr><td colSpan={tab === 'resolved' ? 14 : 11} className="py-8 text-center text-zinc-500">
+                            <tr><td colSpan={tab === 'resolved' ? 16 : 13} className="py-8 text-center text-zinc-500">
                               {syncing ? 'Loading…' : 'No tickets in this view.'}
                             </td></tr>
                           )}

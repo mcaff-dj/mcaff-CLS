@@ -45,6 +45,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib
 import mysql_lib
+import delivery_escalation_contact_stats
 
 SPREADSHEET_ID = "1fopbKSrg-U9ixZi6Tfq13Q7mzRMPtceXkfEuN4Wko-w"
 TICKET_NUMBER_COL = "Z"  # one past the tab's existing 25 columns (A-Y)
@@ -365,6 +366,19 @@ def sync_tab(tab, dry_run, since=None):
     # After the value write, never before: the write blanks L:P on these rows.
     drag_formulas(tab, start_row, start_row + len(new_rows) - 1)
     upsert_delivery_escalation_rows(new_db_rows, tab)
+    # Repeat-contact columns are aggregates over every ticket sharing an AWB, so newly-inserted
+    # rows change them for their OLDER siblings too - they have to be recomputed after the
+    # insert, not derived per-row during it. Best-effort, same as the mirror above: a failure
+    # here leaves the previous (merely stale) values in place, which must never fail a run whose
+    # sheet write already succeeded.
+    # Via mysql_lib.execute, not the shared connection directly: fill_missing_awb above switches
+    # that connection to mcaff_prod, and the recompute's table name is unqualified - execute()
+    # re-selects PEP_CLS first, so this can't silently run against the wrong schema.
+    try:
+        n = mysql_lib.execute(delivery_escalation_contact_stats.RECOMPUTE_SQL, database="PEP_CLS")
+        print(f"  recomputed contact_count/first_added_date for {n} row(s)")
+    except Exception as e:
+        print(f"  WARNING: contact-stat recompute failed (values left stale): {e}")
 
 
 def self_check():

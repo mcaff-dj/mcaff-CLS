@@ -22,7 +22,7 @@ const { getSession } = require('../_lib/session');
 const {
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
-  getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT,
+  getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
 } = require('../_lib/db');
@@ -68,11 +68,12 @@ module.exports = async (req, res) => {
       if (q.op === 'stats') {
         // Tiles describe the whole desk; agents populates the Agent filter, which everyone with
         // access now has (it is the only way to get back the old "just my tickets" view).
-        const [stats, agents] = await Promise.all([
+        const [stats, agents, repeatStats] = await Promise.all([
           getDeliveryEscalationStats(),
           getDeliveryEscalationAgents(),
+          getDeliveryEscalationRepeatStats(),
         ]);
-        res.status(200).json({ stats, agents });
+        res.status(200).json({ stats, agents, repeatStats });
         return;
       }
 

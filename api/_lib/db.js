@@ -1066,6 +1066,7 @@ const DE_TAT_BUCKET_SQL = `CASE
 const DE_SELECT_COLUMNS = `id, brand, order_id, awb_code, delivery_partner, query_class,
     query_category, wh_name, status_as_per_awb, tat, ticket_number, agent_email, outcome,
     child_disposition, LEFT(agent_remarks, 300) AS agent_remarks, disposed_at, added_date,
+    contact_count, first_added_date,
     ${DE_TAT_BUCKET_SQL} AS tat_bucket`;
 
 // Every user-supplied value here becomes a bound parameter - none is ever concatenated into
@@ -1155,6 +1156,39 @@ async function getDeliveryEscalationStats(opts = {}) {
 
 // Populates the admin-only Agent filter. Distinct over a 35k-row table is cheap enough not to
 // need its own index yet.
+// "How often did a customer come back, on complaints that are STILL open" - bucketed by how
+// many tickets share an AWB. Counted per DISTINCT AWB (one parcel = one customer here), not per
+// ticket, so a customer who came 5 times is one entry in the 5-9 bucket rather than five.
+//
+// "Still not resolved" = no ticket for that AWB has a Delivered outcome. Judged across the
+// customer's whole history, not per ticket: if any of their contacts ended in a delivery, the
+// complaint did get resolved, however many times they had to chase it.
+//
+// Grouped off the aggregate rather than the stored contact_count so the two can never disagree
+// mid-window (contact_count is refreshed by the cron sync; this is exact as of right now).
+async function getDeliveryEscalationRepeatStats() {
+  const { rows } = await sql`
+    SELECT CASE WHEN times = 1 THEN '1 time'
+                WHEN times BETWEEN 2 AND 4 THEN '2-4 times'
+                WHEN times BETWEEN 5 AND 9 THEN '5-9 times'
+                ELSE '10+ times' END AS bucket,
+           COUNT(*) AS customers,
+           MIN(times) AS sort_key
+    FROM (
+      SELECT awb_code,
+             COUNT(*) AS times,
+             MAX(outcome = 'Delivered' OR outcome LIKE 'Delivered > %') AS ever_delivered
+      FROM Delivery_escalation
+      WHERE awb_code IS NOT NULL AND awb_code <> ''
+      GROUP BY awb_code
+    ) per_awb
+    WHERE ever_delivered = 0
+    GROUP BY bucket
+    ORDER BY sort_key
+  `;
+  return rows.map((r) => ({ bucket: r.bucket, customers: Number(r.customers) || 0 }));
+}
+
 async function getDeliveryEscalationAgents() {
   const { rows } = await sql`
     SELECT DISTINCT agent_email FROM Delivery_escalation
@@ -1961,7 +1995,7 @@ module.exports = {
   claimNdrLead, disposeNdrLead,
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
-  getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT,
+  getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
