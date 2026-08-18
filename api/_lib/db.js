@@ -1186,13 +1186,19 @@ async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRema
 // lists) so a bad upload can't silently overwrite an already-Delivered ticket's history. Returns
 // how many rows each pair actually changed, so the caller can report AWBs that matched nothing
 // (typo, wrong AWB) or matched zero because every row for that AWB was already resolved.
+//
+// agent_email is ALWAYS set to whoever ran the upload, even if some other agent had already
+// claimed the row - unlike the single claim/dispose path (claimDeliveryEscalationTicketById/
+// disposeDeliveryEscalationTicketById), which only fills a blank agent_email and never
+// overwrites an existing claim. A bulk upload's outcome IS the disposal, uploaded by the person
+// who ran it, not a claim being made on someone else's behalf.
 async function bulkDisposeDeliveryEscalationByAwb(rows, email) {
   const results = [];
   for (const { awb, outcome, remarks } of rows) {
     const { affectedRows } = await sql`
       UPDATE Delivery_escalation
       SET outcome = ${outcome}, agent_remarks = ${remarks || null}, disposed_at = now(),
-          agent_email = CASE WHEN agent_email IS NULL OR agent_email = '' THEN ${email} ELSE agent_email END,
+          agent_email = ${email},
           assigned_at = CASE WHEN assigned_at IS NULL THEN now() ELSE assigned_at END
       WHERE awb_code = ${awb}
         AND (outcome IS NULL OR outcome = ''

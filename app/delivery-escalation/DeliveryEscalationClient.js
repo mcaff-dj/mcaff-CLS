@@ -650,8 +650,8 @@ export default function DeliveryEscalationClient() {
                           <th className="py-3 px-4 text-left font-medium">Status as per AWB</th>
                           <th className="py-3 px-4 text-left font-medium">TAT</th>
                           <th className="py-3 px-4 text-left font-medium">Agent Name</th>
+                          <th className="py-3 px-4 text-left font-medium">Outcome</th>
                           {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">Action Date</th>}
-                          {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">Outcome</th>}
                           {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">Remarks</th>}
                           {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">TAT Bucket</th>}
                           <th className="py-3 px-4 text-right font-medium">Action</th>
@@ -668,8 +668,8 @@ export default function DeliveryEscalationClient() {
                               <td className="py-3 px-4 text-zinc-400">{t.statusAsPerAwb}</td>
                               <td className="py-3 px-4 text-zinc-400">{t.tat}</td>
                               <td className="py-3 px-4 text-zinc-400 text-[12px]">{t.assignedAgent ? t.assignedAgent.split('@')[0] : '—'}</td>
+                              <td className="py-3 px-4 text-zinc-400">{t.outcome || '—'}</td>
                               {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.actionDate}</td>}
-                              {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.outcome}</td>}
                               {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400 max-w-xs truncate" title={t.remarks}>{t.remarks}</td>}
                               {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.tatBucket}</td>}
                               <td className="py-3 px-4 text-right">
@@ -683,7 +683,7 @@ export default function DeliveryEscalationClient() {
                             </tr>
                           ))}
                           {rows.length === 0 && (
-                            <tr><td colSpan={tab === 'resolved' ? 14 : 10} className="py-8 text-center text-zinc-500">
+                            <tr><td colSpan={tab === 'resolved' ? 14 : 11} className="py-8 text-center text-zinc-500">
                               {syncing ? 'Loading…' : 'No tickets in this view.'}
                             </td></tr>
                           )}
