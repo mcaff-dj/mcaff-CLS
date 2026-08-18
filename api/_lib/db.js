@@ -1003,6 +1003,24 @@ async function disposeDeliveryEscalationTicket(ticket, email, outcome, agentRema
   `;
 }
 
+// Delivery-Escalation's Resolved tab reads this, not the sheet - a sheet row ages out of
+// DeliveryEscalationClient.js's own MAX_ROWS_PER_TAB window once enough newer rows are added
+// above it, which silently dropped old resolved tickets from view. MySQL is the durable copy
+// (every terminal dispose is upserted here - see disposeDeliveryEscalationTicket), so it has
+// the full history the sheet can't guarantee. Capped at the same row count as the sheet's own
+// MAX_ROWS_PER_TAB for the same reason: an unbounded read risks the Lambda response payload
+// limit (see api/_lib/escalationSheet.js's own comment on this).
+async function getDeliveryEscalationHistory() {
+  const { rows } = await sql`
+    SELECT brand, order_id, awb_code, delivery_partner, query_class, query_category, wh_name,
+           status_as_per_awb, tat, agent_email, outcome, agent_remarks, disposed_at
+    FROM Delivery_escalation
+    ORDER BY disposed_at DESC
+    LIMIT 12000
+  `;
+  return rows;
+}
+
 // dateFrom/dateTo are inclusive "YYYY-MM-DD" strings (or null for unbounded), interpreted
 // as IST calendar days (+05:30, matching the hour-of-day bucketing above and the rest of
 // this app's IST convention) rather than UTC days - otherwise "Today"/"Yesterday" would be
@@ -1729,7 +1747,7 @@ module.exports = {
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions,
   claimNdrLead, disposeNdrLead,
-  disposeDeliveryEscalationTicket,
+  disposeDeliveryEscalationTicket, getDeliveryEscalationHistory,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,
   // Exported for api/_lib/db.retry.test.js, db.cache.test.js and db.refundExport.test.js only -

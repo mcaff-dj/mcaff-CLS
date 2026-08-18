@@ -5,10 +5,11 @@
 // with a TERMINAL outcome (Delivered or RTO) - not on claim, and not for a non-terminal outcome
 // like Escalated, which stays sheet-only. This table is a parallel write alongside the Google
 // Sheet, not a replacement: the sheet stays what the UI actually reads from; this is the
-// durable/queryable history side, same role MySQL's CLS_RTO_calling plays for RTO. No GET:
-// nothing in the UI reads this table back yet.
+// durable/queryable history side, same role MySQL's CLS_RTO_calling plays for RTO. GET returns
+// this table's rows - the Resolved tab reads them from here, not the sheet, since a sheet row
+// ages out of the client's own row-count cap while this table keeps the full history.
 const { getSession } = require('../_lib/session');
-const { disposeDeliveryEscalationTicket } = require('../_lib/db');
+const { disposeDeliveryEscalationTicket, getDeliveryEscalationHistory } = require('../_lib/db');
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'deliveryescalation';
@@ -22,14 +23,26 @@ function checkAccess(session) {
 }
 
 module.exports = async (req, res) => {
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed' });
-    return;
-  }
   const session = await getSession(req);
   const denied = checkAccess(session);
   if (denied) {
     res.status(session ? 403 : 401).json({ error: denied });
+    return;
+  }
+
+  if (req.method === 'GET') {
+    try {
+      const rows = await getDeliveryEscalationHistory();
+      res.status(200).json({ rows });
+    } catch (e) {
+      console.error('api/delivery-escalation/record GET error:', e);
+      res.status(500).json({ error: e.message || 'Could not load Delivery-Escalation history' });
+    }
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
     return;
   }
 

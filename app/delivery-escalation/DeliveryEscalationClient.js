@@ -123,6 +123,33 @@ function ticketSnapshot(t) {
   };
 }
 
+// Resolved tab's data source - MySQL PEP_CLS.Delivery_escalation, not the sheet: a sheet row
+// ages out of fetchTab's MAX_ROWS_PER_TAB window once enough newer rows are added above it,
+// which silently dropped old resolved tickets from view (see api/_lib/db.js's
+// getDeliveryEscalationHistory comment). Rows here have no sheet rowNum/tab of their own, so
+// they're mapped with readOnly: true - openAction/saveAction skip the claim/write-back path
+// for them (nothing to write back to; the ticket is already terminal).
+async function fetchResolvedHistory() {
+  const r = await fetch('/api/delivery-escalation/record');
+  if (!r.ok) throw new Error(`Resolved history ${r.status}`);
+  const d = await r.json();
+  return d.rows || [];
+}
+
+function mapHistoryRow(row, i) {
+  return {
+    id: `hist-${row.brand}-${row.awb_code || row.order_id}-${i}`,
+    tab: null, rowNum: null, readOnly: true,
+    brand: row.brand, orderId: row.order_id, awb: row.awb_code || '',
+    deliveryPartner: row.delivery_partner || '', queryClass: row.query_class || '',
+    queryCategory: row.query_category || '', whName: row.wh_name || '',
+    statusAsPerAwb: row.status_as_per_awb || '', tat: row.tat || '',
+    assignedAgent: row.agent_email || '',
+    actionDate: row.disposed_at ? new Date(row.disposed_at).toLocaleDateString('en-GB') : '',
+    outcome: row.outcome || '', remarks: row.agent_remarks || '',
+  };
+}
+
 async function writeCells(tab, ranges) {
   const r = await fetch('/api/delivery-escalation/sheet', {
     method: 'POST',
@@ -176,6 +203,7 @@ export default function DeliveryEscalationClient() {
 
   const [tickets, setTickets] = useState([]);
   const [totalRows, setTotalRows] = useState(0);
+  const [resolvedTickets, setResolvedTickets] = useState([]);
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState('—');
   const [syncError, setSyncError] = useState(null);
@@ -184,9 +212,16 @@ export default function DeliveryEscalationClient() {
   const sync = useCallback(async (silent = false) => {
     setSyncing(true);
     try {
-      const settled = await Promise.allSettled(TABS.map(fetchTab));
-      const ok = settled.filter(s => s.status === 'fulfilled').map(s => s.value);
-      const failed = settled.filter(s => s.status === 'rejected');
+      const settled = await Promise.allSettled([...TABS.map(fetchTab), fetchResolvedHistory()]);
+      const tabSettled = settled.slice(0, TABS.length);
+      const historySettled = settled[TABS.length];
+      const ok = tabSettled.filter(s => s.status === 'fulfilled').map(s => s.value);
+      const failed = tabSettled.filter(s => s.status === 'rejected');
+      if (historySettled.status === 'fulfilled') {
+        setResolvedTickets(historySettled.value.map(mapHistoryRow));
+      } else {
+        failed.push(historySettled);
+      }
       if (!ok.length) throw (failed[0]?.reason || new Error('Sync failed'));
       setTickets(ok.flatMap(o => o.rows));
       setTotalRows(ok.reduce((sum, o) => sum + o.totalRows, 0));
@@ -263,7 +298,7 @@ export default function DeliveryEscalationClient() {
 
   const openAction = async (t) => {
     let ticket = t;
-    if (!t.assignedAgent && googleUser?.email) {
+    if (!t.readOnly && !t.assignedAgent && googleUser?.email) {
       try {
         await writeCells(t.tab, [{ range: `${COL_AGENT}${t.rowNum}`, values: [googleUser.email] }]);
         ticket = { ...t, assignedAgent: googleUser.email };
@@ -314,10 +349,11 @@ export default function DeliveryEscalationClient() {
   const inMyScope = (t) => !myScopeEmail || (t.assignedAgent || '').toLowerCase() === myScopeEmail;
 
   const scopedTickets = useMemo(() => tickets.filter(inMyScope), [tickets, myScopeEmail]);
+  const scopedResolved = useMemo(() => resolvedTickets.filter(inMyScope), [resolvedTickets, myScopeEmail]);
   const total = scopedTickets.length;
   const assigned = useMemo(() => scopedTickets.filter(t => t.assignedAgent).length, [scopedTickets]);
-  // Resolved = a TERMINAL dispose (Delivered/RTO) - the same set that gets moved into MySQL.
-  const resolved = useMemo(() => scopedTickets.filter(t => TERMINAL_OUTCOMES.includes(outcomeTopLevel(t))).length, [scopedTickets]);
+  // Resolved count comes from MySQL (scopedResolved), not the sheet - see fetchResolvedHistory.
+  const resolved = scopedResolved.length;
   // Fresh = still needs work: never disposed, OR disposed as Escalated (not done, just waiting
   // on the delivery partner) - anything else non-terminal would land here too by the same rule,
   // but today's only non-terminal outcome is Escalated.
@@ -326,25 +362,28 @@ export default function DeliveryEscalationClient() {
   const resolutionRate = assigned > 0 ? Math.round((resolved / assigned) * 100) : 0;
 
   const agentOptions = useMemo(() => {
-    const emails = Array.from(new Set(scopedTickets.map(t => t.assignedAgent).filter(Boolean)));
+    const emails = Array.from(new Set([...scopedTickets, ...scopedResolved].map(t => t.assignedAgent).filter(Boolean)));
     return [{ value: 'ALL', label: 'All Agents' }, ...emails.sort().map(e => ({ value: e, label: e.split('@')[0] }))];
-  }, [scopedTickets]);
+  }, [scopedTickets, scopedResolved]);
 
-  const filteredBase = useMemo(() => {
+  const applyFilters = useCallback((list) => {
     const q = search.trim().toLowerCase();
-    return scopedTickets.filter(t => {
+    return list.filter(t => {
       if (brandFilter !== 'ALL' && t.brand !== brandFilter) return false;
       if (agentFilter !== 'ALL' && (t.assignedAgent || '') !== agentFilter) return false;
       if (!q) return true;
       return (t.awb || '').toLowerCase().includes(q) || (t.orderId || '').toLowerCase().includes(q);
     });
-  }, [scopedTickets, search, brandFilter, agentFilter]);
+  }, [search, brandFilter, agentFilter]);
+
+  const filteredBase = useMemo(() => applyFilters(scopedTickets), [applyFilters, scopedTickets]);
+  const filteredResolved = useMemo(() => applyFilters(scopedResolved), [applyFilters, scopedResolved]);
 
   const rowsForTab = useMemo(() => {
     if (tab === 'fresh') return filteredBase.filter(t => t.assignedAgent && !TERMINAL_OUTCOMES.includes(outcomeTopLevel(t)));
-    if (tab === 'resolved') return filteredBase.filter(t => TERMINAL_OUTCOMES.includes(outcomeTopLevel(t)));
+    if (tab === 'resolved') return filteredResolved;
     return filteredBase;
-  }, [filteredBase, tab]);
+  }, [filteredBase, filteredResolved, tab]);
 
   const totalPages = Math.max(1, Math.ceil(rowsForTab.length / perPage));
   const pageRows = useMemo(() => rowsForTab.slice((page - 1) * perPage, page * perPage), [rowsForTab, page, perPage]);
@@ -532,7 +571,7 @@ export default function DeliveryEscalationClient() {
                                   onClick={() => openAction(t)}
                                   className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-semibold transition-colors"
                                 >
-                                  {t.outcome ? 'View / Edit' : 'Resolve'}
+                                  {t.readOnly ? 'View' : t.outcome ? 'View / Edit' : 'Resolve'}
                                 </button>
                               </td>
                             </tr>
@@ -567,7 +606,7 @@ export default function DeliveryEscalationClient() {
         <Overlay onClose={() => setDetailTkt(null)}>
           <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 w-full max-w-lg space-y-4 shadow-2xl">
             <div className="flex items-center justify-between">
-              <h3 className="text-base font-bold text-zinc-100">Resolve Ticket</h3>
+              <h3 className="text-base font-bold text-zinc-100">{detailTkt.readOnly ? 'Ticket Details' : 'Resolve Ticket'}</h3>
               <button onClick={() => setDetailTkt(null)} className="text-zinc-500 hover:text-zinc-300"><XIcon /></button>
             </div>
             <div className="text-[13px] text-zinc-400 space-y-1">
@@ -575,6 +614,15 @@ export default function DeliveryEscalationClient() {
               <p><span className="text-zinc-500">Brand:</span> {detailTkt.brand} &nbsp; <span className="text-zinc-500">Partner:</span> {detailTkt.deliveryPartner}</p>
               <p><span className="text-zinc-500">Query:</span> {detailTkt.queryClass} / {detailTkt.queryCategory}</p>
             </div>
+            {detailTkt.readOnly ? (
+              <div className="text-[13px] text-zinc-300 space-y-1 bg-zinc-950/60 border border-zinc-800 rounded-lg px-3 py-2">
+                <p><span className="text-zinc-500">Outcome:</span> {detailTkt.outcome || '—'}</p>
+                <p><span className="text-zinc-500">Action Date:</span> {detailTkt.actionDate || '—'}</p>
+                <p><span className="text-zinc-500">Agent:</span> {detailTkt.assignedAgent || '—'}</p>
+                <p><span className="text-zinc-500">Remarks:</span> {detailTkt.remarks || '—'}</p>
+              </div>
+            ) : (
+            <>
             <div>
               <label className="text-[12px] font-semibold text-zinc-400 mb-1 block">Outcome</label>
               {(processDispositions || []).length === 0 ? (
@@ -615,15 +663,19 @@ export default function DeliveryEscalationClient() {
                 placeholder="Notes on what was done…"
               />
             </div>
+            </>
+            )}
             <div className="flex justify-end gap-2">
-              <button onClick={() => setDetailTkt(null)} className="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[13px] font-semibold transition-colors">Cancel</button>
-              <button
-                onClick={saveAction}
-                disabled={!dispComplete || saving}
-                className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-semibold transition-colors disabled:opacity-50"
-              >
-                {saving ? 'Saving…' : 'Save'}
-              </button>
+              <button onClick={() => setDetailTkt(null)} className="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[13px] font-semibold transition-colors">{detailTkt.readOnly ? 'Close' : 'Cancel'}</button>
+              {!detailTkt.readOnly && (
+                <button
+                  onClick={saveAction}
+                  disabled={!dispComplete || saving}
+                  className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-semibold transition-colors disabled:opacity-50"
+                >
+                  {saving ? 'Saving…' : 'Save'}
+                </button>
+              )}
             </div>
           </div>
         </Overlay>
