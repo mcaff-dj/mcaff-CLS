@@ -536,12 +536,16 @@ def fetch_online_agents(process_key=None, conn=None):
     means unrestricted" contract: an agent with no row, or an empty/NULL value, is eligible for
     a reassignment of either payment type, same as before this column existed.
 
-    Returns ([], {}, {}, {}, {}) (not an error) if MYSQL_* credentials aren't configured -
-    that's the true fail-safe case, since agent_presence itself is unreachable. A missing
-    POSTGRES_URL (with a process_key given) is a smaller-blast-radius gap: agents are still
-    read from agent_presence and DO get leads assigned, just without any per-process
-    quotas/specializations/hard filters applied - the pre-per-process global-presence
-    behaviour, not a no-assignment fail-safe.
+    Returns ([], {}, {}, {}, {}) (not an error) if MYSQL_* credentials aren't configured, or if
+    the agent_presence query itself errors (a dropped connection, a lock timeout) - agent_presence
+    is the true fail-safe case, since the whole run has no idea who's online without it, and
+    every other MySQL/Postgres call in this file already fails open the same way (see
+    lookup_platform_order_ids, check_already_punched, fetch_reassignment_attempts) rather than
+    letting an unhandled exception here abort a run that would otherwise have assigned nothing
+    anyway. A missing POSTGRES_URL (with a process_key given) is a smaller-blast-radius gap:
+    agents are still read from agent_presence and DO get leads assigned, just without any
+    per-process quotas/specializations/hard filters applied - the pre-per-process
+    global-presence behaviour, not a no-assignment fail-safe.
 
     conn: reuse main()'s already-open connection instead of opening a new one - see
     _pg_cursor. Optional so this stays directly callable on its own (REPL, one-off script).
@@ -551,10 +555,14 @@ def fetch_online_agents(process_key=None, conn=None):
         print("MYSQL_* credentials not configured - cannot determine online agents.")
         return [], {}, {}, {}, {}
     cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=STALE_MINUTES)
-    rows = mysql_lib.query(
-        "SELECT email FROM agent_presence WHERE status = %s AND updated_at >= %s ORDER BY email",
-        ("Online", cutoff),
-    )
+    try:
+        rows = mysql_lib.query(
+            "SELECT email FROM agent_presence WHERE status = %s AND updated_at >= %s ORDER BY email",
+            ("Online", cutoff),
+        )
+    except Exception as e:
+        print(f"  (agent_presence lookup failed: {e} - treating as no agents online)")
+        return [], {}, {}, {}, {}
     present = [row[0].lower() for row in (rows or [])]
 
     if not process_key:

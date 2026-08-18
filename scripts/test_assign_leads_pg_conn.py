@@ -60,6 +60,32 @@ def test_fetch_online_agents_reads_mysql_not_postgres():
         assign_leads.mysql_lib.query = orig_query
 
 
+def test_fetch_online_agents_fails_open_on_mysql_query_error():
+    """The actual bug this test guards: agent_presence is a live network call like every
+    other MySQL/Postgres lookup in this file, and a transient failure here (dropped
+    connection, lock timeout) must fail open the same way lookup_platform_order_ids/
+    check_already_punched/fetch_reassignment_attempts already do - not raise uncaught
+    through fetch_online_agents -> _main -> main() and abort the whole 5-minute run,
+    assigning zero leads even though hundreds may be pending."""
+    orig_get_cred = assign_leads.mysql_lib.get_credential
+    orig_query = assign_leads.mysql_lib.query
+    assign_leads.mysql_lib.get_credential = lambda: {
+        "host": "h", "user": "u", "password": "p", "database": "PEP_CLS", "port": 3306,
+    }
+
+    def _boom(sql, params=None, database=None):
+        raise Exception("SELECT command denied to user")
+
+    assign_leads.mysql_lib.query = _boom
+    try:
+        result = assign_leads.fetch_online_agents()
+        assert result == ([], {}, {}, {}, {}), \
+            "a raising agent_presence query must fail open, not propagate"
+    finally:
+        assign_leads.mysql_lib.get_credential = orig_get_cred
+        assign_leads.mysql_lib.query = orig_query
+
+
 class FakeCursor:
     def __init__(self, rows=None, raise_on_execute=False):
         self.rows = rows or []
