@@ -81,7 +81,7 @@ async function fetchPage({ view, page, perPage, search, brand, agent }) {
 // not derived from the loaded page.
 async function fetchStats() {
   const d = await getJson('/api/delivery-escalation/record?op=stats');
-  return { stats: d.stats || { total: 0, assigned: 0, resolved: 0, fresh: 0 }, agents: d.agents || [] };
+  return { stats: d.stats || { total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0 }, agents: d.agents || [] };
 }
 
 // Fresh tab's claim/resolve - MySQL-only, no sheet write at all, same model as CLS_RTO_calling's
@@ -258,7 +258,7 @@ export default function DeliveryEscalationClient() {
 
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
-  const [stats, setStats] = useState({ total: 0, assigned: 0, resolved: 0, fresh: 0 });
+  const [stats, setStats] = useState({ total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0 });
   const [agents, setAgents] = useState([]);
   const [bulkUploading, setBulkUploading] = useState(false);
   const [bulkResult, setBulkResult] = useState(null);
@@ -283,7 +283,7 @@ export default function DeliveryEscalationClient() {
   // Guards against a slow earlier request landing after a faster later one and overwriting the
   // newer rows - only the most recent request is allowed to apply its result.
   const reqIdRef = useRef(0);
-  const listTab = tab === 'fresh' || tab === 'resolved';
+  const listTab = tab === 'fresh' || tab === 'resolved' || tab === 'forced_rto';
 
   const loadPage = useCallback(async (silent = false) => {
     if (!listTab) return;
@@ -463,6 +463,7 @@ export default function DeliveryEscalationClient() {
   const tabsList = [
     { key: 'overview', label: '📊 Overview', count: stats.total },
     { key: 'fresh', label: '⚡ Fresh', count: stats.fresh },
+    { key: 'forced_rto', label: '↩️ Forced RTO', count: stats.forcedRto },
     { key: 'resolved', label: '✅ Resolved', count: stats.resolved },
     ...(sessionIsAdmin ? [{ key: 'admin', label: '🛡️ Admin Panel', count: (processDispositions || []).length }] : []),
   ];
@@ -580,7 +581,7 @@ export default function DeliveryEscalationClient() {
                 </div>
               )}
 
-              {(tab === 'fresh' || tab === 'resolved') && (
+              {listTab && (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 flex-wrap justify-between">
                     <div className="flex items-center gap-2 flex-wrap">

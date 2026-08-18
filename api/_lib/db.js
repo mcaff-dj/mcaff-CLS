@@ -1020,15 +1020,24 @@ const DELIVERY_ESCALATION_MAX_PER_PAGE = 200;
 // a row this is ~1.5MB).
 const DELIVERY_ESCALATION_MAX_EXPORT = 5000;
 
+// A ticket is Forced RTO whenever its TAT bucket (tat, the sheet-fed string - see
+// DE_SELECT_COLUMNS/DE_TAT_BUCKET_SQL below for the OTHER, computed tat_bucket, a different
+// field) reads "Forced to be marked as RTO" - the logistics pipeline's own flag for an RTO it
+// forced rather than one worked normally. Split into its own tab/view so those don't sit mixed
+// into Fresh's ordinary RTO rows.
+const DE_FORCED_RTO_WHERE = `tat = 'Forced to be marked as RTO'`;
+
 // A ticket is Fresh while its outcome is blank (never disposed), RTO (an RTO'd order can still
 // be re-shipped and later delivered, so it isn't terminal), or Escalated (still waiting on the
-// delivery partner). Resolved is Delivered ONLY. Matched on the top-level outcome label, so a
-// nested "Delivered > <sub-reason>" still counts.
-const DE_FRESH_WHERE = `(outcome IS NULL OR outcome = ''
+// delivery partner) - EXCLUDING Forced RTO, which moved to its own view (DE_FORCED_RTO_WHERE)
+// instead of sitting inside Fresh's ordinary RTO rows. Resolved is Delivered ONLY. Matched on
+// the top-level outcome label, so a nested "Delivered > <sub-reason>" still counts.
+const DE_FRESH_WHERE = `((outcome IS NULL OR outcome = ''
    OR outcome = 'RTO' OR outcome LIKE 'RTO > %'
-   OR outcome = 'Escalated' OR outcome LIKE 'Escalated > %')`;
+   OR outcome = 'Escalated' OR outcome LIKE 'Escalated > %')
+   AND NOT (${DE_FORCED_RTO_WHERE}))`;
 const DE_RESOLVED_WHERE = `(outcome = 'Delivered' OR outcome LIKE 'Delivered > %')`;
-const DE_VIEW_WHERE = { fresh: DE_FRESH_WHERE, resolved: DE_RESOLVED_WHERE };
+const DE_VIEW_WHERE = { fresh: DE_FRESH_WHERE, resolved: DE_RESOLVED_WHERE, forced_rto: DE_FORCED_RTO_WHERE };
 
 // Days-to-deliver (disposed_at, when the agent actually marked it Delivered, minus added_date)
 // bucketed into the same 6 names the sheet's own column P formula uses for ITS metric - that
@@ -1124,7 +1133,8 @@ async function getDeliveryEscalationStats(opts = {}) {
     `SELECT COUNT(DISTINCT awb_code) AS total,
             COUNT(DISTINCT CASE WHEN agent_email IS NOT NULL AND agent_email != '' THEN awb_code END) AS assigned,
             COUNT(DISTINCT CASE WHEN ${DE_RESOLVED_WHERE} THEN awb_code END) AS resolved,
-            COUNT(DISTINCT CASE WHEN ${DE_FRESH_WHERE} THEN awb_code END) AS fresh
+            COUNT(DISTINCT CASE WHEN ${DE_FRESH_WHERE} THEN awb_code END) AS fresh,
+            COUNT(DISTINCT CASE WHEN ${DE_FORCED_RTO_WHERE} THEN awb_code END) AS forcedRto
      FROM Delivery_escalation WHERE ${where}`, params);
   const r = rows[0] || {};
   return {
@@ -1132,6 +1142,7 @@ async function getDeliveryEscalationStats(opts = {}) {
     assigned: Number(r.assigned) || 0,
     resolved: Number(r.resolved) || 0,
     fresh: Number(r.fresh) || 0,
+    forcedRto: Number(r.forcedRto) || 0,
   };
 }
 

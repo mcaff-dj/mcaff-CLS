@@ -53,7 +53,7 @@ module.exports = async (req, res) => {
     // A non-admin is pinned to their own tickets in SQL; only an admin may filter by agent.
     const scopeEmail = session.isAdmin ? '' : session.email;
     const view = q.view || 'fresh';
-    if (view !== 'fresh' && view !== 'resolved') {
+    if (view !== 'fresh' && view !== 'resolved' && view !== 'forced_rto') {
       // A bad query param is the caller's error, not a server fault - answering 500 here would
       // look identical to a real outage.
       res.status(400).json({ error: `Unknown view: ${view}` });
