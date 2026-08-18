@@ -31,9 +31,11 @@ const TAB_KEY = 'deliveryescalation';
 // Number (column E), not Added Date (column A) - Added Date is blank on some real rows (seen on
 // the sheet itself), so it would under-count how many rows actually exist.
 const MAX_ROWS_PER_TAB = 12000;
-// Only columns A-Q (indices 0-16, see mapRow) are actually read out of the fetched width below -
-// everything from R onward is a separate downstream process's own columns (differs between the
-// two tabs; City/State/Ticket Number/etc.), not ours to read or touch.
+// Only columns A-Q plus Z (indices 0-16 and 25, see mapRow) are actually read out of the
+// fetched width below - everything else from R to Y is a separate downstream process's own
+// columns (differs between the two tabs; City/State/etc.), not ours to read or touch. Z
+// (Ticket Number) is the one exception in that range - it's the same column, same meaning, on
+// both tabs.
 // Agent Name / Action Date / Outcome / Remarks - the only cells this UI ever writes. Appended
 // fresh after Z (not reusing anything in R:Z) because nothing in that range belongs to this app.
 const COL_AGENT = 'AA', COL_ACTION_DATE = 'AB', COL_OUTCOME = 'AC', COL_REMARKS = 'AD';
@@ -56,7 +58,7 @@ function mapRow(row, rowNum, tab) {
     addedDate: v(0), queryClass: v(1), queryCategory: v(2), orderId: v(3), awb: v(4),
     deliveryPartner: v(5), orderDate: v(6), orderMonth: v(7), queryDate: v(8), queryMonth: v(9),
     whName: v(10), uniqueCount: v(11), deliveredDate: v(12), statusAsPerAwb: v(13), solvDate: v(14),
-    tat: v(15), logisticsUpdate: v(16),
+    tat: v(15), logisticsUpdate: v(16), ticketNumber: v(25),
     assignedAgent: v(26), actionDate: v(27), outcome: v(28), remarks: v(29),
   };
 }
@@ -117,7 +119,7 @@ function ticketSnapshot(t) {
   return {
     brand: t.brand, orderId: t.orderId, awbCode: t.awb, deliveryPartner: t.deliveryPartner,
     queryClass: t.queryClass, queryCategory: t.queryCategory, whName: t.whName,
-    statusAsPerAwb: t.statusAsPerAwb, tat: t.tat,
+    statusAsPerAwb: t.statusAsPerAwb, tat: t.tat, ticketNumber: t.ticketNumber,
   };
 }
 
