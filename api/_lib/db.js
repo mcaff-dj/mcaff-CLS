@@ -1060,9 +1060,12 @@ const DE_TAT_BUCKET_SQL = `CASE
 
 // agent_remarks is unbounded TEXT; the UI truncates its display anyway, so it's cut here too -
 // otherwise one pathological remark could bloat a page response on its own.
+// child_disposition is a generated column derived from outcome (see
+// scripts/alter_delivery_escalation_add_child_disposition.py) - the sub-level of the
+// disposition tree, split out so it can be read/grouped without substringing outcome.
 const DE_SELECT_COLUMNS = `id, brand, order_id, awb_code, delivery_partner, query_class,
     query_category, wh_name, status_as_per_awb, tat, ticket_number, agent_email, outcome,
-    LEFT(agent_remarks, 300) AS agent_remarks, disposed_at, added_date,
+    child_disposition, LEFT(agent_remarks, 300) AS agent_remarks, disposed_at, added_date,
     ${DE_TAT_BUCKET_SQL} AS tat_bucket`;
 
 // Every user-supplied value here becomes a bound parameter - none is ever concatenated into

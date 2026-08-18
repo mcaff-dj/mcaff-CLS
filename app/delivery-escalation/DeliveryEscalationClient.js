@@ -45,7 +45,8 @@ function mapRow(row, readOnly) {
     statusAsPerAwb: row.status_as_per_awb || '', tat: row.tat || '',
     ticketNumber: row.ticket_number || '', assignedAgent: row.agent_email || '',
     actionDate: row.disposed_at ? new Date(row.disposed_at).toLocaleDateString('en-GB') : '',
-    outcome: row.outcome || '', remarks: row.agent_remarks || '',
+    outcome: row.outcome || '', childDisposition: row.child_disposition || '',
+    remarks: row.agent_remarks || '',
     tatBucket: row.tat_bucket || '',
   };
 }
@@ -171,8 +172,9 @@ const EXPORT_COLUMNS = [
   ['Brand', 'brand'], ['Order ID', 'orderId'], ['AWB', 'awb'], ['Ticket Number', 'ticketNumber'],
   ['Delivery Partner', 'deliveryPartner'], ['Query Class', 'queryClass'],
   ['Query Category', 'queryCategory'], ['WH Name', 'whName'],
-  ['Status as per AWB', 'statusAsPerAwb'], ['TAT', 'tat'], ['Agent Name', 'assignedAgent'],
-  ['Action Date', 'actionDate'], ['Outcome', 'outcome'], ['Remarks', 'remarks'],
+  ['TAT', 'tat'], ['Agent Name', 'assignedAgent'],
+  ['Action Date', 'actionDate'], ['Outcome', 'outcome'],
+  ['Child Disposition', 'childDisposition'], ['Remarks', 'remarks'],
   ['TAT Bucket', 'tatBucket'],
 ];
 
@@ -648,10 +650,10 @@ export default function DeliveryEscalationClient() {
                           <th className="py-3 px-4 text-left font-medium">Delivery Partner</th>
                           <th className="py-3 px-4 text-left font-medium">Query Category</th>
                           <th className="py-3 px-4 text-left font-medium">WH Name</th>
-                          <th className="py-3 px-4 text-left font-medium">Status as per AWB</th>
                           <th className="py-3 px-4 text-left font-medium">TAT</th>
                           <th className="py-3 px-4 text-left font-medium">Agent Name</th>
                           <th className="py-3 px-4 text-left font-medium">Outcome</th>
+                          <th className="py-3 px-4 text-left font-medium">Child Disposition</th>
                           {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">Action Date</th>}
                           {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">Remarks</th>}
                           {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">TAT Bucket</th>}
@@ -666,10 +668,10 @@ export default function DeliveryEscalationClient() {
                               <td className="py-3 px-4 text-zinc-400">{t.deliveryPartner}</td>
                               <td className="py-3 px-4 text-zinc-400">{t.queryCategory}</td>
                               <td className="py-3 px-4 text-zinc-400">{t.whName}</td>
-                              <td className="py-3 px-4 text-zinc-400">{t.statusAsPerAwb}</td>
                               <td className="py-3 px-4 text-zinc-400">{t.tat}</td>
                               <td className="py-3 px-4 text-zinc-400 text-[12px]">{t.assignedAgent ? t.assignedAgent.split('@')[0] : '—'}</td>
                               <td className="py-3 px-4 text-zinc-400">{t.outcome || '—'}</td>
+                              <td className="py-3 px-4 text-zinc-400">{t.childDisposition || '—'}</td>
                               {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.actionDate}</td>}
                               {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400 max-w-xs truncate" title={t.remarks}>{t.remarks}</td>}
                               {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.tatBucket}</td>}
