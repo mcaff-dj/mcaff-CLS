@@ -78,10 +78,11 @@ module.exports = async (req, res) => {
       }
 
       if (q.op === 'export') {
-        const rows = await getDeliveryEscalationExport(view, filters);
-        // capped tells the client the export hit the ceiling, so a partial file can say so
-        // rather than looking like the complete set.
-        res.status(200).json({ rows, capped: rows.length >= DELIVERY_ESCALATION_MAX_EXPORT });
+        // One chunk (see getDeliveryEscalationExport) - q.page walks through the full matching
+        // set across multiple requests, so no total row count is capped here. hasMore tells the
+        // client whether to request the next page rather than stop.
+        const rows = await getDeliveryEscalationExport(view, { ...filters, page: q.page });
+        res.status(200).json({ rows, hasMore: rows.length >= DELIVERY_ESCALATION_MAX_EXPORT });
         return;
       }
 

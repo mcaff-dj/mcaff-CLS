@@ -1206,15 +1206,20 @@ async function getDeliveryEscalationAgents() {
   return rows.map((r) => r.agent_email);
 }
 
-// Rows for a CSV export - the current filter/scope, but every matching row rather than one
-// page, capped so the response still fits the 6MB ceiling. The cap is reported back (see
-// record.js) so a truncated export can say so instead of looking complete.
+// One CHUNK of a CSV export - current filter/scope, ordered, LIMIT/OFFSET by opts.page (1-based).
+// DELIVERY_ESCALATION_MAX_EXPORT is a per-request chunk size, not a total cap: it exists only
+// to keep any one response inside Lambda's 6MB ceiling. The client (see downloadCsv in
+// DeliveryEscalationClient.js) walks page 1, 2, 3... requesting the next chunk until one comes
+// back shorter than the chunk size, so the export itself has no row-count ceiling. Same
+// LIMIT/OFFSET-must-be-inlined-not-bound reasoning as dePaging above.
 async function getDeliveryEscalationExport(view, opts = {}) {
   const { where, params } = deWhere(view, opts);
+  const page = Math.max(parseInt(opts.page, 10) || 1, 1);
+  const offset = (page - 1) * DELIVERY_ESCALATION_MAX_EXPORT;
   const pool = await getPool();
   const [rows] = await pool.execute(
     `SELECT ${DE_SELECT_COLUMNS} FROM Delivery_escalation WHERE ${where}
-     ORDER BY ${deOrderBy(view)} LIMIT ${DELIVERY_ESCALATION_MAX_EXPORT}`, params);
+     ORDER BY ${deOrderBy(view)} LIMIT ${DELIVERY_ESCALATION_MAX_EXPORT} OFFSET ${offset}`, params);
   return rows;
 }
 

@@ -188,14 +188,24 @@ const EXPORT_COLUMNS = [
   ['TAT Bucket', 'tatBucket'],
 ];
 
-// Downloads the CURRENT view and filters, not just the page on screen - the server returns
-// every matching row (capped, see DELIVERY_ESCALATION_MAX_EXPORT) and the file is built here.
+// Downloads the CURRENT view and filters, not just the page on screen - every matching row,
+// with no row-count ceiling. The server hands back one chunk per request (bounded so any single
+// response stays inside Lambda's 6MB cap - see DELIVERY_ESCALATION_MAX_EXPORT/hasMore in
+// db.js/record.js); this walks page 1, 2, 3... until a chunk comes back short, then builds one
+// CSV from everything collected. onChunk reports progress for a long export.
 // ﻿ prefix: without a BOM Excel reads a UTF-8 CSV as ANSI and mangles non-ASCII text.
-async function downloadCsv({ view, search, brand, agent }) {
-  const p = filterQuery({ view, search, brand, agent });
-  p.set('op', 'export');
-  const d = await getJson(`/api/delivery-escalation/record?${p}`);
-  const rows = (d.rows || []).map((r) => mapRow(r, view === 'resolved'));
+async function downloadCsv({ view, search, brand, agent }, onChunk) {
+  const rows = [];
+  for (let page = 1; ; page++) {
+    const p = filterQuery({ view, search, brand, agent });
+    p.set('op', 'export');
+    p.set('page', String(page));
+    const d = await getJson(`/api/delivery-escalation/record?${p}`);
+    const chunk = d.rows || [];
+    for (const r of chunk) rows.push(mapRow(r, view === 'resolved'));
+    onChunk?.(rows.length);
+    if (!d.hasMore) break;
+  }
   const lines = [EXPORT_COLUMNS.map(([label]) => csvCell(label)).join(',')];
   for (const row of rows) lines.push(EXPORT_COLUMNS.map(([, key]) => csvCell(row[key])).join(','));
   const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
@@ -207,7 +217,7 @@ async function downloadCsv({ view, search, brand, agent }) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  return { count: rows.length, capped: !!d.capped };
+  return { count: rows.length };
 }
 
 // Fresh tab's bulk outcome upload - one call, many (awb, outcome) pairs; see
@@ -444,14 +454,17 @@ export default function DeliveryEscalationClient() {
     }
   };
 
-  // Exports the whole current view+filters, not the page on screen - see downloadCsv.
+  // Exports the whole current view+filters, not the page on screen, no row-count ceiling - see
+  // downloadCsv. A large table means several chunk requests, so the toast updates as they land
+  // rather than sitting silent until the last one.
   const handleExport = async () => {
     setExporting(true);
     try {
-      const { count, capped } = await downloadCsv({
-        view: tab, search: debouncedSearch, brand: brandFilter, agent: agentFilter,
-      });
-      showToast(capped ? `Downloaded ${count.toLocaleString('en-IN')} rows (export cap reached)` : `Downloaded ${count.toLocaleString('en-IN')} rows`);
+      const { count } = await downloadCsv(
+        { view: tab, search: debouncedSearch, brand: brandFilter, agent: agentFilter },
+        (soFar) => showToast(`Exporting… ${soFar.toLocaleString('en-IN')} rows so far`),
+      );
+      showToast(`Downloaded ${count.toLocaleString('en-IN')} rows`);
     } catch (e) {
       showToast(`⚠️ Export failed: ${e.message}`);
     } finally {
