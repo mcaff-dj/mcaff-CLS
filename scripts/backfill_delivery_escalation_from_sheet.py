@@ -33,6 +33,12 @@ already-exported CSV (same A:Z column layout) - useful for re-running against a 
 someone hand-corrected (e.g. filled in a previously-blank Added Date column) without waiting
 on another live Sheets read.
 
+--unresolved-only restricts to rows whose Status as per AWB (column N) is "Unresolved" or
+blank - the tickets logistics hasn't closed out as Delivered or RTO either way, i.e. everything
+NOT already covered by the Delivered (Mapping_delivery.xlsx) and RTO (status_as_per_awb='RTO')
+backfills already run against this same export. Filters BEFORE the upsert, not after, so the
+row counts printed reflect only what's actually being touched.
+
 Dry-run by default (writes the CSV, prints what it would upsert, touches no DB rows);
 --apply performs the upserts.
 """
@@ -132,8 +138,19 @@ def build_row(cells, tab):
     )
 
 
-def backfill_tab(tab, csv_path, dry_run):
+def is_unresolved_status(cells):
+    """True for blank or 'Unresolved' (case-insensitive) in the Status as per AWB column -
+    i.e. not yet closed out as Delivered or RTO by the logistics pipeline."""
+    v = cells[STATUS_COL].strip() if STATUS_COL < len(cells) else ""
+    return v == "" or v.lower() == "unresolved"
+
+
+def backfill_tab(tab, csv_path, dry_run, unresolved_only=False):
     cells_rows = rows_from_csv(csv_path)
+    if unresolved_only:
+        before = len(cells_rows)
+        cells_rows = [c for c in cells_rows if is_unresolved_status(c)]
+        print(f"  {tab}: {len(cells_rows)}/{before} rows are Unresolved/blank status - only these will be touched")
     upsert_rows = [r for r in (build_row(c, tab) for c in cells_rows) if r]
     print(f"  {tab}: {len(upsert_rows)}/{len(cells_rows)} rows have a Parent Order to key on")
     if dry_run:
@@ -167,6 +184,19 @@ def self_check():
     assert build_row([], "HYPHEN") is None  # blank row, nothing to key on
     # A short row (fewer cells than the status/tat columns) must not IndexError.
     assert build_row(["", "", "", "ORD1"], "HYPHEN")[13:] == (None, None)
+
+    blank_row = [""] * 14
+    unresolved_row = [""] * 14; unresolved_row[STATUS_COL] = "Unresolved"
+    mixed_case_row = [""] * 14; mixed_case_row[STATUS_COL] = "  unresolved  "
+    delivered_row = [""] * 14; delivered_row[STATUS_COL] = "Delivered"
+    rto_row = [""] * 14; rto_row[STATUS_COL] = "RTO"
+    assert is_unresolved_status(blank_row) is True
+    assert is_unresolved_status(unresolved_row) is True
+    assert is_unresolved_status(mixed_case_row) is True  # case/whitespace insensitive
+    assert is_unresolved_status(delivered_row) is False
+    assert is_unresolved_status(rto_row) is False
+    assert is_unresolved_status([""] * 3) is True  # shorter than STATUS_COL treated as blank, same as an empty cell
+
     print("self-check ok")
 
 
@@ -176,6 +206,8 @@ def main():
     ap.add_argument("--out-dir", default=".", help="Where to write the per-tab sheet-export CSVs.")
     ap.add_argument("--hyphen-csv", help="Use this file instead of fetching HYPHEN from the live sheet.")
     ap.add_argument("--mcaffeine-csv", help="Use this file instead of fetching mCaffeine from the live sheet.")
+    ap.add_argument("--unresolved-only", action="store_true",
+                     help="Only touch rows whose Status as per AWB is Unresolved or blank.")
     ap.add_argument("--self-check", action="store_true")
     args = ap.parse_args()
     if args.self_check:
@@ -187,7 +219,7 @@ def main():
     for tab in TABS:
         print(f"--- {tab} ---")
         csv_path = Path(csv_override[tab]) if csv_override[tab] else fetch_tab_to_csv(tab, out_dir)
-        backfill_tab(tab, csv_path, dry_run=not args.apply)
+        backfill_tab(tab, csv_path, dry_run=not args.apply, unresolved_only=args.unresolved_only)
 
 
 if __name__ == "__main__":
