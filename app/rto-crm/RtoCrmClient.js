@@ -12,6 +12,9 @@ import leadAssignmentRules from '../../api/_lib/leadAssignmentRules.json';
 // (which turns these into the grantable 'calling' tabs) and scripts/assign_leads.py (business
 // hours). Same directory, and same reason, as leadAssignmentRules.json above.
 import CALLING_PROCESSES from '../../api/_lib/callingProcesses.json';
+// The one definition of "is this agent at their claim quota", shared with api/rto/claim.js's
+// server-side gate so the browser and the server can never disagree about the cap.
+import { checkClaimQuota, countUndisposedLoad, resolveAgentQuota, isTicketUndisposed } from '../../api/_lib/leadQuota';
 import { safeStorage as localStorage, startOfDay, isDateInScope, scopeToDateBounds, normalizeOrderKey, isLeadDateInScope, istMinutesSinceMidnightClient, istDayKeyClient, formatTimeOfDay, formatBreakMinutes, formatFrt, formatPct, postJsonWithRetry } from '../_calling/util';
 import { useCallingSession, STATUS_OPTIONS, ROSTER_STATUS_OPTIONS, ROLE_OPTIONS } from '../_calling/useCallingSession';
 import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
@@ -653,6 +656,35 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
           showToast('⚠️ Cannot claim leads while Offline. Switch status to Online first.');
           return;
         }
+
+        // The same quota scripts/assign_leads.py enforces (build_assignment_queue). A manual
+        // claim deliberately bypassed the robot - see the comment on the bulk-reassign guard
+        // below, which exempted "a deliberate, one-at-a-time human action" - but nothing
+        // bounded how many times that action could be repeated, so it bypassed the QUOTA too.
+        // Observed 2026-08-18: an agent holding 34 undisposed leads against a quota of 20, all
+        // 34 self-claimed (no CLS_RTO_calling row for any of them). The robot then correctly
+        // refused to auto-assign her more, which reads from the agent's side as "the robot
+        // stopped giving me leads" - the opposite of what was happening. Gating here keeps the
+        // one-at-a-time claim, just not past the cap the auto-assigner already respects.
+        //
+        // Load is counted from allTickets (override-merged and deduped) using the same
+        // undisposed test the assignment preview uses, so this and the cron cannot disagree
+        // about what "load" means. This client-side check is for IMMEDIATE feedback only -
+        // /api/rto/claim re-runs the identical check server-side (same leadQuota helper) and
+        // is the authoritative gate, since anything enforced only in the browser can be
+        // stepped around with devtools.
+        const quotaCheck = checkClaimQuota({
+          tickets: allTickets,
+          roster: effectiveAgentRoster,
+          email: googleUser.email,
+          defaultQuota: ASSIGNMENT_QUOTA,
+          excludeOrderKey: tkt.orderNumber,
+        });
+        if (!quotaCheck.allowed) {
+          showToast(`⚠️ ${quotaCheck.reason}`);
+          return;
+        }
+
         const agentAssignedTag = `${googleUser.email}`;
 
         const setLocalAssignee = (assignedAgent, assignedEmail) => {
@@ -664,36 +696,58 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
         };
 
         const sid = extractSheetId(DEFAULT_SHEET_URL);
-        if (!sid) {
-          setLocalAssignee(agentAssignedTag, googleUser.email);
-          writeToSheetRow(tkt.orderNumber, tkt.rawIndex, { assignedAgent: agentAssignedTag });
-          showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email}`);
-          return;
-        }
 
         try {
-          // Resolve by order number (not the cached rawIndex, which can drift) and check
-          // whether someone else has genuinely already claimed it since this browser's last
-          // sync, instead of overwriting them.
-          const liveMap = await fetchLiveOrderAndAgentMap(sid);
+          // Resolve by order number (not the cached rawIndex, which can drift) so the row this
+          // claims is the row the sheet actually has today. rawIndex stays as the degraded
+          // fallback if the map fetch itself fails, same as writeToSheetRow does.
+          const liveMap = sid ? await fetchLiveOrderAndAgentMap(sid) : null;
           const key = (tkt.orderNumber || '').toString().trim().toUpperCase();
           const live = liveMap ? liveMap.get(key) : null;
 
+          // Cheap local shortcut for the common "someone beat me to it" case, so the obvious
+          // race is caught without a round-trip. The server re-checks this regardless - its
+          // copy of Column Q is the one that decides.
           if (live && live.agent && live.agent.toLowerCase() !== 'unassigned') {
             setLocalAssignee(live.agent, live.agent);
             showToast(`⚠️ Lead ${tkt.orderNumber} was just claimed by ${live.agent}. Refresh to sync view.`);
             return;
           }
 
+          // The claim itself now goes through /api/rto/claim rather than writing Column Q via
+          // the generic sheet proxy: the server owns the quota gate and records the
+          // CLS_RTO_calling row, neither of which a direct range write can do. See that route.
+          const res = await fetch('/api/rto/claim', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              orderNumber: tkt.orderNumber,
+              rowNumber: live ? live.row : (tkt.rawIndex + 2),
+              awbCode: tkt.awbCode,
+              rtoReason: tkt.rtoReason,
+            }),
+          });
+          const body = await res.json().catch(() => ({}));
+
+          if (!res.ok) {
+            // The local override is deliberately NOT set before this point. A refusal here is
+            // routine now that the server can say no (at quota, or someone else got there
+            // first), and an optimistic tag left behind would show the agent holding a lead
+            // they were just denied - which is exactly the confusion this whole change exists
+            // to remove.
+            if (body.assignedTo) setLocalAssignee(body.assignedTo, body.assignedTo);
+            showToast(`⚠️ ${body.error || `Could not claim ${tkt.orderNumber}.`}`);
+            return;
+          }
+
           setLocalAssignee(agentAssignedTag, googleUser.email);
-          writeToSheetRow(tkt.orderNumber, tkt.rawIndex, { assignedAgent: agentAssignedTag });
-          showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email} & updated Column Q!`);
+          const held = body.load != null && body.quota != null ? ` (${body.load}/${body.quota})` : '';
+          showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email}${held}`);
         } catch (e) {
-          // Live verification itself failed (network hiccup) - still claim locally and let
-          // writeToSheetRow's own row-by-order-number resolution do the write safely.
-          setLocalAssignee(agentAssignedTag, googleUser.email);
-          writeToSheetRow(tkt.orderNumber, tkt.rawIndex, { assignedAgent: agentAssignedTag });
-          showToast(`Claimed order ${tkt.orderNumber} for ${googleUser.email} & updated Column Q!`);
+          // Network/parse failure - the claim may or may not have landed, so say so rather
+          // than tagging it locally and risking a phantom lead in this browser's view.
+          console.error('claimLeadForAgent error:', e);
+          showToast(`⚠️ Could not reach the server to claim ${tkt.orderNumber}. Try again.`);
         }
       };
 
@@ -1032,6 +1086,26 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
         if (targetTickets.length === 0) {
           showToast(`No active leads found for ${sourceAgentEmail}`);
           return;
+        }
+
+        // The same cap the single claim and the auto-assigner respect - but a WARNING here,
+        // deliberately not a hard block. This path exists for offboarding (moving a departing
+        // agent's whole queue to someone else), which legitimately has to be able to exceed a
+        // quota: refusing would leave those leads stranded with nobody. What it must not do is
+        // blow past the cap SILENTLY, which is how agents ended up at 34 against a cap of 20
+        // (see claimLeadForAgent's note) - so the admin is shown the resulting load and has to
+        // agree to it.
+        const movingUndisposed = targetTickets.filter(isTicketUndisposed).length;
+        const targetQuota = resolveAgentQuota(effectiveAgentRoster, targetAgentEmail, ASSIGNMENT_QUOTA);
+        const targetLoad = countUndisposedLoad(allTickets, targetAgentEmail);
+        const projected = targetLoad + movingUndisposed;
+        if (projected > targetQuota) {
+          const ok = window.confirm(
+            `${targetAgentEmail} currently holds ${targetLoad} undisposed lead(s) and this moves ${movingUndisposed} more, ` +
+            `taking them to ${projected} against a quota of ${targetQuota}.\n\n` +
+            `They will stop receiving auto-assigned leads until they work back below ${targetQuota}. Continue?`
+          );
+          if (!ok) return;
         }
 
         const newAssignedTag = targetAgentEmail;

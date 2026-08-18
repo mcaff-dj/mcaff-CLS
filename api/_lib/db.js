@@ -947,6 +947,61 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
   invalidateCache('calling:leadDates');
 }
 
+// Records the ASSIGNMENT half of a manual RTO claim - the RTO twin of claimNdrLead below, and
+// the same row scripts/assign_leads.py's record_lead_assignments writes when the robot assigns.
+//
+// Until this existed, an agent's own "Claim" button wrote Column Q and nothing else, so a
+// self-claimed lead had no live row at all. recordLeadDisposition above then INSERTed one only
+// when the lead was finally disposed - stamping assigned_at = disposed_at = that moment, i.e.
+// recording the lead as assigned the very second it was worked. Called by api/rto/claim.js.
+//
+// Same collision handling as record_lead_assignments: a live_order_id_key hit means this lead
+// already has a live cycle (someone else claimed it first, or a double-click), which is a
+// benign no-op rather than an error - the caller has already confirmed Column Q was free, so
+// losing that race just means the other claim won. Any OTHER unique key (live_awb_code_key -
+// two leads sharing one live AWB, a genuine data error) is left to raise, exactly as the cron
+// leaves it.
+async function claimRtoLead(orderId, email, awbCode, rtoReason) {
+  await ensureSchema();
+  const deliveryPartner = resolvePartnerFromAwb(awbCode);
+  try {
+    await sql`
+      INSERT INTO CLS_RTO_calling (order_id, agent_email, assigned_at, awb_code, rto_reason, delivery_partner)
+      VALUES (${orderId}, ${email}, ${new Date()}, ${awbCode || null}, ${rtoReason || null}, ${deliveryPartner})
+    `;
+  } catch (e) {
+    if (!/live_order_id_key/.test((e && e.message) || '')) throw e;
+    return { recorded: false };
+  }
+  invalidateCache('calling:leadDates');
+  return { recorded: true };
+}
+
+// This agent's admin-set RTO quota, or null when they have no calling_agent_process row or an
+// explicit NULL - "unset", which the caller resolves to the process default via
+// leadQuota.resolveAgentQuota. Never coerce a missing value to 0 here: that would read as "may
+// hold no leads at all" rather than "no override set".
+//
+// Only the quota lives here. The matching LOAD is deliberately NOT counted from
+// CLS_RTO_calling - see api/rto/claim.js's getLoadByAgent for the measurement showing why that
+// table cannot answer it yet.
+async function getRtoAgentQuota(email) {
+  try {
+    await ensurePgSchema();
+    const { rows } = await pgSql`
+      SELECT max_quota FROM calling_agent_process
+      WHERE process_key = 'rto' AND LOWER(email) = LOWER(${email})
+    `;
+    return rows.length && rows[0].max_quota != null ? rows[0].max_quota : null;
+  } catch (e) {
+    // Same fail-open contract scripts/assign_leads.py uses for this table: an unreachable
+    // calling_agent_process means "no per-process override", so the caller falls back to the
+    // process default - a config lookup must never block a legitimate claim.
+    console.error('getRtoAgentQuota: calling_agent_process unavailable, using default quota:', e.message);
+    return null;
+  }
+}
+
 // NDR's own equivalent of the assignment half of record_lead_assignments (scripts/
 // assign_leads.py) - a fresh live cycle for this awb. ON CONFLICT targets the partial unique
 // index (ndr_lead_assignments_awb_current_key), so a re-claim of an already-live row (a race,
@@ -2109,6 +2164,7 @@ module.exports = {
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
   getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
+  claimRtoLead, getRtoAgentQuota,
   getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
