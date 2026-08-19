@@ -54,6 +54,11 @@ mount('all', '/api/ndr/sheet', '../ndr/sheet.js');
 mount('post', '/api/ndr/lead-assignment', '../ndr/lead-assignment.js');
 mount('all', '/api/delivery-escalation/sheet', '../delivery-escalation/sheet.js');
 mount('all', '/api/delivery-escalation/record', '../delivery-escalation/record.js');
+mount('all', '/api/nps-admin/surveys', '../nps-admin/surveys.js');
+mount('all', '/api/nps-admin/recipients', '../nps-admin/recipients.js');
+mount('post', '/api/nps-admin/send', '../nps-admin/send.js');
+mount('get', '/api/nps-admin/dashboard', '../nps-admin/dashboard.js');
+mount('all', '/api/nps/public/:token', '../nps/public/[token].js', 'token');
 
 // The Escalation desk's whole API surface - one dynamic-segment handler, same shape as the
 // two :action mounts above (agents/orders/assign/tag/update/bulk-update/import/export/sample).

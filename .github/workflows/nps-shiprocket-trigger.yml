@@ -1,0 +1,53 @@
+name: NPS Shiprocket delivered-order trigger
+
+on:
+  # No `schedule:` trigger yet, on purpose: nps_shiprocket_trigger.py raises immediately
+  # (no Shiprocket credentials configured, see the script's own docstring), and a `schedule`
+  # event can't supply a survey_id input. Add both back once Shiprocket credentials exist
+  # and there's a survey to auto-trigger for - store its id in a repo variable
+  # (vars.NPS_AUTO_SURVEY_ID) and reference it in the schedule job instead of an input.
+  workflow_dispatch:
+    inputs:
+      survey_id:
+        description: "nps_survey.id to auto-trigger for"
+        required: true
+      dry_run:
+        description: "true to only print, not insert/send"
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nps-shiprocket-trigger
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Shiprocket trigger
+        env:
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+          SHIPROCKET_EMAIL: ${{ secrets.SHIPROCKET_EMAIL }}
+          SHIPROCKET_PASSWORD: ${{ secrets.SHIPROCKET_PASSWORD }}
+        run: >
+          python scripts/nps_shiprocket_trigger.py
+          --survey-id ${{ github.event.inputs.survey_id }}
+          ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
