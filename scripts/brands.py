@@ -29,10 +29,18 @@ BRANDS = [
             {"key": "Product", "id": "product", "label": "Product", "color": "var(--s5)"},
             {"key": "Product Suggestion/Recommendation", "id": "suggestion", "label": "Product Suggestion", "color": "var(--s6)"},
         ],
+        # created_date/order_id/lastsource verified directly against the live "mCaffeine"
+        # tab's header row (A1:P1): Created Date, Parent Order, Last Source Type, Ticket No,
+        # Query Class, ... - i.e. 0/1/2, NOT 1/2/3. mCaffeine's sheet has no leading Ticket
+        # No column the way Hyphen's does (see hyphen's "col" below) - a real layout
+        # difference between the two brands' sheets, not a copy-paste target. Was
+        # previously 1/2/3, which shifted Created Date/Order ID/Source by one column on
+        # every raw CSV export and any other reader of these three fields - caught via a
+        # downloaded raw CSV's header/value mismatch.
         "col": {"prod": 6, "batch": 7, "sku": 8, "cls": 4, "cat": 5, "partner": 10, "month": 12, "week": 13,
-                "sales": 19, "salesW": 20, "alloc": 23, "uniq": 17, "created_date": 1,
-                "wh": 21, "prosales": 22, "lastsource": 3, "platform": 32, "visdamage": 30, "outerpkg": 29, "statezone": 28,
-                "order_id": 2, "awb": 9, "order_date": 11, "order_month": 14},
+                "sales": 19, "salesW": 20, "alloc": 23, "uniq": 17, "created_date": 0,
+                "wh": 21, "prosales": 22, "lastsource": 2, "platform": 32, "visdamage": 30, "outerpkg": 29, "statezone": 28,
+                "order_id": 1, "awb": 9, "order_date": 11, "order_month": 14},
         "small_tabs": {"agent": "AGENT", "ai": "AI"},
         # Read only to patch Jan'26/Feb'26 onto the MySQL-sourced NPS charts, and only on runs
         # that actually re-query NPS - see generate_report.py's NPS_SHEET_OVERRIDE_MONTHS. Kept
@@ -50,20 +58,14 @@ BRANDS = [
         # Settled-month ticket rows (everything but the current, still-moving month) come
         # from this table instead of a live Sheets pull - see scripts/kyc_source.py. It's a
         # column-for-column mirror (in this exact order) of the primary sheet's own columns
-        # A:Z - the sheet has more trailing columns (State_zone/Outer_package/visible_damage/
-        # CPR/platform) this table doesn't carry, which is fine: ctx.cell() already returns
-        # "" past a row's actual length.
-        #
-        # ticket_no leads (matching Hyphen's list below, and matching "col" above: index 1 =
-        # created_date, 2 = order_id/parent_order, 3 = lastsource/last_source_type) - this
-        # list previously led with created_date/parent_order/last_source_type/ticket_no,
-        # which shifted every MySQL-sourced (settled-month) mCaffeine row's Created
-        # Date/Order ID/Source by one column (Created Date showed the Order ID value, Order
-        # ID showed the Source value) - caught via a downloaded raw CSV's header/value
-        # mismatch, fixed here.
+        # A:Z, verified directly against the live "mCaffeine" tab header (A1:P1) - created_
+        # date leads (NOT ticket_no - see the "col" comment above, mCaffeine's layout has no
+        # leading Ticket No column the way Hyphen's does). The sheet has more trailing
+        # columns (State_zone/Outer_package/visible_damage/CPR/platform) this table doesn't
+        # carry, which is fine: ctx.cell() already returns "" past a row's actual length.
         "kyc_mysql_table": "CLS_KYC_mCaff",
         "kyc_mysql_columns": [
-            "ticket_no", "created_date", "parent_order", "last_source_type", "query_class", "query_category",
+            "created_date", "parent_order", "last_source_type", "ticket_no", "query_class", "query_category",
             "product_name", "batch_number", "sku", "awb_number", "delivery_partner_name", "order_date",
             "month", "week", "order_month", "order_week", "year", "unique_flag", "order_year",
             "total_sales_m", "total_sales_w", "wh_name", "pro_sales", "partner_allocation", "wh_allocation",
