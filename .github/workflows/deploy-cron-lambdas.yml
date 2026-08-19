@@ -76,3 +76,38 @@ jobs:
             --zip-file fileb://lambda/dist/assign_ndr_leads.zip \
             --query "{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus,CodeSha256:CodeSha256}"
           aws lambda wait function-updated --function-name mcaff-cls-assign-ndr-leads
+
+      # Size, in version control, because it is load-bearing and was invisible.
+      #
+      # assign-leads was created at 256 MB (lambda/deploy_infra.sh), which is ~0.15 vCPU. Every
+      # CPU-bound stage - cold-start imports, the RSA JWT sign, JSON-parsing a ~6 MB sheet, the
+      # 15k-row main loop - runs several times slower there than on a full core. Measured on a
+      # full core the whole run takes ~14s; throttled that plausibly exceeds the 60s timeout, and
+      # a Lambda timeout is a kill, so the run writes nothing and the next one repeats it. That
+      # presented four times in two days as "the robot has stopped assigning leads", each time
+      # with agents at zero leads and 1,000+ pending, and each time cleared only by running the
+      # script by hand off a machine with no timeout.
+      #
+      # Lambda bills GB-seconds, so ~5x faster at 6x memory is roughly cost-neutral. Timeout goes
+      # to 120s to match assign-ndr-leads: enough that a slow run finishes instead of dying, still
+      # inside the 5-minute schedule so runs cannot stack (reserved concurrency is 1 regardless).
+      #
+      # --query for the same reason as the code updates above: this call's full response includes
+      # Environment.Variables in PLAINTEXT (MYSQL_PASSWORD, every GOKWIK_*_APPSECRET), and none of
+      # them are `secrets.X` in this workflow so GitHub would not mask them. See the 2026-08-14
+      # incident note in lambda/README.md.
+      #
+      # Non-fatal: if the deploy role lacks lambda:UpdateFunctionConfiguration this prints what to
+      # grant rather than turning a working code deploy red. Check the log if a run still times out.
+      - name: Ensure cron Lambda sizing (memory/timeout)
+        run: |
+          for fn in mcaff-cls-assign-leads mcaff-cls-assign-ndr-leads; do
+            if aws lambda update-function-configuration --function-name "$fn" \
+                 --memory-size 1536 --timeout 120 \
+                 --query "{FunctionName:FunctionName,MemorySize:MemorySize,Timeout:Timeout}"; then
+              aws lambda wait function-updated-v2 --function-name "$fn" \
+                || aws lambda wait function-updated --function-name "$fn" || true
+            else
+              echo "::warning::Could not set memory/timeout on $fn - grant lambda:UpdateFunctionConfiguration to the deploy role, or set 1536 MB / 120 s in the console."
+            fi
+          done
