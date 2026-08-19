@@ -2484,6 +2484,98 @@ async function deleteMomStatus(boardId, statusKey) {
   await sql`DELETE FROM mom_statuses WHERE board_id = ${boardId} AND status_key = ${statusKey}`;
 }
 
+async function getMomTasks(boardId) {
+  const { rows: tasks } = await sql`
+    SELECT id, board_id AS boardId, title, description, status_key AS statusKey, priority,
+           assignee_email AS assigneeEmail, due_date AS dueDate, position, created_by AS createdBy,
+           created_at AS createdAt, updated_at AS updatedAt
+    FROM mom_tasks WHERE board_id = ${boardId} ORDER BY status_key, position
+  `;
+  const { rows: values } = await sql`
+    SELECT v.task_id AS taskId, v.column_id AS columnId, v.value
+    FROM mom_task_field_values v
+    JOIN mom_tasks t ON t.id = v.task_id
+    WHERE t.board_id = ${boardId}
+  `;
+  const byTask = new Map();
+  values.forEach((v) => {
+    if (!byTask.has(v.taskId)) byTask.set(v.taskId, {});
+    byTask.get(v.taskId)[v.columnId] = v.value;
+  });
+  return tasks.map((t) => ({ ...t, customValues: byTask.get(t.id) || {} }));
+}
+
+async function getMomTaskBoardId(taskId) {
+  const { rows } = await sql`SELECT board_id AS boardId FROM mom_tasks WHERE id = ${taskId}`;
+  return rows[0] ? rows[0].boardId : null;
+}
+
+async function createMomTask(boardId, { title, description, priority, assigneeEmail, dueDate, statusKey, createdBy }) {
+  let resolvedStatus = statusKey;
+  if (!resolvedStatus) {
+    const { rows } = await sql`SELECT status_key FROM mom_statuses WHERE board_id = ${boardId} ORDER BY position LIMIT 1`;
+    resolvedStatus = rows.length ? rows[0].status_key : 'todo';
+  }
+  const { rows: posRows } = await sql`
+    SELECT COALESCE(MAX(position), -1) AS maxPos FROM mom_tasks WHERE board_id = ${boardId} AND status_key = ${resolvedStatus}
+  `;
+  const position = posRows[0].maxPos + 1;
+  const { insertId } = await sql`
+    INSERT INTO mom_tasks (board_id, title, description, status_key, priority, assignee_email, due_date, position, created_by)
+    VALUES (${boardId}, ${title}, ${description || null}, ${resolvedStatus}, ${priority || 'medium'}, ${assigneeEmail || null}, ${dueDate || null}, ${position}, ${createdBy})
+  `;
+  return insertId;
+}
+
+async function updateMomTask(taskId, fields) {
+  const { rows } = await sql`
+    SELECT title, description, priority, assignee_email AS assigneeEmail, due_date AS dueDate
+    FROM mom_tasks WHERE id = ${taskId}
+  `;
+  if (!rows.length) throw new Error('Task not found');
+  const current = rows[0];
+  const next = {
+    title: fields.title === undefined ? current.title : fields.title,
+    description: fields.description === undefined ? current.description : fields.description,
+    priority: fields.priority === undefined ? current.priority : fields.priority,
+    assigneeEmail: fields.assigneeEmail === undefined ? current.assigneeEmail : fields.assigneeEmail,
+    dueDate: fields.dueDate === undefined ? current.dueDate : fields.dueDate,
+  };
+  await sql`
+    UPDATE mom_tasks SET title = ${next.title}, description = ${next.description || null}, priority = ${next.priority},
+      assignee_email = ${next.assigneeEmail || null}, due_date = ${next.dueDate || null}
+    WHERE id = ${taskId}
+  `;
+  if (fields.customValues) {
+    const entries = Object.entries(fields.customValues);
+    for (const [columnId, value] of entries) {
+      await sql`
+        INSERT INTO mom_task_field_values (task_id, column_id, value) VALUES (${taskId}, ${columnId}, ${value})
+        ON DUPLICATE KEY UPDATE value = ${value}
+      `;
+    }
+  }
+}
+
+async function deleteMomTask(taskId) {
+  await sql`DELETE FROM mom_tasks WHERE id = ${taskId}`;
+}
+
+async function reorderMomTask(taskId, statusKey, position) {
+  const { rows: taskRows } = await sql`SELECT board_id AS boardId FROM mom_tasks WHERE id = ${taskId}`;
+  if (!taskRows.length) throw new Error('Task not found');
+  const boardId = taskRows[0].boardId;
+  const { rows: siblings } = await sql`
+    SELECT id FROM mom_tasks WHERE board_id = ${boardId} AND status_key = ${statusKey} AND id != ${taskId} ORDER BY position
+  `;
+  const ids = siblings.map((s) => s.id);
+  const clamped = Math.max(0, Math.min(position, ids.length));
+  ids.splice(clamped, 0, taskId);
+  for (let i = 0; i < ids.length; i++) {
+    await sql`UPDATE mom_tasks SET position = ${i}, status_key = ${statusKey} WHERE id = ${ids[i]}`;
+  }
+}
+
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
@@ -2515,4 +2607,5 @@ module.exports = {
   updateMomBoard, archiveMomBoard, upsertMomBoardMember, removeMomBoardMember,
   createMomColumn, getMomColumnBoardId, updateMomColumn, deleteMomColumn,
   createMomStatus, updateMomStatus, deleteMomStatus,
+  getMomTasks, getMomTaskBoardId, createMomTask, updateMomTask, deleteMomTask, reorderMomTask,
 };
