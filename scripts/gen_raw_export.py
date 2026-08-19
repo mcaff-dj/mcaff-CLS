@@ -16,6 +16,8 @@ attachment just downloads as opaque compressed bytes named ".csv".
 import csv
 import io
 
+from gen_geo_insights import _awb_geo_map, _awb_tokens
+
 RAW_CORE_FIELDS = [
     ("Created Date", "created_date"),
     ("Order ID", "order_id"),
@@ -31,9 +33,32 @@ RAW_CORE_FIELDS = [
 ]
 
 RAW_TAB_EXTRA_FIELDS = {
-    "delivery": [("AWB Number", "awb")],
     "warehouse": [("Warehouse Facility", "wh"), ("AWB Number", "awb")],
     "technical": [("Platform", "platform")],
+}
+
+# Delivery tab's export deviates enough from the shared RAW_CORE_FIELDS shape (drops
+# Product Name/Batch Number - not relevant to a delivery ticket, renames Delivery Partner
+# to Courier, adds AWB/City/State/Order Date/Order Month) that it gets its own full field
+# list instead of layering onto RAW_CORE_FIELDS. City/State aren't sheet columns - they're
+# resolved per-row below from the AWB via the same cached AWB->geo lookup gen_geo_insights
+# already uses for the Delivery tab's city/state tables (_awb_geo_map).
+RAW_TAB_FIELD_OVERRIDES = {
+    "delivery": [
+        ("Created Date", "created_date"),
+        ("Order ID", "order_id"),
+        ("Query Class", "cls"),
+        ("Query Category", "cat"),
+        ("Courier", "partner"),
+        ("Month", "month"),
+        ("Week", "week"),
+        ("Source", "lastsource"),
+        ("AWB", "awb"),
+        ("City", "city"),
+        ("State", "state"),
+        ("Order Date", "order_date"),
+        ("Order Month", "order_month"),
+    ],
 }
 
 # tab id -> class-key filter (None = every row, e.g. Overview)
@@ -61,13 +86,31 @@ def build_raw_exports(ctx, out_dir):
         else:
             rows = [r for r in ctx.data_rows if ctx.cell(r, col["cls"]) == cls_filter]
 
-        fields = RAW_CORE_FIELDS + RAW_TAB_EXTRA_FIELDS.get(tab_key, [])
+        fields = RAW_TAB_FIELD_OVERRIDES.get(tab_key) or (RAW_CORE_FIELDS + RAW_TAB_EXTRA_FIELDS.get(tab_key, []))
+
+        # City/State are resolved from the row's (first) AWB rather than a sheet column -
+        # collected once per tab up front so _awb_geo_map makes at most one MySQL round-trip
+        # for whatever AWBs aren't already cached, instead of one per row.
+        row_geo = None
+        if any(key in ("city", "state") for _, key in fields):
+            first_awbs = [next(iter(_awb_tokens(ctx.cell(r, col["awb"]))), None) for r in rows]
+            geo = _awb_geo_map(ctx, {a for a in first_awbs if a}) or {}
+            row_geo = [geo.get(a) if a else None for a in first_awbs]
+
         path = out_dir / f"{ctx.b['brand']}_raw_{tab_key}.csv"
         buf = io.StringIO()
         w = csv.writer(buf, quoting=csv.QUOTE_ALL, lineterminator="\r\n")
         w.writerow([label for label, _ in fields])
-        for r in rows:
-            w.writerow([ctx.cell(r, col[key]) for _, key in fields])
+        for i, r in enumerate(rows):
+            vals = []
+            for _, key in fields:
+                if key == "city":
+                    vals.append(row_geo[i][0] if row_geo[i] else "")
+                elif key == "state":
+                    vals.append(row_geo[i][1] if row_geo[i] else "")
+                else:
+                    vals.append(ctx.cell(r, col[key]))
+            w.writerow(vals)
         csv_bytes = ("﻿" + buf.getvalue()).encode("utf-8")
         path.write_bytes(csv_bytes)
         print(f"[{ctx.b['brand']}] wrote raw export {path.name} ({len(rows)} rows, {path.stat().st_size} bytes)")

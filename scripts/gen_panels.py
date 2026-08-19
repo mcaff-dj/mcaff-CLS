@@ -17,24 +17,37 @@ embedded JS/CSS as `{{`/`}}` (high risk of a missed brace silently corrupting th
 from gen_geo_insights import build_delivery_geo_containers, build_geo_script
 from gen_insights import build_insights_card, get_category_insight_items, get_delivery_partner_insight
 from gen_weekly import build_weekly_class_block, build_weekly_delivery_block, get_week_num, is_partial_week, week_col_header
-from gen_monthly import build_monthly_analysis_panel
+from gen_monthly import build_delivery_order_month_narrative, build_monthly_analysis_panel
 from gen_raw_export import raw_download_link
 from nps_source import _month_label as nps_month_label
 from report_context import (ci_key, fnum, h_enc, index_map, j_enc, n0, pretty_month, round1,
                             sort_keys_by_last_period, year_of)
 
 
-def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mode, dim2_pct_label, dim2_cap, coverage_mode):
-    months = ctx.months
-    n = ctx.n
+def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mode, dim2_pct_label, dim2_cap, coverage_mode,
+                              month_key="month", months=None, month_index=None, pfx_suffix="", include_extras=True, return_parts=False):
+    """month_key/months/month_index let a class render this panel a second time on an
+    alternate month axis (Delivery's Order Month view, gen_panels.py:assemble_report) -
+    default args reproduce today's Ticket Month behavior exactly. pfx_suffix keeps the two
+    renders' DOM ids/inline <script> blocks from colliding on the page. include_extras=False
+    (used for that second render) skips the raw-download link, the weekly block, and the
+    insights/geo card - those aren't month-key-aware and would otherwise just render the same
+    ticket-month content twice under different ids. return_parts=True (used when the caller
+    needs to wrap just the month-dependent body in a show/hide container, keeping the
+    month-independent extras outside it) returns {"body":..., "extras":...} instead of one
+    concatenated string."""
+    if months is None:
+        months = ctx.months
+    if month_index is None:
+        month_index = ctx.month_index
+    n = len(months)
     subset = ctx.unique_by_class.get(cls["key"], [])
-    pfx = cls["id"]
+    pfx = cls["id"] + pfx_suffix
     dim2_col = ctx.col[dim2_key]
     # Hoisted out of the four per-row loops below: `month_index` replaces the
     # `mo in months` + `months.index(mo)` linear scan pair, and the column indices are
     # plain dict lookups that don't need repeating ~100k times.
-    month_index = ctx.month_index
-    month_col = ctx.col["month"]
+    month_col = ctx.col[month_key]
     cat_col = ctx.col["cat"]
 
     # Months this class has zero tickets for (e.g. a query category introduced only
@@ -164,7 +177,10 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     dim2s_json = "[" + ",".join(f'"{j_enc(d)}"' for d in dim2_order) + "]"
     months_json = "[" + ",".join(f'"{j_enc(m)}"' for m in months) + "]"
     month_labels_json = "[" + ",".join(f'"{j_enc(pretty_month(m))}"' for m in months) + "]"
-    sales_json = "[" + ",".join(str(v) for v in ctx.sales_arr) + "]"
+    # Not ctx.sales_arr directly - that's positionally aligned to ctx.months. Re-derived
+    # from ctx.sales_m (month-label -> that calendar month's total sales) against whichever
+    # `months` axis is active here, so this stays correct for the Order Month render too.
+    sales_json = "[" + ",".join(str(ctx.sales_m.get(mo, 0)) for mo in months) + "]"
     # Same empty-month set as sb1/sb2's skipped <th>/<td>s above, but for the "wrt Sales"
     # chart (drawn client-side, reactive to row-click filtering) - rch() below slices its
     # per-month arrays down to just these indices before handing them to renderPctChart,
@@ -328,6 +344,22 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
             .replace("__CLSLABEL__", h_enc(cls["label"])).replace("__DIM2LABEL__", h_enc(dim2_label))
             .replace("__PFX__", pfx))
 
+    if cls["id"] == "suggestion":
+        cat_desc = "Percent = complaints &divide; that month's total order volume (\"Total Sales M\")."
+        dim2_section = ""
+    else:
+        cat_desc = "Percent = complaints &divide; that month's total order volume (\"Total Sales M\"). Click a row in either table below to cross-filter."
+        dim2_section = f"<section><h2>{h_enc(dim2_title)}</h2>{coverage_note}{capped_note}{''.join(sb2)}</section>\n"
+
+    body = f"""<div class="gran-monthly">
+{filter_note}
+<section><h2>{h_enc(cls['label'])} Complaints by Issue Category</h2><p class="desc">{cat_desc}</p>{''.join(sb1)}</section>
+{dim2_section}<section><h2>{h_enc(cls['label'])} Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line). Recomputes for the row selected above.</p>{''.join(sb3)}</section>
+</div>
+{js}"""
+    if not include_extras:
+        return {"pre": "", "body": body, "post": ""} if return_parts else body
+
     if cls["id"] == "delivery":
         insights_block = build_insights_card("Insights &mdash; Delivery",
                                               get_category_insight_items(ctx, subset) + [get_delivery_partner_insight(ctx, subset)])
@@ -336,22 +368,12 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     else:
         insights_block = build_insights_card(f"Insights &mdash; {h_enc(cls['label'])}", get_category_insight_items(ctx, subset))
         weekly_block = build_weekly_class_block(ctx, cls)
-    if cls["id"] == "suggestion":
-        cat_desc = "Percent = complaints &divide; that month's total order volume (\"Total Sales M\")."
-        dim2_section = ""
-    else:
-        cat_desc = "Percent = complaints &divide; that month's total order volume (\"Total Sales M\"). Click a row in either table below to cross-filter."
-        dim2_section = f"<section><h2>{h_enc(dim2_title)}</h2>{coverage_note}{capped_note}{''.join(sb2)}</section>\n"
 
-    return f"""{raw_download_link(ctx, pfx)}
-<div class="gran-monthly">
-{filter_note}
-<section><h2>{h_enc(cls['label'])} Complaints by Issue Category</h2><p class="desc">{cat_desc}</p>{''.join(sb1)}</section>
-{dim2_section}<section><h2>{h_enc(cls['label'])} Complaints wrt Sales</h2><p class="desc">Monthly complaint volume (bars) against complaint rate as a share of sales (line). Recomputes for the row selected above.</p>{''.join(sb3)}</section>
-</div>
-{weekly_block}
-{insights_block}
-{js}"""
+    pre = raw_download_link(ctx, pfx)
+    post = f"{weekly_block}\n{insights_block}"
+    if return_parts:
+        return {"pre": pre, "body": body, "post": post}
+    return f"{pre}\n{body}\n{post}"
 
 
 def _build_category_pivot(ctx, subset, title):
@@ -1528,7 +1550,39 @@ def assemble_report(ctx, here_dir, lap=None):
     for c in ctx.b["classes"]:
         kpi = ctx.kpi_row(c, ctx.unique_by_class.get(c["key"], []))
         if c["id"] == "delivery":
-            detail = build_cross_filter_panel(ctx, c, "partner", "Delivery Partner Name", f"{h_enc(c['label'])} Complaints wrt Delivery Partners", "alloc", "wrt allocation", 9999, "none")
+            tm = build_cross_filter_panel(ctx, c, "partner", "Delivery Partner Name", f"{h_enc(c['label'])} Complaints wrt Delivery Partners", "alloc", "wrt allocation", 9999, "none",
+                                           return_parts=True)
+            if ctx.delivery_order_months:
+                om = build_cross_filter_panel(ctx, c, "partner", "Delivery Partner Name", f"{h_enc(c['label'])} Complaints wrt Delivery Partners", "alloc", "wrt allocation", 9999, "none",
+                                               month_key="order_month", months=ctx.delivery_order_months, month_index=ctx.delivery_order_month_index,
+                                               pfx_suffix="-om", include_extras=False, return_parts=True)
+                # Mirrors the existing setGranularity/applyGranularity toolbar (below, in this
+                # same function) but scoped to the Delivery tab only and self-contained: both
+                # bases are fully pre-baked above, so this is pure show/hide, no recompute.
+                monthbasis_toolbar = """<div class="monthbasis-toolbar gran-toolbar">
+  <div class="gran-toggle">
+    <button type="button" class="gran-btn active" data-monthbasis="ticket" onclick="setMonthBasis('ticket')">Ticket Month</button>
+    <button type="button" class="gran-btn" data-monthbasis="order" onclick="setMonthBasis('order')">Order Month</button>
+  </div>
+  <span class="gran-note">Ticket Month = when the complaint was raised. Order Month = when the underlying order was placed. The Weekly view above and the city/state tables' weekly breakdown always use Ticket Month.</span>
+</div>
+<script>
+(function(){
+  window.setMonthBasis = function(basis){
+    document.querySelectorAll('.monthbasis-toolbar .gran-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.monthbasis===basis); });
+    document.querySelectorAll('.monthbasis-ticket').forEach(function(el){ el.style.display = (basis==='ticket') ? '' : 'none'; });
+    document.querySelectorAll('.monthbasis-order').forEach(function(el){ el.style.display = (basis==='order') ? '' : 'none'; });
+    if(basis==='order' && window.renderGeoForDeliveryTabOrderMonth) window.renderGeoForDeliveryTabOrderMonth();
+  };
+})();
+</script>"""
+                om_narrative = build_delivery_order_month_narrative(ctx, c)
+                detail = (f"{tm['pre']}\n{monthbasis_toolbar}\n"
+                          f"<div class=\"monthbasis-ticket\">{tm['body']}</div>\n"
+                          f"<div class=\"monthbasis-order\" style=\"display:none\">{om['body']}{om_narrative}</div>\n"
+                          f"{tm['post']}")
+            else:
+                detail = f"{tm['pre']}\n{tm['body']}\n{tm['post']}"
         elif c["id"] == "technical":
             detail = build_cross_filter_panel(ctx, c, "platform", "Platform", f"{h_enc(c['label'])} Complaints by Platform", "sales", "wrt sales", 9999, "sinceFirst")
         elif c["id"] == "warehouse":

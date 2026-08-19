@@ -104,12 +104,19 @@ def _save_json_cache(path, cache):
         json.dump(cache, f, separators=(",", ":"))
 
 
-def _order_counts_by_month_cached(ctx, brand_db):
+def _order_counts_by_month_cached(ctx, brand_db, months=None):
     """Every month's full (unfiltered) order-count rows, keyed by month label - cached
     indefinitely except the single most recent month, which can still be accumulating
     orders and is always re-queried live. Kept unfiltered by city/state (unlike the
     in-memory city_orders/state_orders dicts built from this) so the cache stays valid
-    regardless of which areas happen to have complaints in any given run."""
+    regardless of which areas happen to have complaints in any given run.
+
+    `months` defaults to ctx.months (Ticket Month axis); the Order Month axis
+    (_compute_geo_dataset_order_month) passes ctx.delivery_order_months instead. Both share
+    this same on-disk cache, keyed by the (generic, format-identical) month-label string -
+    a month already queried for one axis is never re-queried for the other."""
+    if months is None:
+        months = ctx.months
     cache_path = _orders_cache_path(ctx)
     cache = _load_json_cache(cache_path)
     # The most recent month is the only one that can still be accumulating orders, so it is
@@ -119,10 +126,10 @@ def _order_counts_by_month_cached(ctx, brand_db):
     # ~50M-row Item_level_data, per brand, inside the report-assembly step that dominates
     # the run. A month with NO cache entry at all is still queried either way, so the first
     # run of a new calendar month pays for it once rather than dropping the month entirely.
-    refresh_months = set() if ctx.quick else set(ctx.months[-1:])
+    refresh_months = set() if ctx.quick else set(months[-1:])
     result = {}
     changed = False
-    for month_label in ctx.months:
+    for month_label in months:
         if month_label in cache and month_label not in refresh_months:
             result[month_label] = cache[month_label]
             continue
@@ -415,6 +422,161 @@ def get_category_state_movers(ctx, category, cur_weeks, prev_weeks, min_cur=3, t
     return movers[:top_n]
 
 
+def _compute_geo_dataset_order_month(ctx):
+    """Order-Month-basis counterpart to _compute_geo_dataset - monthly only, no weekly
+    breakdown (the Ticket/Order Month toggle explicitly stays Ticket-Month-only for weekly
+    views - see gen_panels.assemble_report). Numerator buckets each Delivery ticket by its
+    own order_month value directly - no week-grid conversion needed, since there's no
+    weekly view to feed here. Denominator reuses the same per-calendar-month MySQL query,
+    called against ctx.delivery_order_months instead of ctx.months."""
+    if "awb" not in ctx.col or "order_month" not in ctx.col or not ctx.delivery_order_months:
+        return None
+    brand_db = _MYSQL_BRAND.get(ctx.b["brand"])
+    if not brand_db:
+        return None
+
+    rows = _delivery_rows_all(ctx)
+    if not rows:
+        return None
+
+    col = ctx.col
+    awb_tokens = set()
+    for r in rows:
+        awb_tokens.update(_awb_tokens(ctx.cell(r, col["awb"])))
+    awb_geo = _awb_geo_map(ctx, awb_tokens)
+    if awb_geo is None:
+        return None
+
+    om_index = ctx.delivery_order_month_index
+    cat_cache = {}
+    city_complaints, state_complaints = {}, {}
+    cat_city_complaints, cat_state_complaints = {}, {}
+    all_cities, all_states = set(), set()
+    for r in rows:
+        mi = om_index.get(ctx.cell(r, col["order_month"]), -1)
+        if mi < 0:
+            continue
+        cat = ctx.cell(r, col["cat"])
+        if not str(cat).strip():
+            cat = "(blank)"
+        cat = ci_key(cat, cat_cache)
+        seen_c, seen_s = set(), set()
+        for tok in _awb_tokens(ctx.cell(r, col["awb"])):
+            geo = awb_geo.get(tok)
+            if not geo:
+                continue
+            city, state = geo
+            if city:
+                seen_c.add(city)
+            if state:
+                seen_s.add(state)
+        for city in seen_c:
+            all_cities.add(city)
+            cat_city_complaints.setdefault(cat, {}).setdefault(city, {})
+            cat_city_complaints[cat][city][mi] = cat_city_complaints[cat][city].get(mi, 0) + 1
+            if cat == _DELAYED_CATEGORY:
+                city_complaints.setdefault(city, {})
+                city_complaints[city][mi] = city_complaints[city].get(mi, 0) + 1
+        for state in seen_s:
+            all_states.add(state)
+            cat_state_complaints.setdefault(cat, {}).setdefault(state, {})
+            cat_state_complaints[cat][state][mi] = cat_state_complaints[cat][state].get(mi, 0) + 1
+            if cat == _DELAYED_CATEGORY:
+                state_complaints.setdefault(state, {})
+                state_complaints[state][mi] = state_complaints[state].get(mi, 0) + 1
+
+    if not all_cities and not all_states:
+        return None
+
+    order_counts_by_month = _order_counts_by_month_cached(ctx, brand_db, months=ctx.delivery_order_months)
+    if order_counts_by_month is None:
+        return None
+
+    city_orders, state_orders = {}, {}
+    for mi, month_label in enumerate(ctx.delivery_order_months):
+        rows_mo = order_counts_by_month.get(month_label)
+        if not rows_mo:
+            continue
+        for city, state, wk, cnt in rows_mo:
+            cnt = int(cnt)
+            if city and str(city).strip():
+                ck = str(city).strip().upper()
+                if ck in all_cities:
+                    city_orders.setdefault(ck, {})
+                    city_orders[ck][mi] = city_orders[ck].get(mi, 0) + cnt
+            if state and str(state).strip():
+                sk = str(state).strip().upper()
+                if sk in all_states:
+                    state_orders.setdefault(sk, {})
+                    state_orders[sk][mi] = state_orders[sk].get(mi, 0) + cnt
+
+    cities = sorted(city_complaints.keys())
+    states = sorted(state_complaints.keys())
+    n_months = len(ctx.delivery_order_months)
+
+    def to_matrix(complaints, orders, keys):
+        comp = [[complaints.get(k, {}).get(mi, 0) for mi in range(n_months)] for k in keys]
+        ordr = [[orders.get(k, {}).get(mi, 0) for mi in range(n_months)] for k in keys]
+        return comp, ordr
+
+    city_comp, city_ord = to_matrix(city_complaints, city_orders, cities)
+    state_comp, state_ord = to_matrix(state_complaints, state_orders, states)
+
+    return {
+        "months": ctx.delivery_order_months,
+        "cities": cities, "states": states,
+        "city_complaints": city_comp, "city_orders": city_ord,
+        "state_complaints": state_comp, "state_orders": state_ord,
+        "total_months": n_months,
+        "cat_state_complaints": cat_state_complaints, "cat_city_complaints": cat_city_complaints,
+        "state_orders_raw": state_orders,
+    }
+
+
+def _get_geo_dataset_order_month(ctx):
+    if not hasattr(ctx, "_geo_dataset_om"):
+        try:
+            ctx._geo_dataset_om = _compute_geo_dataset_order_month(ctx)
+        except Exception as e:
+            print(f"[{ctx.b['brand']}] delivery order-month geo dataset skipped: {e}")
+            ctx._geo_dataset_om = None
+    return ctx._geo_dataset_om
+
+
+def get_category_state_movers_by_order_month(ctx, category, cur_mi, prev_mi, min_cur=3, top_n=2):
+    """Order Month counterpart to get_category_state_movers - same mover semantics (rate
+    change between two periods, gated on a minimum order volume so a tiny area can't
+    produce a meaningless "rate," see _MIN_AREA_ORDERS), but reading straight off order-month
+    indices instead of summing over a global-week-index list."""
+    dataset = _get_geo_dataset_order_month(ctx)
+    if not dataset:
+        return []
+    cat_states = dataset["cat_state_complaints"].get(category)
+    if not cat_states:
+        return []
+    state_orders = dataset["state_orders_raw"]
+
+    movers = []
+    for state, momap in cat_states.items():
+        cur = momap.get(cur_mi, 0)
+        if cur < min_cur:
+            continue
+        prev = momap.get(prev_mi, 0)
+        delta = cur - prev
+        if delta <= 0:
+            continue
+        cur_orders = state_orders.get(state, {}).get(cur_mi, 0)
+        prev_orders = state_orders.get(state, {}).get(prev_mi, 0)
+        if cur_orders < _MIN_AREA_ORDERS:
+            continue
+        rate_cur = (cur / cur_orders * 100) if cur_orders > 0 else 0
+        rate_prev = (prev / prev_orders * 100) if prev_orders > 0 else 0
+        movers.append({"name": state, "cur": cur, "prev": prev,
+                        "rate_cur": rate_cur, "rate_prev": rate_prev, "delta": delta})
+    movers.sort(key=lambda m: m["delta"], reverse=True)
+    return movers[:top_n]
+
+
 def _aj_num_matrix(m):
     return "[" + ",".join("[" + ",".join(str(v) for v in row) + "]" for row in m) + "]"
 
@@ -444,9 +606,19 @@ def build_geo_script(ctx):
         f"totalWeeks:{dataset['total_weeks']},totalMonths:{dataset['total_months']},minOrders:{_MIN_AREA_ORDERS}"
         "};"
     )
+    om_dataset = _get_geo_dataset_order_month(ctx)
+    data_js_om = (
+        "window.GEO_DATA_OM={"
+        f"cities:{_aj_str(om_dataset['cities'])},states:{_aj_str(om_dataset['states'])},"
+        f"cityComplaints:{_aj_num_matrix(om_dataset['city_complaints'])},cityOrders:{_aj_num_matrix(om_dataset['city_orders'])},"
+        f"stateComplaints:{_aj_num_matrix(om_dataset['state_complaints'])},stateOrders:{_aj_num_matrix(om_dataset['state_orders'])},"
+        f"totalMonths:{om_dataset['total_months']}"
+        "};"
+    ) if om_dataset else "window.GEO_DATA_OM=null;"
 
     return f"""<script>
 {data_js}
+{data_js_om}
 (function(){{
   function titleCase(s){{ return String(s).replace(/\\w\\S*/g, function(t){{ return t.charAt(0).toUpperCase()+t.slice(1).toLowerCase(); }}); }}
   function fmt(n){{ return n.toLocaleString('en-IN'); }}
@@ -497,6 +669,20 @@ def build_geo_script(ctx):
     }}
     window.geoRenderTables('geo-delivery-cities','geo-delivery-states',curWeeks,prevWeeks);
   }};
+  // Order Month counterpart - always the two most recent order months (no Monthly/Weekly
+  // toggle on this axis, see gen_panels.assemble_report's monthbasis toolbar). rankGeo/
+  // tableHTML are reused as-is (they just sum matrices over an index list, agnostic to
+  // whether that index means "global week" or "order-month index") but NOT geoRenderTables
+  // itself - it's hardcoded to window.GEO_DATA, so this reads window.GEO_DATA_OM directly.
+  window.renderGeoForDeliveryTabOrderMonth=function(){{
+    if(!window.GEO_DATA_OM) return;
+    var lastMi=window.GEO_DATA_OM.totalMonths-1;
+    if(lastMi<1) return;
+    var cityEl=document.getElementById('geo-delivery-om-cities'), stateEl=document.getElementById('geo-delivery-om-states');
+    if(cityEl){{ cityEl.innerHTML=tableHTML('Top 10 Cities \\u2014 Delayed Order (Order Month)','City',rankGeo(window.GEO_DATA_OM.cities,window.GEO_DATA_OM.cityComplaints,window.GEO_DATA_OM.cityOrders,[lastMi],[lastMi-1])); }}
+    if(stateEl){{ stateEl.innerHTML=tableHTML('Top 10 States \\u2014 Delayed Order (Order Month)','State',rankGeo(window.GEO_DATA_OM.states,window.GEO_DATA_OM.stateComplaints,window.GEO_DATA_OM.stateOrders,[lastMi],[lastMi-1])); }}
+    if(window.injectButtons) window.injectButtons();
+  }};
   window.renderGeoForMonthlyAnalysis=function(granularity,curIdx){{
     if(!window.GEO_DATA) return;
     var wrap=document.getElementById('geo-ma-wrap');
@@ -520,14 +706,24 @@ def build_delivery_geo_containers(ctx):
     renderGeoForDeliveryTab() (see build_geo_script), which re-runs whenever the page-wide
     Monthly/Weekly toggle changes. Deliberately NOT tagged '.gran-monthly'/'.gran-weekly' -
     those classes make applyGranularity() hide the element entirely in the other mode, but
-    this section should stay visible and just re-render its own content in both modes."""
-    if not _get_geo_dataset(ctx):
-        return ""
-    return (f"<section><h2>Delayed Order by City &amp; State</h2>"
-            f"<p class=\"desc\">Ranked by how much each area's (delayed-order tickets &divide; that area's orders) rate rose vs the "
-            f"previous period. City/state resolved via AWB lookup against the MySQL order DWH; areas with fewer than {_MIN_AREA_ORDERS} "
-            f"orders that period are excluded as too small to rank. Follows the Monthly/Weekly toggle above.</p>"
-            f"<div id='geo-delivery-cities'></div><div id='geo-delivery-states'></div></section>")
+    this section should stay visible and just re-render its own content in both modes.
+
+    IS tagged monthbasis-ticket/monthbasis-order (the Ticket/Order Month toggle, see
+    gen_panels.assemble_report) - that's a genuinely different axis, not a granularity, so
+    each variant gets its own container, populated by its own render function."""
+    parts = []
+    if _get_geo_dataset(ctx):
+        parts.append(f"""<div class="monthbasis-ticket"><section><h2>Delayed Order by City &amp; State</h2>
+<p class="desc">Ranked by how much each area's (delayed-order tickets &divide; that area's orders) rate rose vs the
+previous period. City/state resolved via AWB lookup against the MySQL order DWH; areas with fewer than {_MIN_AREA_ORDERS}
+orders that period are excluded as too small to rank. Follows the Monthly/Weekly toggle above.</p>
+<div id='geo-delivery-cities'></div><div id='geo-delivery-states'></div></section></div>""")
+    if _get_geo_dataset_order_month(ctx):
+        parts.append(f"""<div class="monthbasis-order" style="display:none"><section><h2>Delayed Order by City &amp; State (Order Month)</h2>
+<p class="desc">Same ranking, grouped by when the order was placed instead of when the ticket was raised. Always compares
+the two most recent order months (no Monthly/Weekly toggle here - Order Month stays monthly-only).</p>
+<div id='geo-delivery-om-cities'></div><div id='geo-delivery-om-states'></div></section></div>""")
+    return "".join(parts)
 
 
 def build_monthly_analysis_geo_containers(ctx):

@@ -6,7 +6,8 @@ Python port of gen-monthly.ps1. Depends on gen_weekly.setup(ctx) having already 
 import math
 from datetime import timedelta
 
-from gen_geo_insights import build_monthly_analysis_geo_containers, get_category_state_movers
+from gen_geo_insights import (build_monthly_analysis_geo_containers, get_category_state_movers,
+                               get_category_state_movers_by_order_month)
 from gen_weekly import get_week_num, is_partial_week
 from report_context import ci_key, fnum, h_enc, n0, pretty_month, round1, year_of
 
@@ -85,6 +86,10 @@ def setup(ctx):
     def weeks_for_month(mi):
         return [wi for wi in range(ctx.total_weeks) if ctx.week_month_of[wi] == mi]
 
+    def state_movers_via_weeks(weeks_fn):
+        return lambda cat, cur_idx, prev_idx, min_cur, top_n: get_category_state_movers(
+            ctx, cat, weeks_fn(cur_idx), weeks_fn(prev_idx), min_cur=min_cur, top_n=top_n)
+
     ctx.ma_month_ctx = {
         "n": ctx.n,
         "sales": ctx.sales_arr,
@@ -93,6 +98,7 @@ def setup(ctx):
         "index_fn": lambda r: ctx.month_index.get(ctx.cell(r, ctx.col["month"]), -1),
         "label_fn": lambda idx: pretty_month(ctx.months[idx]),
         "weeks_fn": weeks_for_month,
+        "state_movers_fn": state_movers_via_weeks(weeks_for_month),
     }
     ctx.ma_week_ctx = {
         "n": ctx.total_weeks,
@@ -103,6 +109,7 @@ def setup(ctx):
         ),
         "label_fn": pretty_week_full,
         "weeks_fn": lambda wi: [wi],
+        "state_movers_fn": state_movers_via_weeks(lambda wi: [wi]),
     }
 
     year_index_of = {yr: i for i, yr in enumerate(ctx.distinct_years)}
@@ -127,6 +134,25 @@ def setup(ctx):
         "index_fn": lambda r: year_index_of.get(year_of(ctx.cell(r, ctx.col["month"])), -1),
         "label_fn": lambda idx: ctx.distinct_years[idx],
         "weeks_fn": weeks_for_year,
+        "state_movers_fn": state_movers_via_weeks(weeks_for_year),
+    }
+
+    # Delivery-only Order Month period context (Ticket/Order Month toggle, see
+    # ctx.delivery_order_months in generate_report.py). No weeks_fn - an order-month's
+    # tickets land on arbitrary, non-contiguous ticket weeks, so there's no clean
+    # month->week range to hand to get_category_state_movers. state_movers_fn instead
+    # routes state-name movers through the order-month-bucketed geo dataset directly (see
+    # build_class_period_narrative's dispatch on period.get("state_movers_fn")).
+    om_months = ctx.delivery_order_months
+    om_sales = [ctx.sales_m.get(mo, 0) for mo in om_months]
+    ctx.ma_order_month_ctx = {
+        "n": len(om_months),
+        "sales": om_sales,
+        "index_fn": lambda r: ctx.delivery_order_month_index.get(ctx.cell(r, ctx.col["order_month"]), -1),
+        "label_fn": lambda idx: pretty_month(om_months[idx]),
+        "weeks_fn": None,
+        "state_movers_fn": lambda cat, cur_idx, prev_idx, min_cur, top_n: get_category_state_movers_by_order_month(
+            ctx, cat, cur_idx, prev_idx, min_cur=min_cur, top_n=top_n),
     }
 
     # ---------- Daily (yesterday vs the day before) ----------
@@ -256,10 +282,8 @@ def build_class_period_narrative(ctx, cls, data, period, cur_idx):
         # a sheet column for any other class. Ranked/gated the same way as the courier
         # movers above (same mover_min/mover_top_n, same "explains >=25% of the category's
         # overall change" abs_delta filter) so both read as one consistent list.
-        if cls["id"] == "delivery" and period.get("weeks_fn"):
-            cur_weeks = period["weeks_fn"](cur_idx)
-            prev_weeks = period["weeks_fn"](prev_idx)
-            state_movers = get_category_state_movers(ctx, cat, cur_weeks, prev_weeks, min_cur=mover_min, top_n=mover_top_n)
+        if cls["id"] == "delivery" and period.get("state_movers_fn"):
+            state_movers = period["state_movers_fn"](cat, cur_idx, prev_idx, mover_min, mover_top_n)
             for m in state_movers:
                 if abs_delta > 0 and (m["delta"] / abs_delta) < 0.25:
                     continue
@@ -284,6 +308,44 @@ def build_class_period_narrative(ctx, cls, data, period, cur_idx):
         parts.append("</ul>")
     parts.append("</div>")
     return "".join(parts)
+
+
+def build_delivery_order_month_narrative(ctx, cls):
+    """Order Month counterpart to Monthly Analysis's per-month narrative, scoped to the
+    Delivery tab (see the Ticket/Order Month toggle in gen_panels.assemble_report) rather
+    than embedded in the shared, all-classes Monthly Analysis tab - that tab's month
+    dropdown/period-divs cover every class in one shared structure and aren't cleanly
+    splittable to just one class's alternate axis."""
+    om_months = ctx.delivery_order_months
+    n = len(om_months)
+    if n < 2:
+        return ""
+    period = ctx.ma_order_month_ctx
+    data = build_class_period_data(ctx, cls, period)
+    divs = []
+    for mi in range(1, n):
+        body = build_class_period_narrative(ctx, cls, data, period, mi)
+        if not body:
+            body = f"<p class='note'>No notable order-month-on-order-month changes crossed the reporting threshold for {h_enc(pretty_month(om_months[mi]))}.</p>"
+        disp = "" if mi == n - 1 else " style='display:none;'"
+        divs.append(f"<div class='ma-period' id='ma-om-{mi}'{disp}>{body}</div>")
+    opts = []
+    for mi in range(1, n):
+        sel = " selected" if mi == n - 1 else ""
+        opts.append(f"<option value='{mi}'{sel}>{h_enc(pretty_month(om_months[mi]))} vs {h_enc(pretty_month(om_months[mi-1]))}</option>")
+    return f"""<section><h2>Delivery Monthly Analysis (Order Month)</h2>
+<p class="desc">Same drill-down as Monthly Analysis, but grouped by when the order was placed instead of when the ticket was raised.</p>
+<div style="margin-bottom:18px;"><label for="ma-om-select" style="font-size:12px;color:var(--text-muted);margin-right:8px;">Month</label>
+<select id="ma-om-select" onchange="onOrderMonthAnalysisChange(this.value)" style="font-size:13px;padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;">{"".join(opts)}</select></div>
+{"".join(divs)}
+</section>
+<script>
+(function(){{
+  window.onOrderMonthAnalysisChange = function(v){{
+    document.querySelectorAll('#panel-delivery .monthbasis-order .ma-period').forEach(function(el){{ el.style.display = (el.id==='ma-om-'+v) ? '' : 'none'; }});
+  }};
+}})();
+</script>"""
 
 
 def build_daily_narrative(cls, data):

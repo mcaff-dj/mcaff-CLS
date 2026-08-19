@@ -32,7 +32,7 @@ BRANDS = [
         "col": {"prod": 6, "batch": 7, "sku": 8, "cls": 4, "cat": 5, "partner": 10, "month": 12, "week": 13,
                 "sales": 19, "salesW": 20, "alloc": 23, "uniq": 17, "created_date": 1,
                 "wh": 21, "prosales": 22, "lastsource": 3, "platform": 32, "visdamage": 30, "outerpkg": 29, "statezone": 28,
-                "order_id": 2, "awb": 9},
+                "order_id": 2, "awb": 9, "order_date": 11, "order_month": 14},
         "small_tabs": {"agent": "AGENT", "ai": "AI"},
         # Read only to patch Jan'26/Feb'26 onto the MySQL-sourced NPS charts, and only on runs
         # that actually re-query NPS - see generate_report.py's NPS_SHEET_OVERRIDE_MONTHS. Kept
@@ -83,7 +83,7 @@ BRANDS = [
         "col": {"prod": 6, "batch": 7, "sku": 8, "cls": 4, "cat": 5, "partner": 10, "month": 12, "week": 13,
                 "sales": 19, "salesW": 20, "alloc": 23, "uniq": 17, "created_date": 1,
                 "wh": 22, "prosales": 21, "lastsource": 3, "platform": 40, "visdamage": 33, "outerpkg": 32, "statezone": 34,
-                "order_id": 2, "awb": 9},
+                "order_id": 2, "awb": 9, "order_date": 11, "order_month": 14},
         "small_tabs": {"agent": "Hyp Agent Chart", "ai": "HYP AI Chart"},
         "nps_override_tabs": {"mom": "Hyp: MoM", "prodnps": "HYP:PRODUCT NPS"},
         "nps_mysql_brand": "Hyphen",

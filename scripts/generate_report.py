@@ -20,7 +20,7 @@ import kyc_source
 import lib
 import nps_source
 from brands import BRANDS
-from report_context import Ctx, ci_key, fnum, h_enc, index_map, n0, pretty_month, round1, year_of
+from report_context import Ctx, ci_key, fnum, h_enc, index_map, n0, parse_month_label, pretty_month, round1, year_of
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
@@ -298,6 +298,18 @@ def main():
     ctx.unique_by_class = {}
     for r in ctx.unique:
         ctx.unique_by_class.setdefault(ctx.cell(r, col["cls"]), []).append(r)
+
+    # Delivery-only Order Month axis (Ticket/Order Month toggle) - built from the distinct
+    # order_month values actually on Delivery rows, NOT reused from ctx.months: order_month
+    # isn't guaranteed to fall inside that hardcoded per-brand ticket-month window (an order
+    # can predate the report's tracked range). Sorted chronologically via parse_month_label;
+    # anything unparseable is dropped rather than crashing the sort.
+    delivery_rows = ctx.unique_by_class.get("Delivery", [])
+    om_col = col.get("order_month")
+    distinct_order_months = {ctx.cell(r, om_col) for r in delivery_rows} if om_col is not None else set()
+    distinct_order_months = {m for m in distinct_order_months if str(m).strip() and parse_month_label(m)}
+    ctx.delivery_order_months = sorted(distinct_order_months, key=parse_month_label)
+    ctx.delivery_order_month_index = index_map(ctx.delivery_order_months)
 
     ctx.sales_m = get_sales_m_by_month(ctx, data_rows)
     ctx.sales_arr = [ctx.sales_m.get(mo, 0) for mo in ctx.months]
