@@ -91,6 +91,7 @@ mount('all', '/api/ndr/sheet', '../ndr/sheet.js');
 mount('post', '/api/ndr/lead-assignment', '../ndr/lead-assignment.js');
 mount('all', '/api/delivery-escalation/sheet', '../delivery-escalation/sheet.js');
 mount('all', '/api/delivery-escalation/record', '../delivery-escalation/record.js');
+mount('get', '/api/delivery-escalation/fresh-export', '../delivery-escalation/fresh-export.js');
 mount('all', '/api/nps-admin/surveys', '../nps-admin/surveys.js');
 mount('all', '/api/nps-admin/recipients', '../nps-admin/recipients.js');
 mount('post', '/api/nps-admin/send', '../nps-admin/send.js');
