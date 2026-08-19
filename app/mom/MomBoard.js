@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { fetchJson, postJson, deleteJson } from './momApi';
+import { fetchJson, postJson, putJson, deleteJson } from './momApi';
 
 const PRIORITY_COLORS = { low: '#64748b', medium: '#3b82f6', high: '#f59e0b', urgent: '#ef4444' };
 
@@ -221,14 +221,142 @@ function QuickAddTask({ boardId, statuses, onAdded }) {
   );
 }
 
-function TaskPanel({ task, onClose }) {
-  if (!task) return null;
+function CustomFieldInput({ column, value, onChange }) {
+  if (column.type === 'checkbox') {
+    return <input type="checkbox" checked={value === 'true'} onChange={(e) => onChange(e.target.checked ? 'true' : 'false')} />;
+  }
+  if (column.type === 'select') {
+    const opts = column.options || [];
+    return (
+      <select value={value || ''} onChange={(e) => onChange(e.target.value)}
+        className="w-full px-2 py-1 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-[12px]">
+        <option value="">—</option>
+        {opts.map((o) => <option key={o.value} value={o.value}>{o.value}</option>)}
+      </select>
+    );
+  }
+  const type = column.type === 'number' ? 'number' : column.type === 'date' ? 'date' : column.type === 'person' ? 'email' : 'text';
+  return (
+    <input type={type} value={value || ''} onChange={(e) => onChange(e.target.value)}
+      className="w-full px-2 py-1 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-[12px]" />
+  );
+}
+
+function TaskPanel({ task, columns, onClose, onSaved, onDeleted }) {
+  const [form, setForm] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!task) { setForm(null); return; }
+    setForm({
+      title: task.title, description: task.description || '', priority: task.priority || 'medium',
+      assigneeEmail: task.assigneeEmail || '', dueDate: task.dueDate ? task.dueDate.slice(0, 10) : '',
+      customValues: { ...task.customValues },
+    });
+  }, [task]);
+
+  if (!task || !form) return null;
+
+  const save = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      await putJson('/api/mom/tasks', { id: task.id, ...form });
+      onSaved();
+      onClose();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    try {
+      await deleteJson('/api/mom/tasks', { id: task.id });
+      onDeleted();
+      onClose();
+    } catch (e) {
+      setError(e.message);
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 bg-black/50 flex justify-end z-50" onClick={onClose}>
-      <div className="w-full max-w-sm h-full bg-zinc-900 border-l border-zinc-800 p-4" onClick={(e) => e.stopPropagation()}>
-        <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 text-[12px] mb-3">Close</button>
-        <div className="text-zinc-100 font-bold text-[15px]">{task.title}</div>
+      <div className="w-full max-w-sm h-full bg-zinc-900 border-l border-zinc-800 p-4 overflow-y-auto space-y-3" onClick={(e) => e.stopPropagation()}>
+        <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 text-[12px]">Close</button>
+        {error && <div className="text-red-400 text-[12px]">{error}</div>}
+        <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })}
+          className="w-full px-2 py-1.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-[14px] font-bold" />
+        <textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })}
+          placeholder="Description" rows={3}
+          className="w-full px-2 py-1.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-[12px]" />
+        <div>
+          <label className="text-zinc-500 text-[11px] uppercase">Priority</label>
+          <select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}
+            className="w-full px-2 py-1 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-[12px]">
+            {['low', 'medium', 'high', 'urgent'].map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-zinc-500 text-[11px] uppercase">Assignee</label>
+          <input value={form.assigneeEmail} onChange={(e) => setForm({ ...form, assigneeEmail: e.target.value })}
+            className="w-full px-2 py-1 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-[12px]" />
+        </div>
+        <div>
+          <label className="text-zinc-500 text-[11px] uppercase">Due date</label>
+          <input type="date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })}
+            className="w-full px-2 py-1 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-[12px]" />
+        </div>
+        {columns.map((c) => (
+          <div key={c.id}>
+            <label className="text-zinc-500 text-[11px] uppercase">{c.name}</label>
+            <CustomFieldInput column={c} value={form.customValues[c.id]}
+              onChange={(v) => setForm({ ...form, customValues: { ...form.customValues, [c.id]: v } })} />
+          </div>
+        ))}
+        <div className="flex gap-2 pt-2">
+          <button onClick={save} disabled={busy}
+            className="px-3 py-1.5 rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white text-[12px] font-bold">Save</button>
+          <button onClick={remove} disabled={busy}
+            className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-red-900 border border-zinc-700 text-red-400 text-[12px] font-bold">Delete</button>
+        </div>
       </div>
+    </div>
+  );
+}
+
+function TableView({ statuses, columns, tasks, onOpenTask }) {
+  const statusLabel = (key) => (statuses.find((s) => s.statusKey === key) || {}).label || key;
+  return (
+    <div className="overflow-x-auto bg-zinc-900/60 border border-zinc-800/80 rounded-xl">
+      <table className="w-full text-[13px]">
+        <thead>
+          <tr className="border-b border-zinc-800/80 text-zinc-500">
+            <th className="py-2 px-3 text-left font-medium">Title</th>
+            <th className="py-2 px-3 text-left font-medium">Status</th>
+            <th className="py-2 px-3 text-left font-medium">Priority</th>
+            <th className="py-2 px-3 text-left font-medium">Assignee</th>
+            <th className="py-2 px-3 text-left font-medium">Due</th>
+            {columns.map((c) => <th key={c.id} className="py-2 px-3 text-left font-medium">{c.name}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {tasks.map((t) => (
+            <tr key={t.id} onClick={() => onOpenTask(t)} className="border-b border-zinc-800/50 hover:bg-zinc-800/40 cursor-pointer">
+              <td className="py-2 px-3 text-zinc-100">{t.title}</td>
+              <td className="py-2 px-3 text-zinc-400">{statusLabel(t.statusKey)}</td>
+              <td className="py-2 px-3" style={{ color: PRIORITY_COLORS[t.priority] || PRIORITY_COLORS.medium }}>{t.priority}</td>
+              <td className="py-2 px-3 text-zinc-400">{t.assigneeEmail || '—'}</td>
+              <td className="py-2 px-3 text-zinc-400">{t.dueDate ? t.dueDate.slice(0, 10) : '—'}</td>
+              {columns.map((c) => <td key={c.id} className="py-2 px-3 text-zinc-400">{(t.customValues || {})[c.id] || '—'}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -239,6 +367,7 @@ export default function MomBoard({ boardId, onBack }) {
   const [error, setError] = useState('');
   const [managing, setManaging] = useState(false);
   const [selectedTask, setSelectedTask] = useState(null);
+  const [view, setView] = useState('kanban');
 
   const load = () => {
     Promise.all([
@@ -300,9 +429,27 @@ export default function MomBoard({ boardId, onBack }) {
 
       <QuickAddTask boardId={boardId} statuses={detail.statuses} onAdded={load} />
 
-      <KanbanView statuses={detail.statuses} tasks={tasks} onDropTask={moveTask} onOpenTask={setSelectedTask} />
+      <div className="flex gap-2 mb-3">
+        <button
+          onClick={() => setView('kanban')}
+          className={`px-3 py-1 rounded-lg text-[12px] font-bold ${view === 'kanban' ? 'bg-purple-700 text-white' : 'bg-zinc-800 text-zinc-400'}`}
+        >Board</button>
+        <button
+          onClick={() => setView('table')}
+          className={`px-3 py-1 rounded-lg text-[12px] font-bold ${view === 'table' ? 'bg-purple-700 text-white' : 'bg-zinc-800 text-zinc-400'}`}
+        >Table</button>
+      </div>
 
-      <TaskPanel task={selectedTask} onClose={() => setSelectedTask(null)} />
+      {view === 'kanban' ? (
+        <KanbanView statuses={detail.statuses} tasks={tasks} onDropTask={moveTask} onOpenTask={setSelectedTask} />
+      ) : (
+        <TableView statuses={detail.statuses} columns={detail.columns} tasks={tasks} onOpenTask={setSelectedTask} />
+      )}
+
+      <TaskPanel
+        task={selectedTask} columns={detail.columns} onClose={() => setSelectedTask(null)}
+        onSaved={load} onDeleted={load}
+      />
     </div>
   );
 }
