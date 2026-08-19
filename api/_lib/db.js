@@ -2411,6 +2411,79 @@ async function removeMomBoardMember(boardId, email) {
   await sql`DELETE FROM mom_board_members WHERE board_id = ${boardId} AND email = ${email}`;
 }
 
+async function createMomColumn(boardId, name, type, options) {
+  const { rows } = await sql`SELECT COALESCE(MAX(position), -1) AS maxPos FROM mom_columns WHERE board_id = ${boardId}`;
+  const position = rows[0].maxPos + 1;
+  const { insertId } = await sql`
+    INSERT INTO mom_columns (board_id, name, type, options, position)
+    VALUES (${boardId}, ${name}, ${type}, ${options ? JSON.stringify(options) : null}, ${position})
+  `;
+  return { id: insertId, name, type, options: options || null, position };
+}
+
+async function getMomColumnBoardId(columnId) {
+  const { rows } = await sql`SELECT board_id AS boardId FROM mom_columns WHERE id = ${columnId}`;
+  return rows[0] ? rows[0].boardId : null;
+}
+
+async function updateMomColumn(id, { name, options, position }) {
+  const { rows } = await sql`SELECT name, options, position FROM mom_columns WHERE id = ${id}`;
+  if (!rows.length) throw new Error('Column not found');
+  const current = rows[0];
+  const nextName = name === undefined ? current.name : name;
+  const nextOptions = options === undefined ? current.options : options;
+  const nextPosition = position === undefined ? current.position : position;
+  await sql`
+    UPDATE mom_columns SET name = ${nextName}, options = ${nextOptions ? JSON.stringify(nextOptions) : null}, position = ${nextPosition}
+    WHERE id = ${id}
+  `;
+}
+
+async function deleteMomColumn(id) {
+  await sql`DELETE FROM mom_columns WHERE id = ${id}`;
+}
+
+async function createMomStatus(boardId, label, color) {
+  const baseKey = label.toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'status';
+  const { rows: existing } = await sql`SELECT status_key AS statusKey, position FROM mom_statuses WHERE board_id = ${boardId}`;
+  const existingKeys = new Set(existing.map((s) => s.statusKey));
+  let key = baseKey;
+  let suffix = 1;
+  while (existingKeys.has(key)) {
+    key = `${baseKey}_${suffix}`;
+    suffix += 1;
+  }
+  const position = existing.length ? Math.max(...existing.map((s) => s.position)) + 1 : 0;
+  const finalColor = color || '#94a3b8';
+  await sql`
+    INSERT INTO mom_statuses (board_id, status_key, label, color, position)
+    VALUES (${boardId}, ${key}, ${label}, ${finalColor}, ${position})
+  `;
+  return { statusKey: key, label, color: finalColor, position };
+}
+
+async function updateMomStatus(boardId, statusKey, { label, color, position }) {
+  const { rows } = await sql`SELECT label, color, position FROM mom_statuses WHERE board_id = ${boardId} AND status_key = ${statusKey}`;
+  if (!rows.length) throw new Error('Status not found');
+  const current = rows[0];
+  const nextLabel = label === undefined ? current.label : label;
+  const nextColor = color === undefined ? current.color : color;
+  const nextPosition = position === undefined ? current.position : position;
+  await sql`
+    UPDATE mom_statuses SET label = ${nextLabel}, color = ${nextColor}, position = ${nextPosition}
+    WHERE board_id = ${boardId} AND status_key = ${statusKey}
+  `;
+}
+
+async function deleteMomStatus(boardId, statusKey) {
+  const { rows: statuses } = await sql`
+    SELECT status_key, position FROM mom_statuses WHERE board_id = ${boardId}
+  `;
+  const target = resolveStatusForDeletion(statuses, statusKey);
+  await sql`UPDATE mom_tasks SET status_key = ${target} WHERE board_id = ${boardId} AND status_key = ${statusKey}`;
+  await sql`DELETE FROM mom_statuses WHERE board_id = ${boardId} AND status_key = ${statusKey}`;
+}
+
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
@@ -2440,4 +2513,6 @@ module.exports = {
   resolveStatusForDeletion,
   getMomBoardsForUser, createMomBoard, getMomBoardRole, getMomBoardDetail,
   updateMomBoard, archiveMomBoard, upsertMomBoardMember, removeMomBoardMember,
+  createMomColumn, getMomColumnBoardId, updateMomColumn, deleteMomColumn,
+  createMomStatus, updateMomStatus, deleteMomStatus,
 };
