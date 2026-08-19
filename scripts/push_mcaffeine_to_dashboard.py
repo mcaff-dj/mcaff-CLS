@@ -25,9 +25,109 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib
+import mysql_lib
 
 SOURCE_SHEET_ID = "1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A"
 SOURCE_TAB = "mcaffeine"
+
+# Query Classes whose missing AWB gets backfilled from the item-level DB before push.
+AWB_LOOKUP_QUERY_CLASSES = ("Warehouse", "Delivery")
+
+# "Order Name" for a live mCaffeine order is "MCaff" + Item_level_data.Display_Order_Code
+# (e.g. "MCaff9119979" -> "9119979"). Combo/split-shipment suffix variants of the order
+# code ("9119979_1") aren't matched here - genuinely unmapped cases are left blank rather
+# than guessed at, per the "map for the cases you will find" instruction.
+MCAFFEINE_ORDER_NAME_PATTERN = re.compile(r"^MCaff(\d+)$", re.IGNORECASE)
+
+
+def extract_mcaffeine_order_code(order_name):
+    m = MCAFFEINE_ORDER_NAME_PATTERN.match(str(order_name).strip())
+    return m.group(1) if m else None
+
+
+CREATED_AT_PATTERN = re.compile(
+    r"^(\d{1,2})/(\d{1,2})/(\d{4}),?\s*(\d{1,2}):(\d{2}):(\d{2})\s*(am|pm)$", re.IGNORECASE
+)
+
+
+def parse_created_at(value):
+    """Parses FlowCall's 'Created At' (DD/MM/YYYY, H:MM:SS AM/PM, Asia/Kolkata) into a
+    naive datetime comparable against Item_level_data.Order_Date - both are IST wall-clock
+    values with no timezone info, so no conversion is needed. Returns None on anything that
+    doesn't match (missing/malformed value), and the AWB backfill below treats that as
+    "can't bound the lookup" rather than guessing."""
+    m = CREATED_AT_PATTERN.match(str(value).strip())
+    if not m:
+        return None
+    day, month, year, hour, minute, second, ampm = m.groups()
+    hour = int(hour) % 12
+    if ampm.lower() == "pm":
+        hour += 12
+    try:
+        return datetime(int(year), int(month), int(day), hour, int(minute), int(second))
+    except ValueError:
+        return None
+
+
+def pick_awb_before_ticket_date(candidates, ticket_dt):
+    """From [(order_date, tracking), ...] for one order code, returns the tracking number
+    of the latest shipment that existed AT OR BEFORE the ticket was raised - a shipment
+    dated after the ticket can't be the one the ticket is about. None if none qualify."""
+    best = None
+    for order_date, tracking in candidates:
+        if order_date <= ticket_dt and (best is None or order_date > best[0]):
+            best = (order_date, tracking)
+    return best[1] if best else None
+
+
+def fetch_awb_candidates(rows_to_push, src_idx):
+    """Batched lookup of every (Order_Date, Tracking_Number) Item_level_data has for each
+    order code a Warehouse/Delivery row with a blank AWB needs - one query for the whole
+    batch rather than one per row. Returns {order_code: [(order_date, tracking), ...]};
+    picking the one to actually use (bounded by that row's own ticket date) happens per-row
+    in the caller via pick_awb_before_ticket_date, since two tickets can reference the same
+    order code but be raised at different times."""
+    idx_qclass = src_idx.get("Disposition: Query Class")
+    idx_awb = src_idx.get("Disposition: AWB number")
+    idx_order_name = src_idx.get("Order Name")
+    if idx_qclass is None or idx_awb is None or idx_order_name is None:
+        return {}
+
+    order_codes = set()
+    for row in rows_to_push:
+        if idx_qclass >= len(row) or str(row[idx_qclass]).strip() not in AWB_LOOKUP_QUERY_CLASSES:
+            continue
+        if idx_awb < len(row) and str(row[idx_awb]).strip():
+            continue  # AWB already present, nothing to backfill
+        if idx_order_name >= len(row):
+            continue
+        code = extract_mcaffeine_order_code(row[idx_order_name])
+        if code:
+            order_codes.add(code)
+
+    if not order_codes:
+        return {}
+
+    order_codes = sorted(order_codes)
+    placeholders = ",".join(["%s"] * len(order_codes))
+    rows = mysql_lib.query(
+        f"SELECT Display_Order_Code, Tracking_Number, Order_Date FROM Item_level_data "
+        f"WHERE Brand = 'mCaffeine' AND Tracking_Number IS NOT NULL AND Tracking_Number <> '' "
+        f"AND Display_Order_Code IN ({placeholders})",
+        tuple(order_codes), database="mcaff_prod",
+    )
+    if not rows:  # None (no DB creds) or empty result - nothing to backfill
+        print(f"[dashboard] AWB lookup: {len(order_codes)} order(s) needed a backfill, "
+              f"{'DB unavailable' if rows is None else 'no matching tracking numbers found'}")
+        return {}
+
+    candidates_by_code = {}
+    for code, tracking, order_date in rows:
+        candidates_by_code.setdefault(code, []).append((order_date, tracking))
+    print(f"[dashboard] AWB lookup: {len(order_codes)} order(s) needed a backfill, "
+          f"{len(candidates_by_code)} had at least one tracking number in the DB")
+    return candidates_by_code
+
 
 DASHBOARD_SHEET_ID = "1fjrwKgi26q3kxsLsFrXP0KY0uAJNfcpTeHBQhCXwkPA"
 DASHBOARD_TAB = "mCaffeine"
@@ -151,7 +251,7 @@ def main():
                 existing_ids.add(str(r[0]))
     print(f"[dashboard] {len(existing_ids)} existing Ticket No values in dashboard")
 
-    new_rows = []
+    rows_to_push = []
     seen_this_batch = set()
     for src_row in src_rows:
         if idx_ticket_src >= len(src_row):
@@ -160,7 +260,19 @@ def main():
         if not ticket_id or ticket_id in existing_ids or ticket_id in seen_this_batch:
             continue
         seen_this_batch.add(ticket_id)
+        rows_to_push.append(src_row)
 
+    print(f"[dashboard] {len(rows_to_push)} new unique tickets to push")
+    if not rows_to_push:
+        return
+
+    awb_candidates_by_code = fetch_awb_candidates(rows_to_push, src_idx)
+    idx_qclass_src = src_idx.get("Disposition: Query Class")
+    idx_created_at_src = src_idx.get("Created At")
+    awb_backfilled = 0
+
+    new_rows = []
+    for src_row in rows_to_push:
         dest_row = []
         for dest_header in dash_headers:
             if dest_header in FORMULA_COLUMNS:
@@ -172,15 +284,23 @@ def main():
                 dest_row.append(parse_flowcall_date(raw_val))
                 continue
             mapped = FIELD_MAP.get(dest_header)
-            if mapped and mapped in src_idx and src_idx[mapped] < len(src_row):
-                dest_row.append(src_row[src_idx[mapped]])
-            else:
-                dest_row.append("")  # no source column for this destination field
+            value = src_row[src_idx[mapped]] if mapped and mapped in src_idx and src_idx[mapped] < len(src_row) else ""
+            if (dest_header == "AWB Number" and not str(value).strip() and awb_candidates_by_code
+                    and idx_qclass_src is not None and idx_qclass_src < len(src_row)
+                    and str(src_row[idx_qclass_src]).strip() in AWB_LOOKUP_QUERY_CLASSES):
+                order_code = extract_mcaffeine_order_code(src_row[src_idx["Order Name"]]) if "Order Name" in src_idx else None
+                ticket_dt = (parse_created_at(src_row[idx_created_at_src])
+                             if idx_created_at_src is not None and idx_created_at_src < len(src_row) else None)
+                if order_code and ticket_dt and order_code in awb_candidates_by_code:
+                    found = pick_awb_before_ticket_date(awb_candidates_by_code[order_code], ticket_dt)
+                    if found:
+                        value = found
+                        awb_backfilled += 1
+            dest_row.append(value)
         new_rows.append(dest_row)
-
-    print(f"[dashboard] {len(new_rows)} new unique tickets to push")
-    if not new_rows:
-        return
+    if awb_candidates_by_code:
+        print(f"[dashboard] backfilled AWB for {awb_backfilled} row(s) from item-level DB "
+              f"(latest shipment at or before the ticket's Created At)")
 
     start_row = dash_last_row + 1 if dash_last_row >= 1 else 2
     lib.set_sheet_rows_at_row(DASHBOARD_SHEET_ID, DASHBOARD_TAB, new_rows, start_row)
