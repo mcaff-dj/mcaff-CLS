@@ -21,6 +21,9 @@ function checkCardAccess(session) {
 
 async function checkBoardAccess(session, boardId, { requireOwner } = {}) {
   if (!boardId) return 'boardId is required';
+  const archived = await db.isMomBoardArchived(boardId);
+  if (archived === null) return 'Board not found';
+  if (archived) return 'This board has been archived.';
   if (session.isAdmin) return null;
   const role = await db.getMomBoardRole(boardId, session.email);
   if (!role) return 'You are not a member of this board.';
@@ -94,7 +97,11 @@ const handler = async (req, res) => {
         }
         const boardDenied = await checkBoardAccess(session, boardId, { requireOwner: true });
         if (boardDenied) return res.status(403).json({ error: boardDenied });
-        await db.upsertMomBoardMember(boardId, email.trim().toLowerCase(), role);
+        try {
+          await db.upsertMomBoardMember(boardId, email.trim().toLowerCase(), role);
+        } catch (e) {
+          return res.status(400).json({ error: e.message });
+        }
         return res.status(200).json({ ok: true });
       }
       if (req.method === 'DELETE') {
@@ -115,7 +122,7 @@ const handler = async (req, res) => {
     if (action === 'columns') {
       if (req.method === 'POST') {
         const { boardId, name, type, options } = body;
-        const validTypes = ['text', 'number', 'select', 'person', 'date', 'checkbox'];
+        const validTypes = ['text', 'number', 'person', 'date', 'checkbox'];
         if (!name || !name.trim() || !validTypes.includes(type)) {
           return res.status(400).json({ error: `name is required and type must be one of ${validTypes.join(', ')}` });
         }
@@ -206,6 +213,9 @@ const handler = async (req, res) => {
       if (req.method === 'PUT') {
         const { id, ...fields } = body;
         if (!id) return res.status(400).json({ error: 'id is required' });
+        if (fields.title !== undefined && !fields.title.trim()) {
+          return res.status(400).json({ error: 'title cannot be blank' });
+        }
         const boardId = await db.getMomTaskBoardId(id);
         if (!boardId) return res.status(404).json({ error: 'Task not found' });
         const boardDenied = await checkBoardAccess(session, boardId);

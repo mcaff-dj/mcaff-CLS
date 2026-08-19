@@ -120,7 +120,6 @@ function ManagePanel({ statuses, columns, members, myRole, boardId, onChanged, o
               <option value="date">date</option>
               <option value="checkbox">checkbox</option>
               <option value="person">person</option>
-              <option value="select">select</option>
             </select>
             <button
               disabled={busy || !columnName.trim()}
@@ -190,22 +189,26 @@ function KanbanView({ statuses, tasks, onDropTask, onOpenTask }) {
 function QuickAddTask({ boardId, statuses, onAdded }) {
   const [title, setTitle] = useState('');
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
   const submit = async (e) => {
     e.preventDefault();
     if (!title.trim()) return;
     setBusy(true);
+    setError('');
     try {
       await postJson('/api/mom/tasks', { boardId, title: title.trim(), statusKey: statuses[0] && statuses[0].statusKey });
       setTitle('');
       onAdded();
+    } catch (e) {
+      setError(e.message);
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <form onSubmit={submit} className="flex gap-2 mb-4">
+    <form onSubmit={submit} className="flex flex-wrap items-center gap-2 mb-4">
       <input
         value={title}
         onChange={(e) => setTitle(e.target.value)}
@@ -217,6 +220,7 @@ function QuickAddTask({ boardId, statuses, onAdded }) {
         disabled={busy || !title.trim()}
         className="px-3 py-1.5 rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white text-[13px] font-bold"
       >Add task</button>
+      {error && <div className="text-red-400 text-[12px] w-full">{error}</div>}
     </form>
   );
 }
@@ -319,7 +323,7 @@ function TaskPanel({ task, columns, onClose, onSaved, onDeleted }) {
           </div>
         ))}
         <div className="flex gap-2 pt-2">
-          <button onClick={save} disabled={busy}
+          <button onClick={save} disabled={busy || !form.title.trim()}
             className="px-3 py-1.5 rounded-lg bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white text-[12px] font-bold">Save</button>
           <button onClick={remove} disabled={busy}
             className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-red-900 border border-zinc-700 text-red-400 text-[12px] font-bold">Delete</button>

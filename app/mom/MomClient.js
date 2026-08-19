@@ -73,11 +73,21 @@ export default function MomClient() {
 
   const load = () => {
     fetchJson('/api/mom/boards')
-      .then((d) => setBoards(d.boards))
+      .then((d) => { setBoards(d.boards); setError(''); })
       .catch((e) => setError(e.message));
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    fetch('/api/auth/me')
+      .then((r) => r.json())
+      .then((d) => {
+        if (!d.authenticated) {
+          window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname);
+          return;
+        }
+        load();
+      });
+  }, []);
 
   if (openBoardId) {
     return <MomBoard boardId={openBoardId} onBack={() => { setOpenBoardId(null); load(); }} />;

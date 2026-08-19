@@ -2385,6 +2385,11 @@ async function getMomBoardRole(boardId, email) {
   return rows[0] ? rows[0].role : null;
 }
 
+async function isMomBoardArchived(boardId) {
+  const { rows } = await sql`SELECT archived FROM mom_boards WHERE id = ${boardId}`;
+  return rows.length ? !!rows[0].archived : null;
+}
+
 async function getMomBoardDetail(boardId) {
   const { rows: boards } = await sql`SELECT id, name, description, archived FROM mom_boards WHERE id = ${boardId}`;
   if (!boards.length) return null;
@@ -2411,6 +2416,14 @@ async function archiveMomBoard(boardId) {
 }
 
 async function upsertMomBoardMember(boardId, email, role) {
+  if (role !== 'owner') {
+    const { rows } = await sql`SELECT email, role FROM mom_board_members WHERE board_id = ${boardId}`;
+    const current = rows.find((r) => r.email === email);
+    if (current && current.role === 'owner') {
+      const otherOwners = rows.filter((r) => r.email !== email && r.role === 'owner');
+      if (!otherOwners.length) throw new Error('Cannot demote the last owner of a board');
+    }
+  }
   await sql`
     INSERT INTO mom_board_members (board_id, email, role) VALUES (${boardId}, ${email}, ${role})
     ON DUPLICATE KEY UPDATE role = ${role}
@@ -2546,7 +2559,7 @@ async function createMomTask(boardId, { title, description, priority, assigneeEm
 
 async function updateMomTask(taskId, fields) {
   const { rows } = await sql`
-    SELECT title, description, priority, assignee_email AS assigneeEmail, due_date AS dueDate
+    SELECT board_id AS boardId, title, description, priority, assignee_email AS assigneeEmail, due_date AS dueDate
     FROM mom_tasks WHERE id = ${taskId}
   `;
   if (!rows.length) throw new Error('Task not found');
@@ -2564,7 +2577,12 @@ async function updateMomTask(taskId, fields) {
     WHERE id = ${taskId}
   `;
   if (fields.customValues) {
-    const entries = Object.entries(fields.customValues);
+    // Only accept column ids that actually belong to this task's board - a client could
+    // otherwise write field values against another board's columns (junk rows, not a read
+    // leak, but still not a valid state).
+    const { rows: validColumns } = await sql`SELECT id FROM mom_columns WHERE board_id = ${current.boardId}`;
+    const validIds = new Set(validColumns.map((c) => String(c.id)));
+    const entries = Object.entries(fields.customValues).filter(([columnId]) => validIds.has(String(columnId)));
     for (const [columnId, value] of entries) {
       await sql`
         INSERT INTO mom_task_field_values (task_id, column_id, value) VALUES (${taskId}, ${columnId}, ${value})
@@ -2650,7 +2668,7 @@ module.exports = {
   isPoolExhausted, withPgConnectRetry, toTransactionModePooler, cachedRead, invalidateCache, CACHE_TTL_MS,
   buildRefundExportWhere,
   resolveStatusForDeletion,
-  getMomBoardsForUser, createMomBoard, getMomBoardRole, getMomBoardDetail,
+  getMomBoardsForUser, createMomBoard, getMomBoardRole, isMomBoardArchived, getMomBoardDetail,
   updateMomBoard, archiveMomBoard, upsertMomBoardMember, removeMomBoardMember,
   createMomColumn, getMomColumnBoardId, updateMomColumn, deleteMomColumn,
   createMomStatus, updateMomStatus, deleteMomStatus,
