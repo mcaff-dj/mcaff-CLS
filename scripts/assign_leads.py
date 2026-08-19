@@ -1053,10 +1053,87 @@ def _main(conn):
         print(f"  {len(reassign_info_by_row)} Connected=No lead(s) eligible for reassignment (under the {REASSIGN_RETRY_CAP}-attempt cap).")
     print(f"  unassigned pool by priority: Prepaid={tier_counts[0]}, COD+high-priority reason={tier_counts[1]}, other COD={tier_counts[2]}, COD+low-priority reason={tier_counts[3]}")
 
-    # Stamped even if nothing else is assignable this run, and BEFORE the early-return below -
-    # a confirmed refund shouldn't wait on there being other assignable leads this run. Columns
-    # S/T/U are exactly what is_disposed (above) checks, so this permanently marks the row
-    # worked for every future run too, not just skipped once.
+    # ---------------------------------------------------------------------------------------
+    # ASSIGNMENT FIRST. Everything below this block - the refund stamps and the GoKwik cache
+    # flush - is bookkeeping: useful, but nobody is waiting on it. The assignment write is the
+    # only thing an agent sitting with an empty queue actually needs, so it goes first.
+    #
+    # This ordering is not a micro-optimisation, it is the difference between a slow run and a
+    # lost one. This runs as a Lambda with a HARD 60s timeout, and a timeout is a kill: no
+    # cleanup, no partial result, nothing flushed. With the stamps and the flush ahead of the
+    # write (as they were until 2026-08-19) a run that ran out of time lost every assignment it
+    # had just computed, and the next run recomputed the same work and died at the same point.
+    # Observed three times in two days as "the robot has stopped assigning leads" - most
+    # recently with an agent sitting at zero leads for 18 minutes while 1,462 sat unassigned.
+    #
+    # Now the worst a timeout can cost is the bookkeeping, all of which is self-healing: an
+    # unstamped refund is re-detected next run, and an unflushed cache entry is just re-checked.
+    # ---------------------------------------------------------------------------------------
+    assignments = {}
+    if unassigned_pending:
+        # Per-agent quotas where set for this process (calling_agent_process.max_quota); anyone
+        # without one falls back to DEFAULT_QUOTA inside build_assignment_queue. excluded_by_row
+        # keeps a Connected=No reassignment away from every agent who already failed to reach
+        # that customer - empty/absent for every genuinely fresh lead, so their assignment is
+        # unaffected.
+        assignments = build_assignment_queue(unassigned_pending, online_agents, current_load,
+                                             quota=agent_quotas or DEFAULT_QUOTA,
+                                             excluded_by_row=excluded_by_row,
+                                             rto_reason_by_row=rto_reason_by_row,
+                                             agent_specializations=agent_specializations,
+                                             agent_prepaid_target=agent_prepaid_targets,
+                                             agent_reassign_payment_mode=agent_reassign_payment_modes)
+
+    if assignments:
+        # A reassigned row gets Q (new agent) AND R:U wiped back to blank in one write - it must
+        # look exactly like a fresh, never-called lead to the new agent, not carry the previous
+        # agent's Connected/Attempt/Disposition/legacy-remarks forward. Z (remarks) is a separate
+        # range since it isn't contiguous with Q:U. A fresh (non-reassigned) lead is untouched
+        # beyond its own Column Q write, exactly as before this feature existed.
+        value_ranges = []
+        for row_index, email in assignments.items():
+            if row_index in reassign_info_by_row:
+                value_ranges.append({
+                    "range": f"'{SHEET_TAB}'!Q{row_index + 2}:U{row_index + 2}",
+                    "values": [[email, "", "", "", ""]],
+                })
+                value_ranges.append({"range": f"'{SHEET_TAB}'!Z{row_index + 2}", "values": [[""]]})
+            else:
+                value_ranges.append({"range": f"'{SHEET_TAB}'!Q{row_index + 2}", "values": [[email]]})
+        reassigned_count = sum(1 for row_index in assignments if row_index in reassign_info_by_row)
+        print(f"Writing {len(assignments)} assignment(s) ({reassigned_count} of them Connected=No reassignments)...")
+        lib.set_sheet_values_batch(SPREADSHEET_ID, value_ranges)
+
+        # Recorded AFTER the sheet write succeeds, not before - a reassignment that never actually
+        # reached the sheet has no old agent to permanently exclude yet. Both halves of each
+        # reassignment (retire the old agent's cycle, record the new one) happen inside this one
+        # call, in one transaction - see its docstring for why they can't be separated.
+        record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
+                                reassign_info_by_row)
+
+        per_agent = {}
+        for email in assignments.values():
+            per_agent[email] = per_agent.get(email, 0) + 1
+        print("Assigned:")
+        for email, count in sorted(per_agent.items()):
+            print(f"  {email}: +{count}")
+        skipped = len(unassigned_pending) - len(assignments)
+        if skipped > 0:
+            print(f"  ({skipped} unassigned lead(s) left over - all eligible agents at quota or excluded for that specific lead)")
+    elif unassigned_pending:
+        print(f"{len(unassigned_pending)} unassigned lead(s) found, but every eligible agent is already at quota (or excluded) for each. Nothing to assign.")
+    else:
+        print("No unassigned pending leads found - nothing to assign.")
+
+    # ---------------------------------------------------------------------------------------
+    # BOOKKEEPING. Deliberately after the assignment write - see the block comment above. It
+    # still runs on a no-assignment run (there is no early return above any more), because a
+    # confirmed refund should be stamped whether or not anything else was assignable, and a run
+    # that did real GoKwik work should not throw that result away.
+    # ---------------------------------------------------------------------------------------
+
+    # Columns S/T/U are exactly what is_disposed (above) checks, so this permanently marks the
+    # row worked for every future run too, not just skipped once.
     if already_refunded_rows:
         # Only rows not already carrying the mark are written. A Connected=No row keeps its "No"
         # forever, so it re-enters the reassignment branch on every single run - and since a
@@ -1078,10 +1155,9 @@ def _main(conn):
             ]
             lib.set_sheet_values_batch(SPREADSHEET_ID, refund_value_ranges)
 
-    # Flushed before the early-return below too, for the same reason as the refund stamps
-    # above - a run that found nothing assignable still did real GoKwik/MySQL work this run,
-    # and throwing that away would mean re-checking the exact same leads live again next run,
-    # defeating the entire point of the cache.
+    # A run that found nothing assignable still did real GoKwik/MySQL work, and throwing that
+    # away would mean re-checking the exact same leads live again next run, defeating the entire
+    # point of the cache.
     if gokwik_dirty:
         confirmed = sum(1 for refunded in gokwik_dirty.values() if refunded)
         print(f"  Caching {len(gokwik_dirty)} GoKwik refund-check result(s) - {confirmed} refunded "
@@ -1089,62 +1165,7 @@ def _main(conn):
               f"{GOKWIK_CACHE_TTL} + jitter)...")
         flush_gokwik_refund_cache(gokwik_dirty, conn=conn)
 
-    if not unassigned_pending:
-        print("No unassigned pending leads found - nothing to assign.")
-        return
-
-    # Per-agent quotas where set for this process (calling_agent_process.max_quota); anyone
-    # without one falls back to DEFAULT_QUOTA inside build_assignment_queue. excluded_by_row
-    # keeps a Connected=No reassignment away from every agent who already failed to reach
-    # that customer - empty/absent for every genuinely fresh lead, so their assignment is
-    # unaffected.
-    assignments = build_assignment_queue(unassigned_pending, online_agents, current_load,
-                                         quota=agent_quotas or DEFAULT_QUOTA,
-                                         excluded_by_row=excluded_by_row,
-                                         rto_reason_by_row=rto_reason_by_row,
-                                         agent_specializations=agent_specializations,
-                                         agent_prepaid_target=agent_prepaid_targets,
-                                         agent_reassign_payment_mode=agent_reassign_payment_modes)
-
-    if not assignments:
-        print(f"{len(unassigned_pending)} unassigned lead(s) found, but every eligible agent is already at quota (or excluded) for each. Nothing to assign.")
-        return
-
-    # A reassigned row gets Q (new agent) AND R:U wiped back to blank in one write - it must
-    # look exactly like a fresh, never-called lead to the new agent, not carry the previous
-    # agent's Connected/Attempt/Disposition/legacy-remarks forward. Z (remarks) is a separate
-    # range since it isn't contiguous with Q:U. A fresh (non-reassigned) lead is untouched
-    # beyond its own Column Q write, exactly as before this feature existed.
-    value_ranges = []
-    for row_index, email in assignments.items():
-        if row_index in reassign_info_by_row:
-            value_ranges.append({
-                "range": f"'{SHEET_TAB}'!Q{row_index + 2}:U{row_index + 2}",
-                "values": [[email, "", "", "", ""]],
-            })
-            value_ranges.append({"range": f"'{SHEET_TAB}'!Z{row_index + 2}", "values": [[""]]})
-        else:
-            value_ranges.append({"range": f"'{SHEET_TAB}'!Q{row_index + 2}", "values": [[email]]})
-    reassigned_count = sum(1 for row_index in assignments if row_index in reassign_info_by_row)
-    print(f"Writing {len(assignments)} assignment(s) ({reassigned_count} of them Connected=No reassignments)...")
-    lib.set_sheet_values_batch(SPREADSHEET_ID, value_ranges)
-
-    # Recorded AFTER the sheet write succeeds, not before - a reassignment that never actually
-    # reached the sheet has no old agent to permanently exclude yet. Both halves of each
-    # reassignment (retire the old agent's cycle, record the new one) happen inside this one
-    # call, in one transaction - see its docstring for why they can't be separated.
-    record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
-                            reassign_info_by_row)
-
-    per_agent = {}
-    for email in assignments.values():
-        per_agent[email] = per_agent.get(email, 0) + 1
-    print("Done. Assigned:")
-    for email, count in sorted(per_agent.items()):
-        print(f"  {email}: +{count}")
-    skipped = len(unassigned_pending) - len(assignments)
-    if skipped > 0:
-        print(f"  ({skipped} unassigned lead(s) left over - all eligible agents at quota or excluded for that specific lead)")
+    print("Done.")
 
 
 if __name__ == "__main__":

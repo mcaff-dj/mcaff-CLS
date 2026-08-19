@@ -7,9 +7,46 @@
 // Static assets (index.html, admin.html, generated reports, etc.) are NOT served from
 // here - those come from S3 via CloudFront directly. This app only ever handles /api/*.
 const express = require('express');
+const compression = require('compression');
 const { ensureAppSecretsLoaded } = require('../_lib/secrets');
 
 const app = express();
+
+// gzip, and it is load-bearing rather than a nicety. API Gateway hard-fails any Lambda response
+// over 6 MB, and that ceiling counts the JSON-ESCAPED envelope, not the raw body - escaping the
+// quotes in a JSON payload adds ~14%. On 2026-08-19 the RTO sheet read crossed it (5.64 MB raw =
+// 6.43 MB escaped) and the CRM died with opaque 500s: agents could not see their leads, could not
+// dispose them, so their load never fell below quota and lead assignment stalled behind it.
+//
+// Measured on that exact payload (5.03 MB of sheet JSON), the response envelope becomes:
+//   uncompressed  5.71 MB   (~4% under the ceiling - one busy week from failing again)
+//   gzip level 1  1.88 MB   60 ms
+//   gzip level 6  1.65 MB   121 ms
+//
+// Level 1 deliberately, not the level-6 default: it captures ~75% of the reduction for half the
+// CPU, and CPU is the scarce resource here - this Lambda is memory-throttled, so every extra
+// millisecond of compression lands on every request. The remaining 0.23 MB buys nothing against a
+// 6 MB ceiling we are now 3x clear of.
+//
+// A real browser offers brotli, so most responses take compression's brotli path rather than the
+// gzip one; `level` above only governs gzip/deflate. That is fine and slightly better (1.11 MB in
+// 90 ms on the same payload) ONLY because compression pins BROTLI_PARAM_QUALITY to 4 itself.
+// Do NOT pass a `brotli` option here without setting that quality explicitly: node's own default
+// is 11, and quality 11 on this payload measured **12.4 seconds** - it would exceed the function
+// timeout on every large read and take the CRM down exactly the way the 6 MB ceiling did.
+//
+// Safe by construction on both ends. serverless-http sets isBase64Encoded automatically whenever
+// content-encoding is gzip/deflate/br (see its lib/provider/aws/is-binary.js), and this API is an
+// API Gateway *HTTP* API (v2 - confirmed by the apigw-requestid response header; a REST API would
+// send x-amzn-RequestId), which base64-decodes such responses automatically with no
+// binaryMediaTypes configuration. And if Accept-Encoding never reaches the Lambda, compression
+// simply no-ops back to today's behaviour rather than breaking.
+//
+// All of that is pinned by api/_lambda/compression.test.js - run it if you touch these options.
+//
+// Mounted FIRST so it wraps every response, including error paths.
+app.use(compression({ level: 1 }));
+
 app.use(async (req, res, next) => {
   try {
     await ensureAppSecretsLoaded();
