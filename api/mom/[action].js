@@ -85,6 +85,105 @@ const handler = async (req, res) => {
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
+    if (action === 'members') {
+      const { boardId } = body;
+      if (req.method === 'POST') {
+        const { email, role } = body;
+        if (!email || !['owner', 'member'].includes(role)) {
+          return res.status(400).json({ error: 'email and a valid role (owner|member) are required' });
+        }
+        const boardDenied = await checkBoardAccess(session, boardId, { requireOwner: true });
+        if (boardDenied) return res.status(403).json({ error: boardDenied });
+        await db.upsertMomBoardMember(boardId, email.trim().toLowerCase(), role);
+        return res.status(200).json({ ok: true });
+      }
+      if (req.method === 'DELETE') {
+        const { email } = body;
+        if (!email) return res.status(400).json({ error: 'email is required' });
+        const boardDenied = await checkBoardAccess(session, boardId, { requireOwner: true });
+        if (boardDenied) return res.status(403).json({ error: boardDenied });
+        try {
+          await db.removeMomBoardMember(boardId, email.trim().toLowerCase());
+        } catch (e) {
+          return res.status(400).json({ error: e.message });
+        }
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    if (action === 'columns') {
+      if (req.method === 'POST') {
+        const { boardId, name, type, options } = body;
+        const validTypes = ['text', 'number', 'select', 'person', 'date', 'checkbox'];
+        if (!name || !name.trim() || !validTypes.includes(type)) {
+          return res.status(400).json({ error: `name is required and type must be one of ${validTypes.join(', ')}` });
+        }
+        const boardDenied = await checkBoardAccess(session, boardId, { requireOwner: true });
+        if (boardDenied) return res.status(403).json({ error: boardDenied });
+        const column = await db.createMomColumn(boardId, name.trim(), type, options || null);
+        return res.status(200).json({ column });
+      }
+      if (req.method === 'PUT') {
+        const { id, name, options, position } = body;
+        if (!id) return res.status(400).json({ error: 'id is required' });
+        const boardId = await db.getMomColumnBoardId(id);
+        if (!boardId) return res.status(404).json({ error: 'Column not found' });
+        const boardDenied = await checkBoardAccess(session, boardId, { requireOwner: true });
+        if (boardDenied) return res.status(403).json({ error: boardDenied });
+        await db.updateMomColumn(id, { name, options, position });
+        return res.status(200).json({ ok: true });
+      }
+      if (req.method === 'DELETE') {
+        const { id } = body;
+        if (!id) return res.status(400).json({ error: 'id is required' });
+        const boardId = await db.getMomColumnBoardId(id);
+        if (!boardId) return res.status(404).json({ error: 'Column not found' });
+        const boardDenied = await checkBoardAccess(session, boardId, { requireOwner: true });
+        if (boardDenied) return res.status(403).json({ error: boardDenied });
+        await db.deleteMomColumn(id);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    if (action === 'statuses') {
+      const { boardId } = body;
+      if (req.method === 'POST') {
+        const { label, color } = body;
+        if (!label || !label.trim()) return res.status(400).json({ error: 'label is required' });
+        const boardDenied = await checkBoardAccess(session, boardId, { requireOwner: true });
+        if (boardDenied) return res.status(403).json({ error: boardDenied });
+        const status = await db.createMomStatus(boardId, label.trim(), color);
+        return res.status(200).json({ status });
+      }
+      if (req.method === 'PUT') {
+        const { statusKey, label, color, position } = body;
+        if (!statusKey) return res.status(400).json({ error: 'statusKey is required' });
+        const boardDenied = await checkBoardAccess(session, boardId, { requireOwner: true });
+        if (boardDenied) return res.status(403).json({ error: boardDenied });
+        try {
+          await db.updateMomStatus(boardId, statusKey, { label, color, position });
+        } catch (e) {
+          return res.status(404).json({ error: e.message });
+        }
+        return res.status(200).json({ ok: true });
+      }
+      if (req.method === 'DELETE') {
+        const { statusKey } = body;
+        if (!statusKey) return res.status(400).json({ error: 'statusKey is required' });
+        const boardDenied = await checkBoardAccess(session, boardId, { requireOwner: true });
+        if (boardDenied) return res.status(403).json({ error: boardDenied });
+        try {
+          await db.deleteMomStatus(boardId, statusKey);
+        } catch (e) {
+          return res.status(400).json({ error: e.message });
+        }
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
     return res.status(404).json({ error: 'Unknown mom route' });
   } catch (e) {
     console.error(`api/mom/${action} error:`, e);
