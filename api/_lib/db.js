@@ -1415,14 +1415,35 @@ async function claimDeliveryEscalationTicketById(id, email) {
 // Disposes a Fresh ticket directly against its own row - no sheet write at all, same model as
 // CLS_RTO_calling's own claim/dispose. Claims on the agent's own behalf first if nobody has
 // (claim-on-resolve), same as the old sheet flow's claimNow in saveAction.
+//
+// Also cascades the SAME outcome/remarks to every other row sharing this ticket's awb_code AND
+// brand that's still Fresh-eligible (DE_FRESH_WHERE, which already excludes Forced RTO). This
+// is the repeat-contact case getDeliveryEscalationRepeatStats/contact_count already surfaces:
+// the same parcel can arrive as several separate tickets - a fresh ticket_number per day it
+// stays flagged (see sync_delivery_tickets_to_sheet.py) - so resolving the newest one used to
+// leave every older duplicate sitting in Fresh looking unresolved even though the parcel itself
+// was already handled. Scoped to the SAME brand read off this row (unlike
+// bulkDisposeDeliveryEscalationByAwb below, which only has an AWB string typed into a CSV, with
+// no row to read a brand off).
 async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRemarks) {
-  await sql`
+  const pool = await getPool();
+  await pool.execute(`
     UPDATE Delivery_escalation
-    SET outcome = ${outcome || null}, agent_remarks = ${agentRemarks || null}, disposed_at = now(),
-        agent_email = CASE WHEN agent_email IS NULL OR agent_email = '' THEN ${email} ELSE agent_email END,
-        assigned_at = CASE WHEN assigned_at IS NULL THEN now() ELSE assigned_at END
-    WHERE id = ${id}
-  `;
+    SET outcome = ?, agent_remarks = ?, disposed_at = NOW(),
+        agent_email = CASE WHEN agent_email IS NULL OR agent_email = '' THEN ? ELSE agent_email END,
+        assigned_at = CASE WHEN assigned_at IS NULL THEN NOW() ELSE assigned_at END
+    WHERE id = ?
+  `, [outcome || null, agentRemarks || null, email, id]);
+
+  await pool.execute(`
+    UPDATE Delivery_escalation d
+    JOIN (SELECT awb_code, brand FROM Delivery_escalation WHERE id = ?) t
+      ON d.awb_code = t.awb_code AND d.brand = t.brand
+    SET d.outcome = ?, d.agent_remarks = ?, d.disposed_at = NOW(),
+        d.agent_email = CASE WHEN d.agent_email IS NULL OR d.agent_email = '' THEN ? ELSE d.agent_email END,
+        d.assigned_at = CASE WHEN d.assigned_at IS NULL THEN NOW() ELSE d.assigned_at END
+    WHERE d.id <> ? AND t.awb_code IS NOT NULL AND t.awb_code <> '' AND (${DE_FRESH_WHERE})
+  `, [id, outcome || null, agentRemarks || null, email, id]);
 }
 
 // Bulk outcome upload for Fresh tickets (see api/delivery-escalation/record.js's 'bulkDispose'
