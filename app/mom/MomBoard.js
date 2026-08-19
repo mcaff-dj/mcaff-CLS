@@ -248,6 +248,7 @@ export default function MomBoard({ boardId, onBack }) {
       .then(([boardData, taskData]) => {
         setDetail(boardData);
         setTasks(taskData.tasks);
+        setError('');
       })
       .catch((e) => setError(e.message));
   };
@@ -271,7 +272,7 @@ export default function MomBoard({ boardId, onBack }) {
     }
   };
 
-  if (error) return <div className="min-h-screen bg-zinc-950 text-red-400 p-6">{error}</div>;
+  if (error && !detail) return <div className="min-h-screen bg-zinc-950 text-red-400 p-6">{error}</div>;
   if (!detail) return <div className="min-h-screen bg-zinc-950 text-zinc-500 p-6">Loading board…</div>;
 
   return (
@@ -287,6 +288,8 @@ export default function MomBoard({ boardId, onBack }) {
           className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 text-[12px] font-bold"
         >Manage</button>
       </div>
+
+      {error && <div className="text-red-400 text-[13px] mb-4">{error}</div>}
 
       {managing && (
         <ManagePanel
