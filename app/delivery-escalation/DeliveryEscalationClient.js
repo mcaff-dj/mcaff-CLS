@@ -73,6 +73,18 @@ function formatDaywiseDate(d) {
   return new Date(`${d}T00:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+// The exact string checkAccess() in record.js/sheet.js sends when getSession(req) comes back
+// null - a cookie that expired (7-day Max-Age; this page is the kind of tab an agent leaves
+// open for days) or was cleared, NOT a permission problem. Distinguishing it matters: every
+// other failure here is worth retrying (a blip, a slow query), but this one never recovers on
+// its own - retrying just repeats "Not authenticated" every 15-60s forever with no way for the
+// agent to tell that from a real outage. See sessionExpired below for what happens once this
+// is seen.
+const AUTH_ERROR_MESSAGE = 'Not authenticated';
+function isSessionExpired(err) {
+  return err?.message === AUTH_ERROR_MESSAGE;
+}
+
 // Sums a set of day-level {counts, total} entries (already computed server-side per day) into
 // one aggregate, recomputing pct against THIS group's own total - the same "% of this row's own
 // total" rule the day rows already use, just applied at whichever level is being summed.
@@ -186,7 +198,11 @@ async function claimMysqlTicket(id) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: 'claim', id }),
   });
-  if (!r.ok) throw new Error(`Claim failed ${r.status}`);
+  // Same "read the real reason out of the body" rule as getJson/bulkUploadOutcomes - a bare
+  // "Claim failed 401" can't be told apart from a session expiry (AUTH_ERROR_MESSAGE) or any
+  // other real failure without it.
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `Claim failed (${r.status})`);
 }
 
 async function disposeMysqlTicket(id, outcome, agentRemarks) {
@@ -195,7 +211,8 @@ async function disposeMysqlTicket(id, outcome, agentRemarks) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: 'dispose', id, outcome, agentRemarks }),
   });
-  if (!r.ok) throw new Error(`Save failed ${r.status}`);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `Save failed (${r.status})`);
 }
 
 // Minimal CSV parser for the Fresh tab's bulk outcome upload - handles quoted fields (commas,
@@ -386,6 +403,9 @@ export default function DeliveryEscalationClient() {
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState('—');
   const [syncError, setSyncError] = useState(null);
+  // Sticky once true - the fix is always "sign in again", and it needs to survive whatever
+  // page/tab the agent is on when it's noticed (an export failure, a background poll, a save).
+  const [sessionExpired, setSessionExpired] = useState(false);
 
   // Typing a search shouldn't fire a query per keystroke - the value the fetch actually uses
   // lags 350ms behind the input.
@@ -422,7 +442,8 @@ export default function DeliveryEscalationClient() {
       if (reqId !== reqIdRef.current) return;
       console.error('Delivery-Escalation load failed:', e);
       setSyncError(e.message || 'Load failed');
-      if (!silent) showToast(`⚠️ ${e.message}`);
+      if (isSessionExpired(e)) setSessionExpired(true);
+      else if (!silent) showToast(`⚠️ ${e.message}`);
     } finally {
       if (reqId === reqIdRef.current) setSyncing(false);
     }
@@ -437,6 +458,7 @@ export default function DeliveryEscalationClient() {
     } catch (e) {
       console.error('Delivery-Escalation stats failed:', e);
       setSyncError(e.message || 'Stats failed');
+      if (isSessionExpired(e)) setSessionExpired(true);
     }
   }, []);
 
@@ -450,18 +472,23 @@ export default function DeliveryEscalationClient() {
       setDaywise(await fetchDaywiseStats({ brand: brandFilter, agent: agentFilter }));
     } catch (e) {
       console.error('Delivery-Escalation daywise stats failed:', e);
+      if (isSessionExpired(e)) setSessionExpired(true);
     } finally {
       setDaywiseLoading(false);
     }
   }, [tab, brandFilter, agentFilter]);
 
   const refresh = useCallback(async (silent = true) => {
+    // Once the session is known expired, every one of these will just 401 again - retrying
+    // is dead weight (and, unsilenced, a fresh wall of identical toasts) until the agent
+    // actually reloads and signs back in.
+    if (sessionExpired) return;
     await Promise.all([loadPage(silent), loadStats(), loadDaywise()]);
-  }, [loadPage, loadStats, loadDaywise]);
+  }, [loadPage, loadStats, loadDaywise, sessionExpired]);
 
-  useEffect(() => { loadPage(true); }, [loadPage]);
-  useEffect(() => { loadStats(); }, [loadStats]);
-  useEffect(() => { loadDaywise(); }, [loadDaywise]);
+  useEffect(() => { if (!sessionExpired) loadPage(true); }, [loadPage, sessionExpired]);
+  useEffect(() => { if (!sessionExpired) loadStats(); }, [loadStats, sessionExpired]);
+  useEffect(() => { if (!sessionExpired) loadDaywise(); }, [loadDaywise, sessionExpired]);
   // New rows land in Fresh from OUTSIDE this page entirely - the 2-hourly cron mirror and any
   // one-off backfill script write straight to MySQL, with no way to tell an open browser tab
   // it happened. Polling is the only way this page can find out, so Fresh polls 4x faster than
@@ -542,7 +569,8 @@ export default function DeliveryEscalationClient() {
         ticket = { ...t, assignedAgent: googleUser.email };
         setRows(prev => prev.map(x => x.id === t.id ? ticket : x));
       } catch (e) {
-        showToast(`⚠️ Could not claim ticket: ${e.message}`);
+        if (isSessionExpired(e)) setSessionExpired(true);
+        else showToast(`⚠️ Could not claim ticket: ${e.message}`);
       }
     }
     setDetailTkt(ticket);
@@ -566,7 +594,8 @@ export default function DeliveryEscalationClient() {
       setDetailTkt(null);
       refresh(true);
     } catch (e) {
-      showToast(`⚠️ Could not save: ${e.message}`);
+      if (isSessionExpired(e)) setSessionExpired(true);
+      else showToast(`⚠️ Could not save: ${e.message}`);
     } finally {
       setSaving(false);
     }
@@ -593,7 +622,8 @@ export default function DeliveryEscalationClient() {
       showToast(`Bulk upload: ${matchedCount}/${results.length} matched`);
       refresh(true);
     } catch (err) {
-      showToast(`⚠️ Bulk upload failed: ${err.message}`);
+      if (isSessionExpired(err)) setSessionExpired(true);
+      else showToast(`⚠️ Bulk upload failed: ${err.message}`);
     } finally {
       setBulkUploading(false);
     }
@@ -611,7 +641,8 @@ export default function DeliveryEscalationClient() {
       );
       showToast(`Downloaded ${count.toLocaleString('en-IN')} rows`);
     } catch (e) {
-      showToast(`⚠️ Export failed: ${e.message}`);
+      if (isSessionExpired(e)) setSessionExpired(true);
+      else showToast(`⚠️ Export failed: ${e.message}`);
     } finally {
       setExporting(false);
     }
@@ -655,7 +686,7 @@ export default function DeliveryEscalationClient() {
               </h1>
               <p className="text-[11px] text-zinc-500 font-mono hidden sm:flex items-center gap-1.5">
                 Last sync: {lastSync}
-                {syncError && (
+                {syncError && !sessionExpired && (
                   <span className="text-rose-400 font-sans font-semibold" title={syncError}>
                     ⚠ Sync failed — showing cached data, retrying…
                   </span>
@@ -675,6 +706,23 @@ export default function DeliveryEscalationClient() {
       {toast && <div className="fixed top-16 right-5 z-50 animate-slideUp"><div className="px-4 py-2.5 rounded-xl bg-zinc-800/90 text-zinc-100 border border-zinc-700 text-[13px] shadow-2xl flex items-center gap-2.5 backdrop-blur-md"><CheckIcon className="text-emerald-400 shrink-0" />{toast}</div></div>}
 
       <main className="flex-1 max-w-[1440px] w-full mx-auto px-5 py-5 space-y-5">
+        {sessionExpired && (
+          <div className="bg-amber-950/40 border border-amber-800/60 rounded-2xl p-5 shadow-xl backdrop-blur-md flex items-center justify-between gap-4 flex-wrap">
+            <div>
+              <h2 className="text-[14px] font-bold text-amber-200">Your session has expired</h2>
+              <p className="text-[13px] text-amber-100/80 mt-0.5">
+                Reload the page and sign in again - nothing here will load or export until you do.
+              </p>
+            </div>
+            <button
+              onClick={() => window.location.reload()}
+              className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-amber-950 text-[13px] font-semibold transition-colors shrink-0"
+            >
+              Reload page
+            </button>
+          </div>
+        )}
+
         {authLoaded && !hasAccess && (
           <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-8 shadow-xl backdrop-blur-md">
             <div className="max-w-2xl space-y-3">
@@ -710,7 +758,7 @@ export default function DeliveryEscalationClient() {
             </nav>
 
             <div className="p-4 space-y-4">
-              {syncError && (
+              {syncError && !sessionExpired && (
                 <div className="text-[12px] text-rose-400">⚠ {syncError} — retrying…</div>
               )}
               {bulkResult && tab === 'fresh' && (
