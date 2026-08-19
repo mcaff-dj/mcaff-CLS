@@ -321,8 +321,15 @@
   // below the class pivot tables: one line per class, all on the same 0-pctMax axis, so
   // the shape/slope of the lines (whether a class's % is rising) is what's being read,
   // not raw counts. Endpoint of each line gets a direct value label instead of every
-  // point, per-point value is still available via native <title> hover.
-  window.renderMultiPctTrendChart = function(svg, opts){
+  // point. Interactive like renderRtoFunnelChart: a per-month hover tooltip (tip, may be
+  // null) listing every series' value, and click-to-isolate - clicking a line (via its
+  // fat invisible hit-path, the visible 2px stroke is too thin to click reliably) fades
+  // every other line to make that one's trend easy to read against the rest; clicking it
+  // again, or clicking empty chart background, restores all lines. state.isolated holds
+  // the isolated series index across redraws (year-filter, etc.) since svg.innerHTML
+  // wipes and rebuilds all elements/listeners on every render.
+  window.renderMultiPctTrendChart = function(svg, tip, opts, state){
+    state = state || {};
     var active = window.REPORT_ACTIVE_YEARS;
     var idx = [];
     for (var i = 0; i < opts.months.length; i++) {
@@ -346,17 +353,65 @@
       var cx = padL + slot * k + slot / 2;
       out.push('<text x="' + cx + '" y="' + (H - padB + 18) + '" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">' + escXml(opts.monthLabels[origI]) + '</text>');
     });
-    opts.series.forEach(function(s){
+    var allPts = opts.series.map(function(s){
       var svals = idx.map(function(i){ return s.vals[i]; });
-      var pts = svals.map(function(v, k){ return [padL + slot * k + slot / 2, padT + plotH * (1 - v / pctMax)]; });
-      out.push('<polyline points="' + pts.map(function(p){ return p[0] + ',' + p[1]; }).join(' ') + '" fill="none" stroke="' + s.color + '" stroke-width="2"/>');
+      return svals.map(function(v, k){ return [padL + slot * k + slot / 2, padT + plotH * (1 - v / pctMax)]; });
+    });
+    opts.series.forEach(function(s, si){
+      var svals = idx.map(function(i){ return s.vals[i]; });
+      var pts = allPts[si];
+      var faded = (state.isolated !== null && state.isolated !== undefined && state.isolated !== si);
+      var op = faded ? 0.15 : 1;
+      out.push('<polyline points="' + pts.map(function(p){ return p[0] + ',' + p[1]; }).join(' ') + '" fill="none" stroke="' + s.color + '" stroke-width="2" stroke-opacity="' + op + '"/>');
       pts.forEach(function(p, k){
-        out.push('<circle cx="' + p[0] + '" cy="' + p[1] + '" r="2.5" fill="' + s.color + '"><title>' + escXml(s.label) + ': ' + svals[k] + '%</title></circle>');
+        out.push('<circle cx="' + p[0] + '" cy="' + p[1] + '" r="2.5" fill="' + s.color + '" fill-opacity="' + op + '"/>');
       });
       var lastP = pts[pts.length - 1], lastV = svals[svals.length - 1];
-      out.push('<text x="' + (lastP[0] + 6) + '" y="' + (lastP[1] + 4) + '" text-anchor="start" font-size="10.5" font-weight="700" fill="' + s.color + '">' + lastV + '%</text>');
+      out.push('<text x="' + (lastP[0] + 6) + '" y="' + (lastP[1] + 4) + '" text-anchor="start" font-size="10.5" font-weight="700" fill="' + s.color + '" fill-opacity="' + op + '">' + lastV + '%</text>');
+    });
+    // Fat transparent click targets, drawn after the visible lines so they sit on top
+    // for hit-testing without changing what's actually painted.
+    opts.series.forEach(function(s, si){
+      var pts = allPts[si];
+      out.push('<polyline class="line-hit" data-si="' + si + '" points="' + pts.map(function(p){ return p[0] + ',' + p[1]; }).join(' ') + '" fill="none" stroke="transparent" stroke-width="14" style="cursor:pointer;"/>');
+    });
+    // Hover targets appended last so they sit above every drawn/hit mark.
+    idx.forEach(function(origI, k){
+      out.push('<rect class="slot-hit" data-i="' + origI + '" x="' + (padL + slot * k) + '" y="' + padT + '" width="' + slot + '" height="' + plotH + '"/>');
     });
     svg.innerHTML = out.join('');
+
+    Array.prototype.forEach.call(svg.querySelectorAll('.line-hit'), function(lp){
+      lp.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        var si = parseInt(lp.getAttribute('data-si'), 10);
+        state.isolated = (state.isolated === si) ? null : si;
+        window.renderMultiPctTrendChart(svg, tip, opts, state);
+      });
+    });
+    svg.onclick = function(){
+      if (state.isolated !== null && state.isolated !== undefined) {
+        state.isolated = null;
+        window.renderMultiPctTrendChart(svg, tip, opts, state);
+      }
+    };
+    if (!tip) return;
+    Array.prototype.forEach.call(svg.querySelectorAll('.slot-hit'), function(rc){
+      var i = parseInt(rc.getAttribute('data-i'), 10);
+      rc.addEventListener('mousemove', function(ev){
+        var html = '<div class="tip-head">' + escXml(opts.monthLabels[i]) + '</div>';
+        opts.series.forEach(function(s){
+          html += '<div class="tip-row"><span class="tip-sw" style="background:' + s.color + '"></span>'
+                + '<span>' + escXml(s.label) + '</span><span class="tip-val">' + s.vals[i] + '%</span></div>';
+        });
+        tip.innerHTML = html;
+        tip.style.opacity = '1';
+        var host = tip.parentNode.getBoundingClientRect();
+        tip.style.left = (ev.clientX - host.left) + 'px';
+        tip.style.top = (ev.clientY - host.top) + 'px';
+      });
+      rc.addEventListener('mouseleave', function(){ tip.style.opacity = '0'; });
+    });
   };
 
   // Mode used by NPS/CSAT charts: bars = response counts (own niceMax'd axis), line = a

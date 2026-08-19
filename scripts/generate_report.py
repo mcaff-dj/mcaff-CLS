@@ -125,15 +125,18 @@ def build_pct_trend_chart(ctx, title, counts_by_class_month):
         series_parts.append(f"{{label:'{j_enc(c['label'])}', color:'{c['color']}', vals:{vals_json}}}")
         legend_parts.append(f"<div class='legend-item'><span class='swatch' style='background:{c['color']};'></span><span class='lname'>{h_enc(c['label'])}</span></div>")
     series_json = "[" + ",".join(series_parts) + "]"
-    parts = [f"<div class='card'><div class='pivot-title' style='margin-bottom:18px;'>{h_enc(title)}</div>"
+    parts = [f"<div class='card chart-wrap'><div class='pivot-title' style='margin-bottom:18px;'>{h_enc(title)}</div>"
              f"<div class='legend-row' style='justify-content:center;flex-wrap:wrap;'>{''.join(legend_parts)}</div>"
-             f"<svg id='{chart_id}' viewBox='0 0 {W} {H}' width='100%' height='{H}' role='img'></svg></div>"]
+             f"<svg id='{chart_id}' viewBox='0 0 {W} {H}' width='100%' height='{H}' role='img'></svg>"
+             f"<div class='chart-tip' id='{chart_id}-tip'></div></div>"]
     parts.append(f"""<script>
 (function(){{
   var svg = document.getElementById('{chart_id}');
+  var tip = document.getElementById('{chart_id}-tip');
   var opts = {{ series:{series_json}, months:{months_json}, monthLabels:{month_labels_json},
     W:{W}, H:{H}, padL:{pad_l}, padR:{pad_r}, padT:{pad_t}, padB:{pad_b}}};
-  window.registerYearChart(function(){{ window.renderMultiPctTrendChart(svg, opts); }});
+  var state = {{ isolated: null }};
+  window.registerYearChart(function(){{ window.renderMultiPctTrendChart(svg, tip, opts, state); }});
 }})();
 </script>""")
     return "".join(parts)
