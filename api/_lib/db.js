@@ -2300,6 +2300,26 @@ const MOM_DEFAULT_STATUSES = [
   { key: 'done', label: 'Done', color: '#22c55e' },
 ];
 
+// A single connection wrapped in a MySQL transaction - unlike the `sql` tagged-template
+// helper (which checks out a fresh connection from the pool per call, so it cannot span
+// multiple statements atomically), this pins one connection for the whole callback so a
+// partial failure rolls back instead of leaving, e.g., a board with no owner.
+async function withMomTransaction(fn) {
+  const pool = await getPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const result = await fn(conn);
+    await conn.commit();
+    return result;
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
 async function getMomBoardsForUser(email, isAdmin) {
   if (isAdmin) {
     const { rows } = await sql`
@@ -2322,18 +2342,25 @@ async function getMomBoardsForUser(email, isAdmin) {
 }
 
 async function createMomBoard(name, description, email) {
-  const { insertId } = await sql`
-    INSERT INTO mom_boards (name, description, created_by) VALUES (${name}, ${description || null}, ${email})
-  `;
-  await sql`INSERT INTO mom_board_members (board_id, email, role) VALUES (${insertId}, ${email}, 'owner')`;
-  for (let i = 0; i < MOM_DEFAULT_STATUSES.length; i++) {
-    const s = MOM_DEFAULT_STATUSES[i];
-    await sql`
-      INSERT INTO mom_statuses (board_id, status_key, label, color, position)
-      VALUES (${insertId}, ${s.key}, ${s.label}, ${s.color}, ${i})
-    `;
-  }
-  return insertId;
+  return withMomTransaction(async (conn) => {
+    const [result] = await conn.execute(
+      'INSERT INTO mom_boards (name, description, created_by) VALUES (?, ?, ?)',
+      [name, description || null, email]
+    );
+    const boardId = result.insertId;
+    await conn.execute(
+      "INSERT INTO mom_board_members (board_id, email, role) VALUES (?, ?, 'owner')",
+      [boardId, email]
+    );
+    for (let i = 0; i < MOM_DEFAULT_STATUSES.length; i++) {
+      const s = MOM_DEFAULT_STATUSES[i];
+      await conn.execute(
+        'INSERT INTO mom_statuses (board_id, status_key, label, color, position) VALUES (?, ?, ?, ?, ?)',
+        [boardId, s.key, s.label, s.color, i]
+      );
+    }
+    return boardId;
+  });
 }
 
 async function getMomBoardRole(boardId, email) {
