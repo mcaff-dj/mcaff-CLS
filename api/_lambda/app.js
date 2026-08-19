@@ -98,6 +98,7 @@ mount('post', '/api/nps-admin/send', '../nps-admin/send.js');
 mount('get', '/api/nps-admin/preview-link', '../nps-admin/preview-link.js');
 mount('get', '/api/nps-admin/dashboard', '../nps-admin/dashboard.js');
 mount('all', '/api/nps/public/:token', '../nps/public/[token].js', 'token');
+mount('all', '/api/mom/:action', '../mom/[action].js', 'action');
 
 // The Escalation desk's whole API surface - one dynamic-segment handler, same shape as the
 // two :action mounts above (agents/orders/assign/tag/update/bulk-update/import/export/sample).

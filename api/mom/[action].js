@@ -184,6 +184,62 @@ const handler = async (req, res) => {
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
+    if (action === 'tasks') {
+      if (req.method === 'GET') {
+        const boardId = Number(req.query.boardId);
+        if (!boardId) return res.status(400).json({ error: 'boardId is required' });
+        const boardDenied = await checkBoardAccess(session, boardId);
+        if (boardDenied) return res.status(403).json({ error: boardDenied });
+        const tasks = await db.getMomTasks(boardId);
+        return res.status(200).json({ tasks });
+      }
+      if (req.method === 'POST') {
+        const { boardId, title, description, priority, assigneeEmail, dueDate, statusKey } = body;
+        if (!boardId || !title || !title.trim()) return res.status(400).json({ error: 'boardId and title are required' });
+        const boardDenied = await checkBoardAccess(session, boardId);
+        if (boardDenied) return res.status(403).json({ error: boardDenied });
+        const id = await db.createMomTask(boardId, {
+          title: title.trim(), description, priority, assigneeEmail, dueDate, statusKey, createdBy: session.email,
+        });
+        return res.status(200).json({ id });
+      }
+      if (req.method === 'PUT') {
+        const { id, ...fields } = body;
+        if (!id) return res.status(400).json({ error: 'id is required' });
+        const boardId = await db.getMomTaskBoardId(id);
+        if (!boardId) return res.status(404).json({ error: 'Task not found' });
+        const boardDenied = await checkBoardAccess(session, boardId);
+        if (boardDenied) return res.status(403).json({ error: boardDenied });
+        await db.updateMomTask(id, fields);
+        return res.status(200).json({ ok: true });
+      }
+      if (req.method === 'DELETE') {
+        const { id } = body;
+        if (!id) return res.status(400).json({ error: 'id is required' });
+        const boardId = await db.getMomTaskBoardId(id);
+        if (!boardId) return res.status(404).json({ error: 'Task not found' });
+        const boardDenied = await checkBoardAccess(session, boardId);
+        if (boardDenied) return res.status(403).json({ error: boardDenied });
+        await db.deleteMomTask(id);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    if (action === 'reorder') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+      const { taskId, statusKey, position } = body;
+      if (!taskId || !statusKey || position == null) {
+        return res.status(400).json({ error: 'taskId, statusKey, and position are required' });
+      }
+      const boardId = await db.getMomTaskBoardId(taskId);
+      if (!boardId) return res.status(404).json({ error: 'Task not found' });
+      const boardDenied = await checkBoardAccess(session, boardId);
+      if (boardDenied) return res.status(403).json({ error: boardDenied });
+      await db.reorderMomTask(taskId, statusKey, Number(position));
+      return res.status(200).json({ ok: true });
+    }
+
     return res.status(404).json({ error: 'Unknown mom route' });
   } catch (e) {
     console.error(`api/mom/${action} error:`, e);
