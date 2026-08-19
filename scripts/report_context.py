@@ -84,6 +84,12 @@ PARTNER_NORM_MAP = {
     "na": "(blank)",
 }
 
+# The sheet's "Order Month" column is itself a formula, and lands on this literal string
+# for any row whose Order Date is blank (order not yet linked/resolved) - confirmed on both
+# brands' live sheets, always paired with a blank Order Date. Ctx.cell() below swaps it for
+# the row's own ticket month instead of surfacing the sentinel to callers.
+ORDER_MONTH_SENTINEL = "12_Dec'99"
+
 _SKU_TITLE_MAP = None
 
 
@@ -261,6 +267,9 @@ class Ctx:
         self._prod_i = self.col.get("prod", -1)
         self._sku_i = self.col.get("sku", -1)
         self._sku_titles = sku_title_map() if brand.get("brand") == "mcaffeine" else {}
+        # See ORDER_MONTH_SENTINEL above - falls back to the row's own ticket month.
+        self._order_month_i = self.col.get("order_month", -1)
+        self._month_i = self.col.get("month", -1)
 
     def cell(self, row, i):
         if row is None:
@@ -291,6 +300,10 @@ class Ctx:
                 canon = self._sku_titles.get(sku_val.strip().casefold())
                 if canon:
                     return canon
+        elif i == self._order_month_i and v == ORDER_MONTH_SENTINEL:
+            tm = row[self._month_i] if isinstance(row, list) and 0 <= self._month_i < len(row) else None
+            if tm not in (None, ""):
+                return tm
         return v
 
     def count_by(self, data, i):
