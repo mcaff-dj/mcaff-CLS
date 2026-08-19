@@ -22,7 +22,12 @@ import { CallingShell } from '../_calling/CallingShell';
 import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, DownloadIcon, ChevronDown, UserIcon, CalendarIcon, CreditCardIcon, ChatIcon, ShieldIcon, SparklesIcon, CustomSelect, MultiSelectDropdown, Badge, Overlay, EmptyState } from '../_calling/ui';
 
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI/edit?usp=sharing';
-    const DEFAULT_SHEET_RANGE = 'Data';
+    // A:Z, not the bare tab name. The bare name means "every column", which pulled AA:AD for all
+    // 14k rows and tipped the Lambda response past API Gateway's 6 MB ceiling on 2026-08-19 -
+    // the CRM died with opaque 500s and the whole desk stalled behind it. Z is the last column
+    // anything reads (COL_REMARKS = 25). api/rto/sheet.js clamps this server-side too, since that
+    // deploys separately from this bundle - see the comment there for the measurements.
+    const DEFAULT_SHEET_RANGE = 'Data!A:Z';
 
     const HIGH_PRIORITY_RTO_REASONS = [
       'consignee opened the package and refused to accept','consignee refused to accept','customer refused to accept',

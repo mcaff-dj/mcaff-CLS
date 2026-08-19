@@ -31,6 +31,52 @@ function checkAccess(session) {
   return null;
 }
 
+// Last column anything actually reads. scripts/lead_priority.py's highest index is COL_REMARKS =
+// 25 = Z (the agent-remarks column); AA:AD carry data nothing in the CRM or the cron ever looks at.
+const LAST_USED_COL = 'Z';
+
+// A bare tab reference ('Data') means "every column", which is how this endpoint started returning
+// AA:AD for 14k rows to nobody's benefit. On 2026-08-19 that tipped the response past API Gateway's
+// hard 6 MB ceiling and the CRM began failing with opaque 500s - agents saw "Sync failed", could not
+// see their leads, could not dispose them, so their load never fell below quota and the assignment
+// robot correctly concluded there was nobody to assign to. One oversized read stalled the whole desk.
+//
+// Measured that morning: 'Data' serialised to a 6.43 MB Lambda response (the limit counts the
+// JSON-ESCAPED envelope, not the 5.64 MB raw body - escaping the quotes adds ~14%, which is why the
+// raw figure looked deceptively safe). 'Data'!A:Z is 5.71 MB.
+//
+// Clamped HERE rather than only at the caller because api/ (Lambda) and app/ (Amplify) deploy
+// separately: a client-side-only fix leaves the Lambda able to serve the oversized range to any
+// browser still running the old bundle. Ranges that already name columns are passed through
+// untouched - this only fills in the "unbounded" case.
+//
+// NOTE: this buys roughly 0.29 MB of headroom, ~700 rows at the current ~130 rows/day net growth.
+// It is a floor, not a fix. The durable fix is gzip inside the Lambda (this payload compresses
+// ~85-90%); see docs/2026-08-18-rto-crm-performance-audit.md.
+function clampRange(range) {
+  const bareTab = /^'?([^'!]+)'?$/.exec((range || '').trim());
+  if (!bareTab) return range; // already qualified with a cell/column range - leave it alone
+  return `${bareTab[1]}!A:${LAST_USED_COL}`;
+}
+
+// API Gateway rejects a Lambda response over 6 MB, and the rejection surfaces to the browser as a
+// bare 500 with nothing in the logs tying it to size - which is exactly why the 2026-08-19 outage
+// took a while to identify. Log loudly as the payload approaches the ceiling so the next one is
+// obvious from CloudWatch alone. Measured against the escaped envelope, not the raw body.
+const PAYLOAD_WARN_BYTES = 5 * 1024 * 1024;
+function warnIfLarge(label, data) {
+  try {
+    const bytes = Buffer.byteLength(JSON.stringify(data));
+    if (bytes >= PAYLOAD_WARN_BYTES) {
+      console.warn(
+        `api/rto/sheet: ${label} response is ${(bytes / 1048576).toFixed(2)} MB raw ` +
+        `(~${((bytes * 1.14) / 1048576).toFixed(2)} MB once JSON-escaped into the Lambda envelope). ` +
+        'API Gateway hard-fails at 6 MB - narrow the range or enable compression.'
+      );
+    }
+  } catch (e) { /* size logging must never break the response */ }
+}
+
 // Short-TTL read cache for the GET ops below (values/batchGet). Without it, every page-load
 // or poll is a live Sheets API call with nothing in front of it. A 20s staleness window is an
 // acceptable tradeoff for the load this saves (mirrors scripts/assign_leads.py's
@@ -81,7 +127,8 @@ module.exports = async (req, res) => {
 
   try {
     if (req.method === 'GET' && req.query.op === 'values') {
-      const range = req.query.range || '';
+      // Clamped before the cache key so every caller - old bundle or new - shares one entry.
+      const range = clampRange(req.query.range || '');
       const { status, data } = await cachedRead(`values:${range}`, async () => {
         const r = await fetch(
           `https://sheets.googleapis.com/v4/spreadsheets/${RTO_SHEET_ID}/values/${encodeURIComponent(range)}?majorDimension=ROWS`,
@@ -89,6 +136,7 @@ module.exports = async (req, res) => {
         );
         return { status: r.status, data: await r.json() };
       });
+      warnIfLarge(`values:${range}`, data);
       res.status(status).json(data);
       return;
     }
