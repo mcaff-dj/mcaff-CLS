@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS `nps_recipient` (
   `name` VARCHAR(255) NULL,
   `phone` VARCHAR(32) NULL,
   `email` VARCHAR(255) NULL,
-  `trigger_source` ENUM('manual', 'shiprocket') NOT NULL DEFAULT 'manual',
+  `trigger_source` ENUM('manual', 'shiprocket', 'preview') NOT NULL DEFAULT 'manual',
   `order_ref` VARCHAR(64) NULL,
   `status` ENUM('pending', 'sent', 'responded', 'failed') NOT NULL DEFAULT 'pending',
   `sent_at` DATETIME NULL,

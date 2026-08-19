@@ -46,4 +46,15 @@ function verifyNpsToken(token) {
   return { valid: true, expired: false, payload };
 }
 
-module.exports = { signNpsToken, verifyNpsToken };
+const LINK_TTL_SECONDS = 14 * 24 * 60 * 60; // 14 days
+
+// Shared by api/nps-admin/send.js (real sends) and api/nps-admin/preview-link.js (admin
+// preview, no WhatsApp involved) - one place that knows how a recipient id becomes a link.
+function buildNpsLink(recipientId) {
+  const base = process.env.NPS_PUBLIC_BASE_URL;
+  if (!base) throw new Error('Missing NPS_PUBLIC_BASE_URL env var');
+  const token = signNpsToken({ recipientId, exp: Math.floor(Date.now() / 1000) + LINK_TTL_SECONDS });
+  return `${base.replace(/\/+$/, '')}/nps/${token}`;
+}
+
+module.exports = { signNpsToken, verifyNpsToken, buildNpsLink };

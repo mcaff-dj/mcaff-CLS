@@ -6,11 +6,10 @@
 // this file is the one place that knows how to build a link and call sendWhatsApp.
 const { getSession } = require('../_lib/session');
 const { sql } = require('../_lib/db');
-const { signNpsToken } = require('../_lib/npsToken');
+const { buildNpsLink } = require('../_lib/npsToken');
 const { sendWhatsApp } = require('../_lib/npsWhatsapp');
 
 const CARD_KEY = 'nps';
-const TOKEN_TTL_SECONDS = 14 * 24 * 60 * 60; // 14 days
 // ponytail: one Lambda invocation sends synchronously, capped so a huge pending backlog
 // can't run past Lambda's timeout. Re-running "Send" picks up the rest (still 'pending').
 // Upgrade path if this becomes a real limit: move sending to an SQS-fed queue.
@@ -20,13 +19,6 @@ function checkAccess(session) {
   if (!session) return 'Not authenticated';
   if (!(session.perms || []).includes(CARD_KEY)) return 'You do not have access to NPS Survey Admin.';
   return null;
-}
-
-function buildLink(recipientId) {
-  const base = process.env.NPS_PUBLIC_BASE_URL;
-  if (!base) throw new Error('Missing NPS_PUBLIC_BASE_URL env var');
-  const token = signNpsToken({ recipientId, exp: Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS });
-  return `${base.replace(/\/+$/, '')}/nps/${token}`;
 }
 
 module.exports = async (req, res) => {
@@ -57,7 +49,12 @@ module.exports = async (req, res) => {
     const { rows: all } = await sql`SELECT id, phone FROM nps_recipient WHERE survey_id = ${surveyId}`;
     targets = all.filter((r) => recipientIds.includes(r.id));
   } else {
-    const { rows: pending } = await sql`SELECT id, phone FROM nps_recipient WHERE survey_id = ${surveyId} AND status = 'pending'`;
+    // trigger_source != 'preview' - the admin's own "Preview form" recipient row (see
+    // api/nps-admin/preview-link.js) never has a real phone number, so it must never be
+    // swept into a bulk send.
+    const { rows: pending } = await sql`
+      SELECT id, phone FROM nps_recipient WHERE survey_id = ${surveyId} AND status = 'pending' AND trigger_source != 'preview'
+    `;
     targets = pending;
   }
 
@@ -66,7 +63,7 @@ module.exports = async (req, res) => {
   let failed = 0;
   for (const recipient of capped) {
     try {
-      const link = buildLink(recipient.id);
+      const link = buildNpsLink(recipient.id);
       const message = `We'd love your feedback! Please take a moment to answer "${survey.name}": ${link}`;
       await sendWhatsApp(recipient.phone, message);
       await sql`UPDATE nps_recipient SET status = 'sent', sent_at = NOW() WHERE id = ${recipient.id}`;

@@ -302,6 +302,8 @@ function SurveyDetail({ surveyId, onBack }) {
   const [dashboard, setDashboard] = useState(null);
   const [sendStatus, setSendStatus] = useState('');
   const [error, setError] = useState('');
+  const [previewLink, setPreviewLink] = useState('');
+  const [previewing, setPreviewing] = useState(false);
 
   const load = useCallback(() => {
     Promise.all([
@@ -316,6 +318,20 @@ function SurveyDetail({ surveyId, onBack }) {
   }, [surveyId]);
 
   useEffect(() => { load(); }, [load]);
+
+  async function openPreview() {
+    setPreviewing(true);
+    setError('');
+    try {
+      const d = await getJson(`/api/nps-admin/preview-link?surveyId=${surveyId}`);
+      setPreviewLink(d.link);
+      window.open(d.link, '_blank', 'noopener');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setPreviewing(false);
+    }
+  }
 
   async function send() {
     setSendStatus('Sending...');
@@ -339,9 +355,26 @@ function SurveyDetail({ surveyId, onBack }) {
   return (
     <div className="space-y-4">
       <button type="button" className="text-sm text-indigo-400 hover:text-indigo-300" onClick={onBack}>&larr; All surveys</button>
-      <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-5 space-y-1">
-        <h2 className="text-lg font-bold text-zinc-100">{survey.survey.name}</h2>
-        <p className="text-xs text-zinc-500">{survey.survey.status} - {survey.questions.length} question(s)</p>
+      <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-5 space-y-2">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-bold text-zinc-100">{survey.survey.name}</h2>
+            <p className="text-xs text-zinc-500">{survey.survey.status} - {survey.questions.length} question(s)</p>
+          </div>
+          <button
+            type="button"
+            className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-sm disabled:opacity-50"
+            onClick={openPreview}
+            disabled={previewing}
+          >
+            {previewing ? 'Loading...' : 'Preview form'}
+          </button>
+        </div>
+        {previewLink && (
+          <p className="text-xs text-zinc-500 break-all">
+            Opened in a new tab - link: <span className="text-zinc-400">{previewLink}</span>
+          </p>
+        )}
       </div>
 
       {dashboard && (

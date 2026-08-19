@@ -57,6 +57,7 @@ mount('all', '/api/delivery-escalation/record', '../delivery-escalation/record.j
 mount('all', '/api/nps-admin/surveys', '../nps-admin/surveys.js');
 mount('all', '/api/nps-admin/recipients', '../nps-admin/recipients.js');
 mount('post', '/api/nps-admin/send', '../nps-admin/send.js');
+mount('get', '/api/nps-admin/preview-link', '../nps-admin/preview-link.js');
 mount('get', '/api/nps-admin/dashboard', '../nps-admin/dashboard.js');
 mount('all', '/api/nps/public/:token', '../nps/public/[token].js', 'token');
 
