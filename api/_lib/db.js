@@ -281,6 +281,79 @@ async function bootstrapSchema() {
   await sql`UPDATE permissions SET card_key = 'deepdive' WHERE card_key = 'npsdeepdive'`;
   await sql`UPDATE report_tab_permissions SET card_key = 'deepdive' WHERE card_key = 'npsdeepdive'`;
   await sql`UPDATE audit_log SET card_key = 'deepdive' WHERE card_key = 'npsdeepdive'`;
+
+  // MOM project tracker (Phase 1) - multi-board task tracker behind the 'mom' card.
+  // Statuses and custom fields are per-board (not a global enum) so each board's kanban
+  // columns and extra fields are independently configurable, Monday.com-style.
+  await sql`
+    CREATE TABLE IF NOT EXISTS mom_boards (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      description TEXT,
+      created_by VARCHAR(320) NOT NULL,
+      archived BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS mom_board_members (
+      board_id INT NOT NULL,
+      email VARCHAR(320) NOT NULL,
+      role VARCHAR(16) NOT NULL DEFAULT 'member',
+      added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (board_id, email),
+      FOREIGN KEY (board_id) REFERENCES mom_boards(id) ON DELETE CASCADE
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS mom_statuses (
+      board_id INT NOT NULL,
+      status_key VARCHAR(64) NOT NULL,
+      label VARCHAR(64) NOT NULL,
+      color VARCHAR(16) NOT NULL DEFAULT '#94a3b8',
+      position INT NOT NULL DEFAULT 0,
+      PRIMARY KEY (board_id, status_key),
+      FOREIGN KEY (board_id) REFERENCES mom_boards(id) ON DELETE CASCADE
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS mom_columns (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      board_id INT NOT NULL,
+      name VARCHAR(128) NOT NULL,
+      type VARCHAR(16) NOT NULL,
+      options JSON,
+      position INT NOT NULL DEFAULT 0,
+      FOREIGN KEY (board_id) REFERENCES mom_boards(id) ON DELETE CASCADE
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS mom_tasks (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      board_id INT NOT NULL,
+      title VARCHAR(500) NOT NULL,
+      description TEXT,
+      status_key VARCHAR(64) NOT NULL DEFAULT 'todo',
+      priority VARCHAR(16) NOT NULL DEFAULT 'medium',
+      assignee_email VARCHAR(320),
+      due_date DATE,
+      position INT NOT NULL DEFAULT 0,
+      created_by VARCHAR(320) NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (board_id) REFERENCES mom_boards(id) ON DELETE CASCADE
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS mom_task_field_values (
+      task_id INT NOT NULL,
+      column_id INT NOT NULL,
+      value TEXT,
+      PRIMARY KEY (task_id, column_id),
+      FOREIGN KEY (task_id) REFERENCES mom_tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (column_id) REFERENCES mom_columns(id) ON DELETE CASCADE
+    )
+  `;
   schemaReady = true;
 }
 
@@ -2205,6 +2278,22 @@ async function getRefundExportRows(filters, { includePii } = {}) {
   return rows;
 }
 
+// Pure - given a board's statuses and the key being deleted, returns the status_key that
+// orphaned tasks should move to (the remaining status with the lowest `position`). Throws
+// rather than silently no-op'ing: deleting an unknown key or a board's last status are both
+// caller bugs, not valid states to write to the DB.
+function resolveStatusForDeletion(statuses, deletedKey) {
+  const remaining = statuses.filter((s) => s.status_key !== deletedKey);
+  if (remaining.length === statuses.length) {
+    throw new Error(`Status "${deletedKey}" not found on this board`);
+  }
+  if (!remaining.length) {
+    throw new Error('Cannot delete the last status on a board');
+  }
+  remaining.sort((a, b) => a.position - b.position);
+  return remaining[0].status_key;
+}
+
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
@@ -2231,4 +2320,5 @@ module.exports = {
   deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS,
   isPoolExhausted, withPgConnectRetry, toTransactionModePooler, cachedRead, invalidateCache, CACHE_TTL_MS,
   buildRefundExportWhere,
+  resolveStatusForDeletion,
 };
