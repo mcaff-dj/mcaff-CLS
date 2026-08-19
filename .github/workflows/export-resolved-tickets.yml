@@ -37,28 +37,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Diagnose grid sizes (temporary)
-        env:
-          GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
-        run: |
-          cd scripts
-          python -c "
-          import lib, requests
-          SHEET_ID = '1fpGeg1ErGc_DVgTGWln86AoLmhKmbUIgOnHNm-54X8A'
-          token = lib.get_access_token()
-          r = requests.get(f'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}', headers={'Authorization': f'Bearer {token}'})
-          r.raise_for_status()
-          total = 0
-          for s in r.json()['sheets']:
-              p = s['properties']
-              g = p.get('gridProperties', {})
-              rows, cols = g.get('rowCount', 0), g.get('columnCount', 0)
-              cells = rows * cols
-              total += cells
-              print(f\"{p['title']!r}: {rows} rows x {cols} cols = {cells} cells\")
-          print(f'TOTAL: {total} cells (limit 10000000)')
-          "
-
       - name: Export mcaffeine
         env:
           GOOGLE_SA_KEY_JSON: ${{ secrets.GOOGLE_SA_KEY }}
