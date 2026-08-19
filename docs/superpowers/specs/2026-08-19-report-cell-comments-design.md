@@ -55,11 +55,11 @@ CREATE TABLE IF NOT EXISTS report_cell_comments (
 )
 ```
 
-- `page` = `location.pathname` of the report as loaded inside the iframe (e.g.
-  `/reports/mcaffeine.html` — the signed-URL path from `reportUrls.js`, not
-  `/api/report/mcaffeine`, which only redirects there), naturally namespacing mcaffeine
-  vs. hyphen and any future report reusing this shell. The signature lives in the query
-  string, which is ignored — only the stable path is used as the key.
+- `page` = `window.REPORT_CARD` (e.g. `'mcaffeine'`/`'hyphen'`) — already injected by
+  `gen_panels.py:1813` and already used for this exact purpose by the existing CSV-export
+  log call (`_shell_head.html`'s `exportPivotTable`). Falls back to `location.pathname`
+  only if `REPORT_CARD` is ever unset. Naturally namespaces mcaffeine vs. hyphen and any
+  future report reusing this shell.
 - `cell_key` = a client-derived string identifying the cell by content, not position:
   `<pivot title>␟<row label>␟<top column header>␟<sub column header>`
   (`␟` = unit separator, unlikely to appear in real labels). Stable across nightly
@@ -79,7 +79,7 @@ mount('all', '/api/report-comments/:action', '../report-comments/[action].js', '
 
 `api/report-comments/[action].js`:
 
-- **`GET list?page=<pathname>`** — requires session (401 if not signed in). Returns
+- **`GET list?page=<page key>`** — requires session (401 if not signed in). Returns
   `{ comments: { [cellKey]: text } }` for `session.uid` + that page. One request per page
   load, not per cell.
 - **`POST save`** `{ page, cellKey, text }` — requires session. `text` trimmed empty →
@@ -98,7 +98,7 @@ Added once in `_shell_head.html`, alongside the existing generic CSV-export scri
 On page load:
 1. `fetch('/api/auth/me')` (same call `api/_reports/calling.html` and `onboarding.html`
    already make from a static report page — same-origin, cookie flows automatically).
-2. If authenticated, `fetch('/api/report-comments/list?page=' + location.pathname)` and
+2. If authenticated, `fetch('/api/report-comments/list?page=' + (window.REPORT_CARD || location.pathname))` and
    keep the `{cellKey: text}` map in memory; mark every cell with a saved note (a small
    persistent dot, so existing notes are discoverable without opening each cell).
 
