@@ -146,6 +146,27 @@
   .slot-hit{fill:var(--text-primary);opacity:0;}
   .slot-hit:hover{opacity:.045;}
 
+  /* Private per-cell comments (see docs/superpowers/specs/2026-08-19-report-cell-comments-design.md) */
+  .pivot-table td{cursor:pointer;}
+  .pivot-table td:hover{box-shadow:inset 0 0 0 1px var(--s1);}
+  .cell-comment-dot{position:relative;}
+  .cell-comment-dot::after{content:'';position:absolute;top:2px;right:2px;width:5px;height:5px;border-radius:50%;background:var(--s1);}
+  .cell-comment-popover{position:fixed;z-index:50;width:260px;background:var(--surface-1);
+    border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.22);
+    padding:12px;display:none;font-size:13px;box-sizing:border-box;}
+  .cell-comment-popover.open{display:block;}
+  .cell-comment-popover .ccp-head{font-weight:600;margin-bottom:6px;font-size:12px;color:var(--text-secondary);}
+  .cell-comment-popover textarea{width:100%;min-height:70px;resize:vertical;font:inherit;
+    color:var(--text-primary);background:var(--surface-card);border:1px solid var(--border);
+    border-radius:6px;padding:6px 8px;box-sizing:border-box;}
+  .cell-comment-popover .ccp-actions{display:flex;gap:8px;margin-top:8px;justify-content:flex-end;}
+  .cell-comment-popover button{font:inherit;border:1px solid var(--border);background:var(--surface-card);
+    color:var(--text-primary);border-radius:6px;padding:5px 10px;cursor:pointer;}
+  .cell-comment-popover button.ccp-save{background:var(--s1);border-color:var(--s1);color:#fff;}
+  .cell-comment-popover .ccp-error{color:var(--s6);font-size:11.5px;margin-top:6px;}
+  .cell-comment-popover .ccp-signin{color:var(--text-secondary);}
+  .cell-comment-popover .ccp-signin a{color:var(--s1);font-weight:600;text-decoration:none;}
+
   .stack-row{display:grid;grid-template-columns:200px 1fr 220px;align-items:center;gap:14px;margin-bottom:16px;}
   @media (max-width:800px){.stack-row{grid-template-columns:1fr;}}
   .stack-label{font-size:13px;color:var(--text-primary);font-weight:500;}
@@ -578,13 +599,14 @@
   // whatever the visitor is currently looking at.
   function isVisible(el){ return el.offsetParent !== null; }
 
-  function tableToGrid(table){
-    var rows = Array.prototype.filter.call(table.querySelectorAll('tr'), isVisible);
+  function tableToGrid(table, posMap, includeHidden){
+    var keep = includeHidden ? function(){ return true; } : isVisible;
+    var rows = Array.prototype.filter.call(table.querySelectorAll('tr'), keep);
     var grid = [];
     var rowSpans = {};
     rows.forEach(function(tr, r){
       grid[r] = grid[r] || [];
-      var cells = Array.prototype.filter.call(tr.querySelectorAll('th,td'), isVisible);
+      var cells = Array.prototype.filter.call(tr.querySelectorAll('th,td'), keep);
       var c = 0, ci = 0;
       while (ci < cells.length || rowSpans[c]) {
         if (rowSpans[c] && rowSpans[c].remaining > 0) {
@@ -602,12 +624,14 @@
         for (var k = 0; k < colspan; k++) {
           grid[r][c] = text;
           if (rowspan > 1) { rowSpans[c] = { remaining: rowspan - 1, value: text }; }
+          if (posMap) posMap.set(td, [r, c]);
           c++;
         }
       }
     });
     return grid;
   }
+  window.tableToGrid = tableToGrid;
 
   function gridToCSV(grid){
     return grid.map(function(row){
@@ -664,5 +688,146 @@
   }
   window.injectButtons = injectButtons;
   if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', injectButtons); } else { injectButtons(); }
+})();
+</script>
+<script>
+(function(){
+  // Private per-cell comments - see docs/superpowers/specs/2026-08-19-report-cell-comments-design.md.
+  // One popover element, reused for every cell; a click delegated at the document level
+  // (not one listener per td) so it keeps working for tables whose rows are rebuilt later
+  // (e.g. the ProdPkg drill-down's tbody swap).
+  var SEP = '␟';
+  var popover = null, currentTd = null, comments = {}, signedOut = false;
+
+  function pageKey(){ return window.REPORT_CARD || location.pathname; }
+
+  function tableTitle(table){
+    var wrap = table.closest('.pivot-wrap');
+    var titleEl = wrap && wrap.querySelector('.pivot-title');
+    if (!titleEl) return '';
+    var span = titleEl.querySelector('.pivot-title-text');
+    return (span || titleEl).textContent.trim();
+  }
+
+  function buildKey(title, grid, headRows, r, c){
+    var colPath = grid.slice(0, headRows).map(function(row){ return ((row && row[c]) || '').trim(); }).join(' / ');
+    var rowLabel = (grid[r] && grid[r][0]) || '';
+    return [title, rowLabel, colPath].join(SEP);
+  }
+
+  // Comment keys are content-derived (table title + row label + column header path), not
+  // positional, so they stay stable even though the *index* tableToGrid assigns a cell can
+  // shift depending on what else is hidden at read time (a year filter, a collapsed
+  // drill-down row) - see the design doc's Data model section for why this is safe.
+  function cellKeyFor(td){
+    var table = td.closest('table.pivot-table');
+    if (!table) return null;
+    var posMap = new Map();
+    var grid = window.tableToGrid(table, posMap, true);
+    var pos = posMap.get(td);
+    if (!pos) return null;
+    var headRows = table.querySelectorAll('thead tr').length || 1;
+    return buildKey(tableTitle(table), grid, headRows, pos[0], pos[1]);
+  }
+
+  function markDot(td, on){ td.classList.toggle('cell-comment-dot', !!on); }
+
+  function markAllDots(){
+    document.querySelectorAll('table.pivot-table').forEach(function(table){
+      var posMap = new Map();
+      var grid = window.tableToGrid(table, posMap, true);
+      var headRows = table.querySelectorAll('thead tr').length || 1;
+      var title = tableTitle(table);
+      posMap.forEach(function(pos, td){
+        markDot(td, !!comments[buildKey(title, grid, headRows, pos[0], pos[1])]);
+      });
+    });
+  }
+
+  function ensurePopover(){
+    if (popover) return popover;
+    popover = document.createElement('div');
+    popover.className = 'cell-comment-popover';
+    document.body.appendChild(popover);
+    document.addEventListener('mousedown', function(ev){
+      if (popover.classList.contains('open') && !popover.contains(ev.target) && ev.target !== currentTd) closePopover();
+    });
+    document.addEventListener('keydown', function(ev){ if (ev.key === 'Escape') closePopover(); });
+    return popover;
+  }
+
+  function closePopover(){
+    if (popover) popover.classList.remove('open');
+    currentTd = null;
+  }
+
+  function renderSignedOut(){
+    var next = encodeURIComponent(window.top.location.href);
+    popover.innerHTML =
+      '<div class="ccp-head">Private note</div>' +
+      '<div class="ccp-signin">Sign in to add a note only you can see.<br>' +
+      '<a href="/api/auth/login?next=' + next + '" target="_top">Sign in with Google</a></div>';
+  }
+
+  function renderEditor(key){
+    popover.innerHTML =
+      '<div class="ccp-head">Private note</div>' +
+      '<textarea class="ccp-text"></textarea>' +
+      '<div class="ccp-error" style="display:none;"></div>' +
+      '<div class="ccp-actions">' +
+        '<button type="button" class="ccp-close">Close</button>' +
+        '<button type="button" class="ccp-clear">Clear</button>' +
+        '<button type="button" class="ccp-save">Save</button>' +
+      '</div>';
+    var ta = popover.querySelector('.ccp-text');
+    ta.value = comments[key] || '';
+    ta.focus();
+    var errEl = popover.querySelector('.ccp-error');
+    function showError(msg){ errEl.textContent = msg; errEl.style.display = 'block'; }
+    var savingTd = currentTd;
+    function doSave(text){
+      fetch('/api/report-comments/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page: pageKey(), cellKey: key, text: text })
+      }).then(function(r){
+        if (r.status === 401) { signedOut = true; renderSignedOut(); return; }
+        if (!r.ok) { showError('Could not save - try again.'); return; }
+        if (text.trim()) { comments[key] = text; markDot(savingTd, true); }
+        else { delete comments[key]; markDot(savingTd, false); }
+        closePopover();
+      }).catch(function(){ showError('Could not save - check your connection.'); });
+    }
+    popover.querySelector('.ccp-close').onclick = closePopover;
+    popover.querySelector('.ccp-save').onclick = function(){ doSave(ta.value); };
+    popover.querySelector('.ccp-clear').onclick = function(){ ta.value = ''; doSave(''); };
+  }
+
+  function openPopoverFor(td, ev){
+    ensurePopover();
+    currentTd = td;
+    var key = cellKeyFor(td);
+    if (!key) { currentTd = null; return; }
+    if (signedOut) renderSignedOut(); else renderEditor(key);
+    popover.classList.add('open');
+    var pw = 260;
+    var left = Math.min(ev.clientX + 8, window.innerWidth - pw - 8);
+    var top = Math.min(ev.clientY + 8, window.innerHeight - 200);
+    popover.style.left = Math.max(8, left) + 'px';
+    popover.style.top = Math.max(8, top) + 'px';
+  }
+
+  document.addEventListener('click', function(ev){
+    var td = ev.target.closest && ev.target.closest('td');
+    if (!td || !td.closest('table.pivot-table')) return;
+    openPopoverFor(td, ev);
+  });
+
+  fetch('/api/auth/me').then(function(r){ return r.json(); }).then(function(d){
+    if (!d || !d.authenticated) { signedOut = true; return; }
+    return fetch('/api/report-comments/list?page=' + encodeURIComponent(pageKey()))
+      .then(function(r){ return r.ok ? r.json() : { comments: {} }; })
+      .then(function(d2){ comments = d2.comments || {}; markAllDots(); });
+  }).catch(function(){ signedOut = true; });
 })();
 </script>

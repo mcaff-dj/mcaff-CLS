@@ -103,6 +103,10 @@ mount('all', '/api/nps/public/:token', '../nps/public/[token].js', 'token');
 // two :action mounts above (agents/orders/assign/tag/update/bulk-update/import/export/sample).
 mount('all', '/api/escalation/:action', '../escalation/[action].js', 'action');
 
+// Private per-cell report comments (list/save) - see docs/superpowers/specs/
+// 2026-08-19-report-cell-comments-design.md.
+mount('all', '/api/report-comments/:action', '../report-comments/[action].js', 'action');
+
 // Registered before the dynamic /api/report/:card route below - Express matches routes
 // in registration order, so these more specific paths have to win the match before
 // "raw"/"data" are ever tried as a :card value.

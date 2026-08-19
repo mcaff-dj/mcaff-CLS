@@ -354,6 +354,23 @@ async function bootstrapSchema() {
       FOREIGN KEY (column_id) REFERENCES mom_columns(id) ON DELETE CASCADE
     )
   `;
+  // Private per-cell notes on report pivot tables (see docs/superpowers/specs/
+  // 2026-08-19-report-cell-comments-design.md) - one row per (user, page, cell), never
+  // read by anyone but the user who wrote it. `cell_key` is a client-derived, content-based
+  // string (pivot title + row label + column header path), not a DOM position, so it stays
+  // stable across the nightly report regeneration.
+  await sql`
+    CREATE TABLE IF NOT EXISTS report_cell_comments (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      page VARCHAR(255) NOT NULL,
+      cell_key VARCHAR(255) NOT NULL,
+      comment TEXT NOT NULL,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uniq_user_page_cell (user_id, page, cell_key),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `;
   schemaReady = true;
 }
 
@@ -2576,6 +2593,36 @@ async function reorderMomTask(taskId, statusKey, position) {
   }
 }
 
+// Pure - whether saving `text` should delete the row instead of writing it. Split out from
+// saveCellComment so the branch is testable without a DB connection (see
+// db.reportCellComments.test.js).
+function shouldDeleteCellComment(text) {
+  return !String(text || '').trim();
+}
+
+async function getCellComments(userId, page) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT cell_key AS cellKey, comment FROM report_cell_comments WHERE user_id = ${userId} AND page = ${page}
+  `;
+  const out = {};
+  rows.forEach((r) => { out[r.cellKey] = r.comment; });
+  return out;
+}
+
+async function saveCellComment(userId, page, cellKey, text) {
+  await ensureSchema();
+  if (shouldDeleteCellComment(text)) {
+    await sql`DELETE FROM report_cell_comments WHERE user_id = ${userId} AND page = ${page} AND cell_key = ${cellKey}`;
+    return;
+  }
+  const trimmed = String(text).trim();
+  await sql`
+    INSERT INTO report_cell_comments (user_id, page, cell_key, comment) VALUES (${userId}, ${page}, ${cellKey}, ${trimmed})
+    ON DUPLICATE KEY UPDATE comment = VALUES(comment)
+  `;
+}
+
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
@@ -2608,4 +2655,7 @@ module.exports = {
   createMomColumn, getMomColumnBoardId, updateMomColumn, deleteMomColumn,
   createMomStatus, updateMomStatus, deleteMomStatus,
   getMomTasks, getMomTaskBoardId, createMomTask, updateMomTask, deleteMomTask, reorderMomTask,
+  getCellComments, saveCellComment,
+  // Exported for api/_lib/db.reportCellComments.test.js only - nothing in the app calls this directly.
+  shouldDeleteCellComment,
 };
