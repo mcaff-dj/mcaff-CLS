@@ -1,62 +1,42 @@
-"""Pushes today's resolved Delivery-class tickets from PEP_CLS into the
-HYPHEN/mCaffeine tabs of the "Internal Escalation" sheet. Run every 2 hours via
-GitHub Actions (see .github/workflows/sync-delivery-tickets.yml).
+"""Mirrors today's resolved Delivery-class tickets from hyphen_tickets/mcaff_tickets straight
+into PEP_CLS.Delivery_escalation. Run every 2 hours via GitHub Actions (see
+.github/workflows/sync-delivery-tickets.yml).
 
-Only 11 of the tab's ~25 columns have a source in hyphen_tickets/mcaff_tickets
-(Added date, Query Class, Query Category, Parent Order, AWB Number, Delivery
-Partner Name, Order Date, Order Month, Query date, Query month, WH Name). The
-rest (Delivered Date, Status as per AWB, Solv Date, TAT, City, State, etc.)
-come from a separate logistics-tracking pipeline this job doesn't touch, so
-they're left blank on job-inserted rows.
+Used to ALSO paste these into the HYPHEN/mCaffeine tabs of the "Internal Escalation" Google
+Sheet - that write is gone. The sheet was the original ticket source before Delivery_escalation
+existed; this job kept writing to both while the CRM (app/delivery-escalation/) migrated over,
+and nothing left reads the sheet copy. MySQL is now the only destination, and the ONLY correct
+one - keeping a second write path alive after nothing reads it just doubles the ways this job
+can fail.
 
-Any of the columns L:P the TAB ITSELF computes with a formula is dragged
-down into the newly appended rows (see drag_formulas) - a pasted row that
-leaves a formula column blank silently breaks every downstream pivot reading
-it, and nobody notices until month-end.
+Only 11 columns have a source here (brand/order_id/awb_code/delivery_partner/query_class/
+query_category/wh_name, plus added_date/order_date/order_month/query_date/query_month) - the
+rest (delivered_date, status_as_per_awb, tat, city, state, etc.) come from a separate
+logistics-tracking pipeline this job doesn't touch, so they're left NULL on job-inserted rows.
 
-The sheet has no column holding ticket_number, so column Z is added purely as
-an internal dedup key - each run reads it to skip tickets already pasted.
+ticket_number is this job's own dedup key, same as when it lived in a sheet column - but the
+dedup itself no longer needs a "read what's already there" pass: DELIVERY_ESCALATION_INSERT is
+an upsert (ON DUPLICATE KEY UPDATE against the table's own dedup_key, IF(ticket_number is set,
+brand+ticket_number, brand+awb_code)), so re-running this on a ticket already mirrored just
+re-writes the same row instead of duplicating it. That makes every run idempotent for free,
+including re-running the same day or a --since backfill that overlaps an earlier run.
 
-Each new row is ALSO mirrored into MySQL PEP_CLS.Delivery_escalation - the same A:K columns
-this job writes to the sheet (brand/order_id/awb_code/delivery_partner/query_class/
-query_category/wh_name, plus added_date/order_date/order_month/query_date/query_month) plus
-ticket_number (sheet column Z, this job's own dedup key) - see
-alter_delivery_escalation_add_sync_columns.py for the columns this needed that the table didn't
-already have.
-
-NOT a merge with the dispose-flow row for the same ticket, even though the table's own
-`dedup_key` generated column (live schema, not reflected in create_delivery_escalation_table.py)
-was clearly built to make that possible - it's IF(ticket_number is set, brand+ticket_number,
-brand+awb_code). This job supplies ticket_number, so its rows key off the ticket_number branch.
-api/_lib/db.js's disposeDeliveryEscalationTicket does NOT put ticket_number in its own INSERT
-(despite having it on the ticket object via ticketSnapshot), so ITS rows key off the awb_code
-branch instead. Different dedup_key -> a ticket this job pre-inserts and later gets resolved by
-an agent ends up as TWO rows, not one filled-in row. Fixing this means adding ticket_number to
-disposeDeliveryEscalationTicket's INSERT - deliberately not done here, out of this change's
-scope.
-
-Best-effort, same as that JS side's own mirror write: a MySQL failure here is logged and
-skipped, never allowed to undo or block the sheet write that already succeeded.
+NOT a merge with the dispose-flow row for the same ticket, even though dedup_key was clearly
+built to make that possible - this job supplies ticket_number, so its rows key off the
+ticket_number branch of dedup_key. api/_lib/db.js's disposeDeliveryEscalationTicket does NOT put
+ticket_number in its own INSERT (despite having it on the ticket object via ticketSnapshot), so
+ITS rows key off the awb_code branch instead. Different dedup_key branch -> a ticket this job
+pre-inserts and later gets resolved by an agent ends up as TWO rows, not one filled-in row.
+Fixing this means adding ticket_number to disposeDeliveryEscalationTicket's INSERT - deliberately
+not done here, out of this change's scope.
 """
 import argparse
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import lib
 import mysql_lib
 import delivery_escalation_contact_stats
-
-SPREADSHEET_ID = "1fopbKSrg-U9ixZi6Tfq13Q7mzRMPtceXkfEuN4Wko-w"
-TICKET_NUMBER_COL = "Z"  # one past the tab's existing 25 columns (A-Y)
-
-# Columns to fill formulas down into: L (index 11) through P (index 15) - the
-# only formula-driven span in these tabs. A:K hold job data (a formula there
-# would be overwritten by the value write anyway); Q:S are pasted by the
-# logistics pipeline, T:W are typed by the escalation desk (api/escalation),
-# and Z is the internal dedup key - none of those are dragged.
-FORMULA_FIRST_COL = 11
-FORMULA_LAST_COL = 15
 
 TAB_TABLE = {
     "HYPHEN": "hyphen_tickets",
@@ -64,73 +44,10 @@ TAB_TABLE = {
 }
 
 
-def format_date(dt):
-    if dt is None:
-        return ""
-    return f"{dt.strftime('%b')} {dt.day}, {dt.year}"
-
-
 def format_month(dt):
     if dt is None:
         return ""
     return f"{dt.month}_{dt.strftime('%b')}'{dt.strftime('%y')}"
-
-
-def ensure_ticket_number_header(tab):
-    existing = lib.get_sheet_values(SPREADSHEET_ID, f"'{tab}'!{TICKET_NUMBER_COL}1")
-    if existing and existing[0] and existing[0][0] == "Ticket Number":
-        return
-    lib.set_sheet_values_batch(SPREADSHEET_ID, [
-        {"range": f"'{tab}'!{TICKET_NUMBER_COL}1", "values": [["Ticket Number"]]},
-    ])
-    print(f"  wrote 'Ticket Number' header at {tab}!{TICKET_NUMBER_COL}1")
-
-
-EXISTING_TICKETS_CHUNK_SIZE = 5000  # see get_existing_ticket_numbers
-
-# 300s, not lib.get_sheet_values' own 120s default - reads against this sheet started
-# timing out at every size tried (bounded 32k-row, 5k-row chunks, even a bare 2-cell
-# read), well past when the sheet was last this size and these same calls were fast. If
-# that's the sheet having gotten genuinely heavier to serve (not throttling - a plain
-# rate-limit would reject fast, not hang), a longer single-request budget is the correct
-# response; it does nothing for actual throttling, which no client-side timeout can fix.
-SHEET_READ_TIMEOUT_SEC = 300
-
-
-def get_existing_ticket_numbers(tab):
-    # Read in chunks, not one 'Z2:Z{last_row}' call - bounding the range (vs. the
-    # original open-ended 'Z2:Z') fixed the timeout at 28-31k rows, but at 32k+ rows even
-    # the BOUNDED single-request read started timing out (5/5 attempts, ~120s each) -
-    # fetching this many cells of one column in one response is what's slow, not whether
-    # the range has an end. Chunking sidesteps that regardless of which it actually is.
-    last_row = get_last_data_row(tab)
-    if last_row < 2:
-        return set()
-    existing = set()
-    row = 2
-    while row <= last_row:
-        end = min(row + EXISTING_TICKETS_CHUNK_SIZE - 1, last_row)
-        values = lib.get_sheet_values(
-            SPREADSHEET_ID, f"'{tab}'!{TICKET_NUMBER_COL}{row}:{TICKET_NUMBER_COL}{end}",
-            timeout_sec=SHEET_READ_TIMEOUT_SEC,
-        )
-        existing.update(r[0] for r in values if r and r[0])
-        row = end + 1
-    return existing
-
-
-def get_last_data_row(tab):
-    # The grid's own row COUNT (a metadata call, no cell data - same call
-    # set_sheet_rows_at_row already uses in lib.py to decide whether to grow the grid
-    # before writing), not a column read. Reliable here because every append grows the
-    # grid to exactly match written rows, so grid size tracks last-data-row tightly.
-    # An open-ended column read (e.g. the previous 'B:B' - column A ("Added date") is
-    # blank on every pre-existing row, so B ("Query Class") was used as the real anchor)
-    # started timing out once this tab passed ~30k rows: Sheets Value ranges API resolves
-    # an unbounded column against the full grid extent, which is the expensive part, not
-    # the actual data. A metadata call stays cheap regardless of row count.
-    _, grid_props = lib._get_sheet_gid_and_grid(SPREADSHEET_ID, tab)
-    return grid_props.get("rowCount", 0)
 
 
 def fetch_today_delivery_tickets(table, since=None):
@@ -190,38 +107,27 @@ def fetch_awb_by_order(parent_orders):
     return {order: awb_by_key[key] for order, key in key_by_order.items() if key in awb_by_key}
 
 
+def parent_order_of(row):
+    (_ticket_number, _subcategory, order_name, disposition_order, *_rest) = row
+    return order_name or disposition_order or ""
+
+
 def fill_missing_awb(rows):
-    missing_orders = sorted({r[3] for r in rows if not r[4] and r[3]})
+    """rows are the raw DB tuples (as lists) from fetch_today_delivery_tickets - mutates awb
+    (index 4) in place wherever it's blank and Item_level_data has a Tracking_Number for that
+    order."""
+    missing_orders = sorted({parent_order_of(r) for r in rows if not r[4] and parent_order_of(r)})
     if not missing_orders:
         return
     awb_by_order = fetch_awb_by_order(missing_orders)
     filled = 0
     for r in rows:
-        if not r[4] and r[3] in awb_by_order:
-            r[4] = awb_by_order[r[3]]
+        order = parent_order_of(r)
+        if not r[4] and order in awb_by_order:
+            r[4] = awb_by_order[order]
             filled += 1
     if filled:
         print(f"  filled AWB from Item_level_data for {filled} row(s)")
-
-
-def build_sheet_row(row):
-    (ticket_number, subcategory, order_name, disposition_order,
-     awb, partner, order_date, created_at, resolved_at, warehouse) = row
-    parent_order = order_name or disposition_order or ""
-    row_out = [""] * 25
-    row_out[0] = format_date(resolved_at)    # Added date
-    row_out[1] = "Delivery"                  # Query Class
-    row_out[2] = subcategory or ""           # Query Category
-    row_out[3] = parent_order                # Parent Order
-    row_out[4] = awb or ""                   # AWB Number
-    row_out[5] = partner or ""               # Delivery Partner Name
-    row_out[6] = format_date(order_date)     # Order Date
-    row_out[7] = format_month(order_date)    # Order Month
-    row_out[8] = format_date(created_at)     # Query date
-    row_out[9] = format_month(created_at)    # Query month
-    row_out[10] = warehouse or ""            # WH Name
-    row_out.append(ticket_number)            # col 26: Ticket Number (dedup key)
-    return row_out
 
 
 DELIVERY_ESCALATION_INSERT = """
@@ -240,9 +146,9 @@ DELIVERY_ESCALATION_INSERT = """
 
 
 def build_delivery_escalation_row(row, tab):
-    """Same field mapping as build_sheet_row (see its comments for what each source column
-    means), but as raw values for MySQL - real DATE objects for added_date/order_date/query_date,
-    not the sheet's display-formatted strings, since this copy needs to stay queryable."""
+    """row is a raw DB tuple from fetch_today_delivery_tickets - real DATE/datetime objects for
+    added_date/order_date/query_date, not display strings, since this row needs to stay
+    queryable."""
     (ticket_number, subcategory, order_name, disposition_order,
      awb, partner, order_date, created_at, resolved_at, warehouse) = row
     parent_order = order_name or disposition_order or ""
@@ -258,122 +164,35 @@ def upsert_delivery_escalation_rows(rows, tab):
         try:
             mysql_lib.execute(DELIVERY_ESCALATION_INSERT, build_delivery_escalation_row(r, tab), database="PEP_CLS")
         except Exception as e:
-            print(f"  WARNING: Delivery_escalation mirror failed for ticket {r[0]}: {e}")
-
-
-def pick_formula_sources(block, first_col=FORMULA_FIRST_COL, first_row=2):
-    """col_index -> 1-based row number to drag that column's formula from.
-
-    block is a FORMULA-rendered value range starting at (first_row, first_col).
-    Per column it keeps the LAST row holding a formula, which is why the row
-    directly above the new block can't just be assumed to be the source: every
-    row this job inserted itself leaves L:P blank, so after the first run the
-    preceding rows are blank and the real formula lives further up.
-
-    ARRAYFORMULA cells are skipped, not used as a source: one anchored above
-    already spans the rows below it, so dragging a copy in would collide with
-    its own output (same reason push_hyphen_to_dashboard.py exempts them)."""
-    sources = {}
-    for i, row in enumerate(block):
-        for j, cell in enumerate(row):
-            if not isinstance(cell, str) or not cell.startswith("="):
-                continue
-            if "ARRAYFORMULA" in cell.upper():
-                continue
-            sources[first_col + j] = first_row + i
-    return sources
-
-
-def drag_formulas(tab, start_row, end_row, dry_run=False):
-    """Fills every formula column in L:P down into rows start_row..end_row,
-    the way dragging the fill handle would - Sheets' own copyPaste adjusts the
-    relative references, so no formula text is parsed or rewritten here.
-
-    Never fatal: the rows are already written and already deduped by column Z,
-    so a failure here would otherwise abandon them with blank formula columns
-    and no retry on the next run. It prints the range to drag by hand instead.
-    The known failure is a Basic Filter on the tab - Sheets rejects any
-    copyPaste touching a filtered-out row (see push_hyphen_to_dashboard.py's
-    docstring); if that's what the logged body says, switch this tab to
-    explicit formula templates like those scripts did."""
-    if start_row <= 2:
-        return  # nothing above the new rows to copy from
-    first = lib.get_column_letter(FORMULA_FIRST_COL)
-    last = lib.get_column_letter(FORMULA_LAST_COL)
-    block = lib.get_sheet_values(
-        SPREADSHEET_ID, f"'{tab}'!{first}{2}:{last}{start_row - 1}",
-        value_render_option="FORMULA",
-    )
-    sources = pick_formula_sources(block)
-    if not sources:
-        print(f"  no formula columns found in {first}:{last} - nothing to drag")
-        return
-    cols = ", ".join(f"{lib.get_column_letter(c)}<-row {r}" for c, r in sorted(sources.items()))
-    if dry_run:
-        print(f"  would drag formulas into rows {start_row}-{end_row}: {cols}")
-        return
-    try:
-        gid = lib.get_sheet_gid(SPREADSHEET_ID, tab)
-        for col, src_row in sorted(sources.items()):
-            lib.copy_paste_column(SPREADSHEET_ID, gid, src_row, start_row, end_row, col)
-        print(f"  dragged formulas into rows {start_row}-{end_row}: {cols}")
-    except Exception as e:
-        print(f"  WARNING: formula drag failed for rows {start_row}-{end_row} ({cols}): {e}")
-        print(f"  ACTION NEEDED: drag {first}:{last} down over rows {start_row}-{end_row} of '{tab}' by hand")
+            print(f"  WARNING: Delivery_escalation upsert failed for ticket {r[0]}: {e}")
 
 
 def sync_tab(tab, dry_run, since=None):
     table = TAB_TABLE[tab]
     print(f"--- {tab} ({table}) ---")
 
-    existing = get_existing_ticket_numbers(tab) if not dry_run else set()
-    if not dry_run:
-        print(f"  {len(existing)} ticket numbers already in sheet")
-    elif since:
-        # dry-run + since still needs the existing set to report an accurate "new rows" count
-        existing = get_existing_ticket_numbers(tab)
-
     db_rows = fetch_today_delivery_tickets(table, since=since)
     print(f"  {len(db_rows)} Delivery-class tickets resolved {'since ' + since if since else 'today'} in DB")
-
-    new_db_rows = [list(r) for r in db_rows if r[0] not in existing]
-    new_rows = [build_sheet_row(r) for r in new_db_rows]
-    print(f"  {len(new_rows)} new rows to {'would append' if dry_run else 'append'}")
-
-    if not new_rows:
+    if not db_rows:
         return
 
-    fill_missing_awb(new_rows)
-    # fill_missing_awb only patches the built sheet row (index 4) - carry any backfilled AWB
-    # back onto the raw DB row (index 4 there too) so the MySQL mirror below gets it too.
-    for db_row, sheet_row in zip(new_db_rows, new_rows):
-        db_row[4] = sheet_row[4]
+    rows = [list(r) for r in db_rows]
+    fill_missing_awb(rows)
 
     if dry_run:
-        for r in new_rows[:5]:
-            print("   ", r)
-        if len(new_rows) > 5:
-            print(f"    ... and {len(new_rows) - 5} more")
-        start_row = get_last_data_row(tab) + 1
-        drag_formulas(tab, start_row, start_row + len(new_rows) - 1, dry_run=True)
-        print(f"  would mirror {len(new_db_rows)} row(s) into MySQL Delivery_escalation")
+        for r in rows[:5]:
+            print("   ", build_delivery_escalation_row(r, tab))
+        if len(rows) > 5:
+            print(f"    ... and {len(rows) - 5} more")
+        print(f"  would upsert {len(rows)} row(s) into MySQL Delivery_escalation")
         return
 
-    ensure_ticket_number_header(tab)
-    start_row = get_last_data_row(tab) + 1
-    lib.set_sheet_rows_at_row(SPREADSHEET_ID, tab, new_rows, start_row)
-    print(f"  wrote rows {start_row}-{start_row + len(new_rows) - 1}")
-    # After the value write, never before: the write blanks L:P on these rows.
-    drag_formulas(tab, start_row, start_row + len(new_rows) - 1)
-    upsert_delivery_escalation_rows(new_db_rows, tab)
+    upsert_delivery_escalation_rows(rows, tab)
+    print(f"  upserted {len(rows)} row(s) into MySQL Delivery_escalation")
     # Repeat-contact columns are aggregates over every ticket sharing an AWB, so newly-inserted
     # rows change them for their OLDER siblings too - they have to be recomputed after the
-    # insert, not derived per-row during it. Best-effort, same as the mirror above: a failure
-    # here leaves the previous (merely stale) values in place, which must never fail a run whose
-    # sheet write already succeeded.
-    # Via mysql_lib.execute, not the shared connection directly: fill_missing_awb above switches
-    # that connection to mcaff_prod, and the recompute's table name is unqualified - execute()
-    # re-selects PEP_CLS first, so this can't silently run against the wrong schema.
+    # insert, not derived per-row during it. Best-effort: a failure here leaves the previous
+    # (merely stale) values in place, which must never fail a run whose upsert already succeeded.
     try:
         n = mysql_lib.execute(delivery_escalation_contact_stats.RECOMPUTE_SQL, database="PEP_CLS")
         print(f"  recomputed contact_count/first_added_date for {n} row(s)")
@@ -382,24 +201,12 @@ def sync_tab(tab, dry_run, since=None):
 
 
 def self_check():
-    """Offline check of the formula-source pick - no sheet, no DB."""
-    # P (index 15) formula on row 2, then two job-inserted rows leaving L:P blank:
-    # the source must stay row 2, not the blank row directly above the new block.
-    block = [
-        ["", "", "", "", "=O2-I2", ""],
-        [], [],
-    ]
-    assert pick_formula_sources(block) == {15: 2}, pick_formula_sources(block)
-    # Last formula row per column wins, and ARRAYFORMULA cells are never sources.
-    block = [["=A2", "=ARRAYFORMULA(B2:B)"], ["=A3", "=ARRAYFORMULA(B3:B)"]]
-    assert pick_formula_sources(block) == {11: 3}, pick_formula_sources(block)
-    # Literal values are not formulas.
-    assert pick_formula_sources([["RTO", "12"]]) == {}
+    """Offline check of the row-building/lookup helpers - no DB."""
     # MCaff-prefixed orders look up by their bare numeric ID; other brands keep their prefix.
     assert _awb_lookup_key("MCaff9097914") == "9097914"
     assert _awb_lookup_key("HYP37526450") == "HYP37526450"
-    # MySQL mirror row: brand = the tab it came from, ticket_number carried straight through,
-    # order_month/query_month recomputed rather than reusing build_sheet_row's display strings.
+    # MySQL row: brand = the tab it came from, ticket_number carried straight through,
+    # order_month/query_month recomputed from the real date objects.
     from datetime import date, datetime
     row = ("TCK1", "Wrong Pincode", "", "MCaff123", "AWB1", "BlueDart",
            date(2026, 1, 5), datetime(2026, 1, 6, 10, 0), datetime(2026, 1, 7, 9, 0), "WH1")
@@ -407,21 +214,23 @@ def self_check():
         "mCaffeine", "MCaff123", "AWB1", "BlueDart", "Delivery", "Wrong Pincode", "WH1", "TCK1",
         row[8], row[6], format_month(row[6]), row[7], format_month(row[7]),
     )
-    # Blank order_name falls back to disposition_order, same as build_sheet_row's parent_order.
+    # Blank order_name falls back to disposition_order, same as parent_order_of.
     row2 = ("TCK2", None, "", "HYP999", "", "Delhivery", None, None, None, "")
     assert build_delivery_escalation_row(row2, "HYPHEN") == (
         "HYPHEN", "HYP999", None, "Delhivery", "Delivery", None, None, "TCK2",
         None, None, "", None, "",
     )
+    assert parent_order_of(row) == "MCaff123"
+    assert parent_order_of(row2) == "HYP999"
     print("self-check ok")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tab", choices=sorted(TAB_TABLE))
-    parser.add_argument("--dry-run", action="store_true", help="Fetch and print only, no sheet writes")
+    parser.add_argument("--dry-run", action="store_true", help="Fetch and print only, no MySQL writes")
     parser.add_argument("--since", help="YYYY-MM-DD: backfill tickets resolved from this date through today (default: today only)")
-    parser.add_argument("--self-check", action="store_true", help="Run the offline formula-source check and exit")
+    parser.add_argument("--self-check", action="store_true", help="Run the offline row-building check and exit")
     args = parser.parse_args()
     if args.self_check:
         return self_check()
