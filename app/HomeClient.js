@@ -27,7 +27,8 @@ var NEXT_PAGE_ROUTES = {
   onboarding: '/onboarding',
   productkyc: '/productkyc',
   deepdive: '/deepdive',
-  orgoverview: '/orgoverview'
+  orgoverview: '/orgoverview',
+  nps: '/nps-admin'
 };
 
 // Calling Team has its own nested nav sub-items instead of one blanket "coming soon"
