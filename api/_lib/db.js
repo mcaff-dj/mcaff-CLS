@@ -2294,6 +2294,96 @@ function resolveStatusForDeletion(statuses, deletedKey) {
   return remaining[0].status_key;
 }
 
+const MOM_DEFAULT_STATUSES = [
+  { key: 'todo', label: 'To Do', color: '#94a3b8' },
+  { key: 'in_progress', label: 'In Progress', color: '#3b82f6' },
+  { key: 'done', label: 'Done', color: '#22c55e' },
+];
+
+async function getMomBoardsForUser(email, isAdmin) {
+  if (isAdmin) {
+    const { rows } = await sql`
+      SELECT b.id, b.name, b.description, COALESCE(m.role, 'admin') AS role
+      FROM mom_boards b
+      LEFT JOIN mom_board_members m ON m.board_id = b.id AND m.email = ${email}
+      WHERE b.archived = FALSE
+      ORDER BY b.created_at DESC
+    `;
+    return rows;
+  }
+  const { rows } = await sql`
+    SELECT b.id, b.name, b.description, m.role
+    FROM mom_boards b
+    JOIN mom_board_members m ON m.board_id = b.id
+    WHERE m.email = ${email} AND b.archived = FALSE
+    ORDER BY b.created_at DESC
+  `;
+  return rows;
+}
+
+async function createMomBoard(name, description, email) {
+  const { insertId } = await sql`
+    INSERT INTO mom_boards (name, description, created_by) VALUES (${name}, ${description || null}, ${email})
+  `;
+  await sql`INSERT INTO mom_board_members (board_id, email, role) VALUES (${insertId}, ${email}, 'owner')`;
+  for (let i = 0; i < MOM_DEFAULT_STATUSES.length; i++) {
+    const s = MOM_DEFAULT_STATUSES[i];
+    await sql`
+      INSERT INTO mom_statuses (board_id, status_key, label, color, position)
+      VALUES (${insertId}, ${s.key}, ${s.label}, ${s.color}, ${i})
+    `;
+  }
+  return insertId;
+}
+
+async function getMomBoardRole(boardId, email) {
+  const { rows } = await sql`SELECT role FROM mom_board_members WHERE board_id = ${boardId} AND email = ${email}`;
+  return rows[0] ? rows[0].role : null;
+}
+
+async function getMomBoardDetail(boardId) {
+  const { rows: boards } = await sql`SELECT id, name, description, archived FROM mom_boards WHERE id = ${boardId}`;
+  if (!boards.length) return null;
+  const { rows: statuses } = await sql`
+    SELECT status_key AS statusKey, label, color, position FROM mom_statuses
+    WHERE board_id = ${boardId} ORDER BY position
+  `;
+  const { rows: columns } = await sql`
+    SELECT id, name, type, options, position FROM mom_columns
+    WHERE board_id = ${boardId} ORDER BY position
+  `;
+  const { rows: members } = await sql`
+    SELECT email, role FROM mom_board_members WHERE board_id = ${boardId} ORDER BY added_at
+  `;
+  return { board: boards[0], statuses, columns, members };
+}
+
+async function updateMomBoard(boardId, { name, description }) {
+  await sql`UPDATE mom_boards SET name = ${name}, description = ${description || null} WHERE id = ${boardId}`;
+}
+
+async function archiveMomBoard(boardId) {
+  await sql`UPDATE mom_boards SET archived = TRUE WHERE id = ${boardId}`;
+}
+
+async function upsertMomBoardMember(boardId, email, role) {
+  await sql`
+    INSERT INTO mom_board_members (board_id, email, role) VALUES (${boardId}, ${email}, ${role})
+    ON DUPLICATE KEY UPDATE role = ${role}
+  `;
+}
+
+async function removeMomBoardMember(boardId, email) {
+  const { rows } = await sql`SELECT email, role FROM mom_board_members WHERE board_id = ${boardId}`;
+  const target = rows.find((r) => r.email === email);
+  if (!target) return;
+  if (target.role === 'owner') {
+    const otherOwners = rows.filter((r) => r.email !== email && r.role === 'owner');
+    if (!otherOwners.length) throw new Error('Cannot remove the last owner of a board');
+  }
+  await sql`DELETE FROM mom_board_members WHERE board_id = ${boardId} AND email = ${email}`;
+}
+
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
@@ -2321,4 +2411,6 @@ module.exports = {
   isPoolExhausted, withPgConnectRetry, toTransactionModePooler, cachedRead, invalidateCache, CACHE_TTL_MS,
   buildRefundExportWhere,
   resolveStatusForDeletion,
+  getMomBoardsForUser, createMomBoard, getMomBoardRole, getMomBoardDetail,
+  updateMomBoard, archiveMomBoard, upsertMomBoardMember, removeMomBoardMember,
 };
