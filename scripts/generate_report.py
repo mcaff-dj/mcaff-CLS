@@ -20,7 +20,7 @@ import kyc_source
 import lib
 import nps_source
 from brands import BRANDS
-from report_context import Ctx, ci_key, fnum, h_enc, index_map, n0, parse_month_label, pretty_month, round1, year_of
+from report_context import Ctx, ci_key, fnum, h_enc, index_map, j_enc, n0, parse_month_label, pretty_month, round1, year_of
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
@@ -105,6 +105,37 @@ def build_pivot(ctx, title, counts_by_class_month):
         yr = year_of(mo)
         parts.append(f"<td class='num' data-yr='{yr}'>{n0(t)}</td><td class='pct' data-yr='{yr}'>{fnum(pct)}%</td>")
     parts.append("</tr></tbody></table></div></div>")
+    return "".join(parts)
+
+
+def build_pct_trend_chart(ctx, title, counts_by_class_month):
+    months = ctx.months
+    W, H, pad_l, pad_r, pad_t, pad_b = 1200, 380, 46, 60, 20, 55
+    chart_id = gen_panels._next_chart_id("trend")
+    months_json = "[" + ",".join(f'"{j_enc(m)}"' for m in months) + "]"
+    month_labels_json = "[" + ",".join(f'"{j_enc(pretty_month(m))}"' for m in months) + "]"
+    series_parts, legend_parts = [], []
+    for c in ctx.b["classes"]:
+        vals = []
+        for mo in months:
+            cnt = counts_by_class_month.get(c["key"], {}).get(mo, 0)
+            sm = ctx.sales_m.get(mo, 0)
+            vals.append(round1(cnt / sm * 100) if sm > 0 else 0)
+        vals_json = "[" + ",".join(str(v) for v in vals) + "]"
+        series_parts.append(f"{{label:'{j_enc(c['label'])}', color:'{c['color']}', vals:{vals_json}}}")
+        legend_parts.append(f"<div class='legend-item'><span class='swatch' style='background:{c['color']};'></span><span class='lname'>{h_enc(c['label'])}</span></div>")
+    series_json = "[" + ",".join(series_parts) + "]"
+    parts = [f"<div class='card'><div class='pivot-title' style='margin-bottom:18px;'>{h_enc(title)}</div>"
+             f"<div class='legend-row' style='justify-content:center;flex-wrap:wrap;'>{''.join(legend_parts)}</div>"
+             f"<svg id='{chart_id}' viewBox='0 0 {W} {H}' width='100%' height='{H}' role='img'></svg></div>"]
+    parts.append(f"""<script>
+(function(){{
+  var svg = document.getElementById('{chart_id}');
+  var opts = {{ series:{series_json}, months:{months_json}, monthLabels:{month_labels_json},
+    W:{W}, H:{H}, padL:{pad_l}, padR:{pad_r}, padT:{pad_t}, padB:{pad_b}}};
+  window.registerYearChart(function(){{ window.renderMultiPctTrendChart(svg, opts); }});
+}})();
+</script>""")
     return "".join(parts)
 
 
@@ -350,6 +381,7 @@ def main():
     ov.append("<div class='gran-monthly'>")
     ov.append(build_pivot(ctx, "Overall Query Class-Wise Comparison", build_class_month_counts(ctx, data_rows)))
     ov.append(build_pivot(ctx, "Unique Query Class-Wise Comparison", uniq_class_month))
+    ov.append(build_pct_trend_chart(ctx, "Unique Query Class % Trend", uniq_class_month))
     ov.append('<p class="note">Count = tickets that month for that query class. Percent = count &divide; that month\'s total order volume ("Total Sales M"). "Overall" includes duplicates; "Unique" excludes them.</p>')
     ov.append("</div>")
 

@@ -317,6 +317,48 @@
     svg.innerHTML = out.join('');
   };
 
+  // Multi-series % trend line - no bars. Used for the query-class share-of-sales trend
+  // below the class pivot tables: one line per class, all on the same 0-pctMax axis, so
+  // the shape/slope of the lines (whether a class's % is rising) is what's being read,
+  // not raw counts. Endpoint of each line gets a direct value label instead of every
+  // point, per-point value is still available via native <title> hover.
+  window.renderMultiPctTrendChart = function(svg, opts){
+    var active = window.REPORT_ACTIVE_YEARS;
+    var idx = [];
+    for (var i = 0; i < opts.months.length; i++) {
+      if (!active || active.has(window.yearOfLabel(opts.months[i]))) idx.push(i);
+    }
+    if (idx.length === 0) idx = opts.months.map(function(_, i){ return i; });
+    var W = opts.W, H = opts.H, padL = opts.padL, padR = opts.padR, padT = opts.padT, padB = opts.padB;
+    var plotW = W - padL - padR, plotH = H - padT - padB;
+    var n = idx.length || 1, slot = plotW / n;
+    var peak = 0;
+    opts.series.forEach(function(s){ idx.forEach(function(i){ if (s.vals[i] > peak) peak = s.vals[i]; }); });
+    var pctMax = window.niceMax((peak * 1.2) || 10);
+    var out = [];
+    for (var g = 0; g <= 5; g++) {
+      var fr = g / 5.0, y = padT + plotH * (1 - fr);
+      var st = Math.round(pctMax * fr * 10) / 10;
+      out.push('<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="var(--grid)" stroke-width="1"/>');
+      out.push('<text x="' + (padL - 10) + '" y="' + (y + 4) + '" text-anchor="end" font-size="11" fill="var(--text-muted)">' + st + '%</text>');
+    }
+    idx.forEach(function(origI, k){
+      var cx = padL + slot * k + slot / 2;
+      out.push('<text x="' + cx + '" y="' + (H - padB + 18) + '" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">' + escXml(opts.monthLabels[origI]) + '</text>');
+    });
+    opts.series.forEach(function(s){
+      var svals = idx.map(function(i){ return s.vals[i]; });
+      var pts = svals.map(function(v, k){ return [padL + slot * k + slot / 2, padT + plotH * (1 - v / pctMax)]; });
+      out.push('<polyline points="' + pts.map(function(p){ return p[0] + ',' + p[1]; }).join(' ') + '" fill="none" stroke="' + s.color + '" stroke-width="2"/>');
+      pts.forEach(function(p, k){
+        out.push('<circle cx="' + p[0] + '" cy="' + p[1] + '" r="2.5" fill="' + s.color + '"><title>' + escXml(s.label) + ': ' + svals[k] + '%</title></circle>');
+      });
+      var lastP = pts[pts.length - 1], lastV = svals[svals.length - 1];
+      out.push('<text x="' + (lastP[0] + 6) + '" y="' + (lastP[1] + 4) + '" text-anchor="start" font-size="10.5" font-weight="700" fill="' + s.color + '">' + lastV + '%</text>');
+    });
+    svg.innerHTML = out.join('');
+  };
+
   // Mode used by NPS/CSAT charts: bars = response counts (own niceMax'd axis), line = a
   // given score with a FIXED axis max (100 for NPS, 5 for CSAT) - plus the 6-line grid
   // with dual-axis labels those charts show that the plain pct-mode charts don't.
