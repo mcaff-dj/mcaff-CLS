@@ -50,12 +50,20 @@ BRANDS = [
         # Settled-month ticket rows (everything but the current, still-moving month) come
         # from this table instead of a live Sheets pull - see scripts/kyc_source.py. It's a
         # column-for-column mirror (in this exact order) of the primary sheet's own columns
-        # A:Z, verified against the live "mCaffeine" tab header - the sheet has more trailing
-        # columns (State_zone/Outer_package/visible_damage/CPR/platform) this table doesn't
-        # carry, which is fine: ctx.cell() already returns "" past a row's actual length.
+        # A:Z - the sheet has more trailing columns (State_zone/Outer_package/visible_damage/
+        # CPR/platform) this table doesn't carry, which is fine: ctx.cell() already returns
+        # "" past a row's actual length.
+        #
+        # ticket_no leads (matching Hyphen's list below, and matching "col" above: index 1 =
+        # created_date, 2 = order_id/parent_order, 3 = lastsource/last_source_type) - this
+        # list previously led with created_date/parent_order/last_source_type/ticket_no,
+        # which shifted every MySQL-sourced (settled-month) mCaffeine row's Created
+        # Date/Order ID/Source by one column (Created Date showed the Order ID value, Order
+        # ID showed the Source value) - caught via a downloaded raw CSV's header/value
+        # mismatch, fixed here.
         "kyc_mysql_table": "CLS_KYC_mCaff",
         "kyc_mysql_columns": [
-            "created_date", "parent_order", "last_source_type", "ticket_no", "query_class", "query_category",
+            "ticket_no", "created_date", "parent_order", "last_source_type", "query_class", "query_category",
             "product_name", "batch_number", "sku", "awb_number", "delivery_partner_name", "order_date",
             "month", "week", "order_month", "order_week", "year", "unique_flag", "order_year",
             "total_sales_m", "total_sales_w", "wh_name", "pro_sales", "partner_allocation", "wh_allocation",

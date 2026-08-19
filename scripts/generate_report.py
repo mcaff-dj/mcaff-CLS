@@ -304,11 +304,20 @@ def main():
     # isn't guaranteed to fall inside that hardcoded per-brand ticket-month window (an order
     # can predate the report's tracked range). Sorted chronologically via parse_month_label;
     # anything unparseable is dropped rather than crashing the sort.
+    #
+    # Capped to the most recent 6 - left unbounded, this pulled in every order_month value
+    # ever seen (potentially years of order history), and any one of those months not
+    # already in data/<brand>_geo_orders_cache.json costs a live ~20-35s MySQL query (see
+    # gen_geo_insights._order_counts_by_month_cached). Confirmed in production: mCaffeine's
+    # "assemble: delivery panel" stage alone ran 523s (vs ~1s) the first time this shipped,
+    # and got canceled before it could even finish - so nothing was cached for next time
+    # either. 6 months keeps the new-query cost bounded and one-time (settled months stay
+    # cached from then on) while still covering the window ops actually look at.
     delivery_rows = ctx.unique_by_class.get("Delivery", [])
     om_col = col.get("order_month")
     distinct_order_months = {ctx.cell(r, om_col) for r in delivery_rows} if om_col is not None else set()
     distinct_order_months = {m for m in distinct_order_months if str(m).strip() and parse_month_label(m)}
-    ctx.delivery_order_months = sorted(distinct_order_months, key=parse_month_label)
+    ctx.delivery_order_months = sorted(distinct_order_months, key=parse_month_label)[-6:]
     ctx.delivery_order_month_index = index_map(ctx.delivery_order_months)
 
     ctx.sales_m = get_sales_m_by_month(ctx, data_rows)
