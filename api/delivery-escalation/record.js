@@ -114,13 +114,15 @@ module.exports = async (req, res) => {
 
   const { action, id, ticket, outcome, agentRemarks } = req.body || {};
 
-  // Fresh tab's bulk outcome upload (CSV: AWB, Outcome, optional Remarks) - see db.js's
-  // bulkDisposeDeliveryEscalationByAwb. rows is pre-parsed client-side; this only validates
-  // shape/size, not outcome values (a bulk upload's Outcome text is trusted the same way a
-  // single dispose's dispPath.join(' > ') already is - no disposition-tree validation there
-  // either).
+  // Fresh AND Forced RTO tabs' bulk outcome upload (CSV: AWB, Outcome, optional Remarks) - see
+  // db.js's bulkDisposeDeliveryEscalationByAwb. rows is pre-parsed client-side; this only
+  // validates shape/size, not outcome values (a bulk upload's Outcome text is trusted the same
+  // way a single dispose's dispPath.join(' > ') already is - no disposition-tree validation
+  // there either). view defaults to 'fresh' for a stale client bundle mid-deploy that doesn't
+  // send one yet; bulkDisposeDeliveryEscalationByAwb itself rejects anything else.
   if (action === 'bulkDispose') {
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    const view = req.body?.view === 'forced_rto' ? 'forced_rto' : 'fresh';
     if (!rows.length) {
       res.status(400).json({ error: 'rows is required' });
       return;
@@ -137,7 +139,7 @@ module.exports = async (req, res) => {
       return;
     }
     try {
-      const results = await bulkDisposeDeliveryEscalationByAwb(clean, session.email);
+      const results = await bulkDisposeDeliveryEscalationByAwb(clean, session.email, view);
       res.status(200).json({ results });
     } catch (e) {
       console.error('api/delivery-escalation/record bulkDispose error:', e);

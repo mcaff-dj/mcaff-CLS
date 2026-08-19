@@ -320,15 +320,61 @@ async function downloadCsv({ view, search, brand, agent }, onChunk) {
 // Fresh tab's bulk outcome upload - one call, many (awb, outcome) pairs; see
 // api/_lib/db.js's bulkDisposeDeliveryEscalationByAwb for matching/scoping rules (every row
 // with that AWB, but only if it's still Fresh-eligible).
-async function bulkUploadOutcomes(rows) {
+async function bulkUploadOutcomes(rows, view) {
   const r = await fetch('/api/delivery-escalation/record', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'bulkDispose', rows }),
+    body: JSON.stringify({ action: 'bulkDispose', rows, view }),
   });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error || `Bulk upload failed (${r.status})`);
   return d.results || [];
+}
+
+// Walks the FIRST child at each level of the process's own configured disposition tree, so the
+// sample template shows a real, currently-valid outcome path for THIS process rather than a
+// made-up one that might not exist here. Falls back to a plain placeholder when nothing's been
+// configured yet (a fresh process's tree starts empty - see callingProcesses.json's own note on
+// "no seeded default").
+function sampleOutcomePaths(tree) {
+  const paths = [];
+  for (const node of (tree || [])) {
+    const labels = [node.label];
+    let cur = node;
+    while (cur.children && cur.children.length) {
+      cur = cur.children[0];
+      labels.push(cur.label);
+    }
+    paths.push(labels.join(' > '));
+    if (paths.length >= 2) break;
+  }
+  return paths;
+}
+
+// Downloads a ready-to-fill CSV for the Bulk Upload button - same AWB/Outcome/Remarks columns
+// rowsFromBulkCsv reads back, pre-populated with two example rows pulled from the process's own
+// disposition tree: a plain top-level outcome, and a nested one showing the "Parent > Child"
+// convention a bulk upload's Outcome column uses for a child disposition (there's no separate
+// column for it - the full path IS the Outcome value, same as a single dispose's
+// dispPath.join(' > ')).
+function downloadBulkSampleCsv(processDispositions) {
+  const [path1, path2] = sampleOutcomePaths(processDispositions);
+  const outcomeTop = path1 || 'Delivered';
+  const outcomeNested = path2 || (path1 && path1.includes(' > ') ? path1 : 'Escalated > Awaiting Partner');
+  const lines = [
+    'AWB,Outcome,Remarks',
+    `SF1234567890EX,${csvCell(outcomeTop)},Optional free text`,
+    `SF0987654321EX,${csvCell(outcomeNested)},`,
+  ];
+  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'delivery-escalation-bulk-upload-sample.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 export default function DeliveryEscalationClient() {
@@ -601,10 +647,11 @@ export default function DeliveryEscalationClient() {
     }
   };
 
-  // Fresh tab's bulk outcome upload - parses client-side (so a header/column mistake shows up
-  // immediately, before any network call) then sends the whole batch in one request. Resyncs
-  // after so Fresh/Resolved both reflect whatever just moved - same reasoning as saveAction's
-  // own post-dispose refresh.
+  // Fresh AND Forced RTO tabs' bulk outcome upload - parses client-side (so a header/column
+  // mistake shows up immediately, before any network call) then sends the whole batch in one
+  // request, scoped server-side to whichever of those two tabs is open (see
+  // bulkDisposeDeliveryEscalationByAwb's own view-scoping). Resyncs after so every tab reflects
+  // whatever just moved - same reasoning as saveAction's own post-dispose refresh.
   const handleBulkFile = async (e) => {
     const file = e.target.files?.[0];
     e.target.value = ''; // allow re-selecting the same file (e.g. after fixing a typo) later
@@ -615,7 +662,7 @@ export default function DeliveryEscalationClient() {
       const text = await file.text();
       const parsed = rowsFromBulkCsv(text);
       if (!parsed.length) throw new Error('No valid rows found - need an AWB and an Outcome column');
-      const results = await bulkUploadOutcomes(parsed);
+      const results = await bulkUploadOutcomes(parsed, tab);
       const unmatched = results.filter((r) => r.matched === 0);
       const matchedCount = results.length - unmatched.length;
       setBulkResult({ total: results.length, matchedCount, unmatched });
@@ -761,7 +808,7 @@ export default function DeliveryEscalationClient() {
               {syncError && !sessionExpired && (
                 <div className="text-[12px] text-rose-400">⚠ {syncError} — retrying…</div>
               )}
-              {bulkResult && tab === 'fresh' && (
+              {bulkResult && (tab === 'fresh' || tab === 'forced_rto') && (
                 <div className="text-[12px] bg-zinc-900/70 border border-zinc-800 rounded-lg px-3 py-2 flex items-start justify-between gap-3">
                   <div>
                     <span className="text-zinc-300 font-semibold">Bulk upload: {bulkResult.matchedCount}/{bulkResult.total} matched.</span>
@@ -972,7 +1019,7 @@ export default function DeliveryEscalationClient() {
                       {/* Everyone with access gets this - it is how an agent narrows the shared
                           desk down to their own tickets now that nothing is hidden from them. */}
                       <CustomSelect value={agentFilter} onChange={setAgentFilter} options={agentOptions} placeholder="Agent" />
-                      {tab === 'fresh' && (
+                      {(tab === 'fresh' || tab === 'forced_rto') && (
                         <>
                           <input
                             ref={bulkFileInputRef}
@@ -985,9 +1032,16 @@ export default function DeliveryEscalationClient() {
                             onClick={() => bulkFileInputRef.current?.click()}
                             disabled={bulkUploading}
                             className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
-                            title="Bulk upload outcomes via CSV (columns: AWB, Outcome, Remarks)"
+                            title="Bulk upload outcomes via CSV (columns: AWB, Outcome, Remarks). For a child disposition, put the full path in Outcome, e.g. Escalated > Awaiting Partner."
                           >
                             {bulkUploading ? 'Uploading…' : '📤 Bulk Upload'}
+                          </button>
+                          <button
+                            onClick={() => downloadBulkSampleCsv(processDispositions)}
+                            className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors"
+                            title="Download a sample CSV in the format Bulk Upload expects, including how to write a child disposition"
+                          >
+                            📋 Sample CSV
                           </button>
                         </>
                       )}

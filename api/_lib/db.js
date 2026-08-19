@@ -1446,34 +1446,40 @@ async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRema
   `, [id, outcome || null, agentRemarks || null, email, id]);
 }
 
-// Bulk outcome upload for Fresh tickets (see api/delivery-escalation/record.js's 'bulkDispose'
-// action) - one UPDATE per (awb, outcome) pair, matching EVERY row with that awb_code: an AWB
-// can legitimately repeat (same AWB reused across brands, or a re-shipped order), and there's
-// no brand column in the upload to disambiguate, so every match gets the same outcome. Scoped
-// to Fresh-eligible rows only (outcome blank/RTO/Escalated - same set getDeliveryEscalationFresh
-// lists) so a bad upload can't silently overwrite an already-Delivered ticket's history. Returns
-// how many rows each pair actually changed, so the caller can report AWBs that matched nothing
-// (typo, wrong AWB) or matched zero because every row for that AWB was already resolved.
+// Bulk outcome upload for the Fresh AND Forced RTO tabs (see api/delivery-escalation/record.js's
+// 'bulkDispose' action) - one UPDATE per (awb, outcome) pair, matching every row with that
+// awb_code THAT'S STILL IN THE UPLOADING TAB'S OWN VIEW (DE_VIEW_WHERE[view]): an AWB can
+// legitimately repeat (same AWB reused across brands, a re-shipped order, or the same parcel
+// sitting in both Fresh and Forced RTO as separate ticket rows - see the repeat-contact case
+// disposeDeliveryEscalationTicketById's own cascade handles for the single-dispose path), and
+// there's no brand column in the upload to disambiguate, so every match within that view gets
+// the same outcome. Scoping by view - not just "is this outcome still open" - is what stops a
+// Fresh upload from silently resolving an unrelated Forced RTO row for the same AWB, and vice
+// versa. Returns how many rows each pair actually changed, so the caller can report AWBs that
+// matched nothing (typo, wrong AWB) or matched zero because every row for that AWB in this view
+// was already resolved.
 //
 // agent_email is ALWAYS set to whoever ran the upload, even if some other agent had already
 // claimed the row - unlike the single claim/dispose path (claimDeliveryEscalationTicketById/
 // disposeDeliveryEscalationTicketById), which only fills a blank agent_email and never
 // overwrites an existing claim. A bulk upload's outcome IS the disposal, uploaded by the person
 // who ran it, not a claim being made on someone else's behalf.
-async function bulkDisposeDeliveryEscalationByAwb(rows, email) {
+async function bulkDisposeDeliveryEscalationByAwb(rows, email, view) {
+  if (view !== 'fresh' && view !== 'forced_rto') {
+    throw new Error(`Unknown Delivery-Escalation bulk-upload view: ${view}`);
+  }
+  const where = DE_VIEW_WHERE[view];
+  const pool = await getPool();
   const results = [];
   for (const { awb, outcome, remarks } of rows) {
-    const { affectedRows } = await sql`
+    const [result] = await pool.execute(`
       UPDATE Delivery_escalation
-      SET outcome = ${outcome}, agent_remarks = ${remarks || null}, disposed_at = now(),
-          agent_email = ${email},
-          assigned_at = CASE WHEN assigned_at IS NULL THEN now() ELSE assigned_at END
-      WHERE awb_code = ${awb}
-        AND (outcome IS NULL OR outcome = ''
-             OR outcome = 'RTO' OR outcome LIKE 'RTO > %'
-             OR outcome = 'Escalated' OR outcome LIKE 'Escalated > %')
-    `;
-    results.push({ awb, outcome, matched: affectedRows || 0 });
+      SET outcome = ?, agent_remarks = ?, disposed_at = NOW(),
+          agent_email = ?,
+          assigned_at = CASE WHEN assigned_at IS NULL THEN NOW() ELSE assigned_at END
+      WHERE awb_code = ? AND (${where})
+    `, [outcome, remarks || null, email, awb]);
+    results.push({ awb, outcome, matched: result.affectedRows || 0 });
   }
   return results;
 }

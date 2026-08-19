@@ -5,7 +5,7 @@
 // hid every unclaimed ticket from the very people meant to claim them (a newly-invited agent saw
 // an empty page). Access is checkAccess()/report_tab_permissions only - no row-level scope.
 const assert = require('assert');
-const { deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS } = require('./db');
+const { deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS, bulkDisposeDeliveryEscalationByAwb } = require('./db');
 
 // 1. No filters: the view predicate alone, no agent/scope clause bolted on.
 {
@@ -60,4 +60,18 @@ assert.throws(() => deWhere('everything', {}), /Unknown Delivery-Escalation view
   ]);
 }
 
-console.log('db.deliveryEscalation.test.js: all assertions passed');
+// 7. Bulk upload's view guard runs BEFORE any query - a bulk upload must be scoped to Fresh or
+// Forced RTO (the only two tabs that offer it), never 'resolved' or a typo view, and rejecting
+// it up front is what stops that mistake from silently matching the wrong tab's rows (or none).
+(async () => {
+  await assert.rejects(
+    () => bulkDisposeDeliveryEscalationByAwb([{ awb: 'x', outcome: 'y' }], 'a@b.com', 'resolved'),
+    /Unknown Delivery-Escalation bulk-upload view/,
+  );
+  await assert.rejects(
+    () => bulkDisposeDeliveryEscalationByAwb([{ awb: 'x', outcome: 'y' }], 'a@b.com', undefined),
+    /Unknown Delivery-Escalation bulk-upload view/,
+  );
+
+  console.log('db.deliveryEscalation.test.js: all assertions passed');
+})();
