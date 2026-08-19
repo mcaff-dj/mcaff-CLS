@@ -16,6 +16,7 @@ import argparse
 import csv
 import io
 import json
+import random
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -47,6 +48,34 @@ DEFAULT_TARGET_COLUMNS = [
     "Disposition: partner_name", "Disposition: Estimated_time_delivery_SR",
     "Disposition: Query Class",
 ]
+
+
+DISPATCH_DELAY_TRIGGER_CLASSES = ("Delivery", "Requests & Enquiries")
+
+
+def build_dispatch_delay_duplicate(row, idx_dispatch, idx_qclass, idx_ticket, idx_subcategory):
+    """Returns a Warehouse/Late-Delay-Dispatch duplicate of `row` when its dispatch
+    delay exceeds 24h and its Query Class is Delivery or Requests & Enquiries (the
+    latter is otherwise dropped from the sheet entirely by a later filter - only
+    this duplicate survives for it), else None. Ticket Number gets a random
+    suffix so the duplicate never collides with the original or an existing row."""
+    if idx_dispatch < 0 or idx_qclass < 0 or len(row) <= max(idx_dispatch, idx_qclass):
+        return None
+    try:
+        hours = float(row[idx_dispatch])
+    except (TypeError, ValueError):
+        return None
+    if hours <= 24 or str(row[idx_qclass]).strip() not in DISPATCH_DELAY_TRIGGER_CLASSES:
+        return None
+
+    needed_len = max(idx_qclass, idx_subcategory, idx_ticket) + 1
+    dup = list(row) + [""] * (needed_len - len(row))
+    if idx_ticket >= 0:
+        dup[idx_ticket] = f"{dup[idx_ticket]}-WH{random.randint(1000, 9999)}"
+    dup[idx_qclass] = "Warehouse"
+    if idx_subcategory >= 0:
+        dup[idx_subcategory] = "Late/Delay Dispatch"
+    return dup
 
 
 def get_state():
@@ -132,6 +161,8 @@ def main():
     idx_subcategory = raw_headers.index("Subcategory") if "Subcategory" in raw_headers else -1
     idx_ticket_number = raw_headers.index("Ticket Number") if "Ticket Number" in raw_headers else -1
     idx_query_class = raw_headers.index("Disposition: Query Class") if "Disposition: Query Class" in raw_headers else -1
+    idx_dispatch_delay = (raw_headers.index("Objective: Dispatch_date_timeframe")
+                           if "Objective: Dispatch_date_timeframe" in raw_headers else -1)
 
     fallback_count = 0
     replace_count = 0
@@ -154,6 +185,16 @@ def main():
                 replace_count += 1
     print(f"[{tab_name}] Order Name fallback applied to {fallback_count} rows; "
           f"'Marked Undelivered' replaced in {replace_count} cells")
+
+    dispatch_duplicates = [
+        dup for row in raw_rows
+        if (dup := build_dispatch_delay_duplicate(row, idx_dispatch_delay, idx_query_class,
+                                                   idx_ticket_number, idx_subcategory)) is not None
+    ]
+    if dispatch_duplicates:
+        raw_rows.extend(dispatch_duplicates)
+        print(f"[{tab_name}] added {len(dispatch_duplicates)} dispatch-delay duplicate rows "
+              f"(Warehouse / Late-Delay Dispatch)")
 
     before_count = len(raw_rows)
     if idx_subcategory >= 0:
