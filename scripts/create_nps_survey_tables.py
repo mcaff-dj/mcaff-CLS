@@ -8,7 +8,8 @@ or writes to those tables.
 
 Five tables, one per stage of the flow:
   nps_survey          - a survey definition (name, active/archived)
-  nps_question        - ordered questions on a survey (score/choice/text)
+  nps_question        - ordered questions on a survey (score/csat/choice/text), each optionally
+                        shown only when earlier answers satisfy its conditions_json rule set
   nps_recipient       - one row per customer a survey link was generated for; tracks
                         send/response status regardless of channel or trigger source
   nps_response        - one row per submitted response (unique per recipient - a
@@ -43,10 +44,12 @@ CREATE TABLE IF NOT EXISTS `nps_question` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `survey_id` BIGINT UNSIGNED NOT NULL,
   `position` INT UNSIGNED NOT NULL,
-  `type` ENUM('score', 'choice', 'text') NOT NULL,
+  `type` ENUM('score', 'csat', 'choice', 'text') NOT NULL,
   `question_text` TEXT NOT NULL,
   `options_json` TEXT NULL,
   `required` TINYINT(1) NOT NULL DEFAULT 1,
+  `conditions_json` TEXT NULL,
+  `condition_logic` ENUM('AND', 'OR') NOT NULL DEFAULT 'AND',
   PRIMARY KEY (`id`),
   KEY `survey_id_key` (`survey_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4

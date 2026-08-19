@@ -3,6 +3,7 @@
 const { getSession } = require('../_lib/session');
 const { sql } = require('../_lib/db');
 const { computeNpsAggregate } = require('../_lib/npsScore');
+const { computeCsatAggregate } = require('../_lib/npsCsat');
 
 const CARD_KEY = 'nps';
 
@@ -28,6 +29,7 @@ module.exports = async (req, res) => {
     SELECT id, type, question_text FROM nps_question WHERE survey_id = ${surveyId} ORDER BY position ASC
   `;
   const scoreQuestion = questions.find((q) => q.type === 'score');
+  const csatQuestion = questions.find((q) => q.type === 'csat');
 
   const { rows: statusCounts } = await sql`
     SELECT status, COUNT(*) AS n FROM nps_recipient WHERE survey_id = ${surveyId} GROUP BY status
@@ -41,9 +43,11 @@ module.exports = async (req, res) => {
     WHERE r.survey_id = ${surveyId}
   `;
 
-  const scores = scoreQuestion
-    ? answers.filter((a) => a.question_id === scoreQuestion.id).map((a) => Number(a.answer_value)).filter((n) => Number.isFinite(n))
+  const numericAnswersFor = (question) => question
+    ? answers.filter((a) => a.question_id === question.id).map((a) => Number(a.answer_value)).filter((n) => Number.isFinite(n))
     : [];
+  const scores = numericAnswersFor(scoreQuestion);
+  const csatScores = numericAnswersFor(csatQuestion);
 
   // Group answers by recipient for the admin's per-response detail view.
   const byRecipient = {};
@@ -55,6 +59,7 @@ module.exports = async (req, res) => {
   res.status(200).json({
     statusCounts: Object.fromEntries(statusCounts.map((s) => [s.status, s.n])),
     nps: computeNpsAggregate(scores),
+    csat: computeCsatAggregate(csatScores),
     questions,
     responses: Object.values(byRecipient),
   });

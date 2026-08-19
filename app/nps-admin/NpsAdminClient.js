@@ -6,10 +6,20 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const QUESTION_TYPES = [
-  { value: 'score', label: 'Score (0-10)' },
+  { value: 'score', label: 'Score (0-10, NPS)' },
+  { value: 'csat', label: 'CSAT (1-5)' },
   { value: 'choice', label: 'Multiple choice' },
   { value: 'text', label: 'Free text' },
 ];
+
+// Only these types make sense as a follow-up question's trigger: a score/csat answer is a
+// number to range-check, a choice answer is one of a fixed set to equality-check. A free-text
+// answer has no structured value to condition on.
+const CONDITIONABLE_TYPES = ['score', 'csat', 'choice'];
+
+function optionsList(q) {
+  return (q.options || '').split(',').map((o) => o.trim()).filter(Boolean);
+}
 
 async function getJson(url, opts) {
   const r = await fetch(url, opts);
@@ -19,7 +29,94 @@ async function getJson(url, opts) {
 }
 
 function emptyQuestion() {
-  return { type: 'score', questionText: '', options: '', required: true };
+  return { type: 'score', questionText: '', options: '', required: true, conditions: [], conditionLogic: 'AND' };
+}
+
+function emptyCondition(targetIndex, targetType) {
+  return targetType === 'choice'
+    ? { questionIndex: targetIndex, type: 'equals', value: '' }
+    : { questionIndex: targetIndex, type: 'range', min: 0, max: 10 };
+}
+
+function ConditionEditor({ questions, idx, onChange }) {
+  const q = questions[idx];
+  const priorTargets = questions
+    .map((pq, i) => ({ ...pq, index: i }))
+    .slice(0, idx)
+    .filter((pq) => CONDITIONABLE_TYPES.includes(pq.type));
+
+  if (priorTargets.length === 0) return null;
+
+  const conditions = q.conditions || [];
+
+  function updateCondition(cIdx, patch) {
+    onChange({ conditions: conditions.map((c, i) => (i === cIdx ? { ...c, ...patch } : c)) });
+  }
+
+  return (
+    <div className="border-t border-zinc-800 pt-2 space-y-2">
+      <p className="text-xs text-zinc-500">Show this question only if:</p>
+      {conditions.map((c, cIdx) => {
+        const target = questions[c.questionIndex];
+        return (
+          <div key={cIdx} className="flex flex-wrap items-center gap-2 text-xs">
+            <select
+              className="bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1 text-zinc-100"
+              value={c.questionIndex}
+              onChange={(e) => {
+                const newTarget = questions[Number(e.target.value)];
+                updateCondition(cIdx, emptyCondition(Number(e.target.value), newTarget.type));
+              }}
+            >
+              {priorTargets.map((t) => <option key={t.index} value={t.index}>Q{t.index + 1}: {t.questionText || '(untitled)'}</option>)}
+            </select>
+            {(target.type === 'score' || target.type === 'csat') ? (
+              <>
+                <span className="text-zinc-500">between</span>
+                <input type="number" className="w-14 bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1 text-zinc-100"
+                  value={c.min} onChange={(e) => updateCondition(cIdx, { min: Number(e.target.value) })} />
+                <span className="text-zinc-500">and</span>
+                <input type="number" className="w-14 bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1 text-zinc-100"
+                  value={c.max} onChange={(e) => updateCondition(cIdx, { max: Number(e.target.value) })} />
+              </>
+            ) : (
+              <>
+                <span className="text-zinc-500">equals</span>
+                <select className="bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1 text-zinc-100"
+                  value={c.value} onChange={(e) => updateCondition(cIdx, { value: e.target.value })}>
+                  <option value="">choose...</option>
+                  {optionsList(target).map((o) => <option key={o} value={o}>{o}</option>)}
+                </select>
+              </>
+            )}
+            <button type="button" className="text-rose-400 hover:text-rose-300"
+              onClick={() => onChange({ conditions: conditions.filter((_, i) => i !== cIdx) })}>
+              Remove
+            </button>
+          </div>
+        );
+      })}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="text-xs text-indigo-400 hover:text-indigo-300"
+          onClick={() => onChange({ conditions: [...conditions, emptyCondition(priorTargets[0].index, priorTargets[0].type)] })}
+        >
+          + Add condition
+        </button>
+        {conditions.length > 1 && (
+          <select
+            className="bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1 text-xs text-zinc-100"
+            value={q.conditionLogic}
+            onChange={(e) => onChange({ conditionLogic: e.target.value })}
+          >
+            <option value="AND">Match ALL conditions</option>
+            <option value="OR">Match ANY condition</option>
+          </select>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function NewSurveyForm({ onCreated }) {
@@ -32,6 +129,21 @@ function NewSurveyForm({ onCreated }) {
     setQuestions((qs) => qs.map((q, i) => (i === idx ? { ...q, ...patch } : q)));
   }
 
+  // ponytail: removing/reordering a question doesn't try to auto-fix a LATER question's type
+  // (e.g. a condition targeting a 'choice' question whose type was since changed to 'text') -
+  // create-survey submit surfaces the server's validation error in that case; add smarter
+  // repair if this trips people up in practice.
+  function removeQuestion(removedIdx) {
+    setQuestions((qs) => qs
+      .filter((_, i) => i !== removedIdx)
+      .map((q) => ({
+        ...q,
+        conditions: (q.conditions || [])
+          .filter((c) => c.questionIndex !== removedIdx)
+          .map((c) => (c.questionIndex > removedIdx ? { ...c, questionIndex: c.questionIndex - 1 } : c)),
+      })));
+  }
+
   async function submit() {
     setError('');
     if (!name.trim()) { setError('Survey name is required.'); return; }
@@ -39,7 +151,9 @@ function NewSurveyForm({ onCreated }) {
       type: q.type,
       questionText: q.questionText,
       required: q.required,
-      options: q.type === 'choice' ? q.options.split(',').map((o) => o.trim()).filter(Boolean) : undefined,
+      options: q.type === 'choice' ? optionsList(q) : undefined,
+      conditions: (q.conditions || []).length > 0 ? q.conditions : undefined,
+      conditionLogic: q.conditionLogic,
     }));
     setSaving(true);
     try {
@@ -86,7 +200,7 @@ function NewSurveyForm({ onCreated }) {
               <button
                 type="button"
                 className="ml-auto text-xs text-rose-400 hover:text-rose-300"
-                onClick={() => setQuestions((qs) => qs.filter((_, i) => i !== idx))}
+                onClick={() => removeQuestion(idx)}
                 disabled={questions.length === 1}
               >
                 Remove
@@ -106,6 +220,7 @@ function NewSurveyForm({ onCreated }) {
                 onChange={(e) => updateQuestion(idx, { options: e.target.value })}
               />
             )}
+            <ConditionEditor questions={questions} idx={idx} onChange={(patch) => updateQuestion(idx, patch)} />
           </div>
         ))}
       </div>
@@ -232,6 +347,9 @@ function SurveyDetail({ surveyId, onBack }) {
       {dashboard && (
         <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-5 grid grid-cols-2 sm:grid-cols-4 gap-4">
           <div><p className="text-xs text-zinc-500">NPS score</p><p className="text-2xl font-bold text-zinc-100">{dashboard.nps.total ? dashboard.nps.nps : '—'}</p></div>
+          {dashboard.csat.total > 0 && (
+            <div><p className="text-xs text-zinc-500">CSAT</p><p className="text-2xl font-bold text-zinc-100">{dashboard.csat.satisfiedPct}%</p></div>
+          )}
           <div><p className="text-xs text-zinc-500">Sent</p><p className="text-2xl font-bold text-zinc-100">{dashboard.statusCounts.sent || 0}</p></div>
           <div><p className="text-xs text-zinc-500">Responded</p><p className="text-2xl font-bold text-zinc-100">{dashboard.statusCounts.responded || 0}</p></div>
           <div><p className="text-xs text-zinc-500">Failed</p><p className="text-2xl font-bold text-zinc-100">{dashboard.statusCounts.failed || 0}</p></div>

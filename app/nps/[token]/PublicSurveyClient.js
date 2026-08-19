@@ -4,11 +4,14 @@
 // no login involved. The signed token in the URL (see api/_lib/npsToken.js) is the only
 // authorization; api/nps/public/[token].js is the sole API surface it talks to.
 import { useState, useEffect } from 'react';
+import { conditionsMet } from '../../../api/_lib/npsConditions';
 
-function ScoreInput({ value, onChange }) {
+const SCALE_RANGE = { score: [0, 10], csat: [1, 5] };
+
+function ScaleInput({ min, max, value, onChange }) {
   return (
     <div className="flex flex-wrap gap-1.5">
-      {Array.from({ length: 11 }, (_, n) => n).map((n) => (
+      {Array.from({ length: max - min + 1 }, (_, i) => min + i).map((n) => (
         <button
           key={n}
           type="button"
@@ -62,9 +65,14 @@ export default function PublicSurveyClient({ token }) {
     setAnswers((a) => ({ ...a, [questionId]: value }));
   }
 
+  // Only questions whose own "show only if" conditions hold against the answers given so far -
+  // same conditionsMet check the submit endpoint re-runs server-side (api/nps/public/[token].js),
+  // so a hidden follow-up can't be required or counted here either.
+  const visibleQuestions = questions.filter((q) => conditionsMet(q.conditions, q.conditionLogic, answers));
+
   async function submit() {
     setError('');
-    const missing = questions.find((q) => q.required && !answers[q.id]);
+    const missing = visibleQuestions.find((q) => q.required && !answers[q.id]);
     if (missing) { setError('Please answer every required question.'); return; }
 
     setSubmitting(true);
@@ -101,10 +109,12 @@ export default function PublicSurveyClient({ token }) {
   return (
     <Shell>
       <h1 className="text-lg font-bold text-zinc-900">{survey.name}</h1>
-      {questions.map((q) => (
+      {visibleQuestions.map((q) => (
         <div key={q.id} className="space-y-2">
           <p className="text-sm font-medium text-zinc-800">{q.question_text}{q.required ? ' *' : ''}</p>
-          {q.type === 'score' && <ScoreInput value={answers[q.id]} onChange={(v) => setAnswer(q.id, v)} />}
+          {SCALE_RANGE[q.type] && (
+            <ScaleInput min={SCALE_RANGE[q.type][0]} max={SCALE_RANGE[q.type][1]} value={answers[q.id]} onChange={(v) => setAnswer(q.id, v)} />
+          )}
           {q.type === 'choice' && <ChoiceInput options={q.options} value={answers[q.id]} onChange={(v) => setAnswer(q.id, v)} />}
           {q.type === 'text' && (
             <textarea

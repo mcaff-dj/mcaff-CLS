@@ -45,4 +45,23 @@ assert.strictEqual(nonNumeric.valid, false);
 const badChoice = validateAnswers([choiceQ], [{ questionId: 2, value: 'Amazing' }]);
 assert.strictEqual(badChoice.valid, false);
 
+// 7. CSAT (1-5): in range passes, out of range fails.
+const csatQ = { id: 4, type: 'csat', required: 1 };
+assert.strictEqual(validateAnswers([csatQ], [{ questionId: 4, value: '5' }]).valid, true);
+assert.strictEqual(validateAnswers([csatQ], [{ questionId: 4, value: '6' }]).valid, false);
+assert.strictEqual(validateAnswers([csatQ], [{ questionId: 4, value: '0' }]).valid, false);
+
+// 8. Conditional required: a follow-up whose trigger condition ISN'T met is not required,
+// even though it's flagged required=1 and was left unanswered.
+const followUp = {
+  id: 5, type: 'text', required: 1,
+  conditions: [{ questionId: 1, type: 'range', min: 0, max: 6 }], conditionLogic: 'AND',
+};
+const conditionNotMet = validateAnswers([scoreQ, followUp], [{ questionId: 1, value: '9' }]);
+assert.strictEqual(conditionNotMet.valid, true);
+
+// 9. Conditional required: same follow-up IS required once its trigger condition holds.
+const conditionMet = validateAnswers([scoreQ, followUp], [{ questionId: 1, value: '3' }]);
+assert.strictEqual(conditionMet.valid, false);
+
 console.log('npsAnswers.test.js: all assertions passed');
