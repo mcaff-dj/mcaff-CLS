@@ -24,6 +24,14 @@ on:
       - 'lambda/assign_leads/**'
       - 'lambda/assign_ndr_leads/**'
       - 'lambda/build.sh'
+      # This file too, same as deploy.yml lists itself. Without it a change to the deploy
+      # steps below - including the memory/timeout sizing - sits on main doing nothing until
+      # some unrelated script happens to change. Shipped exactly that way once; hence the line.
+      - '.github/workflows/deploy-cron-lambdas.yml'
+  # Lets the sizing/deploy be applied on demand rather than only as a side effect of a code
+  # change - e.g. after granting the deploy role a missing IAM permission, where there is no
+  # code to push but the configuration still needs to land.
+  workflow_dispatch: {}
 
 permissions:
   id-token: write   # OIDC -> assume the AWS role below, no stored AWS keys
