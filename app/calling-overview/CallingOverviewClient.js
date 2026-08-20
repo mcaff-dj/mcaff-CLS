@@ -238,6 +238,11 @@ export default function CallingOverviewClient() {
             <div className="kpi-value">{stats.totalRefunded.toLocaleString('en-IN')}</div>
             <div className="kpi-sub">₹{stats.totalRefundAmount.toLocaleString('en-IN')}</div>
           </div>
+          <div className="kpi kpi-good">
+            <div className="kpi-label">Total Converted</div>
+            <div className="kpi-value">{stats.totalConverted.toLocaleString('en-IN')}</div>
+            <div className="kpi-sub">Reordered / accepted</div>
+          </div>
         </div>
       )}
 
@@ -299,6 +304,22 @@ export default function CallingOverviewClient() {
               {!data.partnerReasonBreakdown.length && (
                 <tr><td colSpan={6} className="co-table-empty">No data for this filter.</td></tr>
               )}
+              {!!data.partnerReasonBreakdown.length && (() => {
+                const totalAssigned = data.partnerReasonBreakdown.reduce((s, r) => s + r.totalAssigned, 0);
+                const totalConnected = data.partnerReasonBreakdown.reduce((s, r) => s + r.totalConnected, 0);
+                const totalConverted = data.partnerReasonBreakdown.reduce((s, r) => s + r.totalConverted, 0);
+                const pct = (n, d) => (d > 0 ? Math.round((n / d) * 100) : 0);
+                return (
+                  <tr className="co-table-total">
+                    <td>Total</td>
+                    <td>{totalAssigned.toLocaleString('en-IN')}</td>
+                    <td>{totalConnected.toLocaleString('en-IN')}</td>
+                    <td>{pct(totalConnected, totalAssigned)}%</td>
+                    <td>{totalConverted.toLocaleString('en-IN')}</td>
+                    <td>{pct(totalConverted, totalAssigned)}%</td>
+                  </tr>
+                );
+              })()}
             </tbody>
           </table>
         </div>

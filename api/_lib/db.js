@@ -1715,7 +1715,11 @@ async function getCallingOverviewStats(dateFrom, dateTo) {
       SUM(CASE WHEN connected = 'Yes' AND disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN 1 ELSE 0 END) AS total_connected,
       SUM(CASE WHEN connected = 'No' AND disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN 1 ELSE 0 END) AS total_unreachable,
       SUM(CASE WHEN (disposition = 'Refund Requested' OR refund_amount IS NOT NULL) AND disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN 1 ELSE 0 END) AS total_refunded,
-      COALESCE(SUM(CASE WHEN disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN refund_amount ELSE 0 END), 0) AS total_refund_amount
+      COALESCE(SUM(CASE WHEN disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN refund_amount ELSE 0 END), 0) AS total_refund_amount,
+      SUM(CASE WHEN disposed_at IS NOT NULL
+            AND (disposition IN ('Customer Agreed to Accept', 'Product Issue / Exchange') OR new_order_id IS NOT NULL)
+            AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+          THEN 1 ELSE 0 END) AS total_converted
     FROM CLS_RTO_calling
   `;
   const r = rows[0] || {};
@@ -1733,6 +1737,7 @@ async function getCallingOverviewStats(dateFrom, dateTo) {
     connectRate: totalConnectAttempts > 0 ? Math.round((totalConnected / totalConnectAttempts) * 100) : 0,
     totalRefunded: num(r.total_refunded),
     totalRefundAmount: num(r.total_refund_amount),
+    totalConverted: num(r.total_converted),
   };
 }
 
