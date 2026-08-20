@@ -19,6 +19,52 @@ const PAYMENT_MODE_OPTIONS = [
   { value: 'COD', label: 'COD' },
 ];
 
+// Shared column shape for every funnel table on this page (Delivery Partner Breakdown, RTO
+// Reason Breakdown, and the per-partner RTO reason sub-table) - only the leftmost label
+// column differs between them.
+function funnelColumns(labelKey, labelText) {
+  return [
+    { key: labelKey, label: labelText, type: 'string' },
+    { key: 'totalAssigned', label: 'Total Leads Assigned', type: 'number' },
+    { key: 'totalConnected', label: 'Total Connected', type: 'number' },
+    { key: 'connectedPct', label: 'Connected %', type: 'number' },
+    { key: 'totalConverted', label: 'Total Converted', type: 'number' },
+    { key: 'convertedPct', label: 'Converted %', type: 'number' },
+  ];
+}
+const PARTNER_COLUMNS = funnelColumns('deliveryPartner', 'Delivery Partner');
+const REASON_COLUMNS = funnelColumns('rtoReason', 'RTO Reason');
+const DEFAULT_SORT = { key: 'totalAssigned', dir: 'desc' };
+
+function sortRows(rows, sort) {
+  const { key, dir } = sort;
+  return [...rows].sort((a, b) => {
+    const av = a[key], bv = b[key];
+    const cmp = typeof av === 'string' ? av.localeCompare(bv) : av - bv;
+    return dir === 'asc' ? cmp : -cmp;
+  });
+}
+
+// Clicking the already-active column flips its direction; clicking a new column starts it
+// at a sensible default (alphabetical for the label column, highest-first for every number).
+function nextSort(prev, col) {
+  if (prev.key === col.key) return { key: col.key, dir: prev.dir === 'asc' ? 'desc' : 'asc' };
+  return { key: col.key, dir: col.type === 'string' ? 'asc' : 'desc' };
+}
+
+function SortableHeaderRow({ columns, sort, onSort }) {
+  return (
+    <tr>
+      {columns.map((col) => (
+        <th key={col.key} className="co-th-sortable" onClick={() => onSort(col)}>
+          {col.label}
+          {sort.key === col.key && <span className="co-sort-arrow">{sort.dir === 'asc' ? ' ▲' : ' ▼'}</span>}
+        </th>
+      ))}
+    </tr>
+  );
+}
+
 // Uses the browser's own local date components (not toISOString(), which forces UTC and
 // would misdate the early-morning IST hours - e.g. 2am IST is still the previous day in
 // UTC) - correct as long as the agent's device clock/timezone is actually set to IST,
@@ -72,6 +118,9 @@ export default function CallingOverviewClient() {
   const [customTo, setCustomTo] = useState('');
   const [paymentMode, setPaymentMode] = useState('');
   const [expandedPartners, setExpandedPartners] = useState(() => new Set());
+  const [partnerSort, setPartnerSort] = useState(DEFAULT_SORT);
+  const [reasonSort, setReasonSort] = useState(DEFAULT_SORT);
+  const [subtableSort, setSubtableSort] = useState(DEFAULT_SORT);
 
   useEffect(() => {
     fetch('/api/auth/me')
@@ -198,17 +247,14 @@ export default function CallingOverviewClient() {
           <p className="co-table-hint">Click a partner to see its RTO reason funnel.</p>
           <table className="co-table">
             <thead>
-              <tr>
-                <th>Delivery Partner</th>
-                <th>Total Leads Assigned</th>
-                <th>Total Connected</th>
-                <th>Connected %</th>
-                <th>Total Converted</th>
-                <th>Converted %</th>
-              </tr>
+              <SortableHeaderRow
+                columns={PARTNER_COLUMNS}
+                sort={partnerSort}
+                onSort={(col) => setPartnerSort((prev) => nextSort(prev, col))}
+              />
             </thead>
             <tbody>
-              {data.partnerReasonBreakdown.map((row) => {
+              {sortRows(data.partnerReasonBreakdown, partnerSort).map((row) => {
                 const isOpen = expandedPartners.has(row.deliveryPartner);
                 return (
                   <Fragment key={row.deliveryPartner}>
@@ -225,17 +271,14 @@ export default function CallingOverviewClient() {
                         <td colSpan={6}>
                           <table className="co-table co-subtable">
                             <thead>
-                              <tr>
-                                <th>RTO Reason</th>
-                                <th>Total Leads Assigned</th>
-                                <th>Total Connected</th>
-                                <th>Connected %</th>
-                                <th>Total Converted</th>
-                                <th>Converted %</th>
-                              </tr>
+                              <SortableHeaderRow
+                                columns={REASON_COLUMNS}
+                                sort={subtableSort}
+                                onSort={(col) => setSubtableSort((prev) => nextSort(prev, col))}
+                              />
                             </thead>
                             <tbody>
-                              {row.reasons.map((r) => (
+                              {sortRows(row.reasons, subtableSort).map((r) => (
                                 <tr key={r.rtoReason}>
                                   <td>{r.rtoReason}</td>
                                   <td>{r.totalAssigned.toLocaleString('en-IN')}</td>
@@ -266,17 +309,14 @@ export default function CallingOverviewClient() {
           <h2 className="co-table-title">RTO Reason Breakdown</h2>
           <table className="co-table">
             <thead>
-              <tr>
-                <th>RTO Reason</th>
-                <th>Total Leads Assigned</th>
-                <th>Total Connected</th>
-                <th>Connected %</th>
-                <th>Total Converted</th>
-                <th>Converted %</th>
-              </tr>
+              <SortableHeaderRow
+                columns={REASON_COLUMNS}
+                sort={reasonSort}
+                onSort={(col) => setReasonSort((prev) => nextSort(prev, col))}
+              />
             </thead>
             <tbody>
-              {data.rtoReasonBreakdown.map((row) => (
+              {sortRows(data.rtoReasonBreakdown, reasonSort).map((row) => (
                 <tr key={row.rtoReason}>
                   <td>{row.rtoReason}</td>
                   <td>{row.totalAssigned.toLocaleString('en-IN')}</td>
