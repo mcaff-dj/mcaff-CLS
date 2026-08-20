@@ -89,6 +89,7 @@ mount('all', '/api/rto/sheet', '../rto/sheet.js');
 mount('post', '/api/rto/claim', '../rto/claim.js');
 mount('post', '/api/rto/next-lead', '../rto/next-lead.js');
 mount('post', '/api/rto/upload-start', '../rto/upload-start.js');
+mount('get', '/api/rto/upload-status', '../rto/upload-status.js');
 mount('all', '/api/ndr/sheet', '../ndr/sheet.js');
 mount('post', '/api/ndr/lead-assignment', '../ndr/lead-assignment.js');
 mount('all', '/api/delivery-escalation/sheet', '../delivery-escalation/sheet.js');
