@@ -128,6 +128,52 @@ def test_resolve_refund_statuses_caps_live_checks_per_run():
         assign_leads._check_gokwik_refund_status_live = orig_live
 
 
+def test_resolve_refund_statuses_stops_at_time_budget():
+    """The wall-clock ceiling on the GoKwik phase (GOKWIK_TIME_BUDGET_SEC) - what keeps the run
+    inside its Lambda timeout when the machine is slow, which the order-count cap alone could
+    not do (120 orders is a fixed order count but an unbounded amount of TIME).
+
+    Simulated with a deliberately slow live check and a budget of 0, so the phase must stop after
+    at most one wave. What has to hold:
+      1. it stops early rather than working through every checkable order
+      2. every cut-off order still gets a fail-open False, so it assigns as normal
+      3. cut-off orders are NOT cached - not asked is not a verdict, and caching a guess as
+         "not refunded" would suppress a real refund for hours
+    """
+    n = 40
+    order_ids = [f"ORD{i:05d}" for i in range(n)]
+
+    orig_lookup = assign_leads.lookup_platform_order_ids
+    orig_creds = assign_leads._gokwik_credentials
+    orig_live = assign_leads._check_gokwik_refund_status_live
+    orig_budget = assign_leads.GOKWIK_TIME_BUDGET_SEC
+    checked = []
+    assign_leads.lookup_platform_order_ids = lambda ids: ({o: "111" for o in ids}, set())
+    assign_leads._gokwik_credentials = lambda order_id: ("app", "secret")
+
+    def _slow(order_id, platform_order_id, credentials):
+        checked.append(order_id)
+        return False
+
+    assign_leads._check_gokwik_refund_status_live = _slow
+    assign_leads.GOKWIK_TIME_BUDGET_SEC = 0  # budget already spent before the first wave
+    try:
+        dirty = {}
+        results = assign_leads.resolve_refund_statuses(set(order_ids), dirty)
+        assert len(checked) < n, f"the time budget must cut the phase short, checked all {n}"
+        assert len(results) == n, "every order still needs a fail-open answer"
+        assert all(v is False for v in results.values())
+        cut_off = [o for o in order_ids if o not in checked]
+        assert cut_off, "test needs some orders to be cut off"
+        assert not any(o in dirty for o in cut_off), \
+            "an order the clock cut off must never be cached as a verdict"
+    finally:
+        assign_leads.lookup_platform_order_ids = orig_lookup
+        assign_leads._gokwik_credentials = orig_creds
+        assign_leads._check_gokwik_refund_status_live = orig_live
+        assign_leads.GOKWIK_TIME_BUDGET_SEC = orig_budget
+
+
 class FakeCursor:
     def __init__(self, rows=None, raise_on_execute=False):
         self.rows = rows or []

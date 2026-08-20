@@ -78,6 +78,7 @@ import json
 import os
 import sys
 import threading
+import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -176,6 +177,30 @@ GOKWIK_MAX_CONCURRENCY = 8
 # run (a 14k-row sheet read, Postgres/MySQL fetches and the sheet writes - together ~15-20s)
 # comfortable room. Raise this only together with the Lambda's timeout, never on its own.
 GOKWIK_MAX_CHECKS_PER_RUN = 120
+
+# Wall-clock ceiling on the live GoKwik phase, and the thing that finally makes this run fit its
+# Lambda regardless of how slow the Lambda is.
+#
+# GOKWIK_MAX_CHECKS_PER_RUN above bounds the run in ORDERS, which is only a proxy for time: 120
+# orders is ~15 waves, and a wave costs ~1.5s when GoKwik is healthy but has no upper bound when
+# it is slow. That proxy is why this job still overran its 60s timeout after the order cap shipped
+# - the cap was right, the unit was wrong.
+#
+# The real constraint is a 60s hard timeout on a function sized at 256 MB (~0.15 vCPU), where every
+# CPU-bound stage - parsing a ~6 MB sheet, the 15k-row main loop - runs several times slower than
+# the ~12s this whole script takes on a full core. Raising the memory is the better fix and is
+# attempted by .github/workflows/deploy-cron-lambdas.yml, but that needs an IAM permission the
+# deploy role does not have (AccessDeniedException on lambda:UpdateFunctionConfiguration, observed
+# 2026-08-20), so the script cannot rely on it. Instead it now yields: the refund phase gets a
+# fixed slice of the budget and stops when it is spent, whatever the machine, however slow GoKwik
+# is that minute, and however large the sheet has grown.
+#
+# 20s leaves the rest of the run (sheet read, MySQL/Postgres fetches, the main loop, and the
+# assignment write that agents are actually waiting on) the remaining ~40s even at the worst
+# observed throttling. Orders the clock cuts off fail OPEN and are not cached, exactly like the
+# ones over the order cap - the same tradeoff the module docstring already makes everywhere else:
+# one extra call to an already-refunded customer beats stalling the whole desk.
+GOKWIK_TIME_BUDGET_SEC = 20
 
 # Order IDs per Item_level_data IN (...) batch - a few hundred keeps the statement well inside
 # any max_allowed_packet while still collapsing what used to be one query per lead.
@@ -406,12 +431,32 @@ def resolve_refund_statuses(order_ids, dirty):
               f"per fail-open)")
     if checkable:
         workers = min(GOKWIK_MAX_CONCURRENCY, len(checkable))
-        print(f"    asking GoKwik about {len(checkable)} order(s), {workers} at a time...")
+        print(f"    asking GoKwik about {len(checkable)} order(s), {workers} at a time "
+              f"(max {GOKWIK_TIME_BUDGET_SEC}s)...")
+        # Issued in waves rather than one pool.map over the whole list, purely so the clock can be
+        # checked between them - see GOKWIK_TIME_BUDGET_SEC. A wave is GOKWIK_MAX_CONCURRENCY calls,
+        # which is what pool.map was doing internally anyway; the only change is that the run can
+        # now stop partway instead of being committed to all of them.
+        started = time.monotonic()
+        done = 0
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            verdicts = pool.map(lambda args: _check_gokwik_refund_status_live(*args), checkable)
-            for (order_id, _platform_order_id, _credentials), refunded in zip(checkable, verdicts):
-                results[order_id] = refunded
-                cacheable[order_id] = refunded
+            for start in range(0, len(checkable), workers):
+                if time.monotonic() - started >= GOKWIK_TIME_BUDGET_SEC:
+                    break
+                wave = checkable[start:start + workers]
+                verdicts = pool.map(lambda args: _check_gokwik_refund_status_live(*args), wave)
+                for (order_id, _platform_order_id, _credentials), refunded in zip(wave, verdicts):
+                    results[order_id] = refunded
+                    cacheable[order_id] = refunded
+                done += len(wave)
+        # Whatever the clock cut off fails OPEN and is deliberately left uncached, exactly like the
+        # over-budget slice above: not asked is not a verdict.
+        if done < len(checkable):
+            for order_id, _platform_order_id, _credentials in checkable[done:]:
+                results.setdefault(order_id, False)
+            print(f"    ({len(checkable) - done} check(s) cut off after "
+                  f"{time.monotonic() - started:.1f}s of GoKwik time budget - assigned as normal, "
+                  f"re-checked next run)")
 
     dirty.update(cacheable)
     return {**results_over_budget, **results}
@@ -884,7 +929,11 @@ def _main(conn):
     print(f"  {len(online_agents)} online: {', '.join(online_agents)}")
 
     print(f"Fetching '{SHEET_TAB}' tab from spreadsheet {SPREADSHEET_ID}...")
-    values = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!A:AD")
+    # A:Z, not A:AD. Z (COL_REMARKS = 25) is the highest column any of this reads, so AA:AD were
+    # being fetched, transferred and JSON-parsed on every run for no reader at all - ~13% of the
+    # largest payload in the run, and the parse is CPU-bound on a function that is CPU-starved.
+    # The range stays A-anchored so every COL_* index is unchanged.
+    values = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!A:Z")
     if not values or len(values) < 2:
         print("Sheet is empty - nothing to do.")
         return
