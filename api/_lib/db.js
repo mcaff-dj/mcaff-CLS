@@ -2202,17 +2202,95 @@ async function getCallingRtoReasonBreakdown(dateFrom, dateTo, paymentMode) {
     .sort((a, b) => b.totalAssigned - a.totalAssigned);
 }
 
+// Delivery Partner funnel, each partner expandable (client-side) into its own RTO-reason-
+// category funnel - the Overview tab's Delivery Partner Breakdown table, shown ABOVE the RTO
+// Reason Breakdown table (getCallingRtoReasonBreakdown) rather than replacing it: that one
+// answers "which reasons cost us the most conversions overall", this one answers "which
+// courier, and why, for that courier specifically."
+//
+// Same funnel definition, same paymentMode filter, and the same assigned-vs-disposed grain
+// split as getCallingRtoReasonBreakdown - see its comment. Only 9 distinct delivery_partner
+// values exist today (measured against live data), so grouping by (delivery_partner,
+// rto_reason) together and categorizing/re-summing in JS costs one query, not one per
+// partner - cheap enough to return the whole matrix in the same round trip rather than
+// fetching a partner's reasons lazily on expand.
+async function getCallingPartnerReasonBreakdown(dateFrom, dateTo, paymentMode) {
+  await ensureSchema();
+  const { from, to } = dateBounds(dateFrom, dateTo);
+  const mode = paymentMode === 'Prepaid' || paymentMode === 'COD' ? paymentMode : null;
+  const { rows } = await sql`
+    SELECT
+      COALESCE(delivery_partner, 'Unknown') AS partner,
+      COALESCE(rto_reason, 'Unknown') AS rto_reason,
+      SUM(CASE WHEN reassigned_away_at IS NULL
+            AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${from} IS NULL OR assigned_at >= ${from}) AND (${to} IS NULL OR assigned_at <= ${to})
+          THEN 1 ELSE 0 END) AS total_assigned,
+      SUM(CASE WHEN disposed_at IS NOT NULL AND connected = 'Yes'
+            AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+          THEN 1 ELSE 0 END) AS total_connected,
+      SUM(CASE WHEN disposed_at IS NOT NULL
+            AND (disposition IN ('Customer Agreed to Accept', 'Product Issue / Exchange') OR new_order_id IS NOT NULL)
+            AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+          THEN 1 ELSE 0 END) AS total_converted
+    FROM CLS_RTO_calling
+    GROUP BY 1, 2
+    HAVING total_assigned > 0 OR total_connected > 0 OR total_converted > 0
+  `;
+  const pct = (n, d) => (d > 0 ? Math.round((n / d) * 100) : 0);
+  const emptyAcc = () => ({ totalAssigned: 0, totalConnected: 0, totalConverted: 0 });
+  const byPartner = new Map();
+  for (const r of rows) {
+    const category = categorizeRtoReason(r.rto_reason);
+    const assigned = Number(r.total_assigned) || 0;
+    const connected = Number(r.total_connected) || 0;
+    const converted = Number(r.total_converted) || 0;
+
+    const partnerAcc = byPartner.get(r.partner) || { totals: emptyAcc(), byCategory: new Map() };
+    partnerAcc.totals.totalAssigned += assigned;
+    partnerAcc.totals.totalConnected += connected;
+    partnerAcc.totals.totalConverted += converted;
+
+    const categoryAcc = partnerAcc.byCategory.get(category) || emptyAcc();
+    categoryAcc.totalAssigned += assigned;
+    categoryAcc.totalConnected += connected;
+    categoryAcc.totalConverted += converted;
+    partnerAcc.byCategory.set(category, categoryAcc);
+
+    byPartner.set(r.partner, partnerAcc);
+  }
+  const toFunnelRow = (acc) => ({
+    totalAssigned: acc.totalAssigned,
+    totalConnected: acc.totalConnected,
+    connectedPct: pct(acc.totalConnected, acc.totalAssigned),
+    totalConverted: acc.totalConverted,
+    convertedPct: pct(acc.totalConverted, acc.totalAssigned),
+  });
+  return [...byPartner.entries()]
+    .map(([deliveryPartner, acc]) => ({
+      deliveryPartner,
+      ...toFunnelRow(acc.totals),
+      reasons: [...acc.byCategory.entries()]
+        .map(([rtoReason, categoryAcc]) => ({ rtoReason, ...toFunnelRow(categoryAcc) }))
+        .sort((a, b) => b.totalAssigned - a.totalAssigned),
+    }))
+    .sort((a, b) => b.totalAssigned - a.totalAssigned);
+}
+
 // Combines all queries above into the single payload api/report/data/[key].js's
 // "calling-overview" route serves - one round trip for the whole Overview tab.
 async function getCallingOverviewData(query) {
   const { dateFrom, dateTo, paymentMode } = query || {};
-  const [stats, hourly, partnerBreakdown, rtoReasonBreakdown] = await Promise.all([
+  const [stats, hourly, partnerBreakdown, rtoReasonBreakdown, partnerReasonBreakdown] = await Promise.all([
     getCallingOverviewStats(dateFrom, dateTo),
     getCallingHourlyStats(dateFrom, dateTo),
     getCallingPartnerBreakdown(dateFrom, dateTo),
     getCallingRtoReasonBreakdown(dateFrom, dateTo, paymentMode),
+    getCallingPartnerReasonBreakdown(dateFrom, dateTo, paymentMode),
   ]);
-  return { stats, hourly, partnerBreakdown, rtoReasonBreakdown };
+  return { stats, hourly, partnerBreakdown, rtoReasonBreakdown, partnerReasonBreakdown };
 }
 
 // {order_id: {assignedAt, disposedAt}} for EVERY lead ever assigned, not just a recent window

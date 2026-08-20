@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 
 const DATE_OPTIONS = [
   { value: 'ALL_TIME', label: 'All time' },
@@ -60,6 +60,7 @@ export default function CallingOverviewClient() {
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
   const [paymentMode, setPaymentMode] = useState('');
+  const [expandedPartners, setExpandedPartners] = useState(() => new Set());
 
   useEffect(() => {
     fetch('/api/auth/me')
@@ -102,6 +103,14 @@ export default function CallingOverviewClient() {
   }, [authed, dateFrom, dateTo, paymentMode]);
 
   const stats = data && data.stats;
+
+  const togglePartner = (partner) => {
+    setExpandedPartners((prev) => {
+      const next = new Set(prev);
+      if (next.has(partner)) next.delete(partner); else next.add(partner);
+      return next;
+    });
+  };
 
   return (
     <div className="calling-overview-page">
@@ -169,6 +178,75 @@ export default function CallingOverviewClient() {
             <div className="kpi-value">{stats.totalRefunded.toLocaleString('en-IN')}</div>
             <div className="kpi-sub">₹{stats.totalRefundAmount.toLocaleString('en-IN')}</div>
           </div>
+        </div>
+      )}
+
+      {data && data.partnerReasonBreakdown && (
+        <div className="co-table-card">
+          <h2 className="co-table-title">Delivery Partner Breakdown</h2>
+          <p className="co-table-hint">Click a partner to see its RTO reason funnel.</p>
+          <table className="co-table">
+            <thead>
+              <tr>
+                <th>Delivery Partner</th>
+                <th>Total Leads Assigned</th>
+                <th>Total Connected</th>
+                <th>Connected %</th>
+                <th>Total Converted</th>
+                <th>Converted %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.partnerReasonBreakdown.map((row) => {
+                const isOpen = expandedPartners.has(row.deliveryPartner);
+                return (
+                  <Fragment key={row.deliveryPartner}>
+                    <tr className="co-table-row-expandable" onClick={() => togglePartner(row.deliveryPartner)}>
+                      <td><span className="co-expand-caret">{isOpen ? '▾' : '▸'}</span>{row.deliveryPartner}</td>
+                      <td>{row.totalAssigned.toLocaleString('en-IN')}</td>
+                      <td>{row.totalConnected.toLocaleString('en-IN')}</td>
+                      <td>{row.connectedPct}%</td>
+                      <td>{row.totalConverted.toLocaleString('en-IN')}</td>
+                      <td>{row.convertedPct}%</td>
+                    </tr>
+                    {isOpen && (
+                      <tr className="co-table-subrow">
+                        <td colSpan={6}>
+                          <table className="co-table co-subtable">
+                            <thead>
+                              <tr>
+                                <th>RTO Reason</th>
+                                <th>Total Leads Assigned</th>
+                                <th>Total Connected</th>
+                                <th>Connected %</th>
+                                <th>Total Converted</th>
+                                <th>Converted %</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {row.reasons.map((r) => (
+                                <tr key={r.rtoReason}>
+                                  <td>{r.rtoReason}</td>
+                                  <td>{r.totalAssigned.toLocaleString('en-IN')}</td>
+                                  <td>{r.totalConnected.toLocaleString('en-IN')}</td>
+                                  <td>{r.connectedPct}%</td>
+                                  <td>{r.totalConverted.toLocaleString('en-IN')}</td>
+                                  <td>{r.convertedPct}%</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+              {!data.partnerReasonBreakdown.length && (
+                <tr><td colSpan={6} className="co-table-empty">No data for this filter.</td></tr>
+              )}
+            </tbody>
+          </table>
         </div>
       )}
 
