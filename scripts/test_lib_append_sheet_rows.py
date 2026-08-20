@@ -2,6 +2,7 @@
 per upload, so it matters this hits the right Google endpoint with the right body shape.
 Mocks requests.post; no live network. Run: python scripts/test_lib_append_sheet_rows.py"""
 import sys
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -28,8 +29,9 @@ def test_append_sheet_rows_calls_values_append_with_insert_rows():
             ["19-08-2026", "", "Reason B", "HYP2", "U2", "AWB2"],
         ])
 
-    assert 'values:append' in captured['url'], f"must hit values:append, got {captured['url']}"
-    assert 'insertDataOption=INSERT_ROWS' in captured['url'] or captured['json'] is not None
+    encoded = urllib.parse.quote("'Data'!B2:P", safe="")
+    assert f"/values/{encoded}:append" in captured['url'], f"must have range in path before :append, got {captured['url']}"
+    assert captured['url'].endswith(':append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS'), f"wrong query params, got {captured['url']}"
     assert captured['json']['valueInputOption'] == 'USER_ENTERED'
     assert captured['json']['values'] == [
         ["19-08-2026", "", "Reason A", "HYP1", "U1", "AWB1"],

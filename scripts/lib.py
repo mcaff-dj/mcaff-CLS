@@ -194,7 +194,10 @@ def append_sheet_rows(spreadsheet_id, range_, rows):
         return {"updates": {"updatedRows": 0}}
     token = get_write_access_token()
     encoded = urllib.parse.quote(range_, safe="")
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:append?range={encoded}&valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{encoded}"
+        f":append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
+    )
     resp = requests.post(url, headers={
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json; charset=utf-8",
