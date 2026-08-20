@@ -730,6 +730,7 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
               rowNumber: live ? live.row : (tkt.rawIndex + 2),
               awbCode: tkt.awbCode,
               rtoReason: tkt.rtoReason,
+              paymentMode: tkt.paymentMethod,
             }),
           });
           const body = await res.json().catch(() => ({}));
@@ -906,6 +907,7 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
           orderId: dispTkt.orderNumber,
           awbCode: dispTkt.awbCode,
           rtoReason: dispTkt.rtoReason,
+          paymentMode: dispTkt.paymentMethod,
           disposition: dispReason,
           agentRemarks: (isAlreadyRef ? '[Already Refunded] ' : '') + agentRemarks.trim(),
           connected: dispConn==='YES'?'Yes':'No',

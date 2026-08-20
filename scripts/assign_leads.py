@@ -120,6 +120,14 @@ GOKWIK_TIMEOUT_SEC = 8
 # from one that still needs the write - so this string is load-bearing in both directions.
 ALREADY_REFUNDED = "Already Refunded"
 
+# Written to S and T when an order is found already re-punched under a D2C channel in LMD (see
+# check_already_punched) - same load-bearing read-back-out-of-S contract as ALREADY_REFUNDED,
+# so a lead already marked this way is never re-checked or re-stamped on a later run.
+ALREADY_PUNCHED = "Already Punched"
+
+# LMD lives in the same mcaff_prod schema as Item_level_data (see ITEM_LEVEL_SCHEMA above).
+LMD_TABLE = "LMD"
+
 # A live GoKwik/MySQL check is a real network round-trip, and with hundreds of eligible
 # prepaid leads (fresh + Connected=No reassignment candidates combined) checking every one on
 # every 5-minute run took 8-13 minutes per run in practice - runs started queuing behind each
@@ -190,10 +198,9 @@ GOKWIK_MAX_CHECKS_PER_RUN = 120
 # CPU-bound stage - parsing a ~6 MB sheet, the 15k-row main loop - runs several times slower than
 # the ~12s this whole script takes on a full core. Raising the memory is the better fix and is
 # attempted by .github/workflows/deploy-cron-lambdas.yml, but that needs an IAM permission the
-# deploy role does not have (AccessDeniedException on lambda:UpdateFunctionConfiguration, observed
-# 2026-08-20), so the script cannot rely on it. Instead it now yields: the refund phase gets a
-# fixed slice of the budget and stops when it is spent, whatever the machine, however slow GoKwik
-# is that minute, and however large the sheet has grown.
+# deploy role does not have, so the script cannot rely on it. Instead it now yields: the refund
+# phase gets a fixed slice of the budget and stops when it is spent, whatever the machine, however
+# slow GoKwik is that minute, and however large the sheet has grown.
 #
 # 20s leaves the rest of the run (sheet read, MySQL/Postgres fetches, the main loop, and the
 # assignment write that agents are actually waiting on) the remaining ~40s even at the worst
@@ -282,6 +289,45 @@ def lookup_platform_order_ids(order_ids):
             if platform_order_id.isdigit():
                 resolved[display_code] = platform_order_id
     return resolved, failed
+
+
+def check_already_punched(order_ids):
+    """{order_id, ...} - the subset of order_ids that already have a row in LMD under a D2C
+    channel (Channel_Name LIKE '%D2C%') - i.e. a replacement order has already been punched for
+    this return, so calling the customer about the original RTO is now pointless.
+
+    Batched over IN (...) the same way as lookup_platform_order_ids, and for the same reason:
+    one query for the whole candidate set instead of one per lead. Unlike the GoKwik refund
+    check this is a single local MySQL lookup with no external network round-trip, so it needs
+    no TTL cache of its own - the batched query is already cheap enough to just run fresh every
+    run.
+
+    Never raises: a batch that errors is treated as "not punched" for this run (fails open) so
+    a flaky query never blocks a genuinely pending lead - it simply gets re-checked next run."""
+    punched = set()
+    order_ids = list(order_ids)
+    for start in range(0, len(order_ids), PLATFORM_ID_BATCH_SIZE):
+        batch = order_ids[start:start + PLATFORM_ID_BATCH_SIZE]
+        placeholders = ",".join(["%s"] * len(batch))
+        try:
+            rows = mysql_lib.query(
+                f"""
+                SELECT DISTINCT Display_Order_Code
+                FROM {LMD_TABLE}
+                WHERE Display_Order_Code IN ({placeholders})
+                  AND Channel_Name LIKE '%%D2C%%'
+                """,
+                tuple(batch),
+                database=ITEM_LEVEL_SCHEMA,
+            )
+        except Exception as e:
+            print(f"    ({LMD_TABLE} already-punched lookup for {len(batch)} order(s) failed: {e} - "
+                  f"treating them as not punched)")
+            continue
+        if rows is None:  # MYSQL_* not configured
+            continue
+        punched.update(order_id for (order_id,) in rows)
+    return punched
 
 
 _thread_local = threading.local()
@@ -429,6 +475,7 @@ def resolve_refund_statuses(order_ids, dirty):
         print(f"    ({no_mapping} with no Shopify platform order ID, {len(lookup_failed)} whose "
               f"lookup failed, {no_credentials} with no vendor credentials - all not-refunded, "
               f"per fail-open)")
+
     if checkable:
         workers = min(GOKWIK_MAX_CONCURRENCY, len(checkable))
         print(f"    asking GoKwik about {len(checkable)} order(s), {workers} at a time "
@@ -704,7 +751,7 @@ def fetch_online_agents(process_key=None, conn=None):
 
 
 def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
-                            reassign_info_by_row):
+                            payment_mode_by_row, reassign_info_by_row):
     """Stamps assigned_at=<now, UTC> for every lead just assigned, keyed by the sheet's own
     Order ID, so rto-crm.html's resetStalePendingLeads() can tell a fresh assignment apart
     from a genuinely stale one (the lead's own Calling Date can't do this - the backlog this
@@ -743,9 +790,10 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
     Postgres's index.
 
     Also stamps awb_code, rto_reason (the sheet's own Column D - see
-    lead_priority.COL_RTO_REASON), and delivery_partner (derived from awb_code via
-    lead_priority.prefix_rule_partner - the same rule api/_lib/db.js's JS mirror uses for
-    leads recorded via the disposal path instead)."""
+    lead_priority.COL_RTO_REASON), payment_mode (normalized via lead_priority.is_prepaid
+    from Column O - see add_payment_mode_column.py), and delivery_partner (derived from
+    awb_code via lead_priority.prefix_rule_partner - the same rule api/_lib/db.js's JS
+    mirror uses for leads recorded via the disposal path instead)."""
     if not assignments:
         return
     cred = mysql_lib.get_credential()
@@ -757,6 +805,7 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
             order_id_by_row[row_index], email,
             awb_code_by_row.get(row_index) or None,
             rto_reason_by_row.get(row_index) or None,
+            payment_mode_by_row.get(row_index) or None,
             prefix_rule_partner(awb_code_by_row.get(row_index)) or None,
         )
         for row_index, email in assignments.items() if row_index in order_id_by_row
@@ -783,14 +832,14 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
                 "UPDATE CLS_RTO_calling SET reassigned_away_at = %s WHERE order_id = %s AND reassigned_away_at IS NULL",
                 [(now, order_id) for (order_id,) in retiring],
             )
-        for order_id, email, awb_code, rto_reason, delivery_partner in rows:
+        for order_id, email, awb_code, rto_reason, payment_mode, delivery_partner in rows:
             try:
                 cur.execute(
                     """
-                    INSERT INTO CLS_RTO_calling (order_id, agent_email, assigned_at, awb_code, rto_reason, delivery_partner)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO CLS_RTO_calling (order_id, agent_email, assigned_at, awb_code, rto_reason, payment_mode, delivery_partner)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
-                    (order_id, email, now, awb_code, rto_reason, delivery_partner),
+                    (order_id, email, now, awb_code, rto_reason, payment_mode, delivery_partner),
                 )
             except pymysql.err.IntegrityError as e:
                 if "live_order_id_key" not in str(e):
@@ -801,10 +850,11 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
                         agent_email = %s, assigned_at = %s,
                         awb_code = COALESCE(%s, awb_code),
                         rto_reason = COALESCE(%s, rto_reason),
+                        payment_mode = COALESCE(%s, payment_mode),
                         delivery_partner = COALESCE(%s, delivery_partner)
                     WHERE order_id = %s AND reassigned_away_at IS NULL
                     """,
-                    (email, now, awb_code, rto_reason, delivery_partner, order_id),
+                    (email, now, awb_code, rto_reason, payment_mode, delivery_partner, order_id),
                 )
         conn.commit()
     except Exception:
@@ -956,10 +1006,13 @@ def _main(conn):
     unassigned_pending = []  # (row_index, rto_initiated_date, order_id, tier)
     awb_code_by_row = {}
     rto_reason_by_row = {}
+    payment_mode_by_row = {}
     already_refunded_rows = []  # row indices confirmed refunded via GoKwik this run
+    already_punched_rows = []  # row indices confirmed already re-punched (LMD, D2C) this run
     excluded_by_row = {}  # row_index -> {emails} who must not receive this lead (see below)
     reassign_info_by_row = {}  # row_index -> (old_agent, order_id), for rows being reassigned
     refund_check_by_row = {}  # row_index -> order_id whose GoKwik check is deferred (see below)
+    punch_check_by_row = {}  # row_index -> order_id whose LMD already-punched check is deferred
 
     def refund_known_already(row_index, order_id):
         """True only if the cache ALREADY says this prepaid lead was refunded, in which case the
@@ -1015,6 +1068,11 @@ def _main(conn):
                     and not recently_assigned):
                 payment_method = cell(row, COL_PAYMENT_METHOD)
 
+                # Already-punched check (any payment method - a replacement order makes the
+                # original RTO moot regardless of how it was paid for), deferred and batched the
+                # same way as the refund check below - see check_already_punched.
+                punch_check_by_row[i] = order_id
+
                 # Same GoKwik refund check as the fresh-lead path further below (prepaid only -
                 # COD has nothing paid upfront to refund) - a Connected=No lead can ALSO already
                 # be refunded through a channel other than this agent's own disposition (e.g.
@@ -1030,6 +1088,7 @@ def _main(conn):
                 unassigned_pending.append((i, rto_initiated_date, order_id, tier))
                 awb_code_by_row[i] = cell(row, COL_AWB_CODE)
                 rto_reason_by_row[i] = cell(row, COL_RTO_REASON)
+                payment_mode_by_row[i] = "Prepaid" if is_prepaid(payment_method) else "COD"
                 excluded_by_row[i] = prior_agents
                 reassign_info_by_row[i] = (agent_raw, order_id)
                 continue
@@ -1069,13 +1128,34 @@ def _main(conn):
             continue  # stamped "Already Refunded" below - never enters the pool, doesn't count toward load
 
         if is_unassigned:
+            punch_check_by_row[i] = order_id
             unassigned_pending.append((i, rto_initiated_date, order_id, tier))
             awb_code_by_row[i] = cell(row, COL_AWB_CODE)
             rto_reason_by_row[i] = cell(row, COL_RTO_REASON)
+            payment_mode_by_row[i] = "Prepaid" if is_prepaid(payment_method) else "COD"
         elif agent_raw in current_load:
             current_load[agent_raw] += 1
         # else: pending lead already held by someone (eligible or not) - left alone either
         # way. Column Q having any value at all is enough to exempt a lead permanently.
+
+    # Every already-punched check the loop deferred, settled in one go now that the full
+    # candidate set is known - see check_already_punched. Resolved BEFORE the GoKwik refund
+    # check below so a row found punched here is dropped from refund_check_by_row too - no
+    # point paying a GoKwik round-trip for a lead that's already being excluded for a different
+    # reason.
+    if punch_check_by_row:
+        punched_order_ids = check_already_punched(set(punch_check_by_row.values()))
+        punched_rows = {i for i, order_id in punch_check_by_row.items() if order_id in punched_order_ids}
+        if punched_rows:
+            already_punched_rows.extend(sorted(punched_rows))
+            unassigned_pending = [e for e in unassigned_pending if e[0] not in punched_rows]
+            for i in punched_rows:
+                awb_code_by_row.pop(i, None)
+                rto_reason_by_row.pop(i, None)
+                payment_mode_by_row.pop(i, None)
+                excluded_by_row.pop(i, None)
+                reassign_info_by_row.pop(i, None)
+                refund_check_by_row.pop(i, None)
 
     # Every refund check the loop deferred, settled in one go now that the full candidate set is
     # known - see resolve_refund_statuses. A lead that comes back refunded is retracted from the
@@ -1089,6 +1169,7 @@ def _main(conn):
             for i in refunded_rows:
                 awb_code_by_row.pop(i, None)
                 rto_reason_by_row.pop(i, None)
+                payment_mode_by_row.pop(i, None)
                 excluded_by_row.pop(i, None)
                 reassign_info_by_row.pop(i, None)
 
@@ -1103,9 +1184,9 @@ def _main(conn):
     print(f"  unassigned pool by priority: Prepaid={tier_counts[0]}, COD+high-priority reason={tier_counts[1]}, other COD={tier_counts[2]}, COD+low-priority reason={tier_counts[3]}")
 
     # ---------------------------------------------------------------------------------------
-    # ASSIGNMENT FIRST. Everything below this block - the refund stamps and the GoKwik cache
-    # flush - is bookkeeping: useful, but nobody is waiting on it. The assignment write is the
-    # only thing an agent sitting with an empty queue actually needs, so it goes first.
+    # ASSIGNMENT FIRST. Everything below this block - the refund/punch stamps and the GoKwik
+    # cache flush - is bookkeeping: useful, but nobody is waiting on it. The assignment write is
+    # the only thing an agent sitting with an empty queue actually needs, so it goes first.
     #
     # This ordering is not a micro-optimisation, it is the difference between a slow run and a
     # lost one. This runs as a Lambda with a HARD 60s timeout, and a timeout is a kill: no
@@ -1158,7 +1239,7 @@ def _main(conn):
         # reassignment (retire the old agent's cycle, record the new one) happen inside this one
         # call, in one transaction - see its docstring for why they can't be separated.
         record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
-                                reassign_info_by_row)
+                                payment_mode_by_row, reassign_info_by_row)
 
         per_agent = {}
         for email in assignments.values():
@@ -1203,6 +1284,25 @@ def _main(conn):
                 for row_index in to_stamp
             ]
             lib.set_sheet_values_batch(SPREADSHEET_ID, refund_value_ranges)
+
+    # Same "stamp permanently, but only rows not already carrying it" contract as the refund
+    # stamp above - a Connected=No row that fails this same check every run would otherwise
+    # rewrite the same three cells indefinitely.
+    if already_punched_rows:
+        to_stamp_punched = [i for i in already_punched_rows
+                             if cell(rows[i], COL_ATTEMPT).strip() != ALREADY_PUNCHED]
+        print(f"  {len(already_punched_rows)} lead(s) already re-punched under a D2C channel in "
+              f"{LMD_TABLE} - not assigning ({len(to_stamp_punched)} newly stamped).")
+        if to_stamp_punched:
+            punch_value_ranges = [
+                {
+                    "range": f"'{SHEET_TAB}'!S{row_index + 2}:U{row_index + 2}",
+                    "values": [[ALREADY_PUNCHED, ALREADY_PUNCHED,
+                                f"Auto-detected via {LMD_TABLE} (D2C channel) - order already punched, not assigned."]],
+                }
+                for row_index in to_stamp_punched
+            ]
+            lib.set_sheet_values_batch(SPREADSHEET_ID, punch_value_ranges)
 
     # A run that found nothing assignable still did real GoKwik/MySQL work, and throwing that
     # away would mean re-checking the exact same leads live again next run, defeating the entire

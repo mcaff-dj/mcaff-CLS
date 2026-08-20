@@ -1009,13 +1009,13 @@ function resolvePartnerFromAwb(awbCode) {
 // index would have.
 async function recordLeadDisposition(orderId, email, awbCode, details) {
   await ensureSchema();
-  const { disposition, agentRemarks, connected, attempt, refundAmount, newOrderId, rtoReason } = details || {};
+  const { disposition, agentRemarks, connected, attempt, refundAmount, newOrderId, rtoReason, paymentMode } = details || {};
   const deliveryPartner = resolvePartnerFromAwb(awbCode);
   const now = new Date();
   try {
     await sql`
-      INSERT INTO CLS_RTO_calling (order_id, agent_email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount, awb_code, new_order_id, rto_reason, delivery_partner)
-      VALUES (${orderId}, ${email}, ${now}, ${now}, ${disposition || null}, ${agentRemarks || null}, ${connected || null}, ${attempt || null}, ${refundAmount || null}, ${awbCode || null}, ${newOrderId || null}, ${rtoReason || null}, ${deliveryPartner})
+      INSERT INTO CLS_RTO_calling (order_id, agent_email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount, awb_code, new_order_id, rto_reason, payment_mode, delivery_partner)
+      VALUES (${orderId}, ${email}, ${now}, ${now}, ${disposition || null}, ${agentRemarks || null}, ${connected || null}, ${attempt || null}, ${refundAmount || null}, ${awbCode || null}, ${newOrderId || null}, ${rtoReason || null}, ${paymentMode || null}, ${deliveryPartner})
     `;
   } catch (e) {
     if (!/live_order_id_key/.test((e && e.message) || '')) throw e;
@@ -1030,6 +1030,7 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
         awb_code = COALESCE(${awbCode || null}, awb_code),
         new_order_id = COALESCE(${newOrderId || null}, new_order_id),
         rto_reason = COALESCE(rto_reason, ${rtoReason || null}),
+        payment_mode = COALESCE(payment_mode, ${paymentMode || null}),
         delivery_partner = COALESCE(${deliveryPartner}, delivery_partner)
       WHERE order_id = ${orderId} AND reassigned_away_at IS NULL
     `;
@@ -1051,13 +1052,13 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
 // losing that race just means the other claim won. Any OTHER unique key (live_awb_code_key -
 // two leads sharing one live AWB, a genuine data error) is left to raise, exactly as the cron
 // leaves it.
-async function claimRtoLead(orderId, email, awbCode, rtoReason) {
+async function claimRtoLead(orderId, email, awbCode, rtoReason, paymentMode) {
   await ensureSchema();
   const deliveryPartner = resolvePartnerFromAwb(awbCode);
   try {
     await sql`
-      INSERT INTO CLS_RTO_calling (order_id, agent_email, assigned_at, awb_code, rto_reason, delivery_partner)
-      VALUES (${orderId}, ${email}, ${new Date()}, ${awbCode || null}, ${rtoReason || null}, ${deliveryPartner})
+      INSERT INTO CLS_RTO_calling (order_id, agent_email, assigned_at, awb_code, rto_reason, payment_mode, delivery_partner)
+      VALUES (${orderId}, ${email}, ${new Date()}, ${awbCode || null}, ${rtoReason || null}, ${paymentMode || null}, ${deliveryPartner})
     `;
   } catch (e) {
     if (!/live_order_id_key/.test((e && e.message) || '')) throw e;
@@ -2110,33 +2111,69 @@ async function getCallingPartnerBreakdown(dateFrom, dateTo) {
   }));
 }
 
-// Per-RTO-reason lead volume (rto_reason - the sheet's own RTO reason column, mirrored
-// into MySQL). Sorted by volume descending, same as the partner breakdown.
-async function getCallingRtoReasonBreakdown(dateFrom, dateTo) {
+// Per-RTO-reason funnel (rto_reason - the sheet's own RTO reason column, mirrored into
+// MySQL): assigned -> connected -> converted, each stage's own rate over total assigned.
+// Sorted by volume descending, same as the partner breakdown.
+//
+// paymentMode ('', 'Prepaid', or 'COD') filters every stage by the SAME lead's payment_mode
+// - see add_payment_mode_column.py/scripts/backfill_payment_mode.py for where that column
+// comes from. '' means no filter (both). Assigned reads the live-cycle view (reassigned_away_at
+// IS NULL) scoped by assigned_at, same grain as getCallingOverviewStats' totalAssigned;
+// connected/converted read the base table scoped by disposed_at, same grain as its
+// totalConnected - see that function's comment for why assigned and disposed/connected are
+// deliberately different grains. "Converted" mirrors getCallingHourlyStats' "reordered"
+// definition exactly: a disposition indicating the customer re-ordered, OR a replacement
+// order_id was captured.
+async function getCallingRtoReasonBreakdown(dateFrom, dateTo, paymentMode) {
   await ensureSchema();
   const { from, to } = dateBounds(dateFrom, dateTo);
+  const mode = paymentMode === 'Prepaid' || paymentMode === 'COD' ? paymentMode : null;
   const { rows } = await sql`
     SELECT
       COALESCE(rto_reason, 'Unknown') AS rto_reason,
-      COUNT(*) AS total
+      SUM(CASE WHEN reassigned_away_at IS NULL
+            AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${from} IS NULL OR assigned_at >= ${from}) AND (${to} IS NULL OR assigned_at <= ${to})
+          THEN 1 ELSE 0 END) AS total_assigned,
+      SUM(CASE WHEN disposed_at IS NOT NULL AND connected = 'Yes'
+            AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+          THEN 1 ELSE 0 END) AS total_connected,
+      SUM(CASE WHEN disposed_at IS NOT NULL
+            AND (disposition IN ('Customer Agreed to Accept', 'Product Issue / Exchange') OR new_order_id IS NOT NULL)
+            AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+          THEN 1 ELSE 0 END) AS total_converted
     FROM CLS_RTO_calling
-    WHERE reassigned_away_at IS NULL
-      AND (${from} IS NULL OR assigned_at >= ${from}) AND (${to} IS NULL OR assigned_at <= ${to})
     GROUP BY 1
-    ORDER BY total DESC
+    HAVING total_assigned > 0 OR total_connected > 0 OR total_converted > 0
+    ORDER BY total_assigned DESC
   `;
-  return rows.map((r) => ({ rtoReason: r.rto_reason, total: Number(r.total) || 0 }));
+  const pct = (n, d) => (d > 0 ? Math.round((n / d) * 100) : 0);
+  return rows.map((r) => {
+    const totalAssigned = Number(r.total_assigned) || 0;
+    const totalConnected = Number(r.total_connected) || 0;
+    const totalConverted = Number(r.total_converted) || 0;
+    return {
+      rtoReason: r.rto_reason,
+      totalAssigned,
+      totalConnected,
+      connectedPct: pct(totalConnected, totalAssigned),
+      totalConverted,
+      convertedPct: pct(totalConverted, totalAssigned),
+    };
+  });
 }
 
 // Combines all queries above into the single payload api/report/data/[key].js's
 // "calling-overview" route serves - one round trip for the whole Overview tab.
 async function getCallingOverviewData(query) {
-  const { dateFrom, dateTo } = query || {};
+  const { dateFrom, dateTo, paymentMode } = query || {};
   const [stats, hourly, partnerBreakdown, rtoReasonBreakdown] = await Promise.all([
     getCallingOverviewStats(dateFrom, dateTo),
     getCallingHourlyStats(dateFrom, dateTo),
     getCallingPartnerBreakdown(dateFrom, dateTo),
-    getCallingRtoReasonBreakdown(dateFrom, dateTo),
+    getCallingRtoReasonBreakdown(dateFrom, dateTo, paymentMode),
   ]);
   return { stats, hourly, partnerBreakdown, rtoReasonBreakdown };
 }

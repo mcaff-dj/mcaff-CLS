@@ -436,6 +436,7 @@ async function handleRecordDisposition(req, res) {
       refundAmount: typeof body.refundAmount === 'number' ? body.refundAmount : null,
       newOrderId: (body.newOrderId || '').toString().trim() || null,
       rtoReason: (body.rtoReason || '').toString().trim() || null,
+      paymentMode: (body.paymentMode || '').toString().trim() || null,
     });
   } catch (e) {
     // A failed disposition write here has no other trace anywhere - the Sheet write

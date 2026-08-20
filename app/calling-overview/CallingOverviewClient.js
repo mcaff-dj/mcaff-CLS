@@ -11,6 +11,12 @@ const DATE_OPTIONS = [
   { value: 'CUSTOM', label: 'Custom range' },
 ];
 
+const PAYMENT_MODE_OPTIONS = [
+  { value: '', label: 'Both' },
+  { value: 'Prepaid', label: 'Prepaid' },
+  { value: 'COD', label: 'COD' },
+];
+
 // Uses the browser's own local date components (not toISOString(), which forces UTC and
 // would misdate the early-morning IST hours - e.g. 2am IST is still the previous day in
 // UTC) - correct as long as the agent's device clock/timezone is actually set to IST,
@@ -53,6 +59,7 @@ export default function CallingOverviewClient() {
   const [dateScope, setDateScope] = useState('ALL_TIME');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
+  const [paymentMode, setPaymentMode] = useState('');
 
   useEffect(() => {
     fetch('/api/auth/me')
@@ -80,6 +87,7 @@ export default function CallingOverviewClient() {
     const params = new URLSearchParams();
     if (dateFrom) params.set('dateFrom', dateFrom);
     if (dateTo) params.set('dateTo', dateTo);
+    if (paymentMode) params.set('paymentMode', paymentMode);
     const qs = params.toString();
     fetch(`/api/report/data/calling-overview${qs ? `?${qs}` : ''}`)
       .then(async (r) => {
@@ -91,7 +99,7 @@ export default function CallingOverviewClient() {
       })
       .then((json) => setData(json))
       .catch((e) => setError(e.message || 'Could not load Calling Team overview.'));
-  }, [authed, dateFrom, dateTo]);
+  }, [authed, dateFrom, dateTo, paymentMode]);
 
   const stats = data && data.stats;
 
@@ -121,6 +129,14 @@ export default function CallingOverviewClient() {
             <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} />
           </div>
         )}
+        <div className="co-filter-group">
+          <label htmlFor="co-payment-mode">Payment mode</label>
+          <select id="co-payment-mode" value={paymentMode} onChange={(e) => setPaymentMode(e.target.value)}>
+            {PAYMENT_MODE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {error && <p className="co-error">{error}</p>}
@@ -153,6 +169,39 @@ export default function CallingOverviewClient() {
             <div className="kpi-value">{stats.totalRefunded.toLocaleString('en-IN')}</div>
             <div className="kpi-sub">₹{stats.totalRefundAmount.toLocaleString('en-IN')}</div>
           </div>
+        </div>
+      )}
+
+      {data && data.rtoReasonBreakdown && (
+        <div className="co-table-card">
+          <h2 className="co-table-title">RTO Reason Breakdown</h2>
+          <table className="co-table">
+            <thead>
+              <tr>
+                <th>RTO Reason</th>
+                <th>Total Leads Assigned</th>
+                <th>Total Connected</th>
+                <th>Connected %</th>
+                <th>Total Converted</th>
+                <th>Converted %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.rtoReasonBreakdown.map((row) => (
+                <tr key={row.rtoReason}>
+                  <td>{row.rtoReason}</td>
+                  <td>{row.totalAssigned.toLocaleString('en-IN')}</td>
+                  <td>{row.totalConnected.toLocaleString('en-IN')}</td>
+                  <td>{row.connectedPct}%</td>
+                  <td>{row.totalConverted.toLocaleString('en-IN')}</td>
+                  <td>{row.convertedPct}%</td>
+                </tr>
+              ))}
+              {!data.rtoReasonBreakdown.length && (
+                <tr><td colSpan={6} className="co-table-empty">No data for this filter.</td></tr>
+              )}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

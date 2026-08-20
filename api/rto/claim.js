@@ -133,7 +133,7 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const { orderNumber, rowNumber, awbCode, rtoReason } = req.body || {};
+  const { orderNumber, rowNumber, awbCode, rtoReason, paymentMode } = req.body || {};
   const email = session.email;
   if (!orderNumber || !rowNumber) {
     res.status(400).json({ error: 'orderNumber and rowNumber are required' });
@@ -194,7 +194,7 @@ module.exports = async (req, res) => {
     // script re-derives from the sheet), unlike the reverse.
     let recorded = true;
     try {
-      ({ recorded } = await claimRtoLead(orderNumber, email, awbCode, rtoReason));
+      ({ recorded } = await claimRtoLead(orderNumber, email, awbCode, rtoReason, paymentMode));
     } catch (e) {
       // The claim itself succeeded - the agent holds the lead. Losing the history row is a
       // reporting gap, not a failed claim, so this must not surface as an error to the agent.
