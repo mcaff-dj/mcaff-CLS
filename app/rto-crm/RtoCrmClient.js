@@ -20,6 +20,7 @@ import { useCallingSession, STATUS_OPTIONS, ROSTER_STATUS_OPTIONS, ROLE_OPTIONS 
 import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
 import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, DownloadIcon, ChevronDown, UserIcon, CalendarIcon, CreditCardIcon, ChatIcon, ShieldIcon, SparklesIcon, CustomSelect, MultiSelectDropdown, Badge, Overlay, EmptyState } from '../_calling/ui';
+import RtoUploadModal from './RtoUploadModal';
 
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI/edit?usp=sharing';
     // A:Z, not the bare tab name. The bare name means "every column", which pulled AA:AD for all
@@ -653,6 +654,7 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
       const [agentRemarks, setAgentRemarks] = useState('');
       const [attemptType, setAttemptType] = useState('');
       const [receiptTkt, setReceiptTkt] = useState(null);
+      const [showUploadModal, setShowUploadModal] = useState(false);
       const [refundProcessing, setRefundProcessing] = useState(false);
 
       // Explicit Claim & Assign Function for Lead (Column Q Sync)
@@ -2782,6 +2784,17 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
                 options={processOptions}
                 className="shrink-0"
               />
+              {/* Bulk-add new RTO leads from a CSV (see RtoUploadModal) - admin-only, same
+                  sessionIsAdmin gate the Team Roster table uses to restrict process-admin edits. */}
+              {sessionIsAdmin && (
+                <button
+                  type="button"
+                  onClick={() => setShowUploadModal(true)}
+                  className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-[13px] font-medium text-zinc-200 transition-all shadow-xs shrink-0"
+                >
+                  Upload CSV
+                </button>
+              )}
             </>}
           />
 
@@ -4330,6 +4343,14 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
                 </div>
               </div>
             </Overlay>
+          )}
+
+          {/* ═══ UPLOAD CSV MODAL ═══ */}
+          {showUploadModal && (
+            <RtoUploadModal
+              onClose={() => setShowUploadModal(false)}
+              onDone={() => { setShowUploadModal(false); sync(true); }}
+            />
           )}
 
         </div>
