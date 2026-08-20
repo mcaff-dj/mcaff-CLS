@@ -6,6 +6,24 @@ var currentBrand = '';
 var currentTabId = '';
 var userCards = [];
 var userTabPerms = {}; // { cardKey: [tabKey, ...] } - absent/empty key = every tab allowed
+
+// Current view (?brand=&view=&tab=) is mirrored into the URL via replaceState so a
+// browser refresh/reopen restores it instead of always landing back on the first
+// brand's default tab. pendingRestoreView/Tab hold the values read from the URL on
+// initial load - each is consumed (set back to null) the first time it's applied, so
+// normal in-app navigation afterwards behaves exactly as before.
+var pendingRestoreView = null;
+var pendingRestoreTab = null;
+
+function updateUrlState(patch) {
+  var params = new URLSearchParams(window.location.search);
+  Object.keys(patch).forEach(function (k) {
+    if (patch[k] === null) params.delete(k);
+    else params.set(k, patch[k]);
+  });
+  var query = params.toString();
+  window.history.replaceState(null, '', window.location.pathname + (query ? '?' + query : ''));
+}
 var brandColors = {
   mcaffeine: { accent: 'var(--mcaff)', bg: 'rgba(74, 58, 167, 0.08)', fg: 'var(--mcaff)' },
   hyphen: { accent: 'var(--hyphen)', bg: 'rgba(25, 156, 92, 0.08)', fg: 'var(--hyphen)' },
@@ -60,6 +78,7 @@ var CALLING_TEAM_SUBITEMS = {
 };
 
 function selectCallingTeamView(view) {
+  updateUrlState({ view: view });
   Array.prototype.slice.call(document.querySelectorAll('#navList .nav-btn[data-calling-team-view]')).forEach(function (b) {
     b.classList.toggle('active', b.getAttribute('data-calling-team-view') === view);
   });
@@ -182,6 +201,9 @@ function initRefreshStatus() {
 // auto-popup below so we never spawn a tab the user didn't ask for.
 function onBrandChange(brandKey, isUserAction) {
   currentBrand = brandKey;
+  var urlPatch = { brand: brandKey };
+  if (isUserAction) { urlPatch.view = null; urlPatch.tab = null; }
+  updateUrlState(urlPatch);
   var config = brandColors[brandKey] || brandColors.mcaffeine;
 
   var root = document.documentElement;
@@ -210,7 +232,12 @@ function onBrandChange(brandKey, isUserAction) {
     document.getElementById('navList').innerHTML = callingViews.map(function (v) {
       return '<button class="nav-btn" data-calling-team-view="' + v + '" onclick="selectCallingTeamView(\'' + v + '\')">' + CALLING_TEAM_SUBITEMS[v].label + '</button>';
     }).join('');
-    selectCallingTeamView(callingViews.indexOf('rto') !== -1 ? 'rto' : (callingViews[0] || 'rto'));
+    var restoreView = pendingRestoreView;
+    pendingRestoreView = null;
+    var initialView = (restoreView && callingViews.indexOf(restoreView) !== -1)
+      ? restoreView
+      : (callingViews.indexOf('rto') !== -1 ? 'rto' : (callingViews[0] || 'rto'));
+    selectCallingTeamView(initialView);
     return;
   }
 
@@ -296,6 +323,13 @@ function populateReportNav() {
   var innerNav = doc.querySelector('.tab-nav');
   if (innerNav) innerNav.style.display = 'none';
 
+  var restoreTab = pendingRestoreTab;
+  pendingRestoreTab = null;
+  if (restoreTab && innerBtns.some(function (b) { return b.dataset.tab === restoreTab; })) {
+    selectTab(restoreTab);
+    return;
+  }
+
   var activeIsAllowed = innerBtns.some(function (b) { return b.classList.contains('active'); });
   if (innerBtns.length && !activeIsAllowed) {
     selectTab(innerBtns[0].dataset.tab);
@@ -305,6 +339,7 @@ function populateReportNav() {
 // Switch tab inside iframe
 function selectTab(tabId) {
   currentTabId = tabId;
+  updateUrlState({ tab: tabId });
   var iframe = document.getElementById('reportIframe');
   var doc = iframe.contentDocument || iframe.contentWindow.document;
 
@@ -369,6 +404,11 @@ export default function HomePage() {
     // original static HTML page, so it needs the handler reachable on window.
     window.selectCallingTeamView = selectCallingTeamView;
 
+    var urlParams = new URLSearchParams(window.location.search);
+    var urlBrand = urlParams.get('brand');
+    pendingRestoreView = urlParams.get('view');
+    pendingRestoreTab = urlParams.get('tab');
+
     fetch('/api/auth/me')
       .then(function (r) { return r.json(); })
       .then(function (d) {
@@ -395,7 +435,9 @@ export default function HomePage() {
           return '<option value="' + c.key + '">' + c.label + '</option>';
         }).join('');
 
-        onBrandChange(userCards[0].key, false);
+        var initialBrand = userCards.some(function (c) { return c.key === urlBrand; }) ? urlBrand : userCards[0].key;
+        brandSelect.value = initialBrand;
+        onBrandChange(initialBrand, false);
       })
       .catch(function () {
         window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname);
