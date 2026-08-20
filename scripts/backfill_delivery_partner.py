@@ -1,86 +1,90 @@
-#!/usr/bin/env python3
-"""One-off: backfills delivery_partner on MySQL PEP_CLS.CLS_RTO_calling for rows that have an
-awb_code but no delivery_partner - 7729 such rows measured 2026-08-20, ALL of them resolvable
-from their existing awb_code alone (unlike payment_mode/rto_reason, this needs no external
-sheet or CSV lookup: delivery_partner is a pure, deterministic function of awb_code via
-lead_priority.prefix_rule_partner - the same rule assign_leads.py/db.js's claimRtoLead/
-recordLeadDisposition already apply on every write).
+"""One-off: recomputes delivery_partner for every Postgres lead_assignments row that has an
+awb_code but no delivery_partner, using the exact same rule (lead_priority.prefix_rule_partner)
+every live write already applies.
 
-Root cause: these are legacy rows written before delivery_partner existed on this table (see
-migrate_cls_rto_calling_schema.py) or via a path that stored awb_code without ever computing
-delivery_partner from it. Every CURRENT write path already recomputes delivery_partner from
-awb_code on every insert/update, so this is a one-time catch-up for historical rows, not a
-symptom of a live bug.
+These rows exist for one specific historical reason: delivery_partner was found to be a
+GENERATED ALWAYS STORED column on the live DB (see fix_delivery_partner_generated_column.py),
+altered there outside this codebase. Whatever partial/incomplete expression that generated
+column used is now gone - DROP EXPRESSION preserved only its last-computed value, and never
+re-derived anything. This recomputes those frozen values from awb_code using the current,
+correct rule instead of leaving them stale.
 
-Only fills rows where delivery_partner IS STILL NULL/blank - never overwrites an
-already-set value. Not scoped to live cycles only - delivery_partner is an AWB-level fact
-like rto_reason, so it's backfilled for every cycle still missing it.
+Every write is a pure re-derivation of data already in the row (awb_code -> delivery_partner),
+not new information from an external source - unlike rto_reason, which has no such source of
+truth left in Postgres and is not touched here.
 
-Dry run by default; --apply performs the writes.
+Not scoped to live cycles only (contrast backfill_awb_code.py): delivery_partner carries no
+uniqueness constraint and is never read from a retired cycle by any code path, so recomputing
+it everywhere it's missing is harmless and keeps the whole table's history internally
+consistent, not just the currently-active rows.
+
+Only writes when prefix_rule_partner resolves to a real value; an awb_code whose prefix isn't
+in leadAssignmentRules.json is left NULL rather than guessed at, and reported as unmatched.
 """
-import argparse
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import mysql_lib
+import lib
 from lead_priority import prefix_rule_partner
 
-SCHEMA = "PEP_CLS"
 
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--apply", action="store_true", help="Perform the writes (default is a dry run).")
-    args = ap.parse_args()
-
-    if mysql_lib.get_credential() is None:
-        raise SystemExit("MYSQL_* credentials not configured.")
-
-    rows = mysql_lib.query(
-        "SELECT DISTINCT awb_code FROM CLS_RTO_calling "
-        "WHERE (delivery_partner IS NULL OR delivery_partner = '') "
-        "AND awb_code IS NOT NULL AND awb_code <> ''",
-        database=SCHEMA,
-    ) or []
-    print(f"{len(rows)} distinct awb_code(s) missing delivery_partner.")
-
-    pairs = []  # (delivery_partner, awb_code)
-    not_resolved = 0
-    for (awb,) in rows:
-        partner = prefix_rule_partner(awb)
-        if not partner:
-            not_resolved += 1
-            continue
-        pairs.append((partner, awb))
-
-    print(f"{len(pairs)} awb_code(s) resolvable via the current prefix rules; "
-          f"{not_resolved} not matched by any rule (left NULL).")
-    if not args.apply:
-        print("\nDry run - re-run with --apply to write.")
-        return
-
-    CHUNK_SIZE = 500
-    cred = mysql_lib.get_credential()
-    import pymysql
-    conn = pymysql.connect(
-        host=cred["host"], user=cred["user"], password=cred["password"],
-        database=SCHEMA, port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
-    )
-    try:
-        cur = conn.cursor()
-        for start in range(0, len(pairs), CHUNK_SIZE):
-            chunk = pairs[start:start + CHUNK_SIZE]
-            cur.executemany(
-                "UPDATE CLS_RTO_calling SET delivery_partner = %s "
-                "WHERE awb_code = %s AND (delivery_partner IS NULL OR delivery_partner = '')",
-                chunk,
+def main(conn_str):
+    with lib.get_pg_connection(conn_str) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, awb_code FROM lead_assignments "
+                "WHERE awb_code IS NOT NULL AND delivery_partner IS NULL"
             )
-            conn.commit()
-        print(f"Backfilled delivery_partner for {len(pairs)} awb_code(s).")
-    finally:
-        conn.close()
+            rows = cur.fetchall()
+
+    print(f"Found {len(rows)} row(s) with an AWB but no delivery_partner.")
+
+    # Resolved locally up front, same as before - only the write below changed.
+    pairs = []  # (partner, row_id)
+    unmatched = {}
+    for row_id, awb_code in rows:
+        partner = prefix_rule_partner(awb_code)
+        if not partner:
+            unmatched[awb_code[:3]] = unmatched.get(awb_code[:3], 0) + 1
+            continue
+        pairs.append((partner, row_id))
+
+    # Batched via executemany instead of one UPDATE + one commit per row - id is the table's
+    # own primary key, so unlike backfill_rto_reason.py's order_id (which can span several
+    # physical rows), each pair here maps to exactly one row and len(chunk) is an exact
+    # updated count, no separate rowcount tracking needed. CHUNK_SIZE bounds each transaction
+    # rather than one all-or-nothing commit for the whole backfill.
+    CHUNK_SIZE = 500
+    updated = 0
+    # prepare_threshold=None: POSTGRES_URL is Supabase's pooled (PgBouncer transaction-mode)
+    # endpoint, which cannot guarantee the same backend across statements - psycopg3's default
+    # server-side prepared-statement caching then collides with another session's leftover
+    # prepared statement on the same pooled backend ("prepared statement already exists").
+    # Disabling it makes every statement a plain unnamed query, which the pooler handles fine.
+    with lib.get_pg_connection(conn_str, prepare_threshold=None) as conn:
+        with conn.cursor() as cur:
+            for start in range(0, len(pairs), CHUNK_SIZE):
+                chunk = pairs[start:start + CHUNK_SIZE]
+                cur.executemany(
+                    "UPDATE lead_assignments SET delivery_partner = %s "
+                    "WHERE id = %s AND delivery_partner IS NULL",
+                    chunk,
+                )
+                conn.commit()
+                updated += len(chunk)
+
+    print(f"Backfilled {updated} row(s).")
+    if unmatched:
+        total_unmatched = sum(unmatched.values())
+        print(f"{total_unmatched} row(s) had no matching prefix rule - left NULL:")
+        for prefix, n in sorted(unmatched.items(), key=lambda kv: -kv[1]):
+            print(f"  {prefix}... x{n}")
 
 
 if __name__ == "__main__":
-    main()
+    conn_str = os.environ.get("POSTGRES_URL")
+    if not conn_str:
+        raise SystemExit("POSTGRES_URL not configured.")
+    main(conn_str)
