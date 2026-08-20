@@ -27,10 +27,10 @@ assert.strictEqual(normalizeHeader('Address City'), 'addresscity');
   assert.strictEqual(byTarget['Address Pincode'], 'Address Pincode');
 }
 
-// 3. matchHeaders - fuzzy fallback for a genuine wording difference.
+// 3. matchHeaders - fuzzy fallback for a genuine substring-containment case.
 {
-  const result = matchHeaders(['AWB Code'], ['AWB Number']);
-  assert.strictEqual(result[0].csvHeader, 'AWB Number', 'AWB Number must fuzzy-match AWB Code');
+  const result = matchHeaders(['RTO Reason'], ['RTO Reason Code']);
+  assert.strictEqual(result[0].csvHeader, 'RTO Reason Code', 'RTO Reason Code must fuzzy-match RTO Reason (substring: rtoreason is contained in rtoreasoncode)');
 }
 
 // 4. matchHeaders - an extra CSV column matching nothing is simply absent from any target's
@@ -51,10 +51,10 @@ assert.strictEqual(normalizeHeader('Address City'), 'addresscity');
 // 6. findRequiredMatch - locates the matched CSV header for a conceptual required column,
 // case/spacing-insensitively, and returns null cleanly when absent.
 {
-  const matchResult = matchHeaders(['AWB Code', 'Order ID'], ['AWB Number', 'Order ID']);
-  assert.strictEqual(findRequiredMatch(matchResult, 'awb code'), 'AWB Number');
+  const matchResult = matchHeaders(['RTO Reason', 'Order ID'], ['RTO Reason Code', 'Order ID']);
+  assert.strictEqual(findRequiredMatch(matchResult, 'rto reason'), 'RTO Reason Code');
   assert.strictEqual(findRequiredMatch(matchResult, 'order id'), 'Order ID');
-  assert.strictEqual(findRequiredMatch(matchResult, 'rto reason'), null,
+  assert.strictEqual(findRequiredMatch(matchResult, 'payment method'), null,
     'a conceptual name not even present among sheetTargetHeaders must return null, not throw');
 }
 

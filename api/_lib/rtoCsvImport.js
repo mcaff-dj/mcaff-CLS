@@ -38,13 +38,7 @@ function matchHeaders(sheetTargetHeaders, csvHeaders) {
     if (!targetNorm) return;
     for (const [csvHeader, csvNorm] of remaining) {
       if (!csvNorm) continue;
-      // Match if: either is a substring of the other, OR they share a 3+ char common prefix
-      // (e.g., 'awbcode' and 'awbnumber' both start with 'awb', indicating 'Code' vs 'Number'
-      // is just wording variation on the same concept).
-      const hasSubstringMatch = csvNorm.includes(targetNorm) || targetNorm.includes(csvNorm);
-      const hasCommonPrefix = csvNorm.length >= 3 && targetNorm.length >= 3 &&
-        csvNorm.substring(0, 3) === targetNorm.substring(0, 3);
-      if (hasSubstringMatch || hasCommonPrefix) {
+      if (csvNorm.includes(targetNorm) || targetNorm.includes(csvNorm)) {
         entry.csvHeader = csvHeader;
         remaining.delete(csvHeader);
         break;
