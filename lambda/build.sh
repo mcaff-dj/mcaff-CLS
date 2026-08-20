@@ -74,9 +74,38 @@ build_assign_ndr_leads() {
   echo "-> $OUT_DIR/assign_ndr_leads.zip"
 }
 
+build_csv_upload_worker() {
+  echo "=== Building csv_upload_worker.zip ==="
+  work="$(mktemp -d)"
+  mkdir -p "$work/scripts" "$work/api/_lib"
+
+  cp "$LAMBDA_DIR/csv_upload_worker/handler.py" "$work/handler.py"
+  cp "$REPO_ROOT/scripts/process_rto_csv_upload_job.py" \
+     "$REPO_ROOT/scripts/assign_leads.py" \
+     "$REPO_ROOT/scripts/lib.py" \
+     "$REPO_ROOT/scripts/mysql_lib.py" \
+     "$REPO_ROOT/scripts/lead_priority.py" \
+     "$work/scripts/"
+  cp "$REPO_ROOT/api/_lib/callingProcesses.json" \
+     "$REPO_ROOT/api/_lib/leadAssignmentRules.json" \
+     "$work/api/_lib/"
+
+  # Same dependency set as assign_leads.zip - this worker imports assign_leads.py unmodified,
+  # so it needs everything that file needs (pymysql for MySQL, psycopg for Postgres, requests
+  # for Sheets/GoKwik HTTP calls, cryptography as psycopg[binary]'s own dependency).
+  pip3 install --disable-pip-version-check --only-binary=:all: \
+    --platform manylinux2014_x86_64 --python-version 3.12 --implementation cp --abi cp312 \
+    -t "$work" psycopg[binary] requests cryptography pymysql
+
+  ( cd "$work" && zip -r -q "$OUT_DIR/csv_upload_worker.zip" . )
+  rm -rf "$work"
+  echo "-> $OUT_DIR/csv_upload_worker.zip"
+}
+
 case "${1:-all}" in
   assign_leads) build_assign_leads ;;
   assign_ndr_leads) build_assign_ndr_leads ;;
-  all) build_assign_leads; build_assign_ndr_leads ;;
-  *) echo "Usage: $0 [assign_leads|assign_ndr_leads]" >&2; exit 1 ;;
+  csv_upload_worker) build_csv_upload_worker ;;
+  all) build_assign_leads; build_assign_ndr_leads; build_csv_upload_worker ;;
+  *) echo "Usage: $0 [assign_leads|assign_ndr_leads|csv_upload_worker]" >&2; exit 1 ;;
 esac
