@@ -87,6 +87,7 @@ mount('post', '/api/refund/gokwik-initiate', '../refund/gokwik-initiate.js');
 mount('get', '/api/refund-export', '../refund-export.js');
 mount('all', '/api/rto/sheet', '../rto/sheet.js');
 mount('post', '/api/rto/claim', '../rto/claim.js');
+mount('post', '/api/rto/next-lead', '../rto/next-lead.js');
 mount('all', '/api/ndr/sheet', '../ndr/sheet.js');
 mount('post', '/api/ndr/lead-assignment', '../ndr/lead-assignment.js');
 mount('all', '/api/delivery-escalation/sheet', '../delivery-escalation/sheet.js');

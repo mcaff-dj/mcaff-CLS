@@ -935,6 +935,29 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
           return u;
         });
         
+        // Real top-up, not just a hopeful toast: request this agent's next lead right now
+        // instead of waiting on the periodic sweep - see api/rto/next-lead.js. The line below
+        // used to unconditionally claim "& refilled fresh lead into box!" with nothing behind
+        // it - disposing never triggered any assignment at all (see that file's own comment on
+        // why). Best-effort and never blocking: this disposal has already fully succeeded
+        // (sheet + MySQL) by this point, so a failure here must not look like the disposal failed.
+        let nextLeadNote = '';
+        try {
+          const nlRes = await fetch('/api/rto/next-lead', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+          const nlData = await nlRes.json().catch(() => ({}));
+          if (nlRes.ok && nlData.assigned) {
+            nextLeadNote = ` — next lead ${nlData.orderNumber} assigned (${nlData.load}/${nlData.quota})`;
+            sync(true); // pull the newly-written row in now rather than waiting for the 60s poll
+          } else if (nlRes.ok && nlData.reason !== 'at quota') {
+            // 'at quota' means this agent still holds enough leads on purpose - not worth a
+            // toast. Anything else (pool empty) is worth saying so the agent isn't left
+            // wondering why nothing showed up.
+            nextLeadNote = ' — no more leads available right now';
+          }
+        } catch (e) {
+          console.error('next-lead request failed:', e);
+        }
+
         if(isRef){
           const gkData=gokwik?.gokwik||{};
           doRefund(dispTkt.id,{
@@ -948,8 +971,9 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
             notes:refNotes,
             gokwikResponse: gkData
           });
+          if (nextLeadNote) showToast(`Next lead${nextLeadNote.replace(' — next lead ', ' ')}`);
         } else {
-          showToast(`Disposed ${dispTkt.orderNumber} & refilled fresh lead into box!`);
+          showToast(`Disposed ${dispTkt.orderNumber}${nextLeadNote}`);
         }
         setDispTkt(null);
       };
@@ -1412,8 +1436,19 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
       // not) is permanently exempt - it counts toward that agent's load but is never
       // reassigned, matching the script exactly.
       const predictedAssignments = useMemo(() => {
+        // inProcess, not just status === 'Online': status alone can be stale. rosterMap is
+        // seeded from this browser's own localStorage cache (rto_agent_roster), and an entry
+        // there for someone who is no longer an RTO member (rescoped to another process, or
+        // removed) never gets corrected back to Offline - the correction only runs for agents
+        // perProcess[email] actually contains, i.e. real members (see effectiveAgentRoster's own
+        // "Status/quota resolution" block, which is exactly where inProcess gets set). Without
+        // this, a stale cached agent showed up here as a likely recipient while
+        // scripts/assign_leads.py - which reads live DB membership, not this browser's cache -
+        // never had them eligible at all. Matches the Team Roster table's own guard
+        // (`effectiveAgentRoster.filter(a => a.inProcess)`), which this forecast should have had
+        // from the start since it claims to mirror the same eligibility.
         const onlineAgents = effectiveAgentRoster
-          .filter(a => a.status === 'Online')
+          .filter(a => a.status === 'Online' && a.inProcess)
           .map(a => a.email.toLowerCase())
           .sort();
 
