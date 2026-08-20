@@ -19,42 +19,7 @@ const RTO_ASSIGN_LAMBDA = 'mcaff-cls-assign-leads';
 const PROCESS_ASSIGN_LAMBDA = { ndr: 'mcaff-cls-assign-ndr-leads' };
 const PROCESS_ASSIGN_WORKFLOW = {};
 
-let _lambdaClient = null;
-function lambdaClient() {
-  if (!_lambdaClient) {
-    const { LambdaClient } = require('@aws-sdk/client-lambda');
-    _lambdaClient = new LambdaClient({});
-  }
-  return _lambdaClient;
-}
-
-// Invokes the given assign-leads Lambda directly, on demand, so an agent who comes online
-// with an empty queue doesn't have to wait for the next 5-minute EventBridge Scheduler
-// tick. Replaces the old GitHub Actions workflow_dispatch call now that each process's
-// recurring assignment itself runs on that same Lambda (see lambda/README.md) -
-// dispatching the GitHub workflow here as well would have kept running assign-leads.yml's
-// job on the self-hosted runner on every empty-queue heartbeat, redundant with the
-// Lambda's own schedule (this was caught in production for rto on 2026-08-13 - see the
-// chat thread - and fixed for ndr at the same time it was cut over, rather than repeating
-// that mistake). InvocationType 'Event' is fire-and-forget, same semantics as the old
-// dispatch call: this returns as soon as the invoke is *accepted*, not when the
-// assignment run finishes. Best-effort: if the invoke call fails (e.g. a permissions
-// gap), this silently no-ops and the agent just gets picked up by the Lambda's own next
-// scheduled run instead, so a misconfigured setup never blocks the agent from working.
-async function triggerImmediateLambdaAssignment(functionName) {
-  try {
-    const { InvokeCommand } = require('@aws-sdk/client-lambda');
-    const resp = await lambdaClient().send(new InvokeCommand({
-      FunctionName: functionName,
-      InvocationType: 'Event',
-    }));
-    if (resp.StatusCode !== 202) {
-      console.error(`triggerImmediateLambdaAssignment(${functionName}): unexpected StatusCode`, resp.StatusCode);
-    }
-  } catch (e) {
-    console.error(`triggerImmediateLambdaAssignment(${functionName}) error:`, e.message || e);
-  }
-}
+const { triggerLambda: triggerImmediateLambdaAssignment } = require('../_lib/lambdaTrigger');
 
 // Fires a still-on-GitHub-Actions process's own assign workflow on demand - same
 // "don't make an agent wait for the next scheduled pass" reasoning as
