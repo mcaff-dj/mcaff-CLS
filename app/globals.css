@@ -759,6 +759,7 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
 .calling-overview-page .co-table th:first-child,
 .calling-overview-page .co-table td:first-child { text-align: left; }
 .calling-overview-page .co-table tbody tr:last-child td { border-bottom: none; }
+.calling-overview-page .co-table-total td { font-weight: 700; border-top: 2px solid var(--border); }
 .calling-overview-page .co-table-empty { text-align: center; color: var(--text-muted); padding: 20px 0; }
 
 /* ── orgoverview: Org_KYC_Trends tab → /orgoverview ─────────────────────

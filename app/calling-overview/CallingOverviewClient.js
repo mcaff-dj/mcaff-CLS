@@ -200,6 +200,22 @@ export default function CallingOverviewClient() {
               {!data.rtoReasonBreakdown.length && (
                 <tr><td colSpan={6} className="co-table-empty">No data for this filter.</td></tr>
               )}
+              {!!data.rtoReasonBreakdown.length && (() => {
+                const totalAssigned = data.rtoReasonBreakdown.reduce((s, r) => s + r.totalAssigned, 0);
+                const totalConnected = data.rtoReasonBreakdown.reduce((s, r) => s + r.totalConnected, 0);
+                const totalConverted = data.rtoReasonBreakdown.reduce((s, r) => s + r.totalConverted, 0);
+                const pct = (n, d) => (d > 0 ? Math.round((n / d) * 100) : 0);
+                return (
+                  <tr className="co-table-total">
+                    <td>Total</td>
+                    <td>{totalAssigned.toLocaleString('en-IN')}</td>
+                    <td>{totalConnected.toLocaleString('en-IN')}</td>
+                    <td>{pct(totalConnected, totalAssigned)}%</td>
+                    <td>{totalConverted.toLocaleString('en-IN')}</td>
+                    <td>{pct(totalConverted, totalAssigned)}%</td>
+                  </tr>
+                );
+              })()}
             </tbody>
           </table>
         </div>

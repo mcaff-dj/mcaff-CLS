@@ -2123,13 +2123,15 @@ function categorizeRtoReason(rawReason) {
   const r = (rawReason || '').toUpperCase();
   if (!r || r === 'UNKNOWN' || r === 'N/A' || r === 'OTHERS') return 'Unknown/Other';
   if (r.includes('OTP')) return 'OTP/Verified Cancellation';
-  if (r.includes('ADDRESS') || r.includes('DELIVERY AREA') || r.includes('TRACEABLE') || r.includes('LOCATED')) {
+  if (['ADDRESS', 'DELIVERY AREA', 'TRACEABLE', 'LOCATED', 'PINCODE', 'PIN CODE'].some((k) => r.includes(k))) {
     return 'Address Issue';
   }
-  if (r.includes('REATTEMPT') || r.includes('FUTURE DELIVERY')) return 'Reattempt/Future Delivery';
+  if (['REATTEMPT', 'FUTURE DELIVERY', 'RESCHEDULE', 'ANOTHER DATE', 'DELAY DELIVERY'].some((k) => r.includes(k))) {
+    return 'Reattempt/Future Delivery';
+  }
   if (r.includes('REFUS') || r.includes('CANCEL')) return 'Customer Refused/Cancelled';
-  if (r.includes('UNAVAILABLE') || r.includes('NOT CONTACTABLE') || r.includes('NOT AVAILABLE')
-      || r.includes('NOT ANSWERING') || r.includes('RECEIVER NOT') || r.includes('PNA')) {
+  if (['UNAVAILABLE', 'NOT CONTACTABLE', 'NOT AVAILABLE', 'NOT ANSWERING', 'RECEIVER NOT', 'PNA',
+       'OFFICE CLOSED', 'RESIDENCE CLOSED', 'HOUSE LOCKED', 'PERSON NOT MET', 'DOOR LOCK'].some((k) => r.includes(k))) {
     return 'Customer Unavailable/Unreachable';
   }
   return 'Unknown/Other';
