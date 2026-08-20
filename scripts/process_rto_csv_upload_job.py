@@ -111,14 +111,41 @@ def _update_job(conn, job_id, **fields):
     conn.commit()
 
 
-def _fetch_job_rows(conn, job_id):
+def _fetch_job(conn, job_id):
+    """Returns (status, rows_pending_list). (None, []) if the job row doesn't exist at all -
+    callers only special-case the string 'done', so a missing/NULL status still falls through
+    to the same "no pending rows" handling this had before status was added to the query."""
     import json
     with conn.cursor() as cur:
-        cur.execute("SELECT rows_pending FROM rto_csv_upload_jobs WHERE id = %s", (job_id,))
+        cur.execute("SELECT status, rows_pending FROM rto_csv_upload_jobs WHERE id = %s", (job_id,))
         row = cur.fetchone()
-    if row is None or row[0] is None:
-        return []
-    return row[0] if isinstance(row[0], list) else json.loads(row[0])
+    if row is None:
+        return None, []
+    status, rows_pending = row
+    if rows_pending is None:
+        rows = []
+    else:
+        rows = rows_pending if isinstance(rows_pending, list) else json.loads(rows_pending)
+    return status, rows
+
+
+def _normalize_header(h):
+    """Same normalization convention as api/_lib/rtoCsvImport.js's normalizeHeader (lowercase,
+    strip everything but letters/digits) - reimplemented here (not shared) since this file is
+    Python and that one is JS; kept in exact sync by hand, same constraint this feature's own
+    isPrepaid already lives with (see upload-start.js's own comment on that)."""
+    return "".join(c for c in (h or "").lower() if c.isalnum())
+
+
+def _header_index(full_header_row, target_header):
+    """0-based column index of target_header in a live header row (exact normalized-equality
+    match, no substring fallback - matching headerToColumnLetter's own contract), or None if
+    not found."""
+    target_norm = _normalize_header(target_header)
+    for i, h in enumerate(full_header_row):
+        if _normalize_header(h) == target_norm:
+            return i
+    return None
 
 
 def process_job(job_id):
@@ -129,7 +156,14 @@ def process_job(job_id):
         print(f"process_job({job_id}): could not connect to Postgres, giving up: {e}")
         return
     try:
-        rows = _fetch_job_rows(conn, job_id)
+        status, rows = _fetch_job(conn, job_id)
+        if status == "done":
+            # Cost-avoidance only, not the correctness fix - a genuinely duplicate append is
+            # already prevented by the live AWB re-check right before the append below. This
+            # just skips redoing the expensive GoKwik/MySQL check phases when the same job
+            # somehow gets invoked twice for a reason other than a mid-run crash.
+            print(f"process_job({job_id}): status already 'done', skipping duplicate invoke")
+            return
         if not rows:
             _update_job(conn, job_id, status="failed", error_message="Job has no pending rows")
             return
@@ -197,6 +231,51 @@ def process_job(job_id):
             "AWB Code", "Customer Email", "Customer Name", "Customer Mobile", "Address",
             "Address City", "Address State", "Address Pincode", "Payment Method", "Order Total",
         ]
+        # Fresh live read of the header row, right before writing - this worker runs
+        # asynchronously and possibly minutes after api/rto/upload-start.js did its own header
+        # read, so that snapshot can no longer be trusted. Same contiguity guard that endpoint
+        # applies to its own (synchronous, immediately-followed-by-append) read: only columns
+        # that DID resolve are checked (a null is a legitimately-missing column, not
+        # misalignment), and each resolved column must sit exactly `i` positions after
+        # target_headers[0]'s own column.
+        full_header_row = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!A1:AD1")
+        full_header_row = full_header_row[0] if full_header_row else []
+        start_index = _header_index(full_header_row, target_headers[0])
+        resolved_indices = [_header_index(full_header_row, h) for h in target_headers]
+        misaligned = start_index is None or any(
+            idx is not None and idx != start_index + i for i, idx in enumerate(resolved_indices)
+        )
+        if misaligned:
+            _update_job(
+                conn, job_id, status="failed",
+                error_message=(
+                    f"Sheet column layout has changed unexpectedly - could not find '"
+                    f"{target_headers[0]}' or the target columns are no longer contiguous. "
+                    "Refusing to append to avoid writing misaligned data."
+                ),
+            )
+            return
+
+        # Fresh AWB dedup, read RIGHT NOW rather than trusting upload-start.js's snapshot from
+        # whenever /start ran. Two ways that snapshot goes stale by the time this worker
+        # actually appends: (a) two overlapping uploads close together - job A's worker hasn't
+        # appended yet when job B's /start reads the AWB set, so both would otherwise append the
+        # same AWB; (b) a Lambda retry re-running this same job after a timeout that killed the
+        # process after the append already landed but before the status write to 'done' did.
+        # Re-checking against the sheet as it stands right this moment is what actually closes
+        # both gaps - upload-start.js's own dedup only ever protected against what was in the
+        # sheet at upload time.
+        awb_col_letter = lib.get_column_letter(resolved_indices[target_headers.index("AWB Code")])
+        awb_data = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!{awb_col_letter}2:{awb_col_letter}")
+        live_awb_set = {(r[0] if r else "").strip().upper() for r in awb_data}
+        live_awb_set.discard("")
+        before_dedup = len(stamped_rows)
+        stamped_rows = [r for r in stamped_rows if r["awbCode"] not in live_awb_set]
+        skipped_as_dupe = before_dedup - len(stamped_rows)
+        if skipped_as_dupe:
+            print(f"process_job({job_id}): {skipped_as_dupe} row(s) already present in sheet "
+                  "(live AWB re-check) - skipped to avoid a duplicate append")
+
         values_to_append = []
         for row in stamped_rows:
             cells = row["cells"]

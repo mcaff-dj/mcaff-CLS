@@ -127,6 +127,13 @@ aws lambda update-function-configuration --function-name "$FN_CSV_WORKER" --regi
 # needed on our side (see the design spec's concurrency note).
 aws lambda put-function-concurrency --function-name "$FN_CSV_WORKER" \
   --reserved-concurrent-executions 1 --region "$AWS_REGION"
+# Belt-and-suspenders against a duplicate append: an async Lambda invoke retries automatically
+# by default on failure/timeout, which would re-run process_job (including its final sheet
+# append) a second time. The worker's own live AWB re-check right before appending is the real
+# correctness backstop for that; this just avoids the retry - and its wasted GoKwik/MySQL work -
+# happening at all.
+aws lambda put-function-event-invoke-config --function-name "$FN_CSV_WORKER" \
+  --maximum-retry-attempts 0 --region "$AWS_REGION"
 
 # ---- 6. sync-lead-assignments Lambda ----
 # RETIRED 2026-08-17 - sync_agent_presence_log_to_mysql.py deleted, this Lambda's zip can

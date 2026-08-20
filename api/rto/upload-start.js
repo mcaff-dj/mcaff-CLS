@@ -10,7 +10,7 @@ const { parseCSV } = require('../_lib/csv');
 const {
   matchHeaders, findRequiredMatch, buildRowPlan, headerToColumnLetter,
 } = require('../_lib/rtoCsvImport');
-const { createRtoCsvUploadJob } = require('../_lib/db');
+const { createRtoCsvUploadJob, updateRtoCsvUploadJob } = require('../_lib/db');
 const { triggerLambda } = require('../_lib/lambdaTrigger');
 
 const RTO_SHEET_ID = '1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI';
@@ -174,7 +174,7 @@ module.exports = async (req, res) => {
       await sheetsRequest(
         client, 'POST',
         `/values/${encodeURIComponent(`'${SHEET_TAB}'!${startCol}2`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
-        { valueInputOption: 'USER_ENTERED', values: rowsToAppend },
+        { values: rowsToAppend },
       );
       appendedNow = nonPrepaidRows.length;
     }
@@ -192,6 +192,17 @@ module.exports = async (req, res) => {
           totalRows: prepaidRows.length,
           prepaidCount: prepaidRows.length,
           rowsPending: prepaidRows,
+        });
+        // Records the WHOLE upload's outcome (not just the prepaid subset the job otherwise
+        // only ever tracks) - duplicate/missing/error counts from plan.counts/plan.errors were
+        // computed above but, before this call, only ever returned in the HTTP response, where
+        // they were lost as soon as the browser modal closed. Same try/catch as job creation
+        // above: a failure here follows the existing queueError path rather than a new one.
+        await updateRtoCsvUploadJob(jobId, {
+          duplicate_in_sheet_count: plan.counts.duplicateInSheet,
+          duplicate_in_file_count: plan.counts.duplicateInFile,
+          missing_awb_count: plan.counts.missingAwb,
+          errors: plan.errors.slice(0, 50),
         });
         await triggerLambda(CSV_UPLOAD_WORKER_LAMBDA, { jobId });
       } catch (e) {

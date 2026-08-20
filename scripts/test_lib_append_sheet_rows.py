@@ -32,7 +32,11 @@ def test_append_sheet_rows_calls_values_append_with_insert_rows():
     encoded = urllib.parse.quote("'Data'!B2:P", safe="")
     assert f"/values/{encoded}:append" in captured['url'], f"must have range in path before :append, got {captured['url']}"
     assert captured['url'].endswith(':append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS'), f"wrong query params, got {captured['url']}"
-    assert captured['json']['valueInputOption'] == 'USER_ENTERED'
+    # valueInputOption belongs ONLY in the URL query string (checked above) - Sheets'
+    # values.append body is strictly a ValueRange ({range, majorDimension, values}), so a
+    # duplicate valueInputOption key in the JSON body would be wrong shape, not just redundant.
+    assert 'valueInputOption' not in captured['json'], f"body must not carry valueInputOption, got {captured['json']}"
+    assert set(captured['json'].keys()) == {'values'}, f"body must contain exactly 'values', got {captured['json'].keys()}"
     assert captured['json']['values'] == [
         ["19-08-2026", "", "Reason A", "HYP1", "U1", "AWB1"],
         ["19-08-2026", "", "Reason B", "HYP2", "U2", "AWB2"],

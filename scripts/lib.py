@@ -201,7 +201,7 @@ def append_sheet_rows(spreadsheet_id, range_, rows):
     resp = requests.post(url, headers={
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json; charset=utf-8",
-    }, json={"valueInputOption": "USER_ENTERED", "values": rows})
+    }, json={"values": rows})
     resp.raise_for_status()
     return resp.json()
 
