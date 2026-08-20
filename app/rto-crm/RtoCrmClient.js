@@ -941,18 +941,33 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
         // it - disposing never triggered any assignment at all (see that file's own comment on
         // why). Best-effort and never blocking: this disposal has already fully succeeded
         // (sheet + MySQL) by this point, so a failure here must not look like the disposal failed.
+        // nextLeadNote: appended straight onto the "Disposed X" toast (non-refund path).
+        // nextLeadStandalone: its own sentence, for the refund path - that flow already shows
+        // its own "₹X refunded successfully" toast (doRefund below), so the top-up gets a
+        // separate one rather than string surgery on nextLeadNote to make it stand alone.
         let nextLeadNote = '';
+        let nextLeadStandalone = '';
         try {
           const nlRes = await fetch('/api/rto/next-lead', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
           const nlData = await nlRes.json().catch(() => ({}));
           if (nlRes.ok && nlData.assigned) {
-            nextLeadNote = ` — next lead ${nlData.orderNumber} assigned (${nlData.load}/${nlData.quota})`;
-            sync(true); // pull the newly-written row in now rather than waiting for the 60s poll
+            // next-lead.js fills toward quota, not strictly one-for-one - count > 1 means this
+            // disposal is what closed a real gap (an agent who started under quota), not just
+            // routine replacement, so say so rather than naming only the first order number.
+            if (nlData.count > 1) {
+              nextLeadNote = ` — ${nlData.count} leads assigned to catch you up (${nlData.load}/${nlData.quota})`;
+              nextLeadStandalone = `${nlData.count} leads assigned to catch you up (${nlData.load}/${nlData.quota})`;
+            } else {
+              nextLeadNote = ` — next lead ${nlData.orderNumber} assigned (${nlData.load}/${nlData.quota})`;
+              nextLeadStandalone = `Next lead ${nlData.orderNumber} assigned (${nlData.load}/${nlData.quota})`;
+            }
+            sync(true); // pull the newly-written row(s) in now rather than waiting for the 60s poll
           } else if (nlRes.ok && nlData.reason !== 'at quota') {
             // 'at quota' means this agent still holds enough leads on purpose - not worth a
             // toast. Anything else (pool empty) is worth saying so the agent isn't left
             // wondering why nothing showed up.
             nextLeadNote = ' — no more leads available right now';
+            nextLeadStandalone = 'No more leads available right now';
           }
         } catch (e) {
           console.error('next-lead request failed:', e);
@@ -971,7 +986,7 @@ import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, Dow
             notes:refNotes,
             gokwikResponse: gkData
           });
-          if (nextLeadNote) showToast(`Next lead${nextLeadNote.replace(' — next lead ', ' ')}`);
+          if (nextLeadStandalone) showToast(nextLeadStandalone);
         } else {
           showToast(`Disposed ${dispTkt.orderNumber}${nextLeadNote}`);
         }

@@ -10,6 +10,7 @@ const assert = require('assert');
 // duplicate of it. See next-lead.js's own comment next to these exports.
 const {
   isPrepaid, priorityTier, parseRtoInitiatedDate, buildCandidateList, isEligibleNow,
+  computeFillTarget,
 } = require('./next-lead.js');
 
 // 1. is_prepaid mirror: explicit COD/Cash is COD, everything else defaults Prepaid - matches
@@ -89,5 +90,17 @@ assert.strictEqual(isEligibleNow(exactlyAtEdge, 'Online', NOW), false, 'exactly 
 
 assert.strictEqual(isEligibleNow({ status: 'Online', updatedAt: 'not a date' }, 'Online', NOW), false,
   'an unparseable updatedAt must fail closed, not throw or be treated as fresh');
+
+// 7. computeFillTarget - the arithmetic behind the fix for Rasika's exact case (1/20 with a
+// huge backlog available): must fill the real gap, but never past whichever of the three
+// bounds (headroom, per-request ceiling, candidates available) is tightest.
+assert.strictEqual(computeFillTarget(20, 1, 1000, 25), 19, 'Rasika-shaped case: fill the full 19-lead gap');
+assert.strictEqual(computeFillTarget(20, 19, 1000, 25), 1, 'near-quota: fill just the one open slot');
+assert.strictEqual(computeFillTarget(20, 20, 1000, 25), 0, 'exactly at quota: nothing to fill');
+assert.strictEqual(computeFillTarget(20, 1, 1000, 5), 5, 'per-request ceiling wins over a large headroom');
+assert.strictEqual(computeFillTarget(20, 1, 3, 25), 3, 'candidate count wins when the pool itself is smaller than the gap');
+assert.strictEqual(computeFillTarget(20, 25, 1000, 25), 0,
+  'over quota (e.g. from a manual claim) must clamp to 0, never go negative');
+assert.strictEqual(computeFillTarget(20, 1, 0, 25), 0, 'zero candidates -> zero target, not a crash');
 
 console.log('next-lead.test.js: all assertions passed');

@@ -1,4 +1,4 @@
-// Gives the calling agent ONE more RTO lead right now, instead of them waiting on
+// Fills the calling agent back up toward their own quota right now, instead of them waiting on
 // scripts/assign_leads.py's next scheduled pass (up to 5 minutes away, and - see
 // docs/2026-08-18-rto-crm-performance-audit.md and this week's incidents - not reliably
 // completing even then on a CPU-throttled Lambda).
@@ -10,7 +10,16 @@
 // 15-60+ minutes against a backlog in the thousands (Badshah, Sayli, Naziya, Atharva, Shubham
 // all hit this on 2026-08-19/20) purely because the sweep hadn't reached them yet.
 //
-// Deliberately scoped to ONE lead for the CALLER only, not a re-run of the sweep:
+// FILLS to quota, not just one-for-one - this is the fix for a second, quieter failure mode
+// found right after the one-lead version shipped: Rasika sat at 1/20 all session while every
+// other agent climbed to 18-21 through ordinary one-at-a-time top-ups, because giving back
+// exactly what was just disposed can only ever MAINTAIN a load, never GROW it. An agent who
+// starts a session (or comes back from a long idle stretch) under quota had no way to close
+// that gap except the periodic sweep - the exact piece already unreliable all week. See the
+// FILL_TIME_BUDGET_MS/MAX_FILL_PER_REQUEST bounds further down for why this is capped rather
+// than unconditionally filling the whole gap in one request.
+//
+// Deliberately scoped to fresh leads for the CALLER only, not a re-run of the sweep:
 //   - The sweep is a full pass over the whole sheet plus GoKwik/LMD checks (12-40s+ observed
 //     this week) behind reserved concurrency 1 on the Lambda - firing it from every disposal
 //     across a team would queue duplicate full runs behind each other, and Lambda's async
@@ -47,6 +56,23 @@ const TAB_KEY = 'rto';
 // Must match scripts/assign_leads.py's STALE_MINUTES - the same "heartbeat-fresh" window that
 // decides whether an agent's global presence counts as genuinely Online right now.
 const STALE_MINUTES = 10;
+
+// Hard ceiling on how many leads one request will fill, independent of quota - purely
+// defensive against a misconfigured quota value turning one request into dozens of sequential
+// Sheets calls. See computeFillTarget and the handler's own FILL_TIME_BUDGET_MS for the two
+// bounds together.
+const MAX_FILL_PER_REQUEST = 25;
+
+// How many leads this call should try to assign: the smaller of the agent's real remaining
+// quota headroom, the hard per-request ceiling, and how many candidates actually exist. A pure
+// function purely so the arithmetic - easy to get off-by-one on (quota-load vs quota-load-1,
+// clamping negative) - is tested rather than trusted. Clamped at 0: the caller already checks
+// load >= quota before reaching this, but this must never return a negative "target" if that
+// guard is ever reordered or removed.
+function computeFillTarget(quota, load, candidatesAvailable, maxPerRequest) {
+  const headroom = Math.max(0, quota - load);
+  return Math.min(headroom, maxPerRequest, candidatesAvailable);
+}
 
 // The exact eligibility rule scripts/assign_leads.py's fetch_online_agents enforces for the
 // sweep - BOTH a heartbeat-fresh global "Online" AND a per-process (rto) "Online" - reduced to
@@ -285,41 +311,78 @@ async function handler(req, res) {
       return;
     }
 
-    // Try candidates in priority order. A race with another agent's claim/next-lead call
-    // between our read above and this write is the only way one is already taken - re-verify
-    // the single cell right before writing (same pattern as claim.js) and fall through to the
-    // next candidate rather than failing outright, since we already know the whole ranked list.
-    const MAX_ATTEMPTS = 5;
-    for (let attempt = 0; attempt < Math.min(MAX_ATTEMPTS, candidates.length); attempt++) {
-      const candidate = candidates[attempt];
+    // FILLS to quota, not just "replace the one just disposed" - this is the fix for the gap
+    // that let this happen at all: Rasika sat at 1/20 all session while every other agent
+    // climbed to 18-21 via ordinary one-at-a-time top-ups, because one-for-one can only ever
+    // MAINTAIN a load, never GROW it. An agent who starts a session (or a long idle stretch)
+    // under quota has no way to close that gap except the periodic sweep - which is exactly the
+    // piece that has been unreliable all week. Filling here means the very first disposal after
+    // going under-full catches an agent all the way back up, with no dependency on the sweep
+    // completing at all.
+    //
+    // Bounded two ways, because this now runs inside an interactive disposal request the agent
+    // is waiting on, not a background job:
+    //   - FILL_TIME_BUDGET_MS caps wall-clock, the same pattern (and the same reasoning) as
+    //     scripts/assign_leads.py's GOKWIK_TIME_BUDGET_SEC: better to hand back a partial fill
+    //     within a bounded time than let one huge gap turn into a multi-second UI hang.
+    //   - MAX_FILL_PER_REQUEST (see computeFillTarget above) is the other bound.
+    // A gap wider than either limit closes over the agent's next few disposals instead of this
+    // one - slower than instant, but still self-healing without the sweep, which is the property
+    // that was missing before.
+    const FILL_TIME_BUDGET_MS = 8000;
+    const needed = computeFillTarget(quota, load, candidates.length, MAX_FILL_PER_REQUEST);
+
+    const assignedOrders = [];
+    const startedAt = Date.now();
+    let candidateIndex = 0;
+    // Total attempts (successes + lost races) is bounded separately from `needed`: a string of
+    // lost races must not spin through the entire candidate list one HTTP round-trip at a time
+    // with no time check in between.
+    while (
+      assignedOrders.length < needed
+      && candidateIndex < candidates.length
+      && Date.now() - startedAt < FILL_TIME_BUDGET_MS
+    ) {
+      const candidate = candidates[candidateIndex++];
       const cell = `${SHEET_TAB}!${COL.AGENT}${candidate.row}`;
+
+      // Re-verify right before writing - a race with another agent's claim/next-lead call
+      // between our read above and this write is the only way one is already taken (same
+      // pattern as api/rto/claim.js). Skip and move on rather than aborting the whole fill.
       const current = await sheetsRequest(client, 'GET', `/values/${encodeURIComponent(cell)}`);
       const held = (((current.values || [])[0] || [])[0] || '').toString().trim();
-      if (held && held.toLowerCase() !== 'unassigned') continue; // lost the race - try the next one
+      if (held && held.toLowerCase() !== 'unassigned') continue;
 
       await sheetsRequest(client, 'PUT', `/values/${encodeURIComponent(cell)}?valueInputOption=USER_ENTERED`, {
         range: cell,
         values: [[email]],
       });
 
-      let recorded = true;
       try {
-        ({ recorded } = await claimRtoLead(candidate.orderId, email, candidate.awbCode, candidate.rtoReason));
+        await claimRtoLead(candidate.orderId, email, candidate.awbCode, candidate.rtoReason);
       } catch (e) {
+        // The sheet write already succeeded - the agent holds the lead. Losing the history row
+        // is a reporting gap, not a failed assignment, so this must not stop the fill.
         console.error(`api/rto/next-lead: Column Q written for ${candidate.orderId} but CLS_RTO_calling insert failed:`, e.message);
-        recorded = false;
       }
-
-      res.status(200).json({
-        assigned: true, orderNumber: candidate.orderId, load: load + 1, quota, recorded,
-      });
-      return;
+      assignedOrders.push(candidate.orderId);
     }
 
-    // Every attempt lost its race - genuinely unusual (would need several other claims landing
-    // in the same second), but fail open rather than error: the agent's disposal already
-    // succeeded, so report "nothing available this instant" rather than a false failure.
-    res.status(200).json({ assigned: false, reason: 'no leads available', load, quota });
+    if (assignedOrders.length === 0) {
+      // Every attempt lost its race, or the time budget expired before the first write landed -
+      // genuinely unusual, but fail open rather than error: the agent's disposal already
+      // succeeded, so report "nothing available this instant" rather than a false failure.
+      res.status(200).json({ assigned: false, reason: 'no leads available', load, quota });
+      return;
+    }
+    res.status(200).json({
+      assigned: true,
+      count: assignedOrders.length,
+      orderNumbers: assignedOrders,
+      orderNumber: assignedOrders[0], // back-compat single value for any caller expecting v1's shape
+      load: load + assignedOrders.length,
+      quota,
+    });
   } catch (e) {
     console.error('api/rto/next-lead error:', e);
     res.status(500).json({ error: e.message || 'Could not assign a next lead' });
@@ -334,6 +397,7 @@ module.exports = handler;
 // Does not change this file's primary export shape - api/_lambda/app.js's `mount()` still just
 // calls the function directly.
 module.exports.isEligibleNow = isEligibleNow;
+module.exports.computeFillTarget = computeFillTarget;
 module.exports.isPrepaid = isPrepaid;
 module.exports.priorityTier = priorityTier;
 module.exports.parseRtoInitiatedDate = parseRtoInitiatedDate;
