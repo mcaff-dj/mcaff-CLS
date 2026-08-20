@@ -8,6 +8,8 @@ const DATE_OPTIONS = [
   { value: 'YESTERDAY', label: 'Yesterday' },
   { value: '7_DAYS', label: 'Last 7 days' },
   { value: '30_DAYS', label: 'Last 30 days' },
+  { value: 'THIS_MONTH', label: 'This month' },
+  { value: 'LAST_MONTH', label: 'Last month' },
   { value: 'CUSTOM', label: 'Custom range' },
 ];
 
@@ -47,6 +49,15 @@ function resolveDateRange(scope, customFrom, customTo) {
   if (scope === '30_DAYS') {
     const from = new Date(today); from.setDate(from.getDate() - 29);
     return { dateFrom: isoDate(from), dateTo: isoDate(today) };
+  }
+  if (scope === 'THIS_MONTH') {
+    const from = new Date(today.getFullYear(), today.getMonth(), 1);
+    return { dateFrom: isoDate(from), dateTo: isoDate(today) };
+  }
+  if (scope === 'LAST_MONTH') {
+    const from = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+    const to = new Date(today.getFullYear(), today.getMonth(), 0);
+    return { dateFrom: isoDate(from), dateTo: isoDate(to) };
   }
   if (scope === 'CUSTOM') return { dateFrom: customFrom || null, dateTo: customTo || null };
   return { dateFrom: null, dateTo: null };
