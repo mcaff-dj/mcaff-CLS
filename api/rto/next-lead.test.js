@@ -10,7 +10,7 @@ const assert = require('assert');
 // duplicate of it. See next-lead.js's own comment next to these exports.
 const {
   isPrepaid, priorityTier, parseRtoInitiatedDate, buildCandidateList, isEligibleNow,
-  computeFillTarget,
+  computeFillTarget, planFillRound,
 } = require('./next-lead.js');
 
 // 1. is_prepaid mirror: explicit COD/Cash is COD, everything else defaults Prepaid - matches
@@ -102,5 +102,30 @@ assert.strictEqual(computeFillTarget(20, 1, 3, 25), 3, 'candidate count wins whe
 assert.strictEqual(computeFillTarget(20, 25, 1000, 25), 0,
   'over quota (e.g. from a manual claim) must clamp to 0, never go negative');
 assert.strictEqual(computeFillTarget(20, 1, 0, 25), 0, 'zero candidates -> zero target, not a crash');
+
+// 8. planFillRound - the batched verify-response parser that replaced one GET per candidate
+// (the direct cause of a real Sheets API 429 outage on 2026-08-20 once fills started handing
+// out up to 25 leads per disposal). Google's batchGet omits `values` entirely for a genuinely
+// blank cell rather than returning an empty array - the sparse-response case a naive
+// `vr.values[0][0]` would throw on.
+{
+  const target = [{ orderId: 'A1', row: 5 }, { orderId: 'A2', row: 9 }, { orderId: 'A3', row: 12 }];
+  const valueRanges = [
+    {}, // A1's cell: genuinely blank - Google omits `values` entirely, not an empty array
+    { values: [['someone.else@x.com']] }, // A2: lost the race to another claim/fill
+    { values: [['Unassigned']] }, // A3: literal "Unassigned" text must count as free
+  ];
+  const { free, taken } = planFillRound(target, valueRanges);
+  assert.deepStrictEqual(free.map((c) => c.orderId), ['A1', 'A3']);
+  assert.deepStrictEqual(taken.map((c) => c.orderId), ['A2']);
+}
+{
+  // A missing entry in valueRanges (shorter array than target, defensive against an
+  // unexpected Sheets response shape) must not throw - treat as free rather than crash the fill.
+  const target = [{ orderId: 'B1', row: 5 }];
+  const { free, taken } = planFillRound(target, []);
+  assert.deepStrictEqual(free.map((c) => c.orderId), ['B1']);
+  assert.strictEqual(taken.length, 0);
+}
 
 console.log('next-lead.test.js: all assertions passed');

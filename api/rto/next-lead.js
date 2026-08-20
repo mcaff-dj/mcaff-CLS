@@ -25,9 +25,17 @@
 //     across a team would queue duplicate full runs behind each other, and Lambda's async
 //     invoke retries a throttled call for up to 6 hours (see lambda/README.md), so a busy
 //     afternoon could build a backlog that outlives the shift.
-//   - This request touches only the caller's own quota and one sheet row. Cost is a couple of
-//     Sheets API calls, no GoKwik/LMD network round-trip on the common path - see the SCOPE
-//     note below - so it comfortably finishes inside a normal HTTP request.
+//   - This request touches only the caller's own quota and rows. Batched, not per-lead - see
+//     planFillRound and the loop around it - so a whole fill costs a small constant number of
+//     Sheets calls regardless of how many leads it hands out, not one round-trip per lead. That
+//     batching is not an optimisation, it is load-bearing: every Sheets call in this app,
+//     across every agent, authenticates as the SAME service account, so Google's per-user rate
+//     limit is shared team-wide. The first version of this fill did one GET+PUT pair PER lead
+//     (up to 50 calls for one disposal), and on 2026-08-20 that was enough - with a few agents
+//     disposing in the same minute, an ordinary busy stretch - to exhaust the shared quota and
+//     start returning 429 to EVERYONE, including the plain 60s sync that has nothing to do with
+//     filling at all. No GoKwik/LMD network round-trip on the common path either - see the SCOPE
+//     note below - so a fill still comfortably finishes inside a normal HTTP request.
 //
 // SCOPE CUT, stated plainly: this endpoint only ever hands out a FRESH lead (Column Q blank or
 // "Unassigned") - it does NOT participate in the Connected=No reassignment queue, agent
@@ -207,6 +215,23 @@ function buildCandidateList(orderRows, workRows) {
   return candidates;
 }
 
+// Splits one round's target candidates into { free, taken } from a Google values:batchGet
+// response verifying their Column Q cells - pure so the response-shape parsing (an easy place
+// to get array indexing or the "Unassigned" convention subtly wrong) is tested directly rather
+// than trusted. valueRanges is the raw `data.valueRanges` array from the batchGet call, in the
+// SAME order as `target` (both built from the same cellRanges list).
+function planFillRound(target, valueRanges) {
+  const free = [];
+  const taken = [];
+  target.forEach((candidate, i) => {
+    const vr = valueRanges[i];
+    const held = (((vr && vr.values && vr.values[0]) || [])[0] || '').toString().trim();
+    if (held && held.toLowerCase() !== 'unassigned') taken.push(candidate);
+    else free.push(candidate);
+  });
+  return { free, taken };
+}
+
 async function handler(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method not allowed' });
@@ -332,40 +357,55 @@ async function handler(req, res) {
     const FILL_TIME_BUDGET_MS = 8000;
     const needed = computeFillTarget(quota, load, candidates.length, MAX_FILL_PER_REQUEST);
 
+    // BATCHED, not one GET+PUT pair per candidate lead - this is the fix for a real production
+    // incident (2026-08-20): every Sheets call in this app, across every agent, authenticates
+    // as the SAME single service account, so Google's per-user rate limit is shared team-wide.
+    // The original per-candidate loop cost up to MAX_FILL_PER_REQUEST*2 (=50) individual Sheets
+    // calls for ONE agent's ONE disposal; with several agents disposing in the same minute (an
+    // ordinary busy stretch - see the multi-agent per-minute bursts already on record from this
+    // same day), that was enough to exhaust the shared quota and start returning 429 to
+    // EVERYONE, including the plain 60s sync that has nothing to do with filling at all.
+    //
+    // planFillRound below does the same verify-then-write logic as before, just aimed at a
+    // WHOLE round's worth of candidates through one verify call and one write call, rather than
+    // per-candidate. Total Sheets calls for a fill is now ~2 per round (regardless of how many
+    // leads are in that round) x MAX_ROUNDS, a small constant instead of O(fill size).
     const assignedOrders = [];
     const startedAt = Date.now();
-    let candidateIndex = 0;
-    // Total attempts (successes + lost races) is bounded separately from `needed`: a string of
-    // lost races must not spin through the entire candidate list one HTTP round-trip at a time
-    // with no time check in between.
-    while (
-      assignedOrders.length < needed
-      && candidateIndex < candidates.length
-      && Date.now() - startedAt < FILL_TIME_BUDGET_MS
-    ) {
-      const candidate = candidates[candidateIndex++];
-      const cell = `${SHEET_TAB}!${COL.AGENT}${candidate.row}`;
+    let target = candidates.slice(0, needed);
+    let spare = candidates.slice(needed); // backfill pool if a round loses a race
+    const MAX_ROUNDS = 3; // initial pass + up to 2 backfills for lost races
+    for (let round = 0; round < MAX_ROUNDS && target.length > 0 && Date.now() - startedAt < FILL_TIME_BUDGET_MS; round++) {
+      // ONE batchGet verifying every target cell at once, not one GET per cell - a race with
+      // another agent's claim/next-lead call landing on the same row between our initial read
+      // and now is the only way one of these is already taken (same reasoning as the old
+      // per-candidate check, just batched).
+      const cellRanges = target.map((c) => `${SHEET_TAB}!${COL.AGENT}${c.row}`);
+      const vqs = cellRanges.map((r) => `ranges=${encodeURIComponent(r)}`).join('&');
+      const verify = await sheetsRequest(client, 'GET', `/values:batchGet?${vqs}`);
+      const verifyVR = verify.valueRanges || [];
+      const { free, taken } = planFillRound(target, verifyVR);
 
-      // Re-verify right before writing - a race with another agent's claim/next-lead call
-      // between our read above and this write is the only way one is already taken (same
-      // pattern as api/rto/claim.js). Skip and move on rather than aborting the whole fill.
-      const current = await sheetsRequest(client, 'GET', `/values/${encodeURIComponent(cell)}`);
-      const held = (((current.values || [])[0] || [])[0] || '').toString().trim();
-      if (held && held.toLowerCase() !== 'unassigned') continue;
-
-      await sheetsRequest(client, 'PUT', `/values/${encodeURIComponent(cell)}?valueInputOption=USER_ENTERED`, {
-        range: cell,
-        values: [[email]],
-      });
-
-      try {
-        await claimRtoLead(candidate.orderId, email, candidate.awbCode, candidate.rtoReason);
-      } catch (e) {
-        // The sheet write already succeeded - the agent holds the lead. Losing the history row
-        // is a reporting gap, not a failed assignment, so this must not stop the fill.
-        console.error(`api/rto/next-lead: Column Q written for ${candidate.orderId} but CLS_RTO_calling insert failed:`, e.message);
+      if (free.length > 0) {
+        // ONE batchUpdate writing every confirmed-free cell at once, not one PUT per cell.
+        await sheetsRequest(client, 'POST', '/values:batchUpdate', {
+          valueInputOption: 'USER_ENTERED',
+          data: free.map((c) => ({ range: `${SHEET_TAB}!${COL.AGENT}${c.row}`, values: [[email]] })),
+        });
+        assignedOrders.push(...free.map((c) => c.orderId));
+        // CLS_RTO_calling inserts are Postgres/MySQL, not Sheets API - they don't count against
+        // the quota this rewrite exists for, so they run off to the side, in parallel, rather
+        // than serialized into the Sheets round-trip loop above.
+        await Promise.all(free.map((c) => claimRtoLead(c.orderId, email, c.awbCode, c.rtoReason).catch((e) => {
+          // The sheet write already succeeded - the agent holds the lead. Losing the history
+          // row is a reporting gap, not a failed assignment, so this must not stop the fill.
+          console.error(`api/rto/next-lead: Column Q written for ${c.orderId} but CLS_RTO_calling insert failed:`, e.message);
+        })));
       }
-      assignedOrders.push(candidate.orderId);
+
+      if (taken.length === 0) break; // nothing lost this round - done
+      target = spare.slice(0, taken.length);
+      spare = spare.slice(taken.length);
     }
 
     if (assignedOrders.length === 0) {
@@ -398,6 +438,7 @@ module.exports = handler;
 // calls the function directly.
 module.exports.isEligibleNow = isEligibleNow;
 module.exports.computeFillTarget = computeFillTarget;
+module.exports.planFillRound = planFillRound;
 module.exports.isPrepaid = isPrepaid;
 module.exports.priorityTier = priorityTier;
 module.exports.parseRtoInitiatedDate = parseRtoInitiatedDate;
