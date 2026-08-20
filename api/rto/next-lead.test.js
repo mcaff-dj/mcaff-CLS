@@ -9,7 +9,7 @@ const assert = require('assert');
 // specifically so this test exercises the SAME code the request path runs, not a hand-copied
 // duplicate of it. See next-lead.js's own comment next to these exports.
 const {
-  isPrepaid, priorityTier, parseRtoInitiatedDate, buildCandidateList,
+  isPrepaid, priorityTier, parseRtoInitiatedDate, buildCandidateList, isEligibleNow,
 } = require('./next-lead.js');
 
 // 1. is_prepaid mirror: explicit COD/Cash is COD, everything else defaults Prepaid - matches
@@ -65,5 +65,29 @@ assert.strictEqual(parseRtoInitiatedDate('2026-07-19'), null, 'wrong field order
   const candidates = buildCandidateList(orderRows, workRows);
   assert.strictEqual(candidates.length, 1, '"Unassigned" text in Column Q must still be selectable');
 }
+
+// 6. isEligibleNow - the gate missing from the first version of this endpoint (Sayli,
+// 2026-08-20: kept getting assigned for 14+ minutes after going OnCall, because nothing
+// checked presence at all, only quota). Fresh-Online globally AND Online for rto, both
+// required - matches scripts/assign_leads.py's fetch_online_agents intersection.
+const NOW = new Date('2026-08-20T08:30:00Z').getTime();
+const freshOnline = { status: 'Online', updatedAt: '2026-08-20T08:25:00Z' }; // 5 min old
+
+assert.strictEqual(isEligibleNow(freshOnline, 'Online', NOW), true, 'Online both places, fresh heartbeat -> eligible');
+assert.strictEqual(isEligibleNow({ status: 'OnCall', updatedAt: '2026-08-20T08:29:00Z' }, 'Online', NOW), false,
+  'global status OnCall must block, even with a fresh heartbeat and Online-for-rto - this is the exact Sayli case');
+assert.strictEqual(isEligibleNow(freshOnline, 'Busy', NOW), false, 'per-process Busy must block even if globally Online');
+assert.strictEqual(isEligibleNow(freshOnline, 'Offline', NOW), false, 'per-process Offline must block');
+assert.strictEqual(isEligibleNow(freshOnline, null, NOW), false, 'a failed per-process lookup must fail closed, not assume Online');
+assert.strictEqual(isEligibleNow(null, 'Online', NOW), false, 'a failed/missing presence row must fail closed');
+
+const staleOnline = { status: 'Online', updatedAt: '2026-08-20T08:15:00Z' }; // 15 min old
+assert.strictEqual(isEligibleNow(staleOnline, 'Online', NOW), false, 'a stale heartbeat (>10min) must not count as Online');
+
+const exactlyAtEdge = { status: 'Online', updatedAt: new Date(NOW - 10 * 60 * 1000).toISOString() };
+assert.strictEqual(isEligibleNow(exactlyAtEdge, 'Online', NOW), false, 'exactly at the 10-minute boundary must be treated as stale, not fresh');
+
+assert.strictEqual(isEligibleNow({ status: 'Online', updatedAt: 'not a date' }, 'Online', NOW), false,
+  'an unparseable updatedAt must fail closed, not throw or be treated as fresh');
 
 console.log('next-lead.test.js: all assertions passed');

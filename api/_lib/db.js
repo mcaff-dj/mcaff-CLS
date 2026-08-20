@@ -1141,6 +1141,51 @@ async function getRtoAgentQuota(email) {
   }
 }
 
+// Deliberately its OWN function rather than widening getRtoAgentQuota's return shape to add
+// `status`: that function has one existing caller (api/rto/claim.js) for a manual, explicit
+// claim, where being Busy/OnCall has never blocked the action - an agent about to go on a call
+// may still want to grab one on purpose. This one exists only for api/rto/next-lead.js's
+// AUTOMATIC top-up, which is exactly what going Busy/OnCall is supposed to pause. Sharing one
+// function would couple two call sites whose eligibility rules are meant to differ, so a future
+// change to either could silently change the other's behaviour.
+//
+// A missing row means Offline, NOT "no restriction" - matches the existing
+// "no row -> Offline, null quota means unset -> default" convention already used throughout
+// this codebase for calling_agent_process (see effectiveAgentRoster's own comment in
+// RtoCrmClient.js). The one case that DOES mean "no restriction" - the whole PROCESS having no
+// per-process rows at all, so scripts/assign_leads.py falls back to global presence only - is a
+// system-wide state, not a per-agent one; RTO has had per-process rows configured for a long
+// time, so that fallback does not apply here and replicating it would be dead code.
+async function getRtoAgentAvailability(email) {
+  try {
+    await ensurePgSchema();
+    const { rows } = await pgSql`
+      SELECT status FROM calling_agent_process
+      WHERE process_key = 'rto' AND LOWER(email) = LOWER(${email})
+    `;
+    return rows.length ? rows[0].status : 'Offline';
+  } catch (e) {
+    // Unlike quota, this must NOT fail open to "assume eligible" - that would silently ignore
+    // an agent's own Busy/OnCall choice, the exact bug this function exists to prevent. The
+    // caller (next-lead.js) treats null as "cannot verify -> do not assign", the same
+    // conservative direction scripts/assign_leads.py takes when its own online-agents query
+    // errors (fails to an EMPTY eligible set, not to "everyone is eligible").
+    console.error('getRtoAgentAvailability: calling_agent_process unavailable:', e.message);
+    return null;
+  }
+}
+
+// {status, updatedAt} for one agent's global (cross-process) presence row, or null if they have
+// never reported in. Used by api/rto/next-lead.js alongside getRtoAgentAvailability above - both
+// halves scripts/assign_leads.py's own fetch_online_agents requires (per-process Online AND a
+// heartbeat-fresh global presence), and this endpoint is the one automatic-assignment path that
+// was missing that check entirely.
+async function getAgentPresenceRow(email) {
+  await ensureSchema();
+  const { rows } = await sql`SELECT status, updated_at FROM agent_presence WHERE email = ${email}`;
+  return rows.length ? { status: rows[0].status, updatedAt: rows[0].updated_at } : null;
+}
+
 // NDR's own equivalent of the assignment half of record_lead_assignments (scripts/
 // assign_leads.py) - a fresh live cycle for this awb. ON CONFLICT targets the partial unique
 // index (ndr_lead_assignments_awb_current_key), so a re-claim of an already-live row (a race,
@@ -2846,7 +2891,7 @@ module.exports = {
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
   getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
-  claimRtoLead, getRtoAgentQuota,
+  claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow,
   getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,

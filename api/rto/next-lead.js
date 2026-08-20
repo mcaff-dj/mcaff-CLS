@@ -35,7 +35,7 @@
 // already existed for that check before this endpoint was added.
 const { getSession } = require('../_lib/session');
 const { JWT } = require('google-auth-library');
-const { claimRtoLead, getRtoAgentQuota } = require('../_lib/db');
+const { claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow } = require('../_lib/db');
 const { resolveAgentQuota } = require('../_lib/leadQuota');
 const leadAssignmentRules = require('../_lib/leadAssignmentRules.json');
 
@@ -43,6 +43,29 @@ const RTO_SHEET_ID = '1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI';
 const SHEET_TAB = 'Data';
 const CARD_KEY = 'calling';
 const TAB_KEY = 'rto';
+
+// Must match scripts/assign_leads.py's STALE_MINUTES - the same "heartbeat-fresh" window that
+// decides whether an agent's global presence counts as genuinely Online right now.
+const STALE_MINUTES = 10;
+
+// The exact eligibility rule scripts/assign_leads.py's fetch_online_agents enforces for the
+// sweep - BOTH a heartbeat-fresh global "Online" AND a per-process (rto) "Online" - reduced to
+// one pure function so it can be tested without a database. This was the check missing from the
+// first version of this endpoint: it assigned purely on quota, so an agent who went Busy/OnCall
+// mid-shift kept getting topped up on every disposal regardless (observed on Sayli, 2026-08-20 -
+// assignments continued for 14+ minutes and multiple leads after she went OnCall).
+//
+// presence: {status, updatedAt} | null (null = never reported in, or the lookup failed).
+// perProcessStatus: string | null (null = the lookup itself failed - see getRtoAgentAvailability
+// in db.js for why a missing ROW is a different, already-handled case: it resolves to the string
+// 'Offline' before this function ever sees it, not null).
+function isEligibleNow(presence, perProcessStatus, nowMs) {
+  if (!presence || presence.status !== 'Online') return false;
+  const updatedAtMs = new Date(presence.updatedAt).getTime();
+  if (!Number.isFinite(updatedAtMs)) return false;
+  if (nowMs - updatedAtMs >= STALE_MINUTES * 60 * 1000) return false;
+  return perProcessStatus === 'Online';
+}
 
 // Same reason claim.js gives for its own client: reaching into a sibling route's module-scoped
 // client would couple the two for the sake of a few lines of setup.
@@ -171,6 +194,27 @@ async function handler(req, res) {
   }
   const email = session.email;
 
+  // Eligibility gate, checked before doing any Sheets work: an agent who has gone Busy/OnCall/
+  // Offline must not be auto-topped-up just because they happen to dispose something (e.g.
+  // finishing up a call after switching status, or clearing a stale row) - see isEligibleNow's
+  // own comment. Both lookups fail safe to "not eligible" on an error, never to "assume Online" -
+  // the disposal that triggered this call has already fully succeeded regardless, so silently
+  // skipping a top-up here is always the safe direction; assuming eligibility would not be.
+  let presence = null;
+  let perProcessStatus = null;
+  try {
+    [presence, perProcessStatus] = await Promise.all([
+      getAgentPresenceRow(email),
+      getRtoAgentAvailability(email),
+    ]);
+  } catch (e) {
+    console.error('api/rto/next-lead: eligibility lookup failed:', e.message);
+  }
+  if (!isEligibleNow(presence, perProcessStatus, Date.now())) {
+    res.status(200).json({ assigned: false, reason: 'not online' });
+    return;
+  }
+
   try {
     const client = getClient();
 
@@ -289,6 +333,7 @@ module.exports = handler;
 // get a real test against the actual running code rather than a hand-copied duplicate of it.
 // Does not change this file's primary export shape - api/_lambda/app.js's `mount()` still just
 // calls the function directly.
+module.exports.isEligibleNow = isEligibleNow;
 module.exports.isPrepaid = isPrepaid;
 module.exports.priorityTier = priorityTier;
 module.exports.parseRtoInitiatedDate = parseRtoInitiatedDate;
