@@ -99,6 +99,35 @@ aws lambda update-function-configuration --function-name "$FN_NDR" --region "$AW
   --environment "Variables={GOOGLE_SA_KEY_JSON=${GOOGLE_SA_KEY},POSTGRES_URL=${POSTGRES_URL},MYSQL_HOST=${MYSQL_HOST},MYSQL_USER=${MYSQL_USER},MYSQL_PASSWORD=${MYSQL_PASSWORD},MYSQL_DATABASE=${MYSQL_DATABASE},MYSQL_PORT=${MYSQL_PORT}}" \
   >/dev/null
 
+# ---- 5b. csv-upload-worker Lambda - the RTO CSV upload feature's background worker. Its own
+#          function (not folded into assign-leads) specifically so its timeout/memory can be
+#          set generously AT CREATION here, sidestepping the fact that the GitHub Actions
+#          deploy role lacks lambda:UpdateFunctionConfiguration (confirmed blocked 2026-08-20 -
+#          see git log for that incident) and so cannot resize an EXISTING function. No
+#          EventBridge schedule: this is invoked on-demand by api/rto/upload-start.js via a
+#          fire-and-forget Lambda invoke, never on a timer. ----
+FN_CSV_WORKER=mcaff-cls-csv-upload-worker
+if ! aws lambda get-function --function-name "$FN_CSV_WORKER" >/dev/null 2>&1; then
+  aws lambda create-function --function-name "$FN_CSV_WORKER" \
+    --runtime python3.12 --handler handler.handler --role "$ROLE_ARN" \
+    --timeout 900 --memory-size 1536 --region "$AWS_REGION" \
+    --zip-file "fileb://$DIST/csv_upload_worker.zip" >/dev/null
+else
+  aws lambda update-function-code --function-name "$FN_CSV_WORKER" \
+    --zip-file "fileb://$DIST/csv_upload_worker.zip" --region "$AWS_REGION" >/dev/null
+fi
+aws lambda wait function-updated --function-name "$FN_CSV_WORKER" --region "$AWS_REGION"
+aws lambda update-function-configuration --function-name "$FN_CSV_WORKER" --region "$AWS_REGION" \
+  --environment "Variables={GOOGLE_SA_KEY_JSON=${GOOGLE_SA_KEY},POSTGRES_URL=${POSTGRES_URL},MYSQL_HOST=${MYSQL_HOST},MYSQL_USER=${MYSQL_USER},MYSQL_PASSWORD=${MYSQL_PASSWORD},MYSQL_DATABASE=${MYSQL_DATABASE},MYSQL_PORT=${MYSQL_PORT},GOKWIK_HYPHEN_APPID=${GOKWIK_HYPHEN_APPID},GOKWIK_HYPHEN_APPSECRET=${GOKWIK_HYPHEN_APPSECRET},GOKWIK_FIEN_APPID=${GOKWIK_FIEN_APPID},GOKWIK_FIEN_APPSECRET=${GOKWIK_FIEN_APPSECRET},GOKWIK_MCAFFEINE_APPID=${GOKWIK_MCAFFEINE_APPID},GOKWIK_MCAFFEINE_APPSECRET=${GOKWIK_MCAFFEINE_APPSECRET}}" \
+  >/dev/null
+# Reserved concurrency = 1: one upload job processed at a time, avoiding two jobs racing on
+# the same AWB-dedup read. A second job's own /start call still succeeds immediately (it only
+# creates the Postgres row and fires the invoke) - Lambda's own async-invoke retry policy
+# queues the actual worker run until the first job's invocation finishes, no custom queueing
+# needed on our side (see the design spec's concurrency note).
+aws lambda put-function-concurrency --function-name "$FN_CSV_WORKER" \
+  --reserved-concurrent-executions 1 --region "$AWS_REGION"
+
 # ---- 6. sync-lead-assignments Lambda ----
 # RETIRED 2026-08-17 - sync_agent_presence_log_to_mysql.py deleted, this Lambda's zip can
 # no longer be built (build.sh has no sync_lead_assignments target). The already-deployed
