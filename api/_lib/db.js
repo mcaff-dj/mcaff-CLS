@@ -1007,6 +1007,21 @@ function resolvePartnerFromAwb(awbCode) {
 // normal case, since assign_leads.py creates it first) it falls back to an UPDATE, same net
 // effect as the old upsert; any other key is left to raise, exactly as Postgres's partial
 // index would have.
+//
+// A live_order_id_key collision splits further on whether that live row is ALREADY disposed.
+// The CRM's "All Leads" tab lets an agent search up and reopen any already-disposed lead (see
+// RtoCrmClient.js's openDisp - it has no guard against a disposed ticket), and submitting a
+// new disposition there used to UPDATE that same row in place: silently overwriting the
+// original disposition/timestamps and never touching agent_email, so the row would show
+// today's outcome but the agent who actually just worked it goes unrecorded (or worse, the
+// row's assigned_at stays whenever it was FIRST assigned, days earlier - inflating FRT/handle-
+// time metrics that read assigned_at/disposed_at as one continuous gap, e.g. the 40+ hour
+// gaps traced on 2026-08-20 for leads re-touched days after their real first assignment).
+// Not disposed yet is still the normal one-cycle case and keeps the plain UPDATE. Already
+// disposed is treated exactly like a reassignment (record_lead_assignments' own retire-then-
+// insert, same two-step transaction so a lead is never left with zero live rows): the old row
+// is retired via reassigned_away_at, untouched otherwise, and a FRESH row captures this
+// re-dispose with its own assigned_at/disposed_at = now and the actual disposing agent.
 async function recordLeadDisposition(orderId, email, awbCode, details) {
   await ensureSchema();
   const { disposition, agentRemarks, connected, attempt, refundAmount, newOrderId, rtoReason, paymentMode } = details || {};
@@ -1019,21 +1034,54 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
     `;
   } catch (e) {
     if (!/live_order_id_key/.test((e && e.message) || '')) throw e;
-    await sql`
-      UPDATE CLS_RTO_calling SET
-        disposed_at = ${now},
-        disposition = ${disposition || null},
-        agent_remarks = ${agentRemarks || null},
-        connected = ${connected || null},
-        attempt = ${attempt || null},
-        refund_amount = ${refundAmount || null},
-        awb_code = COALESCE(${awbCode || null}, awb_code),
-        new_order_id = COALESCE(${newOrderId || null}, new_order_id),
-        rto_reason = COALESCE(rto_reason, ${rtoReason || null}),
-        payment_mode = COALESCE(payment_mode, ${paymentMode || null}),
-        delivery_partner = COALESCE(${deliveryPartner}, delivery_partner)
-      WHERE order_id = ${orderId} AND reassigned_away_at IS NULL
+    const { rows: liveRows } = await sql`
+      SELECT disposed_at FROM CLS_RTO_calling WHERE order_id = ${orderId} AND reassigned_away_at IS NULL
     `;
+    const alreadyDisposed = liveRows.length > 0 && liveRows[0].disposed_at != null;
+    if (alreadyDisposed) {
+      const p = await getPool();
+      const conn = await p.getConnection();
+      try {
+        await conn.beginTransaction();
+        // Matches on order_id alone (not disposed_at, which could itself have moved between
+        // the SELECT above and here) - same benign-race tolerance as claimRtoLead: whichever
+        // re-dispose lands first retires the row, and this UPDATE affecting 0 rows a moment
+        // later on a genuine race just means the OTHER submission already did it.
+        await conn.execute(
+          'UPDATE CLS_RTO_calling SET reassigned_away_at = ? WHERE order_id = ? AND reassigned_away_at IS NULL',
+          [now, orderId],
+        );
+        await conn.execute(
+          `INSERT INTO CLS_RTO_calling
+             (order_id, agent_email, assigned_at, disposed_at, disposition, agent_remarks, connected, attempt, refund_amount, awb_code, new_order_id, rto_reason, payment_mode, delivery_partner)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [orderId, email, now, now, disposition || null, agentRemarks || null, connected || null, attempt || null,
+           refundAmount || null, awbCode || null, newOrderId || null, rtoReason || null, paymentMode || null, deliveryPartner],
+        );
+        await conn.commit();
+      } catch (txErr) {
+        await conn.rollback();
+        throw txErr;
+      } finally {
+        conn.release();
+      }
+    } else {
+      await sql`
+        UPDATE CLS_RTO_calling SET
+          disposed_at = ${now},
+          disposition = ${disposition || null},
+          agent_remarks = ${agentRemarks || null},
+          connected = ${connected || null},
+          attempt = ${attempt || null},
+          refund_amount = ${refundAmount || null},
+          awb_code = COALESCE(${awbCode || null}, awb_code),
+          new_order_id = COALESCE(${newOrderId || null}, new_order_id),
+          rto_reason = COALESCE(rto_reason, ${rtoReason || null}),
+          payment_mode = COALESCE(payment_mode, ${paymentMode || null}),
+          delivery_partner = COALESCE(${deliveryPartner}, delivery_partner)
+        WHERE order_id = ${orderId} AND reassigned_away_at IS NULL
+      `;
+    }
   }
   invalidateCache('calling:leadDates');
 }
