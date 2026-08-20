@@ -123,7 +123,11 @@ def _fetch_job_rows(conn, job_id):
 
 def process_job(job_id):
     conn_str = os.environ.get("POSTGRES_URL")
-    conn = lib.get_pg_connection(conn_str)
+    try:
+        conn = lib.get_pg_connection(conn_str)
+    except Exception as e:
+        print(f"process_job({job_id}): could not connect to Postgres, giving up: {e}")
+        return
     try:
         rows = _fetch_job_rows(conn, job_id)
         if not rows:
@@ -155,6 +159,7 @@ def process_job(job_id):
         remaining = list(prepaid_unpunched)
         phase_started = time.monotonic()
         while remaining and (time.monotonic() - phase_started) < REFUND_CHECK_PHASE_BUDGET_SEC:
+            dirty_before = len(dirty)
             round_results = assign_leads.resolve_refund_statuses(set(remaining), dirty)
             all_refund_results.update(round_results)
             # Only order_ids resolve_refund_statuses actually resolved on real evidence this
@@ -170,6 +175,13 @@ def process_job(job_id):
                 checked_count=checked_so_far,
                 already_refunded_count=already_refunded_so_far,
             )
+            if len(dirty) == dirty_before:
+                # Zero progress this round (e.g. GoKwik creds misconfigured for this worker
+                # Lambda, or a batch permanently failing platform-ID lookup) - without this,
+                # the loop would burn the full REFUND_CHECK_PHASE_BUDGET_SEC re-issuing the same
+                # doomed batched query every REFUND_CHECK_ROUND_PAUSE_SEC for nothing.
+                print(f"process_job({job_id}): refund-check round made no progress, stopping early")
+                break
             if remaining:
                 time.sleep(REFUND_CHECK_ROUND_PAUSE_SEC)
         try:
@@ -205,10 +217,27 @@ def process_job(job_id):
         )
     except Exception as e:
         print(f"process_job({job_id}) failed: {e}")
+        # `conn` may be mid-aborted-transaction (a failed statement leaves Postgres refusing
+        # all further commands until ROLLBACK) or simply dropped (plausible after the refund-
+        # check phase holds it for up to 600s against a pooled Supabase connection) - roll back
+        # first, and if the failure-status write still doesn't take, retry once on a fresh
+        # connection rather than letting the job silently never reach 'failed' (the browser is
+        # polling this status and needs SOMETHING to show).
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         try:
             _update_job(conn, job_id, status="failed", error_message=str(e))
         except Exception:
-            pass
+            try:
+                fresh_conn = lib.get_pg_connection(conn_str)
+                try:
+                    _update_job(fresh_conn, job_id, status="failed", error_message=str(e))
+                finally:
+                    fresh_conn.close()
+            except Exception as e2:
+                print(f"process_job({job_id}): could not record failure status either: {e2}")
     finally:
         conn.close()
 
