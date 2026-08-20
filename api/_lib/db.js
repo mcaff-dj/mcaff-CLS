@@ -2111,9 +2111,33 @@ async function getCallingPartnerBreakdown(dateFrom, dateTo) {
   }));
 }
 
-// Per-RTO-reason funnel (rto_reason - the sheet's own RTO reason column, mirrored into
-// MySQL): assigned -> connected -> converted, each stage's own rate over total assigned.
-// Sorted by volume descending, same as the partner breakdown.
+// Buckets the sheet's free-text RTO reason into a fixed set of categories, for
+// getCallingRtoReasonBreakdown below. rto_reason comes from the courier/system - not a
+// controlled enum - so the same underlying reason shows up under several spellings
+// ("Customer Refused To Accept" / "REFUSED TO ACCEPT" / "Customer refused to
+// accept:Verified"), and new spellings can appear any time the sheet's upstream source
+// changes. Keyword matching (rather than an exact-value map) is what makes this resilient to
+// that drift; check order matters where a string could match more than one bucket (e.g. an
+// OTP-flavoured cancellation must land in OTP, not Customer Refused/Cancelled).
+function categorizeRtoReason(rawReason) {
+  const r = (rawReason || '').toUpperCase();
+  if (!r || r === 'UNKNOWN' || r === 'N/A' || r === 'OTHERS') return 'Unknown/Other';
+  if (r.includes('OTP')) return 'OTP/Verified Cancellation';
+  if (r.includes('ADDRESS') || r.includes('DELIVERY AREA') || r.includes('TRACEABLE') || r.includes('LOCATED')) {
+    return 'Address Issue';
+  }
+  if (r.includes('REATTEMPT') || r.includes('FUTURE DELIVERY')) return 'Reattempt/Future Delivery';
+  if (r.includes('REFUS') || r.includes('CANCEL')) return 'Customer Refused/Cancelled';
+  if (r.includes('UNAVAILABLE') || r.includes('NOT CONTACTABLE') || r.includes('NOT AVAILABLE')
+      || r.includes('NOT ANSWERING') || r.includes('RECEIVER NOT') || r.includes('PNA')) {
+    return 'Customer Unavailable/Unreachable';
+  }
+  return 'Unknown/Other';
+}
+
+// Per-RTO-reason-category funnel (rto_reason bucketed via categorizeRtoReason above):
+// assigned -> connected -> converted, each stage's own rate over total assigned. Sorted by
+// volume descending, same as the partner breakdown.
 //
 // paymentMode ('', 'Prepaid', or 'COD') filters every stage by the SAME lead's payment_mode
 // - see add_payment_mode_column.py/scripts/backfill_payment_mode.py for where that column
@@ -2124,6 +2148,11 @@ async function getCallingPartnerBreakdown(dateFrom, dateTo) {
 // deliberately different grains. "Converted" mirrors getCallingHourlyStats' "reordered"
 // definition exactly: a disposition indicating the customer re-ordered, OR a replacement
 // order_id was captured.
+//
+// The SQL still groups by the raw rto_reason (a handful of distinct values is cheap to
+// aggregate in the database); categorizing and re-summing into buckets happens in JS after,
+// since a keyword match isn't expressible as a GROUP BY key without a giant, drift-prone
+// CASE WHEN duplicating categorizeRtoReason's logic in SQL.
 async function getCallingRtoReasonBreakdown(dateFrom, dateTo, paymentMode) {
   await ensureSchema();
   const { from, to } = dateBounds(dateFrom, dateTo);
@@ -2149,20 +2178,26 @@ async function getCallingRtoReasonBreakdown(dateFrom, dateTo, paymentMode) {
     HAVING total_assigned > 0 OR total_connected > 0 OR total_converted > 0
     ORDER BY total_assigned DESC
   `;
+  const byCategory = new Map();
+  for (const r of rows) {
+    const category = categorizeRtoReason(r.rto_reason);
+    const acc = byCategory.get(category) || { totalAssigned: 0, totalConnected: 0, totalConverted: 0 };
+    acc.totalAssigned += Number(r.total_assigned) || 0;
+    acc.totalConnected += Number(r.total_connected) || 0;
+    acc.totalConverted += Number(r.total_converted) || 0;
+    byCategory.set(category, acc);
+  }
   const pct = (n, d) => (d > 0 ? Math.round((n / d) * 100) : 0);
-  return rows.map((r) => {
-    const totalAssigned = Number(r.total_assigned) || 0;
-    const totalConnected = Number(r.total_connected) || 0;
-    const totalConverted = Number(r.total_converted) || 0;
-    return {
-      rtoReason: r.rto_reason,
-      totalAssigned,
-      totalConnected,
-      connectedPct: pct(totalConnected, totalAssigned),
-      totalConverted,
-      convertedPct: pct(totalConverted, totalAssigned),
-    };
-  });
+  return [...byCategory.entries()]
+    .map(([rtoReason, acc]) => ({
+      rtoReason,
+      totalAssigned: acc.totalAssigned,
+      totalConnected: acc.totalConnected,
+      connectedPct: pct(acc.totalConnected, acc.totalAssigned),
+      totalConverted: acc.totalConverted,
+      convertedPct: pct(acc.totalConverted, acc.totalAssigned),
+    }))
+    .sort((a, b) => b.totalAssigned - a.totalAssigned);
 }
 
 // Combines all queries above into the single payload api/report/data/[key].js's
