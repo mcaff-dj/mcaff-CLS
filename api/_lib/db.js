@@ -453,6 +453,33 @@ async function bootstrapPgSchema() {
       PRIMARY KEY (email, process_key)
     )
   `;
+  // One row per RTO CSV upload. rows_pending holds the validated, deduped rows still awaiting
+  // the background worker (scripts/process_rto_csv_upload_job.py) - cleared to NULL once the
+  // job reaches 'done' or 'failed', since nothing needs them after that. errors is a capped
+  // sample ({line, reason}[], max 50) - see api/_lib/rtoCsvImport.js's buildRowPlan for where
+  // these originate. See docs/superpowers/specs/2026-08-20-rto-csv-upload-design.md for the
+  // full job lifecycle.
+  await pgSql`
+    CREATE TABLE IF NOT EXISTS rto_csv_upload_jobs (
+      id BIGSERIAL PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'queued',
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      total_rows INTEGER NOT NULL,
+      prepaid_count INTEGER NOT NULL,
+      checked_count INTEGER NOT NULL DEFAULT 0,
+      already_refunded_count INTEGER NOT NULL DEFAULT 0,
+      already_punched_count INTEGER NOT NULL DEFAULT 0,
+      appended_count INTEGER NOT NULL DEFAULT 0,
+      duplicate_in_sheet_count INTEGER NOT NULL DEFAULT 0,
+      duplicate_in_file_count INTEGER NOT NULL DEFAULT 0,
+      missing_awb_count INTEGER NOT NULL DEFAULT 0,
+      rows_pending JSONB,
+      errors JSONB,
+      error_message TEXT
+    )
+  `;
   // Admin OF ONE PROCESS: may manage that process's roster and calling hours, and sees that
   // process's full team data (leads, tickets, per-agent metrics) the same way a company-wide
   // admin would - RtoCrmClient.js exempts isProcessAdmin from every "an Agent only sees their
@@ -1172,6 +1199,61 @@ async function getRtoAgentAvailability(email) {
     // errors (fails to an EMPTY eligible set, not to "everyone is eligible").
     console.error('getRtoAgentAvailability: calling_agent_process unavailable:', e.message);
     return null;
+  }
+}
+
+// { id } for a freshly-created RTO CSV upload job. status starts 'queued' - the worker Lambda
+// (mcaff-cls-csv-upload-worker) hasn't necessarily started yet by the time this returns, since
+// it's invoked fire-and-forget right after this insert (see api/rto/upload-start.js).
+async function createRtoCsvUploadJob({ createdBy, totalRows, prepaidCount, rowsPending }) {
+  await ensurePgSchema();
+  const { rows } = await pgSql`
+    INSERT INTO rto_csv_upload_jobs (created_by, total_rows, prepaid_count, rows_pending)
+    VALUES (${createdBy}, ${totalRows}, ${prepaidCount}, ${JSON.stringify(rowsPending)})
+    RETURNING id
+  `;
+  return rows[0].id;
+}
+
+// The full job row, or null if `id` doesn't exist - api/rto/upload-status.js's whole job.
+async function getRtoCsvUploadJob(id) {
+  await ensurePgSchema();
+  const { rows } = await pgSql`SELECT * FROM rto_csv_upload_jobs WHERE id = ${id}`;
+  return rows[0] || null;
+}
+
+// Partial update - `fields` keys must be a subset of the table's own columns. Used by the
+// Python worker's own Postgres connection too (via a plain UPDATE, not this function directly -
+// Node and Python each use their native DB client) but this is the ONLY way the Node side
+// (api/rto/upload-start.js, for the non-prepaid immediate-append counts) writes to this table,
+// so both sides stay consistent about which columns exist.
+async function updateRtoCsvUploadJob(id, fields) {
+  await ensurePgSchema();
+  const allowed = new Set([
+    'status', 'checked_count', 'already_refunded_count', 'already_punched_count',
+    'appended_count', 'duplicate_in_sheet_count', 'duplicate_in_file_count',
+    'missing_awb_count', 'rows_pending', 'errors', 'error_message',
+  ]);
+  const keys = Object.keys(fields).filter((k) => allowed.has(k));
+  if (!keys.length) return;
+  // pgSql is a tagged template (see its own definition earlier in this file), so the SET
+  // clause has to be built with real interpolation, not a loop of separate awaited queries -
+  // one UPDATE per call, whatever fields are given.
+  for (const key of keys) {
+    const value = key === 'rows_pending' || key === 'errors'
+      ? JSON.stringify(fields[key])
+      : fields[key];
+    if (key === 'status') await pgSql`UPDATE rto_csv_upload_jobs SET status = ${value}, updated_at = now() WHERE id = ${id}`;
+    else if (key === 'checked_count') await pgSql`UPDATE rto_csv_upload_jobs SET checked_count = ${value}, updated_at = now() WHERE id = ${id}`;
+    else if (key === 'already_refunded_count') await pgSql`UPDATE rto_csv_upload_jobs SET already_refunded_count = ${value}, updated_at = now() WHERE id = ${id}`;
+    else if (key === 'already_punched_count') await pgSql`UPDATE rto_csv_upload_jobs SET already_punched_count = ${value}, updated_at = now() WHERE id = ${id}`;
+    else if (key === 'appended_count') await pgSql`UPDATE rto_csv_upload_jobs SET appended_count = ${value}, updated_at = now() WHERE id = ${id}`;
+    else if (key === 'duplicate_in_sheet_count') await pgSql`UPDATE rto_csv_upload_jobs SET duplicate_in_sheet_count = ${value}, updated_at = now() WHERE id = ${id}`;
+    else if (key === 'duplicate_in_file_count') await pgSql`UPDATE rto_csv_upload_jobs SET duplicate_in_file_count = ${value}, updated_at = now() WHERE id = ${id}`;
+    else if (key === 'missing_awb_count') await pgSql`UPDATE rto_csv_upload_jobs SET missing_awb_count = ${value}, updated_at = now() WHERE id = ${id}`;
+    else if (key === 'rows_pending') await pgSql`UPDATE rto_csv_upload_jobs SET rows_pending = ${value}::jsonb, updated_at = now() WHERE id = ${id}`;
+    else if (key === 'errors') await pgSql`UPDATE rto_csv_upload_jobs SET errors = ${value}::jsonb, updated_at = now() WHERE id = ${id}`;
+    else if (key === 'error_message') await pgSql`UPDATE rto_csv_upload_jobs SET error_message = ${value}, updated_at = now() WHERE id = ${id}`;
   }
 }
 
@@ -2897,6 +2979,7 @@ module.exports = {
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
   getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow,
+  createRtoCsvUploadJob, getRtoCsvUploadJob, updateRtoCsvUploadJob,
   getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,

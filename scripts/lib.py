@@ -177,6 +177,35 @@ def set_sheet_values_batch(spreadsheet_id, updates):
     return resp.json()
 
 
+def append_sheet_rows(spreadsheet_id, range_, rows):
+    """Appends `rows` (a list of lists, one per new sheet row) as genuinely NEW rows via
+    Sheets' values:append with insertDataOption=INSERT_ROWS - never values:batchUpdate, which
+    only overwrites existing cells and has no notion of "add a row". ONE call regardless of how
+    many rows are in the batch - see this feature's own design note on why an unbatched write
+    path is not acceptable (a real 429 outage earlier this same day, see git log).
+
+    range_ only needs to name the starting column and sheet/tab (e.g. "'Data'!B2:P") - Google
+    figures out where the actual next blank row is; it does not need to be exact.
+
+    Returns Google's raw response dict, or {"updates": {"updatedRows": 0}} without making any
+    network call at all if `rows` is empty - avoids both a wasted request and a confusing 400
+    from Google for an empty values array."""
+    if not rows:
+        return {"updates": {"updatedRows": 0}}
+    token = get_write_access_token()
+    encoded = urllib.parse.quote(range_, safe="")
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{encoded}"
+        f":append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
+    )
+    resp = requests.post(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json; charset=utf-8",
+    }, json={"values": rows})
+    resp.raise_for_status()
+    return resp.json()
+
+
 def get_sheet_values(spreadsheet_id, range_, timeout_sec=120, value_render_option=None):
     """value_render_option: pass "FORMULA" to get each cell's formula text
     (e.g. "=A2-B2") instead of its computed value - needed to discover which
