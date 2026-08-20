@@ -30,6 +30,12 @@ const TARGET_HEADERS = [
   'Address State', 'Address Pincode', 'Payment Method', 'Order Total',
 ];
 
+// Inverse of headerToColumnLetter's bijective base-26 arithmetic (A=0, B=1, ..., Z=25, AA=26, ...).
+// Local to this file on purpose - only needed here, to detect column drift before the append below.
+function columnLetterToIndex(letter) {
+  return letter.split('').reduce((acc, c) => acc * 26 + (c.charCodeAt(0) - 64), 0) - 1;
+}
+
 let _client = null;
 function getClient() {
   if (!_client) {
@@ -145,8 +151,26 @@ module.exports = async (req, res) => {
     // write in this file, but via values:append specifically.
     let appendedNow = 0;
     if (nonPrepaidRows.length) {
-      const rowsToAppend = nonPrepaidRows.map((r) => TARGET_HEADERS.map((h) => r.cells[h] || ''));
       const startCol = headerToColumnLetter(fullHeaderRow, TARGET_HEADERS[0]);
+
+      // Guard against silent column misalignment: the append below writes 15 values
+      // positionally starting at startCol, assuming the live sheet's columns run in
+      // TARGET_HEADERS order with no gaps. If someone manually inserts/reorders a column in
+      // the live sheet, that assumption breaks silently and every value lands in the wrong
+      // cell. Only columns that DID resolve are checked (a null is a legitimately-missing
+      // column, not misalignment) - each resolved column must sit exactly `i` positions after
+      // startCol, matching its index in TARGET_HEADERS.
+      const startColIndex = columnLetterToIndex(startCol);
+      const resolvedCols = TARGET_HEADERS.map((h) => headerToColumnLetter(fullHeaderRow, h));
+      const misaligned = resolvedCols.some(
+        (col, i) => col !== null && columnLetterToIndex(col) !== startColIndex + i,
+      );
+      if (misaligned) {
+        res.status(500).json({ error: 'Sheet column layout has changed unexpectedly - the target columns are no longer contiguous. Refusing to append to avoid writing misaligned data. Contact an admin.' });
+        return;
+      }
+
+      const rowsToAppend = nonPrepaidRows.map((r) => TARGET_HEADERS.map((h) => r.cells[h] || ''));
       await sheetsRequest(
         client, 'POST',
         `/values/${encodeURIComponent(`'${SHEET_TAB}'!${startCol}2`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
@@ -155,15 +179,26 @@ module.exports = async (req, res) => {
       appendedNow = nonPrepaidRows.length;
     }
 
+    // The non-prepaid append above (if any) has already succeeded by this point - a failure
+    // queuing the prepaid rows must not report a blanket 500, which would wrongly tell the
+    // client nothing happened. Caught separately so the response below still reflects the
+    // append that already landed.
     let jobId = null;
+    let queueError = null;
     if (prepaidRows.length) {
-      jobId = await createRtoCsvUploadJob({
-        createdBy: session.email,
-        totalRows: prepaidRows.length,
-        prepaidCount: prepaidRows.length,
-        rowsPending: prepaidRows,
-      });
-      await triggerLambda(CSV_UPLOAD_WORKER_LAMBDA, { jobId });
+      try {
+        jobId = await createRtoCsvUploadJob({
+          createdBy: session.email,
+          totalRows: prepaidRows.length,
+          prepaidCount: prepaidRows.length,
+          rowsPending: prepaidRows,
+        });
+        await triggerLambda(CSV_UPLOAD_WORKER_LAMBDA, { jobId });
+      } catch (e) {
+        console.error('api/rto/upload-start: failed to queue prepaid rows:', e);
+        jobId = null;
+        queueError = 'Could not queue the prepaid rows for refund/punch checking - contact an admin to re-run this batch.';
+      }
     }
 
     res.status(200).json({
@@ -175,6 +210,7 @@ module.exports = async (req, res) => {
       missingAwb: plan.counts.missingAwb,
       total: csvRows.length,
       errors: plan.errors.slice(0, 50),
+      ...(queueError ? { queueError } : {}),
     });
   } catch (e) {
     console.error('api/rto/upload-start error:', e);
