@@ -32,3 +32,7 @@ data/hyphen_primary_cache.json
 
 # Subagent-driven-development scratch: task briefs, reports, review packages, ledgers
 .superpowers/
+
+# AWS access-key CSVs as the console hands them out. One of these was sitting untracked in
+# the repo root on 2026-08-21, one `git add .` away from being pushed to a GitHub repo.
+*accessKeys*.csv

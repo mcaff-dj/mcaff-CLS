@@ -91,22 +91,40 @@ jobs:
             --query "{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus,CodeSha256:CodeSha256}"
           aws lambda wait function-updated --function-name mcaff-cls-assign-ndr-leads
 
-      - name: Update csv-upload-worker Lambda code
+      # Both on-demand workers in one step, so the tolerated-failure branch below exists once
+      # instead of being copy-pasted per function (which is how it drifts).
+      #
+      # A function that does not exist YET is a bootstrap gap, not a broken deploy:
+      # lambda/deploy_infra.sh is what creates these, and until someone runs it there is no
+      # function to push code to. That case warns and moves on, so a red run keeps meaning a
+      # real problem - it was failing the whole pipeline (and skipping the sizing step below)
+      # from the day csv-upload-worker merged without deploy_infra.sh being re-run, and again
+      # for order-punch-worker on 2026-08-21.
+      #
+      # Every OTHER error still fails the step. Swallowing those is how a dropped deploy stays
+      # invisible - the exact failure mode this branch exists to remove - so the tolerance is
+      # deliberately narrowed to ResourceNotFoundException and nothing else.
+      - name: Update on-demand worker Lambda code
         run: |
-          aws lambda update-function-code --function-name mcaff-cls-csv-upload-worker \
-            --zip-file fileb://lambda/dist/csv_upload_worker.zip \
-            --query "{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus,CodeSha256:CodeSha256}"
-          aws lambda wait function-updated --function-name mcaff-cls-csv-upload-worker
-
-      # Order Punch's worker. lambda/deploy_infra.sh creates it at bootstrap and nothing
-      # redeployed it after that, so its code stayed frozen at whatever the bootstrap zip held -
-      # a fix to scripts/process_order_punch_job.py would sit on main shipping nowhere.
-      - name: Update order-punch-worker Lambda code
-        run: |
-          aws lambda update-function-code --function-name mcaff-cls-order-punch-worker \
-            --zip-file fileb://lambda/dist/order_punch_worker.zip \
-            --query "{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus,CodeSha256:CodeSha256}"
-          aws lambda wait function-updated --function-name mcaff-cls-order-punch-worker
+          rc=0
+          for fn in mcaff-cls-csv-upload-worker mcaff-cls-order-punch-worker; do
+            zip="lambda/dist/$(echo "${fn#mcaff-cls-}" | tr '-' '_').zip"
+            # --query for the same reason as the code updates above: the unrestricted response
+            # includes Environment.Variables in PLAINTEXT and GitHub would not mask them.
+            if out="$(aws lambda update-function-code --function-name "$fn" \
+                        --zip-file "fileb://$zip" \
+                        --query "{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus,CodeSha256:CodeSha256}" 2>&1)"; then
+              echo "$out"
+              aws lambda wait function-updated --function-name "$fn"
+            elif printf '%s' "$out" | grep -q ResourceNotFoundException; then
+              echo "::warning::$fn does not exist in AWS yet, so its code was NOT updated. Run lambda/deploy_infra.sh to create it, then re-run this workflow."
+            else
+              echo "$out" >&2
+              echo "::error::$fn code update failed"
+              rc=1
+            fi
+          done
+          exit $rc
 
       # Size, in version control, because it is load-bearing and was invisible.
       #
