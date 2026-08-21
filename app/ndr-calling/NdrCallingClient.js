@@ -83,6 +83,61 @@ async function fetchNdrSheet() {
 // everything else (including a blank/unreadable one) is mCaffeine.
 const brandOf = (orderId) => (String(orderId || '').toUpperCase().startsWith('HYP') ? 'Hyphen' : 'mCaffeine');
 
+// The four HARD filters scripts/assign_ndr_leads.py applies to decide whether a given lead may
+// reach a given agent, ported field-for-field from that script (attempt_bucket, _covers,
+// reason_covers, payment_mode_covers, brand_covers). At module scope rather than inside a
+// single useMemo's closure because TWO things need them now: the Next-to-Assign prediction
+// (ndrPredicted) and the roster's per-agent match count (ndrFilterMatchCounts). Hoisting
+// beats duplicating - a second hand-written copy is exactly how a filter rule silently drifts
+// from what the cron actually does.
+//
+// `agent` here is the normalized shape ndrAgentFilters builds, NOT a raw processAgents row.
+const ndrBucketOf = (raw) => {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n <= 3 ? String(n) : 'More than 3';
+};
+const ndrAttemptCovers = (agent, bucket) =>
+  !agent.filter.length || bucket === null || agent.filter.includes(bucket);
+// Case-insensitive substring match against the lead's own latestNdrReason - an agent with no
+// reasonFilter values is unrestricted (fails open); an agent WITH filter values excludes any
+// reason that doesn't contain one of them, including a blank/unreadable reason (this one does
+// not fail open the way an unparseable attempt bucket does above).
+const ndrReasonCovers = (agent, latestNdrReason) => {
+  if (!agent.reasonFilter.length) return true;
+  const reason = (latestNdrReason || '').toLowerCase();
+  return agent.reasonFilter.some(r => reason.includes(r.toLowerCase()));
+};
+// Exact, case-insensitive match - a fixed value set ('Prepaid'/'COD'), unlike reasonCovers'
+// free-text substrings above.
+const ndrPaymentModeCovers = (agent, paymentMode) =>
+  !agent.paymentModeFilter
+  || String(paymentMode || '').trim().toLowerCase() === agent.paymentModeFilter.toLowerCase();
+// brand is already normalized to exactly 'Hyphen'/'mCaffeine' by brandOf, same as brandFilter
+// itself (the roster CustomSelect only ever writes those two strings or ''), so a plain
+// equality check is enough - no case-folding needed.
+const ndrBrandCovers = (agent, brand) => !agent.brandFilter || brand === agent.brandFilter;
+
+// All four at once: can this lead EVER reach this agent? Quota and round-robin position are
+// deliberately not consulted - this answers "is this agent's filter set satisfiable at all",
+// which is what a 0 here means and why it is worth showing in the roster.
+const ndrFiltersCoverLead = (agent, lead) =>
+  ndrAttemptCovers(agent, ndrBucketOf(lead.attempts))
+  && ndrReasonCovers(agent, lead.latestNdrReason)
+  && ndrPaymentModeCovers(agent, lead.paymentMode)
+  && ndrBrandCovers(agent, lead.brand);
+
+// processAgents row -> the normalized filter shape the covers helpers above expect. '' / absent
+// means unrestricted throughout, matching assign_ndr_leads.py's "absent means no restriction".
+const ndrAgentFilters = (a) => ({
+  email: a.email,
+  quota: a.maxQuota != null ? a.maxQuota : 20, // DEFAULT_QUOTA in assign_ndr_leads.py
+  filter: (a.attemptCountFilter || '').split(',').map(s => s.trim()).filter(Boolean),
+  reasonFilter: (a.ndrReasonFilter || '').split(',').map(s => s.trim()).filter(Boolean),
+  paymentModeFilter: a.ndrPaymentModeFilter || '',
+  brandFilter: a.ndrBrandFilter || '',
+});
+
 // Fixed positional layout, not fuzzy header matching - this sheet's own columns are stable
 // (it's someone else's existing, long-running process), so a column-index map is simpler and
 // correct. Only assignedAgent (S, index 18) is ever written by scripts/assign_ndr_leads.py;
@@ -431,42 +486,9 @@ export default function NdrCallingClient() {
   const ndrPredicted = useMemo(() => {
     const onlineAgents = (processAgents || [])
       .filter(a => a.status === 'Online')
-      .map(a => ({
-        email: a.email,
-        quota: a.maxQuota != null ? a.maxQuota : 20, // DEFAULT_QUOTA in assign_ndr_leads.py
-        filter: (a.attemptCountFilter || '').split(',').map(s => s.trim()).filter(Boolean),
-        // Free-text substrings, case-insensitive - mirrors scripts/assign_ndr_leads.py's
-        // agent_reason_filter/reason_covers exactly (see that script for the canonical version).
-        reasonFilter: (a.ndrReasonFilter || '').split(',').map(s => s.trim()).filter(Boolean),
-        // Fixed value sets, unlike reasonFilter above - '' means unrestricted, same contract.
-        paymentModeFilter: a.ndrPaymentModeFilter || '',
-        brandFilter: a.ndrBrandFilter || '',
-      }));
+      .map(ndrAgentFilters);
     if (!onlineAgents.length) return { rows: [], onlineAgents: [] };
 
-    const bucketOf = (raw) => {
-      const n = parseInt(raw, 10);
-      if (!Number.isFinite(n) || n <= 0) return null;
-      return n <= 3 ? String(n) : 'More than 3';
-    };
-    const covers = (agent, bucket) => !agent.filter.length || bucket === null || agent.filter.includes(bucket);
-    // Case-insensitive substring match against the lead's own latestNdrReason - an agent with
-    // no reasonFilter values is unrestricted (fails open); an agent WITH filter values excludes
-    // any reason that doesn't contain one of them, including a blank/unreadable reason (this one
-    // does not fail open the way an unparseable attempt bucket does above).
-    const reasonCovers = (agent, latestNdrReason) => {
-      if (!agent.reasonFilter.length) return true;
-      const reason = (latestNdrReason || '').toLowerCase();
-      return agent.reasonFilter.some(r => reason.includes(r.toLowerCase()));
-    };
-    // Exact, case-insensitive match - a fixed value set ('Prepaid'/'COD'), unlike reasonCovers'
-    // free-text substrings above.
-    const paymentModeCovers = (agent, paymentMode) =>
-      !agent.paymentModeFilter || String(paymentMode || '').trim().toLowerCase() === agent.paymentModeFilter.toLowerCase();
-    // brand is already normalized to exactly 'Hyphen'/'mCaffeine' by brandOf, same as brandFilter
-    // itself (the roster CustomSelect only ever writes those two strings or ''), so a plain
-    // equality check is enough - no case-folding needed.
-    const brandCovers = (agent, brand) => !agent.brandFilter || brand === agent.brandFilter;
     // "DD-MM-YYYY" -> a sortable number, undated leads sort last (same convention as
     // scripts/assign_ndr_leads.py's own parse_latest_ndr_date).
     const parseLatestNdrDate = (raw) => {
@@ -476,7 +498,6 @@ export default function NdrCallingClient() {
 
     const pool = ndrTickets
       .filter(t => !t.assignedAgent && !t.connected)
-      .map(t => ({ ...t, bucket: bucketOf(t.attempts) }))
       .sort((a, b) => parseLatestNdrDate(a.latestNdrDate) - parseLatestNdrDate(b.latestNdrDate));
 
     const needed = new Map(onlineAgents.map(a => [a.email, a.quota]));
@@ -489,8 +510,7 @@ export default function NdrCallingClient() {
       let chosen = -1;
       for (let step = 0; step < n; step++) {
         const cand = (idx + step) % n;
-        if (covers(remaining[cand], t.bucket) && reasonCovers(remaining[cand], t.latestNdrReason)
-            && paymentModeCovers(remaining[cand], t.paymentMode) && brandCovers(remaining[cand], t.brand)) { chosen = cand; break; }
+        if (ndrFiltersCoverLead(remaining[cand], t)) { chosen = cand; break; }
       }
       if (chosen === -1) continue; // no online agent's filter covers this lead's bucket
       const agent = remaining[chosen];
@@ -504,6 +524,28 @@ export default function NdrCallingClient() {
       }
     }
     return { rows, onlineAgents };
+  }, [ndrTickets, processAgents]);
+
+  // How many of the currently-unassigned leads each roster agent's HARD filters could ever
+  // reach - {poolSize, byEmail: Map<email, count>}. Surfaced in the Team Roster table beside
+  // the filter controls themselves, because a combination that matches NOTHING is otherwise
+  // completely silent: the agent sees an empty queue, the robot correctly assigns them nothing,
+  // and no error appears anywhere. Ashar sat idle ~20h on 2026-08-20/21 with
+  // Payment Mode=COD + Brand=mCaffeine, a pair that matched 0 of 905 waiting leads because
+  // every COD lead was Hyphen and every mCaffeine lead was Prepaid.
+  //
+  // Deliberately NOT quota- or round-robin-aware, unlike ndrPredicted above: this answers
+  // "is this filter set satisfiable at all", which stays true whether or not the agent happens
+  // to be at quota, and is the only question a 0 needs to answer. Computed for EVERY roster
+  // agent, not just Online ones, so a filter can be fixed while On Break/Offline.
+  const ndrFilterMatchCounts = useMemo(() => {
+    const pool = ndrTickets.filter(t => !t.assignedAgent && !t.connected);
+    const byEmail = new Map();
+    for (const a of (processAgents || [])) {
+      const filters = ndrAgentFilters(a);
+      byEmail.set(a.email, pool.reduce((n, t) => n + (ndrFiltersCoverLead(filters, t) ? 1 : 0), 0));
+    }
+    return { poolSize: pool.length, byEmail };
   }, [ndrTickets, processAgents]);
   const ndrTotalPages = Math.max(1, Math.ceil(ndrRowsForTab.length / ndrPerPage));
   const ndrPageRows = useMemo(
@@ -569,6 +611,7 @@ export default function NdrCallingClient() {
                 <th className="py-3 px-4 text-left font-medium" title="Hard filter: restricts this agent to leads whose Latest NDR Reason contains any of these (case-insensitive), comma-separated. No text = unrestricted.">Latest NDR Reason</th>
                 <th className="py-3 px-4 text-left font-medium" title="Hard filter: restricts this agent to leads of the selected payment mode only. No restriction = unrestricted.">Payment Mode</th>
                 <th className="py-3 px-4 text-left font-medium" title="Hard filter: restricts this agent to leads of the selected brand only (derived from Order ID). No restriction = unrestricted.">Brand</th>
+                <th className="py-3 px-4 text-left font-medium" title="How many of the currently-unassigned leads these four filters could ever reach, ignoring quota. 0 means this combination matches nothing waiting right now - the agent will receive no leads at all until a filter is relaxed.">Matches</th>
                 <th className="py-3 px-4 text-center font-medium" title="Can manage this process's roster, hours, and disposition list - nothing else">Process admin</th>
               </tr></thead>
               <tbody className="divide-y divide-zinc-800/50">
@@ -634,6 +677,31 @@ export default function NdrCallingClient() {
                         ]}
                       />
                     </td>
+                    <td className="py-3 px-4">
+                      {(() => {
+                        const n = ndrFilterMatchCounts.byEmail.get(a.email);
+                        const total = ndrFilterMatchCounts.poolSize;
+                        // Nothing is waiting for anyone - a 0 here says nothing about this
+                        // agent's filters, so it must not be dressed up as their problem.
+                        if (total === 0) return <span className="text-[11px] text-zinc-500" title="No unassigned leads in the sheet at all right now">no leads waiting</span>;
+                        if (n === undefined) return <span className="text-zinc-500">—</span>;
+                        if (n === 0) {
+                          return (
+                            <span
+                              className="inline-block px-2 py-0.5 rounded-md bg-rose-500/15 text-rose-300 border border-rose-500/30 text-[11px] font-semibold"
+                              title={`These filters match 0 of the ${total} unassigned leads waiting - this agent will receive nothing until one is relaxed.`}
+                            >
+                              0 of {total} · no match
+                            </span>
+                          );
+                        }
+                        return (
+                          <span className="text-[12px] text-zinc-300" title={`${n} of the ${total} unassigned leads waiting can reach this agent (quota not considered).`}>
+                            {n} <span className="text-zinc-500">of {total}</span>
+                          </span>
+                        );
+                      })()}
+                    </td>
                     <td className="py-3 px-4 text-center">
                       {a.isAdmin ? (
                         <span className="text-[11px] text-zinc-500" title="Company-wide admin - already administers every process">all</span>
@@ -651,7 +719,7 @@ export default function NdrCallingClient() {
                   </tr>
                 ))}
                 {rows.length === 0 && (
-                  <tr><td colSpan={8} className="py-8 text-center text-zinc-500">No one invited to NDR Calling yet - grant access from Admin → Permissions.</td></tr>
+                  <tr><td colSpan={9} className="py-8 text-center text-zinc-500">No one invited to NDR Calling yet - grant access from Admin → Permissions.</td></tr>
                 )}
               </tbody>
             </table>
