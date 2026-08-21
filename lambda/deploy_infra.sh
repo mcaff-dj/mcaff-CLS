@@ -205,6 +205,45 @@ aws lambda put-function-concurrency --function-name "$FN_ORDER_PUNCH_WORKER" \
 aws lambda put-function-event-invoke-config --function-name "$FN_ORDER_PUNCH_WORKER" \
   --maximum-retry-attempts 0 --region "$AWS_REGION"
 
+# ---- 5d. Let the Node API Lambda actually invoke the worker Lambdas above ----
+# api/_lib/lambdaTrigger.js fires those invokes from mcaff-cls-api (Order Punch's /start, RTO
+# CSV upload's /start, the agent-presence nudge). Without this grant the invoke is refused with
+# AccessDeniedException and the job row it just committed never gets picked up - one half of the
+# 2026-08-21 Order Punch incident (the other half being a worker function that did not exist
+# yet). It lives here, in version control, because it used to be a manual "verify or add this
+# yourself" checklist item in each feature's plan doc, and a step like that gets skipped exactly
+# once.
+#
+# The resource is a wildcard over mcaff-cls-*-worker rather than a list of ARNs, so the next
+# worker Lambda is covered the day it is created with nothing here to remember to edit.
+# put-role-policy is create-or-replace, so re-running this section is a no-op.
+API_FN=mcaff-cls-api
+if API_ROLE_ARN="$(aws lambda get-function-configuration --function-name "$API_FN" \
+      --region "$AWS_REGION" --query Role --output text 2>/dev/null)"; then
+  API_ROLE_NAME="${API_ROLE_ARN##*/}"
+  cat > /tmp/api-invoke-workers-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "lambda:InvokeFunction",
+    "Resource": "arn:aws:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:mcaff-cls-*-worker"
+  }]
+}
+EOF
+  aws iam put-role-policy --role-name "$API_ROLE_NAME" \
+    --policy-name invoke-mcaff-cls-workers \
+    --policy-document file:///tmp/api-invoke-workers-policy.json
+  echo "Granted $API_ROLE_NAME lambda:InvokeFunction on mcaff-cls-*-worker."
+else
+  # Not fatal - the workers themselves are deployed and correct by this point, and on a fresh
+  # account the API Lambda may simply not exist yet. Loud, because every /start that queues
+  # background work stays broken until this grant lands.
+  echo "WARNING: could not read $API_FN's execution role - skipping the invoke grant." >&2
+  echo "         Grant lambda:InvokeFunction on mcaff-cls-*-worker to that role by hand," >&2
+  echo "         or re-run this script once $API_FN exists." >&2
+fi
+
 # ---- 6. sync-lead-assignments Lambda ----
 # RETIRED 2026-08-17 - sync_agent_presence_log_to_mysql.py deleted, this Lambda's zip can
 # no longer be built (build.sh has no sync_lead_assignments target). The already-deployed

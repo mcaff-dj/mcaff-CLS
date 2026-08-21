@@ -12,10 +12,17 @@ function getLambdaClient() {
 }
 
 // InvocationType 'Event' is fire-and-forget: this returns as soon as the invoke is *accepted*,
-// not when the invoked function finishes. Best-effort by design - if the invoke call fails
-// (e.g. a permissions gap), this silently no-ops rather than throwing, so a misconfigured
-// setup never blocks whatever triggered it (an agent going online, a CSV upload finishing its
-// fast half) from completing its own response.
+// not when the invoked function finishes. Never throws, by design - a misconfigured setup must
+// not block whatever triggered it (an agent going online, a CSV upload finishing its fast half)
+// from completing its own response.
+//
+// RETURNS true only when AWS actually accepted the invoke (StatusCode 202), false otherwise.
+// Callers that queue work behind this invoke should check it and surface a failure, because a
+// dropped invoke otherwise leaves a job row sitting at 'queued' forever with nothing anywhere
+// to say why: exactly what happened on 2026-08-21, when the Order Punch tab reported a healthy
+// queued job while mcaff-cls-order-punch-worker did not yet exist. Callers that genuinely only
+// want best-effort nudging (api/auth/[action].js's presence trigger) can keep ignoring the
+// return value - this stays non-throwing either way, so their behavior is unchanged.
 //
 // payload is optional and JSON-stringified when present - existing callers that pass nothing
 // see byte-identical behavior to before this was extracted (no Payload key sent at all).
@@ -29,9 +36,12 @@ async function triggerLambda(functionName, payload) {
     const resp = await getLambdaClient().send(new InvokeCommand(params));
     if (resp.StatusCode !== 202) {
       console.error(`triggerLambda(${functionName}): unexpected StatusCode`, resp.StatusCode);
+      return false;
     }
+    return true;
   } catch (e) {
     console.error(`triggerLambda(${functionName}) error:`, e.message || e);
+    return false;
   }
 }
 

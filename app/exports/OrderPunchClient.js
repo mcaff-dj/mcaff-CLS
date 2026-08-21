@@ -133,6 +133,11 @@ export default function OrderPunchClient() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not start');
       setJobId(data.jobId);
+      // The rows were saved but the worker invoke was refused - /start already marked the job
+      // failed, so the poll below would surface it a few seconds later anyway. Shown here too
+      // so the reason is visible immediately rather than after a "queued" flicker that reads
+      // like normal progress. Same handling RtoUploadModal already gives its own queueError.
+      if (data.queueError) setError(data.queueError);
       setJobStatus({ status: 'queued', totalRows: data.queued, processedCount: 0, successCount: 0, errorCount: 0, skippedCount: 0 });
       pollJob(data.jobId);
     } catch (e) {
@@ -243,9 +248,22 @@ export default function OrderPunchClient() {
           {jobStatus.status === 'failed' && jobStatus.errorMessage && (
             <p style={{ color: '#c0392b', fontSize: 13 }}>{jobStatus.errorMessage}</p>
           )}
+          {/* /status says nothing has touched this job in 15 minutes while it still claims to be
+              live - the worker invoke died without being able to record why (Postgres unreachable,
+              or Lambda killing the invoke at its ceiling). Without this the row above just sits at
+              "queued"/"running" looking healthy forever, which is the failure this whole tab already
+              got bitten by once. The rows that DID process are still in the results CSV, hence the
+              download button staying reachable rather than this reading as a total loss. */}
+          {jobStatus.stalled && (
+            <p style={{ color: '#c0392b', fontSize: 13 }}>
+              No progress for 15+ minutes - the background worker looks dead. Nothing more will
+              process on its own. Download the results CSV to see how far it got, then re-submit
+              the rows that never completed.
+            </p>
+          )}
           <div style={{ display: 'flex', gap: 8 }}>
             {running && <button onClick={handleStop} style={{ padding: '6px 12px', fontSize: 13 }}>Stop</button>}
-            {TERMINAL_STATUSES.has(jobStatus.status) && (
+            {(TERMINAL_STATUSES.has(jobStatus.status) || jobStatus.stalled) && (
               <button onClick={handleDownloadResults} style={{ padding: '6px 12px', fontSize: 13 }}>Download Results CSV</button>
             )}
           </div>

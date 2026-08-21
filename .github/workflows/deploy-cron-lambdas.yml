@@ -25,6 +25,8 @@ on:
       - 'lambda/assign_ndr_leads/**'
       - 'lambda/csv_upload_worker/**'
       - 'scripts/process_rto_csv_upload_job.py'
+      - 'lambda/order_punch_worker/**'
+      - 'scripts/process_order_punch_job.py'
       - 'lambda/build.sh'
       # This file too, same as deploy.yml lists itself. Without it a change to the deploy
       # steps below - including the memory/timeout sizing - sits on main doing nothing until
@@ -61,6 +63,7 @@ jobs:
           bash lambda/build.sh assign_leads
           bash lambda/build.sh assign_ndr_leads
           bash lambda/build.sh csv_upload_worker
+          bash lambda/build.sh order_punch_worker
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -94,6 +97,16 @@ jobs:
             --zip-file fileb://lambda/dist/csv_upload_worker.zip \
             --query "{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus,CodeSha256:CodeSha256}"
           aws lambda wait function-updated --function-name mcaff-cls-csv-upload-worker
+
+      # Order Punch's worker. lambda/deploy_infra.sh creates it at bootstrap and nothing
+      # redeployed it after that, so its code stayed frozen at whatever the bootstrap zip held -
+      # a fix to scripts/process_order_punch_job.py would sit on main shipping nowhere.
+      - name: Update order-punch-worker Lambda code
+        run: |
+          aws lambda update-function-code --function-name mcaff-cls-order-punch-worker \
+            --zip-file fileb://lambda/dist/order_punch_worker.zip \
+            --query "{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus,CodeSha256:CodeSha256}"
+          aws lambda wait function-updated --function-name mcaff-cls-order-punch-worker
 
       # Size, in version control, because it is load-bearing and was invisible.
       #

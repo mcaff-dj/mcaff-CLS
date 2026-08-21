@@ -1372,6 +1372,19 @@ async function getOrderPunchJob(id) {
   return rows[0] || null;
 }
 
+// Marks a job dead on arrival, for the one case Node can detect by itself: the worker Lambda
+// invoke was never accepted, so no worker will ever pick this job up. Without this the row sits
+// at 'queued' forever and the polling UI can only show a job that looks healthy but is not (the
+// 2026-08-21 incident - see triggerLambda's own comment). Every other failure mode is the
+// worker's own to record, since only it knows how far it got.
+async function failOrderPunchJob(id, message) {
+  await ensurePgSchema();
+  await pgSql`
+    UPDATE order_punch_jobs SET status = 'failed', error_message = ${message}, updated_at = now()
+    WHERE id = ${id}
+  `;
+}
+
 // Sets the flag the Python worker checks between rows/chunks - see api/order-punch/stop.js.
 async function setOrderPunchJobStopRequested(id) {
   await ensurePgSchema();
@@ -3157,7 +3170,7 @@ module.exports = {
   getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow,
   createRtoCsvUploadJob, getRtoCsvUploadJob, updateRtoCsvUploadJob,
-  createOrderPunchJob, getOrderPunchJob, setOrderPunchJobStopRequested,
+  createOrderPunchJob, getOrderPunchJob, failOrderPunchJob, setOrderPunchJobStopRequested,
   getOrderPunchJobRowsForExport, getOrderPunchSettings, upsertOrderPunchSetting,
   getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,

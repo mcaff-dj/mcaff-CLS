@@ -7,7 +7,7 @@
 // scripts/process_order_punch_job.py).
 const { getSession } = require('../_lib/session');
 const { validateRows } = require('../_lib/orderPunchRows');
-const { createOrderPunchJob } = require('../_lib/db');
+const { createOrderPunchJob, failOrderPunchJob } = require('../_lib/db');
 const { triggerLambda } = require('../_lib/lambdaTrigger');
 
 const CARD_KEY = 'calling';
@@ -42,7 +42,27 @@ module.exports = async (req, res) => {
 
   try {
     const jobId = await createOrderPunchJob({ createdBy: session.email, rows: validRows });
-    await triggerLambda(ORDER_PUNCH_WORKER_LAMBDA, { jobId });
+
+    // The job row and its rows are committed at this point, so a dropped invoke must not read
+    // as a blanket 500 (nothing would explain the rows that DO exist). Instead the job is
+    // marked failed with the real reason, which the browser's own status poll then renders -
+    // otherwise it sits at 'queued' forever looking healthy, which is exactly how a
+    // not-yet-deployed worker Lambda presented itself on 2026-08-21.
+    const invoked = await triggerLambda(ORDER_PUNCH_WORKER_LAMBDA, { jobId });
+    if (!invoked) {
+      const queueError = `Could not start the background worker (${ORDER_PUNCH_WORKER_LAMBDA}) - `
+        + 'it may not be deployed, or this API\'s role may lack lambda:InvokeFunction on it. '
+        + 'The orders were saved but nothing will process them until that is fixed.';
+      console.error(`api/order-punch/start: invoke of ${ORDER_PUNCH_WORKER_LAMBDA} was not accepted for job ${jobId}`);
+      // Best-effort: if even this write fails, the response below still tells the caller.
+      try {
+        await failOrderPunchJob(jobId, queueError);
+      } catch (markErr) {
+        console.error('api/order-punch/start: could not mark job failed:', markErr);
+      }
+      return res.status(200).json({ jobId, queued: validRows.length, errors, queueError });
+    }
+
     return res.status(200).json({ jobId, queued: validRows.length, errors });
   } catch (e) {
     console.error('api/order-punch/start error:', e);

@@ -3,6 +3,7 @@
 // docs/superpowers/specs/2026-08-21-order-punch-design.md.
 const { getSession } = require('../_lib/session');
 const { getOrderPunchJob } = require('../_lib/db');
+const { isJobStalled } = require('../_lib/orderPunchRows');
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'exports';
@@ -39,6 +40,11 @@ module.exports = async (req, res) => {
       errorCount: job.error_count,
       skippedCount: job.skipped_count,
       errorMessage: job.error_message,
+      // Nothing has touched this job in 15 minutes while it still claims to be live, so the
+      // worker invoke died without being able to record why (see isJobStalled). Reported as a
+      // flag rather than by rewriting status, because the row is not actually 'failed' - a
+      // continuation invoke that was merely slow to cold-start would clear this on the next poll.
+      stalled: isJobStalled(job.status, job.updated_at),
     });
   } catch (e) {
     console.error('api/order-punch/status error:', e);
