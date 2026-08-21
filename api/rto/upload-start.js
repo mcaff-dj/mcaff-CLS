@@ -207,7 +207,19 @@ module.exports = async (req, res) => {
           missing_awb_count: plan.counts.missingAwb,
           errors: plan.errors.slice(0, 50),
         });
-        await triggerLambda(CSV_UPLOAD_WORKER_LAMBDA, { jobId });
+        // triggerLambda never throws - a dropped invoke (missing lambda:InvokeFunction, the
+        // worker not deployed, ...) resolves to false rather than rejecting, so it must be
+        // checked explicitly or the job sits at 'queued' forever with nothing anywhere to say
+        // why (same failure mode api/order-punch/start.js already guards against - see its own
+        // comment on the 2026-08-21 incident this is the RTO-upload counterpart of).
+        const invoked = await triggerLambda(CSV_UPLOAD_WORKER_LAMBDA, { jobId });
+        if (!invoked) {
+          const msg = `Could not start the background worker (${CSV_UPLOAD_WORKER_LAMBDA}) - `
+            + 'it may not be deployed, or this API\'s role may lack lambda:InvokeFunction on it. '
+            + 'The rows were saved but nothing will process them until that is fixed.';
+          console.error(`api/rto/upload-start: invoke of ${CSV_UPLOAD_WORKER_LAMBDA} was not accepted for job ${jobId}`);
+          await updateRtoCsvUploadJob(jobId, { status: 'failed', error_message: msg });
+        }
       } catch (e) {
         console.error('api/rto/upload-start: failed to queue prepaid rows:', e);
         jobId = null;

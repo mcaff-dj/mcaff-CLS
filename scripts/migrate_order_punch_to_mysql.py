@@ -119,8 +119,12 @@ def main():
         if rows:
             cur.executemany(ROWS_UPSERT_SQL, rows)
         if settings:
+            # psycopg deserializes jsonb to native Python (str/int/list/...) - always
+            # re-encode, since a jsonb string value arrives already unwrapped (e.g.
+            # 'MCAFFEINE_D2C', not '"MCAFFEINE_D2C"') and MySQL's JSON column needs the
+            # quoted form back.
             settings_rows = [
-                (key, json.dumps(value) if not isinstance(value, str) else value, updated_at, updated_by)
+                (key, json.dumps(value), updated_at, updated_by)
                 for key, value, updated_at, updated_by in settings
             ]
             cur.executemany(SETTINGS_UPSERT_SQL, settings_rows)

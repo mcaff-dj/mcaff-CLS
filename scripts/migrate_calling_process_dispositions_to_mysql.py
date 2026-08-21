@@ -76,13 +76,15 @@ def main():
         # parent purely by (process_key, label) - the new-side parent_id, not the old one.
         existing_by_key = {(r[1], r[3], r[2]) for r in existing_rows}
 
-        pg_by_id = {r[0]: r for r in pg_rows}
         old_to_new_id = {}  # old Postgres id -> new MySQL id, filled in as each row lands
-        to_insert = []      # (old_id, process_key, new_parent_id_or_None, label, description,
-                             #  sort_order, children_input_type, created_at, created_by)
+        inserted = []       # (process_key, new_parent, label, sort_order) - for the printed sample
         pending = list(pg_rows)
         # Loop passes: a row can only be placed once its parent (if any) already has a new id.
-        # Each pass places every row whose parent is resolved; stops when a pass places nothing.
+        # A placed row is inserted immediately (or, on a dry run, given a fake negative id) so
+        # its own new id is available for its children to resolve against in a later pass -
+        # the new id doesn't exist until the row lands, so resolution and insertion can't be
+        # split into separate phases the way a flat list of "rows to insert" would suggest.
+        next_fake_id = -1
         while pending:
             placed_this_pass = []
             still_pending = []
@@ -100,8 +102,20 @@ def main():
                             old_to_new_id[old_id] = match
                         placed_this_pass.append(old_id)
                         continue
-                    to_insert.append((old_id, process_key, new_parent, label, description,
-                                       sort_order, children_input_type, created_at, created_by))
+                    inserted.append((process_key, new_parent, label, sort_order))
+                    if args.apply:
+                        cur.execute(
+                            f"INSERT INTO `{TABLE}` "
+                            "(process_key, parent_id, label, description, sort_order, "
+                            " children_input_type, created_at, created_by) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                            (process_key, new_parent, label, description, sort_order,
+                             children_input_type, created_at, created_by),
+                        )
+                        old_to_new_id[old_id] = cur.lastrowid
+                    else:
+                        old_to_new_id[old_id] = next_fake_id
+                        next_fake_id -= 1
                     placed_this_pass.append(old_id)
                 else:
                     still_pending.append(row)
@@ -111,29 +125,18 @@ def main():
                                   "orphaned parent_id (points at a row not in this fetch)?")
             pending = still_pending
 
-        print(f"\n  new rows to insert : {len(to_insert)}")
-        if to_insert:
+        print(f"\n  new rows to insert : {len(inserted)}")
+        if inserted:
             print("\n  sample of rows to insert:")
-            for r in to_insert[:5]:
-                print(f"      process_key={r[1]!r} parent(new)={r[2]!r} label={r[3]!r} sort_order={r[5]}")
+            for r in inserted[:5]:
+                print(f"      process_key={r[0]!r} parent(new)={r[1]!r} label={r[2]!r} sort_order={r[3]}")
 
         if not args.apply:
-            print(f"\nDRY RUN - nothing written. Re-run with --apply to write {len(to_insert)} insert(s).")
+            print(f"\nDRY RUN - nothing written. Re-run with --apply to write {len(inserted)} insert(s).")
             return
 
-        for row in to_insert:
-            (old_id, process_key, new_parent, label, description, sort_order,
-             children_input_type, created_at, created_by) = row
-            cur.execute(
-                f"INSERT INTO `{TABLE}` "
-                "(process_key, parent_id, label, description, sort_order, children_input_type, "
-                " created_at, created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                (process_key, new_parent, label, description, sort_order, children_input_type,
-                 created_at, created_by),
-            )
-            old_to_new_id[old_id] = cur.lastrowid
         conn.commit()
-        print(f"\nApplied {len(to_insert)} insert(s) to {SCHEMA}.{TABLE}.")
+        print(f"\nApplied {len(inserted)} insert(s) to {SCHEMA}.{TABLE}.")
     except Exception:
         conn.rollback()
         raise
