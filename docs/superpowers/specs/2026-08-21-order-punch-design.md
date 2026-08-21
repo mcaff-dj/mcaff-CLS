@@ -31,28 +31,49 @@ resume, duplicate-create recovery on retry) — different execution substrate (P
 
 ## Architecture
 
+### Worker language: Python, not Node
+
+Every existing background-worker Lambda in this repo (`assign_leads`, `assign_ndr_leads`,
+`csv_upload_worker`) is Python, deployed via `lambda/build.sh` + `lambda/deploy_infra.sh`,
+talking to Postgres via `psycopg` (`scripts/lib.py`'s `get_pg_connection`) directly — not through
+`api/_lib/db.js`. There is no Node-Lambda build path in this repo at all. Order Punch's worker
+follows that exact convention rather than introducing a new one: the entire repunch business
+logic (channel routing, payload building, SO-code picking, status/date extraction, the
+Unicommerce HTTP calls themselves) lives in Python, in `scripts/process_order_punch_job.py`. No
+JS port of this logic exists or is needed — the Node `/start` endpoint only validates rows and
+queues them, it never executes repunch logic itself, so (unlike RTO's `is_prepaid`, which
+genuinely is needed on both sides) there is no cross-language duplication to keep in sync.
+
 ### New components
 
-- **`api/_lib/orderPunch.js`** — pure logic, no network calls, unit-tested directly:
-  - `resolveTargetChannel_` — channel routing (MCAFFEINE_CHANNELS / HYPHEN_CHANNELS → target).
-  - `buildCreatePayload_` — builds the Unicommerce `saleOrder/create` payload from a fetched
-    order DTO, new display code, resolved SO code, target channel, facility code, reason
-    (→ `giftMessage`), triggering agent's email (→ `voucherCode`).
-  - `pickSoCode_` — picks `displayOrderCode` or `_1`/`_2` suffix based on existing codes + same-
-    channel check.
-  - `extractStatus_` / `extractCreatedDate_` / `parseTimestamp_` — tolerant field extraction from
-    Unicommerce search/get responses (field names vary; auto-scan fallback), used for the
-    DELIVERED check and the cooldown check.
-  - Ported 1:1 from the Apps Script's own `resolveTargetChannel_`, `buildCreatePayload_`,
-    `pickSoCode_`, `extractStatus_`, `extractCreatedDate_`, `parseTimestamp_` — same behavior,
-    same edge cases, translated from Apps Script's `UrlFetchApp` to Node `fetch`.
-
-- **`api/_lib/orderPunchClient.js`** — Unicommerce HTTP calls (the network half, kept separate
-  from the pure logic above so the logic stays unit-testable without mocking HTTP):
-  `getUcToken_` (OAuth), `searchDisplayCode_`, `getOrder_`, `createOrder_`,
-  `searchAndResolve_` (combined search + DELIVERED check + cooldown check + existing-codes map),
-  `getOrderDto_`. Same retry/backoff behavior as the script: one retry with a 10s pause on
-  403/429, `TOKEN_EXPIRED` signaling on 401.
+- **`scripts/process_order_punch_job.py`** — the worker's real logic, run standalone or imported
+  by the Lambda handler below (same `if __name__ == "__main__": process_job(int(sys.argv[1]))`
+  convention as `process_rto_csv_upload_job.py`):
+  - `resolve_target_channel(current_channel)` — channel routing (`MCAFFEINE_CHANNELS` /
+    `HYPHEN_CHANNELS` → target), pure function.
+  - `pick_so_code(display_order_code, same_channel, existing_codes)` — picks the bare code or a
+    `_1`/`_2` suffix, pure function.
+  - `build_create_payload(order, new_display_code, so_code, target_channel, facility_code,
+    reason, agent_email)` — builds the Unicommerce `saleOrder/create` payload; `reason` →
+    `giftMessage`, `agent_email` → `voucherCode` (see Field mapping below), pure function.
+  - `extract_status(obj)` / `extract_created_date(obj)` / `parse_timestamp(val)` — tolerant field
+    extraction from Unicommerce search/get responses (field names vary; auto-scan fallback), pure
+    functions, used for the DELIVERED check and the cooldown check.
+  - `get_uc_token()`, `search_display_code(token, doc)`, `get_order(token, so_code, facility)`,
+    `create_order(token, facility, payload)`, `search_and_resolve(token, doc)`,
+    `get_order_dto(token, so_code)` — the network half, via `requests` (already a `build.sh`
+    dependency for every existing worker). Same retry/backoff behavior as the script: one retry
+    with a 10s pause on 403/429, a `TokenExpiredError` raised on 401 and caught one level up to
+    force a token refresh + retry.
+  - `process_job(job_id)` — the entrypoint: fetches pending rows for `job_id` from
+    `order_punch_job_rows`, processes them in `row_index` order with the same pacing/backoff/
+    duplicate-recovery/crash-safe-resume behavior as the Apps Script (see Error handling below),
+    writing each row's outcome back immediately (one `UPDATE` per row, matching
+    `process_rto_csv_upload_job.py`'s `_update_job` pattern but per-row here instead of per-job).
+  - All ported 1:1 from the Apps Script's own `resolveTargetChannel_`, `buildCreatePayload_`,
+    `pickSoCode_`, `extractStatus_`, `extractCreatedDate_`, `parseTimestamp_`,
+    `searchAndResolve_`, `getOrder_`, `createOrder_`, `getUcToken_` — same behavior, same edge
+    cases, translated from Apps Script's `UrlFetchApp` to Python's `requests`.
 
 - **`api/order-punch/start.js`** — `POST`, admin-only (`session.isAdmin` + existing
   calling/exports tab-permission check, same gate as `refund-export.js`'s `checkAccess` plus the
@@ -78,36 +99,61 @@ resume, duplicate-create recovery on retry) — different execution substrate (P
   `refund-export.js` already uses.
 
 - **`api/order-punch/settings.js`** — `GET`/`PUT`, admin-only. Reads/writes
-  `order_punch_settings` (facility codes, channel-routing lists, cooldown days, max suffix).
+  `order_punch_settings` (facility codes, channel-routing lists, cooldown days, max suffix). The
+  Python worker reads the same table directly via its own `psycopg` connection at the start of
+  each invocation (not through this endpoint) — same "one table, two independent readers/writers
+  in two languages" shape as `rto_csv_upload_jobs` already has.
 
 - **New Lambda function `mcaff-cls-order-punch-worker`** — own function (via
   `lambda/deploy_infra.sh`, same reasoning as `mcaff-cls-csv-upload-worker`: needs a timeout the
-  constrained GitHub Actions deploy role can't set after creation). Proposed 900s timeout, 512MB
-  memory (HTTP-call-bound, not compute-bound), **reserved concurrency 1** — serializes all order-
-  punch work (this job's own chunks *and* any other queued job) to avoid two workers racing the
-  same display-code's `_1`/`_2` suffix assignment or doubling up on Unicommerce rate-limit
-  backoff. A job that can't finish in one invoke's ~800s working window (leaving ~100s buffer for
-  final DB writes and the self re-invoke call) writes its progress and fires an async
-  self-invoke to continue from where it left off — the same "always resume, even on crash"
-  design as the script's `continueRepunch_`/`scheduleContinuation_`, just via Lambda's own async
-  invoke instead of a time-based Apps Script trigger. Per-chunk: fetch a Unicommerce OAuth token
-  once, refresh it every ~2 minutes during the loop (`TOKEN_REFRESH_MS`, ported as-is), process
-  rows with `status = 'pending'` in `row_index` order, `SLEEP_BETWEEN` (500ms) between orders,
-  `BACKOFF_ON_403` (10s) + `MAX_CONSECUTIVE_403` (5 → 30s cooldown) ported unchanged as fixed
-  tuning constants (not admin-editable — these govern Unicommerce rate-limit behavior, not
-  business rules).
+  constrained GitHub Actions deploy role can't set after creation). `python3.12`, 900s timeout,
+  256MB memory (HTTP-call-bound like `assign_ndr_leads`, not the big-JSON-parsing load that gave
+  `csv_upload_worker` 1536MB), **reserved concurrency 1** — serializes all order-punch work (this
+  job's own continuations *and* any other queued job) to avoid two workers racing the same
+  display-code's `_1`/`_2` suffix assignment or doubling up on Unicommerce rate-limit backoff,
+  same `maximum-retry-attempts 0` event-invoke config as `csv_upload_worker` (belt-and-suspenders
+  against a duplicate-create retry; the real correctness backstop is the duplicate-create
+  recovery logic itself).
 
-- **`lambda/order_punch_worker/handler.js`** — thin entrypoint, imports
-  `api/_lib/orderPunch.js` + `api/_lib/orderPunchClient.js` unmodified (same pattern as
-  `lambda/csv_upload_worker/handler.py` importing the Python script unmodified).
+  **Self-continuation (new pattern for this repo):** every existing worker Lambda here finishes
+  in one invoke; Order Punch's explicit no-row-cap decision means a large enough batch (2,000+
+  orders at ~1-2s/order) cannot. `process_job` tracks its own elapsed wall-clock time from
+  invocation start and stops picking up new rows once it crosses an 800s budget (leaving ~100s of
+  its 900s timeout for the in-flight row to finish, a final progress write, and the
+  continuation call itself). If rows are still `pending` at that point, it invokes itself again
+  —`boto3.client('lambda').invoke(FunctionName='mcaff-cls-order-punch-worker',
+  InvocationType='Event', Payload=json.dumps({"jobId": job_id}))` — before returning, same
+  "always resume, even on crash" intent as the script's `continueRepunch_`/
+  `scheduleContinuation_`, just a direct self-invoke instead of a time-based Apps Script trigger.
+  Needs one new IAM inline policy on the shared `mcaff-cls-cron-lambda-role`: `lambda:
+  InvokeFunction` scoped to this function's own ARN only (no other cron Lambda gets a new
+  permission). `boto3` needs no `build.sh` dependency — it ships in every AWS Python Lambda
+  runtime already.
+
+  Per-invoke: fetch a Unicommerce OAuth token once, refresh it every ~2 minutes during the loop
+  (`TOKEN_REFRESH_MS`, ported as-is), process rows with `status = 'pending'` in `row_index`
+  order, `SLEEP_BETWEEN` (500ms) between orders, `BACKOFF_ON_403` (10s) + `MAX_CONSECUTIVE_403`
+  (5 → 30s cooldown) ported unchanged as fixed tuning constants (not admin-editable — these
+  govern Unicommerce rate-limit behavior, not business rules).
+
+- **`lambda/order_punch_worker/handler.py`** — thin entrypoint, imports
+  `scripts/process_order_punch_job.py` unmodified (same pattern as
+  `lambda/csv_upload_worker/handler.py` importing `process_rto_csv_upload_job.py`).
 
 - **New Postgres tables** — see schema below.
 
 - **New secret `mcaff-cls/unicommerce`** in AWS Secrets Manager (`{username, password}`),
-  read via the same lazy-singleton `SecretsManagerClient` pattern `api/_lib/db.js` uses for the
-  DB secret. The worker Lambda's IAM role gets `secretsmanager:GetSecretValue` scoped to this
-  secret's ARN. The credential value itself is set by a human directly in AWS (console or CLI)
-  — never written into this codebase or its deploy scripts.
+  read via `boto3`'s `secretsmanager` client, cached in a module-level variable for the
+  container's lifetime (same intent as `api/_lib/db.js`'s lazy-singleton `SecretsManagerClient`
+  for the DB secret, just Python). This is a deliberate departure from every existing cron-Lambda
+  secret (`GOKWIK_*`, `MYSQL_*`), which `lambda/deploy_infra.sh` injects as plain Lambda
+  environment variables by design (see that script's own comment: "no Secrets Manager calls at
+  runtime") — a live Unicommerce login that creates real orders warrants the tighter Secrets
+  Manager path even though it's inconsistent with the simpler convention every other cron secret
+  uses. Needs its own IAM inline policy on `mcaff-cls-cron-lambda-role`:
+  `secretsmanager:GetSecretValue` scoped to this secret's ARN only. The credential value itself
+  is set by a human directly in AWS (console or CLI) — never written into this codebase or its
+  deploy scripts.
 
 - **`app/exports/ExportsClient.js`** — new hub page: a tab bar (Refund Export | Order Punch).
   Refund Export tab renders the existing `RefundExportClient`. Order Punch tab renders the new
@@ -157,8 +203,8 @@ port as-is:
 
 ```sql
 CREATE TABLE order_punch_jobs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  status TEXT NOT NULL,                -- 'queued' | 'running' | 'done' | 'failed' | 'stopped'
+  id BIGSERIAL PRIMARY KEY,            -- matches rto_csv_upload_jobs' own id convention
+  status TEXT NOT NULL DEFAULT 'queued', -- 'queued' | 'running' | 'done' | 'failed' | 'stopped'
   created_by TEXT NOT NULL,            -- triggering admin's email
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -173,7 +219,7 @@ CREATE TABLE order_punch_jobs (
 );
 
 CREATE TABLE order_punch_job_rows (
-  job_id UUID NOT NULL REFERENCES order_punch_jobs(id),
+  job_id BIGINT NOT NULL REFERENCES order_punch_jobs(id),
   row_index INTEGER NOT NULL,
   display_order_code TEXT NOT NULL,
   reason TEXT,
@@ -185,6 +231,11 @@ CREATE TABLE order_punch_job_rows (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (job_id, row_index)
 );
+CREATE INDEX IF NOT EXISTS order_punch_job_rows_pending_idx
+  ON order_punch_job_rows (job_id, row_index) WHERE status = 'pending';
+-- Every worker invocation's first query is "pending rows for this job, in row_index order" -
+-- this partial index keeps that cheap regardless of how large the job (no cap) or how many
+-- rows have already finished.
 
 CREATE TABLE order_punch_settings (
   key TEXT PRIMARY KEY,                -- 'facility_codes' | 'mcaffeine_channels' |
@@ -230,11 +281,14 @@ for similarly impactful actions (RTO CSV upload, bulk reassign).
 
 ## Testing
 
-- `api/_lib/orderPunch.test.js` — pure logic, no network: `resolveTargetChannel_` for every
-  known channel plus the `HYP`-prefix fallback, `pickSoCode_` suffix picking and max-suffix
-  exhaustion, `buildCreatePayload_` field mapping (reason → `giftMessage`, email → `voucherCode`,
-  facility propagation), `extractStatus_`/`extractCreatedDate_` field-name fallback + auto-scan,
-  `parseTimestamp_` for epoch-ms/epoch-s/ISO-string inputs.
+- `scripts/test_process_order_punch_job.py` — pure-function checks, same plain
+  `assert` + `if __name__ == "__main__"` style as `test_process_rto_csv_upload_job.py` (no
+  pytest dependency, no mocking library): `resolve_target_channel` for every known channel plus
+  the `HYP`-prefix fallback, `pick_so_code` suffix picking and max-suffix exhaustion,
+  `build_create_payload` field mapping (`reason` → `giftMessage`, `agent_email` →
+  `voucherCode`, facility propagation), `extract_status`/`extract_created_date` field-name
+  fallback + auto-scan, `parse_timestamp` for epoch-ms/epoch-s/ISO-string inputs. No network, no
+  Postgres.
 - `api/order-punch/start.test.js` — access control (non-admin 403, missing perm 403), row
   validation (blank doc rejected, valid rows still queued), no live DB/Lambda/Unicommerce calls
   — consistent with this codebase's no-live-testing convention.
