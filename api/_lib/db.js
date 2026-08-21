@@ -611,6 +611,73 @@ async function bootstrapPgSchema() {
       agent_remarks TEXT
     )
   `;
+  // Order Punch - background repunch pipeline, ported from the "Repunch Pipeline" Google Apps
+  // Script. See docs/superpowers/specs/2026-08-21-order-punch-design.md. id is BIGSERIAL to
+  // match rto_csv_upload_jobs' own id convention (not UUID).
+  await pgSql`
+    CREATE TABLE IF NOT EXISTS order_punch_jobs (
+      id BIGSERIAL PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'queued',
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      total_rows INTEGER NOT NULL,
+      processed_count INTEGER NOT NULL DEFAULT 0,
+      success_count INTEGER NOT NULL DEFAULT 0,
+      error_count INTEGER NOT NULL DEFAULT 0,
+      skipped_count INTEGER NOT NULL DEFAULT 0,
+      stop_requested BOOLEAN NOT NULL DEFAULT false,
+      error_message TEXT
+    )
+  `;
+  // One row per order to repunch. status/so_code/target_channel/error_message are written by
+  // the Python worker (its own psycopg connection) as each row is processed - Node only ever
+  // INSERTs these at job creation (see createOrderPunchJob below).
+  await pgSql`
+    CREATE TABLE IF NOT EXISTS order_punch_job_rows (
+      job_id BIGINT NOT NULL REFERENCES order_punch_jobs(id),
+      row_index INTEGER NOT NULL,
+      display_order_code TEXT NOT NULL,
+      reason TEXT,
+      facility_code TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      so_code TEXT,
+      target_channel TEXT,
+      error_message TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (job_id, row_index)
+    )
+  `;
+  // Every worker invocation's first query is "pending rows for this job, in row_index order" -
+  // this partial index keeps that cheap regardless of job size (no cap - see the design spec).
+  await pgSql`
+    CREATE INDEX IF NOT EXISTS order_punch_job_rows_pending_idx
+    ON order_punch_job_rows (job_id, row_index) WHERE status = 'pending'
+  `;
+  // Admin-editable settings, seeded below with the Apps Script's own hardcoded constants so
+  // behavior is identical on day one. The Python worker reads this table directly (its own
+  // psycopg connection) at the start of each invocation.
+  await pgSql`
+    CREATE TABLE IF NOT EXISTS order_punch_settings (
+      key TEXT PRIMARY KEY,
+      value JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_by TEXT NOT NULL
+    )
+  `;
+  // Seed defaults once - ON CONFLICT DO NOTHING means an admin's later edit is never
+  // overwritten by a subsequent cold start re-running this bootstrap.
+  await pgSql`
+    INSERT INTO order_punch_settings (key, value, updated_by) VALUES
+      ('facility_codes', '["HYP_SRKOL","HYP_SRBGLR","mCaff_Mumbai2","mCaff_Gurgaon3","HYP_AHMD","HYP_SRLOK2","HYP_SRGWHT","Omnivio_Noida1","HYP_DLNAG"]'::jsonb, 'system'),
+      ('mcaffeine_channels', '["SHOPIFY","FIEN_SHOPIFY","HYPD","COMPENSATION","MCaf_Shopify.in","MCAFF_TEST"]'::jsonb, 'system'),
+      ('hyphen_channels', '["HYP_SHOPIFY","HYPD_HYPHEN","HYP_COMPENSATION","HYP_SHOPIFY_IN"]'::jsonb, 'system'),
+      ('target_mcaffeine', '"MCAFFEINE_D2C"'::jsonb, 'system'),
+      ('target_hyphen', '"HYPHEN_D2C"'::jsonb, 'system'),
+      ('cooldown_days', '3'::jsonb, 'system'),
+      ('max_suffix', '2'::jsonb, 'system')
+    ON CONFLICT (key) DO NOTHING
+  `;
   // At most one live cycle per awb - same partial-unique-index pattern as RTO's own
   // live-cycle uniqueness (now a generated-column emulation on MySQL, since Postgres has a
   // real partial index and this table stays on Postgres), so claimNdrLead's ON CONFLICT
@@ -1255,6 +1322,87 @@ async function updateRtoCsvUploadJob(id, fields) {
     else if (key === 'errors') await pgSql`UPDATE rto_csv_upload_jobs SET errors = ${value}::jsonb, updated_at = now() WHERE id = ${id}`;
     else if (key === 'error_message') await pgSql`UPDATE rto_csv_upload_jobs SET error_message = ${value}, updated_at = now() WHERE id = ${id}`;
   }
+}
+
+// { id } for a freshly-created Order Punch job - job row + every submitted row inserted in ONE
+// transaction, so a crash between the two inserts can never leave a job with zero rows (which
+// the worker would otherwise treat as instantly "done"). rows is [{doc, reason,
+// facility_code}], already validated by the caller (see api/_lib/orderPunchRows.js) -
+// row_index is assigned here as submission order.
+async function createOrderPunchJob({ createdBy, rows }) {
+  await ensurePgSchema();
+  return withPgTransaction(async (client) => {
+    const { rows: jobRows } = await client.query(
+      'INSERT INTO order_punch_jobs (created_by, total_rows) VALUES ($1, $2) RETURNING id',
+      [createdBy, rows.length],
+    );
+    const jobId = jobRows[0].id;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      await client.query(
+        `INSERT INTO order_punch_job_rows (job_id, row_index, display_order_code, reason, facility_code)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [jobId, i, r.doc, r.reason || null, r.facility_code || null],
+      );
+    }
+    return jobId;
+  });
+}
+
+// The full job row, including the Python worker's own progress counters, or null if `id`
+// doesn't exist.
+async function getOrderPunchJob(id) {
+  await ensurePgSchema();
+  const { rows } = await pgSql`SELECT * FROM order_punch_jobs WHERE id = ${id}`;
+  return rows[0] || null;
+}
+
+// Sets the flag the Python worker checks between rows/chunks - see api/order-punch/stop.js.
+async function setOrderPunchJobStopRequested(id) {
+  await ensurePgSchema();
+  await pgSql`UPDATE order_punch_jobs SET stop_requested = true, updated_at = now() WHERE id = ${id}`;
+}
+
+// Every row for a job, in submission order - api/order-punch/results.js's CSV source.
+async function getOrderPunchJobRowsForExport(id) {
+  await ensurePgSchema();
+  const { rows } = await pgSql`
+    SELECT display_order_code, reason, facility_code, status, so_code, target_channel, error_message
+    FROM order_punch_job_rows WHERE job_id = ${id} ORDER BY row_index
+  `;
+  return rows;
+}
+
+// Same constants the Apps Script hardcoded, used as a fallback merge in case a key is somehow
+// missing from the table (the schema bootstrap above seeds these as real rows on first boot,
+// so this is belt-and-suspenders, not the only source of truth).
+const ORDER_PUNCH_SETTINGS_DEFAULTS = {
+  facility_codes: ['HYP_SRKOL', 'HYP_SRBGLR', 'mCaff_Mumbai2', 'mCaff_Gurgaon3', 'HYP_AHMD',
+    'HYP_SRLOK2', 'HYP_SRGWHT', 'Omnivio_Noida1', 'HYP_DLNAG'],
+  mcaffeine_channels: ['SHOPIFY', 'FIEN_SHOPIFY', 'HYPD', 'COMPENSATION', 'MCaf_Shopify.in', 'MCAFF_TEST'],
+  hyphen_channels: ['HYP_SHOPIFY', 'HYPD_HYPHEN', 'HYP_COMPENSATION', 'HYP_SHOPIFY_IN'],
+  target_mcaffeine: 'MCAFFEINE_D2C',
+  target_hyphen: 'HYPHEN_D2C',
+  cooldown_days: 3,
+  max_suffix: 2,
+};
+
+// { [key]: value } - api/order-punch/settings.js's GET, and the admin settings panel's source.
+async function getOrderPunchSettings() {
+  await ensurePgSchema();
+  const { rows } = await pgSql`SELECT key, value FROM order_punch_settings`;
+  const settings = { ...ORDER_PUNCH_SETTINGS_DEFAULTS };
+  rows.forEach((r) => { settings[r.key] = r.value; });
+  return settings;
+}
+
+async function upsertOrderPunchSetting(key, value, updatedBy) {
+  await ensurePgSchema();
+  const json = JSON.stringify(value);
+  await pgSql`
+    INSERT INTO order_punch_settings (key, value, updated_by) VALUES (${key}, ${json}::jsonb, ${updatedBy})
+    ON CONFLICT (key) DO UPDATE SET value = ${json}::jsonb, updated_at = now(), updated_by = ${updatedBy}
+  `;
 }
 
 // {status, updatedAt} for one agent's global (cross-process) presence row, or null if they have
@@ -2994,6 +3142,8 @@ module.exports = {
   getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow,
   createRtoCsvUploadJob, getRtoCsvUploadJob, updateRtoCsvUploadJob,
+  createOrderPunchJob, getOrderPunchJob, setOrderPunchJobStopRequested,
+  getOrderPunchJobRowsForExport, getOrderPunchSettings, upsertOrderPunchSetting,
   getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
