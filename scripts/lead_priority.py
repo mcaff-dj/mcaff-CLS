@@ -288,6 +288,21 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
         target = agent_prepaid_target.get(email)
         if target is None:
             return True
+        # An agent with nothing yet this run is a sample of ONE: their first lead is unavoidably
+        # 100% of their run so far, so the ratio test below rejects it for any target under 100
+        # and they can never enter the rotation at all. Because tier 0 (prepaid) sorts to the
+        # FRONT of the pool, that meant a targeted agent was skipped for the entire prepaid
+        # block and could only be reached by pass 3 - so whenever the prepaid pool fitted inside
+        # the untargeted agents' combined headroom, every targeted agent got ZERO prepaid leads
+        # no matter how empty their queue was. Measured before this guard, with one 10%-target
+        # agent and one untargeted agent both idle on quota 20: pools of 1/5/20 prepaid leads
+        # gave the targeted agent 0, 0, 0.
+        #
+        # Letting the first lead through costs at most one extra prepaid lead per agent per run
+        # and keeps the target doing its actual job from the second lead onward - it steers the
+        # BULK away, which is what "soft target" means here.
+        if total_assigned_this_run[email] == 0:
+            return True
         prospective_prepaid = prepaid_assigned_this_run[email] + 1
         prospective_total = total_assigned_this_run[email] + 1
         return (prospective_prepaid / prospective_total) * 100 <= target

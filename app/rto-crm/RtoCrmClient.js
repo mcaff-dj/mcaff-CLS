@@ -1584,6 +1584,14 @@ import RtoUploadModal from './RtoUploadModal';
           if (!isPrepaidLead) return true;
           const target = prepaidTargets[email];
           if (target == null) return true;
+          // An agent with nothing yet this run is a sample of ONE: their first lead is
+          // unavoidably 100% of their run so far, so the ratio below rejects it for any target
+          // under 100 and they never enter the rotation. Since prepaid (tier 0) sorts to the
+          // front of the pool, that meant a targeted agent got ZERO prepaid leads whenever the
+          // pool fitted inside the untargeted agents' headroom. Mirrors the same guard in
+          // scripts/lead_priority.py's _within_prepaid_target - these two must agree or this
+          // preview predicts assignments the cron will not make.
+          if (totalAssignedThisRun[email] === 0) return true;
           const prospectivePrepaid = prepaidAssignedThisRun[email] + 1;
           const prospectiveTotal = totalAssignedThisRun[email] + 1;
           return (prospectivePrepaid / prospectiveTotal) * 100 <= target;
