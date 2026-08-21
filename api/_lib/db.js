@@ -572,7 +572,22 @@ async function bootstrapPgSchema() {
   // but NDR/RTO's own admin UI never shows a control to set it, so their rows can only ever
   // default to 'single' and their existing single-choice behavior is unaffected.
   await pgSql`ALTER TABLE calling_process_dispositions ADD COLUMN IF NOT EXISTS children_input_type TEXT NOT NULL DEFAULT 'single'`;
-  await pgSql`ALTER TABLE calling_process_dispositions ADD CONSTRAINT calling_process_dispositions_children_input_type_check CHECK (children_input_type IN ('single', 'multi', 'text'))`;
+  // Postgres has no `ADD CONSTRAINT IF NOT EXISTS`, so this throws 42710 (duplicate_object) on
+  // EVERY run after the very first - permanently, unlike the transient race the function-level
+  // catch below exists for. Caught HERE, right at the statement, because that outer catch
+  // swallows 42710 and then SKIPS EVERY REMAINING STATEMENT while still setting
+  // pgSchemaReady = true. That silently truncated this whole bootstrap from 2026-08-18 (when
+  // this constraint landed) onward: the order_punch_* tables added further down on 2026-08-21
+  // were never created in production at all, and the Order Punch tab failed with
+  // `relation "order_punch_settings" does not exist` on a fully-deployed build.
+  //
+  // Any future non-idempotent DDL in this function needs its own guard exactly like this one -
+  // enforced offline by api/_lib/db.pgSchema.test.js so this cannot silently regress again.
+  try {
+    await pgSql`ALTER TABLE calling_process_dispositions ADD CONSTRAINT calling_process_dispositions_children_input_type_check CHECK (children_input_type IN ('single', 'multi', 'text'))`;
+  } catch (e) {
+    if (e.code !== '42710') throw e;
+  }
   // Append-only history of every status transition an agent has ever had (Online /
   // Busy / Offline), so agent_presence above can stay a single row per agent while this
   // one answers "when did each change happen" - e.g. for a future audit trail or
