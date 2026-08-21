@@ -11,8 +11,9 @@ saveNdrDisposition for the (separate) three columns the Call modal's disposition
 
 Deliberately independent of scripts/assign_leads.py and scripts/lead_priority.py - NDR's rules
 are simpler and diverge from RTO's, so nothing here is shared with RTO beyond the generic,
-already-process-keyed Postgres tables (calling_agent_process, agent_presence) and the generic
-lib.py Sheets helpers both processes already use.
+already-process-keyed availability tables (Postgres calling_agent_process, MySQL
+agent_presence - see fetch_online_ndr_agents for why the two live in different databases) and
+the generic lib.py Sheets helpers both processes already use.
 
 A lead is "unassigned" iff Agent Name is blank - once a row leaves that state, this script
 never touches it again, the same "never take back what's already handed out" contract RTO's
@@ -20,11 +21,12 @@ own assign_leads.py uses. current_load is read straight off the sheet (a count o
 already carrying that agent's email in Agent Name) rather than a separate Postgres tally.
 """
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import psycopg
 
 import lib
+import mysql_lib
 
 PROCESS_KEY = "ndr"
 SPREADSHEET_ID = "12p3rlXyE0PDx3BMqBpl3CUo5YD3uVzQun1HFPizpSeI"
@@ -48,6 +50,16 @@ LAST_COL = lib.get_column_letter(COL_CONNECTED)  # "T"
 
 STALE_MINUTES = 10  # must match the CRM's own heartbeat cadence - same convention as RTO's
 DEFAULT_QUOTA = 20  # NDR's own fallback, independent of RTO's leadAssignmentRules.json value
+
+# agent_presence lives in PEP_CLS, and this is passed EXPLICITLY to mysql_lib.query rather
+# than inherited from MYSQL_DATABASE - the convention every other PEP_CLS reader in scripts/
+# already follows (backfill_*, migrate_*, sync_delivery_tickets_to_sheet.py, kyc_source.py...).
+# Inheriting it is a live trap: .env.local points MYSQL_DATABASE at mcaff_prod, so an
+# unqualified read of this table raises 1142 "SELECT command denied" locally, which
+# fetch_online_ndr_agents below fails open on - i.e. "nobody is online", silently, rather than
+# an error anyone would notice. assign_leads.py's identical RTO read works today only because
+# the assign-rto Lambda's own MYSQL_DATABASE happens to be PEP_CLS.
+PRESENCE_SCHEMA = "PEP_CLS"
 
 ATTEMPT_BUCKETS = ("1", "2", "3", "More than 3")
 
@@ -124,32 +136,52 @@ def fetch_online_ndr_agents():
     ndr_reason_filter, payment_mode_filters/brand_filters are {email: value} from
     ndr_payment_mode_filter/ndr_brand_filter - an agent absent from any of these (or with an
     empty value) is unrestricted, same "absent means no restriction" contract as RTO's
-    reassign_payment_mode. Returns ([], {}, {}, {}, {}, {}) if POSTGRES_URL isn't configured,
-    so a missing secret fails safe - no assignment, not a crash.
+    reassign_payment_mode.
 
-    TEMPORARY (2026-08-17): reads agent_presence from Postgres again, not MySQL - the live
-    mcaff-cls-assign-ndr-leads Lambda is missing the MYSQL_* env vars this migration's MySQL
-    path needs (see docs/superpowers/plans/2026-08-17-agent-presence-to-mysql.md's cutover
-    checklist step 5), and this can't wait for that AWS-side fix. api/_lib/db.js's
-    upsertAgentPresence was given a matching temporary Postgres dual-write so this reads live
-    data, not a stale cutover-time snapshot. Revert both once the Lambda's env vars are fixed -
-    RTO's own assign_leads.py never used Postgres for this and needs no such revert."""
+    The two halves live in different databases and fail open INDEPENDENTLY, exactly as RTO's
+    own fetch_online_agents does:
+
+      * agent_presence ("are they at their desk?") is MySQL PEP_CLS - the same table
+        api/_lib/db.js's upsertAgentPresence writes on every heartbeat. Missing MYSQL_*
+        credentials, or a failed query, returns ([], {}, {}, {}, {}, {}): without it the run
+        has no idea who is online, so assigning nothing is the only safe answer.
+      * calling_agent_process ("available for NDR, with which filters?") is Postgres. A
+        missing POSTGRES_URL is a smaller blast radius - agents are still read from
+        agent_presence and DO get leads, just with no per-process quotas/filters applied.
+
+    Restored to MySQL on 2026-08-21, undoing the 2026-08-17 temporary revert to Postgres (the
+    live mcaff-cls-assign-ndr-leads Lambda had been missing the MYSQL_* env vars this path
+    needs - see docs/superpowers/plans/2026-08-17-agent-presence-to-mysql.md's cutover
+    checklist step 5). That Lambda's env vars MUST be confirmed present before this ships:
+    without them the credential check above fails open to "nobody is online" and NDR silently
+    assigns nothing at all. api/_lib/db.js's matching Postgres dual-write in
+    upsertAgentPresence is deliberately left in place for now as the one-file rollback net -
+    see its own comment there for when to delete it."""
+    cred = mysql_lib.get_credential()
+    if cred is None:
+        print("MYSQL_* credentials not configured - cannot determine online agents.")
+        return [], {}, {}, {}, {}, {}
+    # Naive-but-UTC, matching every other DATETIME this app stores in MySQL (see
+    # CLS_RTO_calling.assigned_at and db.js's own `new Date()` writes) - never SQL NOW(),
+    # whose session time_zone this app does not control.
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=STALE_MINUTES)
+    try:
+        rows = mysql_lib.query(
+            "SELECT email FROM agent_presence WHERE status = %s AND updated_at >= %s ORDER BY email",
+            ("Online", cutoff),
+            database=PRESENCE_SCHEMA,
+        )
+    except Exception as e:
+        print(f"  (agent_presence lookup failed: {e} - treating as no agents online)")
+        return [], {}, {}, {}, {}, {}
+    present = {row[0].lower() for row in (rows or [])}
+
     conn_str = os.environ.get("POSTGRES_URL")
     if not conn_str:
-        print("POSTGRES_URL not configured - cannot determine online agents.")
-        return [], {}, {}, {}, {}, {}
+        print("POSTGRES_URL not configured - using global presence only.")
+        return sorted(present), {}, {}, {}, {}, {}
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT email FROM agent_presence
-                WHERE status = 'Online' AND updated_at >= now() - interval '%s minutes'
-                ORDER BY email
-                """,
-                (STALE_MINUTES,),
-            )
-            present = {row[0].lower() for row in cur.fetchall()}
-
             try:
                 cur.execute(
                     "SELECT email, status, max_quota, attempt_count_filter, ndr_reason_filter, "
