@@ -125,10 +125,12 @@ genuinely is needed on both sides) there is no cross-language duplication to kee
   InvocationType='Event', Payload=json.dumps({"jobId": job_id}))` — before returning, same
   "always resume, even on crash" intent as the script's `continueRepunch_`/
   `scheduleContinuation_`, just a direct self-invoke instead of a time-based Apps Script trigger.
-  Needs one new IAM inline policy on the shared `mcaff-cls-cron-lambda-role`: `lambda:
-  InvokeFunction` scoped to this function's own ARN only (no other cron Lambda gets a new
-  permission). `boto3` needs no `build.sh` dependency — it ships in every AWS Python Lambda
-  runtime already.
+  Gets its own dedicated IAM role (`mcaff-cls-order-punch-worker-role`), not the shared
+  `mcaff-cls-cron-lambda-role` the other three worker Lambdas use — it needs two permissions
+  (self-invoke, and the Secrets Manager read below) that `assign-leads`/`assign-ndr-leads`/
+  `csv-upload-worker` have no business also holding just because they share a role; least
+  privilege wins over convenience here. `boto3` needs no `build.sh` dependency — it ships in
+  every AWS Python Lambda runtime already.
 
   Per-invoke: fetch a Unicommerce OAuth token once, refresh it every ~2 minutes during the loop
   (`TOKEN_REFRESH_MS`, ported as-is), process rows with `status = 'pending'` in `row_index`
@@ -150,10 +152,11 @@ genuinely is needed on both sides) there is no cross-language duplication to kee
   environment variables by design (see that script's own comment: "no Secrets Manager calls at
   runtime") — a live Unicommerce login that creates real orders warrants the tighter Secrets
   Manager path even though it's inconsistent with the simpler convention every other cron secret
-  uses. Needs its own IAM inline policy on `mcaff-cls-cron-lambda-role`:
-  `secretsmanager:GetSecretValue` scoped to this secret's ARN only. The credential value itself
-  is set by a human directly in AWS (console or CLI) — never written into this codebase or its
-  deploy scripts.
+  uses. `secretsmanager:GetSecretValue` (scoped to this secret's ARN only) is granted via the
+  worker's own dedicated IAM role, not the shared cron role — see above. The credential value
+  itself is set by a human directly in AWS (console or CLI) — never written into this codebase
+  or its deploy scripts; `deploy_infra.sh` checks the secret already exists before proceeding
+  and fails with setup instructions if it doesn't, rather than trying to create it itself.
 
 - **`app/exports/ExportsClient.js`** — new hub page: a tab bar (Refund Export | Order Punch).
   Refund Export tab renders the existing `RefundExportClient`. Order Punch tab renders the new
