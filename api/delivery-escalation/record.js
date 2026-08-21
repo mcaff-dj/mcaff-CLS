@@ -30,10 +30,14 @@ const {
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'deliveryescalation';
-// Backstop against an accidentally-huge upload hammering the 5-connection MySQL pool with
-// one UPDATE per row, sequentially, inside a single Lambda invocation - see
-// bulkDisposeDeliveryEscalationByAwb's own per-row loop.
-const MAX_BULK_ROWS = 2000;
+// Backstop against a request that can never finish, not an arbitrary business limit:
+// bulkDisposeDeliveryEscalationByAwb now runs 8 row-updates at a time (see its own comment)
+// rather than one at a time, but the whole request still has to finish inside API Gateway's
+// hard ~29s integration ceiling - a platform limit no Lambda/pool config can raise. 10,000 rows
+// is a wide safety margin under that ceiling at the per-row latency this table has shown so
+// far; if a real upload legitimately needs more than this, the fix is a background-job
+// pattern (see api/rto/upload-start.js's own for exactly that reason), not a bigger number here.
+const MAX_BULK_ROWS = 10000;
 
 function checkAccess(session) {
   if (!session) return 'Not authenticated';

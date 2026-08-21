@@ -1730,6 +1730,16 @@ async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRema
 // disposeDeliveryEscalationTicketById), which only fills a blank agent_email and never
 // overwrites an existing claim. A bulk upload's outcome IS the disposal, uploaded by the person
 // who ran it, not a claim being made on someone else's behalf.
+// Runs BULK_CHUNK_SIZE row-updates at once per chunk rather than one at a time - a fully
+// sequential loop over a few thousand rows was already brushing API Gateway's hard ~29s
+// integration ceiling (see MAX_BULK_ROWS's own comment in record.js), and that ceiling can't be
+// raised from either the Lambda's or this pool's config, no matter how the row loop is written.
+// Firing several queries at once instead lets mysql2's own pool (connectionLimit 5, see getPool)
+// actually run up to 5 of them concurrently instead of 4 connections sitting idle while one row
+// updates at a time - asking for more concurrency than the pool has is free, since excess
+// requests just queue for the next free connection rather than erroring.
+const BULK_CHUNK_SIZE = 8;
+
 async function bulkDisposeDeliveryEscalationByAwb(rows, email, view) {
   if (view !== 'fresh' && view !== 'forced_rto') {
     throw new Error(`Unknown Delivery-Escalation bulk-upload view: ${view}`);
@@ -1737,15 +1747,19 @@ async function bulkDisposeDeliveryEscalationByAwb(rows, email, view) {
   const where = DE_VIEW_WHERE[view];
   const pool = await getPool();
   const results = [];
-  for (const { awb, outcome, remarks } of rows) {
-    const [result] = await pool.execute(`
-      UPDATE Delivery_escalation
-      SET outcome = ?, agent_remarks = ?, disposed_at = NOW(),
-          agent_email = ?,
-          assigned_at = CASE WHEN assigned_at IS NULL THEN NOW() ELSE assigned_at END
-      WHERE awb_code = ? AND (${where})
-    `, [outcome, remarks || null, email, awb]);
-    results.push({ awb, outcome, matched: result.affectedRows || 0 });
+  for (let i = 0; i < rows.length; i += BULK_CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + BULK_CHUNK_SIZE);
+    const chunkResults = await Promise.all(chunk.map(async ({ awb, outcome, remarks }) => {
+      const [result] = await pool.execute(`
+        UPDATE Delivery_escalation
+        SET outcome = ?, agent_remarks = ?, disposed_at = NOW(),
+            agent_email = ?,
+            assigned_at = CASE WHEN assigned_at IS NULL THEN NOW() ELSE assigned_at END
+        WHERE awb_code = ? AND (${where})
+      `, [outcome, remarks || null, email, awb]);
+      return { awb, outcome, matched: result.affectedRows || 0 };
+    }));
+    results.push(...chunkResults);
   }
   return results;
 }
