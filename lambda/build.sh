@@ -102,10 +102,33 @@ build_csv_upload_worker() {
   echo "-> $OUT_DIR/csv_upload_worker.zip"
 }
 
+build_order_punch_worker() {
+  echo "=== Building order_punch_worker.zip ==="
+  work="$(mktemp -d)"
+  mkdir -p "$work/scripts"
+
+  cp "$LAMBDA_DIR/order_punch_worker/handler.py" "$work/handler.py"
+  cp "$REPO_ROOT/scripts/process_order_punch_job.py" \
+     "$REPO_ROOT/scripts/lib.py" \
+     "$work/scripts/"
+
+  # Only requests (Unicommerce HTTP) + psycopg (Postgres) - no MySQL, no Sheets, no GoKwik, so
+  # no pymysql/cryptography needed here (unlike assign_leads.zip/csv_upload_worker.zip). boto3
+  # ships in every AWS Python Lambda runtime already, so it is NOT installed here.
+  pip3 install --disable-pip-version-check --only-binary=:all: \
+    --platform manylinux2014_x86_64 --python-version 3.12 --implementation cp --abi cp312 \
+    -t "$work" psycopg[binary] requests
+
+  ( cd "$work" && zip -r -q "$OUT_DIR/order_punch_worker.zip" . )
+  rm -rf "$work"
+  echo "-> $OUT_DIR/order_punch_worker.zip"
+}
+
 case "${1:-all}" in
   assign_leads) build_assign_leads ;;
   assign_ndr_leads) build_assign_ndr_leads ;;
   csv_upload_worker) build_csv_upload_worker ;;
-  all) build_assign_leads; build_assign_ndr_leads; build_csv_upload_worker ;;
-  *) echo "Usage: $0 [assign_leads|assign_ndr_leads|csv_upload_worker]" >&2; exit 1 ;;
+  order_punch_worker) build_order_punch_worker ;;
+  all) build_assign_leads; build_assign_ndr_leads; build_csv_upload_worker; build_order_punch_worker ;;
+  *) echo "Usage: $0 [assign_leads|assign_ndr_leads|csv_upload_worker|order_punch_worker]" >&2; exit 1 ;;
 esac

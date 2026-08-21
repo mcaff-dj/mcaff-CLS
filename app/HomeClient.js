@@ -74,7 +74,7 @@ var CALLING_TEAM_SUBITEMS = {
   ndr: { label: 'NDR-Calling', text: 'NDR Calling Agent Portal', url: '/ndr-calling' },
   escalation: { label: 'Escalation', text: 'Escalation Agent Portal', url: '/escalation' },
   deliveryescalation: { label: 'Delivery-Escalation', text: 'Delivery-Escalation Agent Portal', url: '/delivery-escalation' },
-  exports: { label: 'Exports', text: 'Refund Export', url: '/refund-export' }
+  exports: { label: 'Exports', text: 'Exports', url: '/exports' }
 };
 
 function selectCallingTeamView(view) {

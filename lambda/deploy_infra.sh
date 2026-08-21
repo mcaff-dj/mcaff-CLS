@@ -135,6 +135,76 @@ aws lambda put-function-concurrency --function-name "$FN_CSV_WORKER" \
 aws lambda put-function-event-invoke-config --function-name "$FN_CSV_WORKER" \
   --maximum-retry-attempts 0 --region "$AWS_REGION"
 
+# ---- 5c. order-punch-worker Lambda - Order Punch feature's background worker (own function,
+#          same "own timeout at creation" reasoning as csv-upload-worker above). Own IAM role
+#          (not the shared $ROLE_NAME above) since it needs two permissions - reading the
+#          Unicommerce secret, invoking itself to continue a job that outran one invoke's time
+#          budget - that assign-leads/assign-ndr-leads/csv-upload-worker have no business also
+#          holding just because they'd share a role. No EventBridge schedule: invoked on-demand
+#          by api/order-punch/start.js, and by itself for continuation. ----
+ORDER_PUNCH_ROLE_NAME="mcaff-cls-order-punch-worker-role"
+if ! aws iam get-role --role-name "$ORDER_PUNCH_ROLE_NAME" >/dev/null 2>&1; then
+  aws iam create-role --role-name "$ORDER_PUNCH_ROLE_NAME" \
+    --assume-role-policy-document file:///tmp/trust-policy.json
+  aws iam attach-role-policy --role-name "$ORDER_PUNCH_ROLE_NAME" \
+    --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  echo "Created $ORDER_PUNCH_ROLE_NAME - waiting 10s for IAM propagation..."
+  sleep 10
+else
+  echo "$ORDER_PUNCH_ROLE_NAME already exists, reusing."
+fi
+ORDER_PUNCH_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${ORDER_PUNCH_ROLE_NAME}"
+
+# The Unicommerce credential is never created by this script (see the design spec's own note on
+# why) - it must already exist before this section can grant read access to it.
+if ! aws secretsmanager describe-secret --secret-id mcaff-cls/unicommerce --region "$AWS_REGION" >/dev/null 2>&1; then
+  echo "ERROR: secret 'mcaff-cls/unicommerce' does not exist yet. Create it first, e.g.:" >&2
+  echo "  aws secretsmanager create-secret --name mcaff-cls/unicommerce --region $AWS_REGION \\" >&2
+  echo "    --secret-string '{\"username\":\"...\",\"password\":\"...\"}'" >&2
+  exit 1
+fi
+UC_SECRET_ARN="$(aws secretsmanager describe-secret --secret-id mcaff-cls/unicommerce --region "$AWS_REGION" --query ARN --output text)"
+
+FN_ORDER_PUNCH_WORKER=mcaff-cls-order-punch-worker
+ORDER_PUNCH_WORKER_ARN="arn:aws:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${FN_ORDER_PUNCH_WORKER}"
+cat > /tmp/order-punch-worker-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow", "Action": "secretsmanager:GetSecretValue", "Resource": "${UC_SECRET_ARN}"},
+    {"Effect": "Allow", "Action": "lambda:InvokeFunction", "Resource": "${ORDER_PUNCH_WORKER_ARN}"}
+  ]
+}
+EOF
+aws iam put-role-policy --role-name "$ORDER_PUNCH_ROLE_NAME" \
+  --policy-name order-punch-worker-access --policy-document file:///tmp/order-punch-worker-policy.json
+
+if ! aws lambda get-function --function-name "$FN_ORDER_PUNCH_WORKER" >/dev/null 2>&1; then
+  aws lambda create-function --function-name "$FN_ORDER_PUNCH_WORKER" \
+    --runtime python3.12 --handler handler.handler --role "$ORDER_PUNCH_ROLE_ARN" \
+    --timeout 900 --memory-size 256 --region "$AWS_REGION" \
+    --zip-file "fileb://$DIST/order_punch_worker.zip" >/dev/null
+else
+  aws lambda update-function-code --function-name "$FN_ORDER_PUNCH_WORKER" \
+    --zip-file "fileb://$DIST/order_punch_worker.zip" --region "$AWS_REGION" >/dev/null
+fi
+aws lambda wait function-updated --function-name "$FN_ORDER_PUNCH_WORKER" --region "$AWS_REGION"
+# Only POSTGRES_URL as a plain env var - the Unicommerce credential deliberately does NOT
+# follow the other workers' plain-env-var pattern (see the design spec's "why deviate" note):
+# it's read from Secrets Manager at runtime via the IAM policy granted above.
+aws lambda update-function-configuration --function-name "$FN_ORDER_PUNCH_WORKER" --region "$AWS_REGION" \
+  --environment "Variables={POSTGRES_URL=${POSTGRES_URL}}" \
+  >/dev/null
+# Reserved concurrency 1: serializes this job's own continuations and any other queued job, so
+# two workers never race the same display-code's _1/_2 suffix assignment.
+aws lambda put-function-concurrency --function-name "$FN_ORDER_PUNCH_WORKER" \
+  --reserved-concurrent-executions 1 --region "$AWS_REGION"
+# Same duplicate-create-avoidance reasoning as csv-upload-worker's own event-invoke config -
+# the real correctness backstop is process_one_row's own duplicate-create recovery logic, this
+# just avoids the wasted retry.
+aws lambda put-function-event-invoke-config --function-name "$FN_ORDER_PUNCH_WORKER" \
+  --maximum-retry-attempts 0 --region "$AWS_REGION"
+
 # ---- 6. sync-lead-assignments Lambda ----
 # RETIRED 2026-08-17 - sync_agent_presence_log_to_mysql.py deleted, this Lambda's zip can
 # no longer be built (build.sh has no sync_lead_assignments target). The already-deployed
@@ -236,3 +306,4 @@ echo ""
 echo "Done. Two Lambdas are deployed and their EventBridge schedules are live:"
 echo "assign-leads and assign-ndr-leads, both every 5 minutes. (sync-lead-assignments is"
 echo "retired - its own Lambda/schedule sections above are commented out, not re-created here.)"
+echo "order-punch-worker is also deployed (on-demand invoke only, no schedule)."
