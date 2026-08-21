@@ -371,6 +371,48 @@ async function bootstrapSchema() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `;
+  // NDR Calling's assignment/disposition history - moved here from Postgres (see
+  // migrate_ndr_lead_assignments_to_mysql.py), the same MySQL-over-Postgres move
+  // lead_assignments already made onto CLS_RTO_calling. Plain UNIQUE on awb_number, not the
+  // generated-column trick CLS_RTO_calling uses for its partial-unique emulation: NDR has no
+  // reassignment loop, so reassigned_away_at is never actually set today and a real unique
+  // index enforces the same "at most one row per awb" guarantee the old Postgres partial index
+  // did. The column stays for the same future-proofing reason it always has - add the
+  // live_awb_number generated-column + unique-index pattern here first if that ever changes.
+  await sql`
+    CREATE TABLE IF NOT EXISTS ndr_lead_assignments (
+      id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      awb_number VARCHAR(64) NOT NULL,
+      email VARCHAR(320) NOT NULL,
+      assigned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      reassigned_away_at TIMESTAMP NULL,
+      disposed_at TIMESTAMP NULL,
+      disposition VARCHAR(255),
+      agent_remarks TEXT,
+      UNIQUE KEY ndr_lead_assignments_awb_key (awb_number)
+    )
+  `;
+  // A process's own admin-defined disposition list - moved here from Postgres (see
+  // migrate_calling_process_dispositions_to_mysql.py). parent_id is self-referencing
+  // (arbitrary nesting depth - see getProcessDispositions), ON DELETE CASCADE so removing a
+  // parent takes its children with it, same as the Postgres version had.
+  await sql`
+    CREATE TABLE IF NOT EXISTS calling_process_dispositions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      process_key VARCHAR(64) NOT NULL,
+      parent_id INT NULL,
+      label VARCHAR(120) NOT NULL,
+      description TEXT,
+      sort_order INT NOT NULL DEFAULT 0,
+      children_input_type VARCHAR(16) NOT NULL DEFAULT 'single',
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_by VARCHAR(320),
+      CHECK (children_input_type IN ('single', 'multi', 'text')),
+      FOREIGN KEY (parent_id) REFERENCES calling_process_dispositions(id) ON DELETE CASCADE,
+      KEY calling_process_dispositions_process_key_idx (process_key, sort_order),
+      KEY calling_process_dispositions_parent_idx (parent_id, sort_order)
+    )
+  `;
   schemaReady = true;
 }
 
@@ -534,60 +576,9 @@ async function bootstrapPgSchema() {
   // "'' = no restriction" contract as the filters above. See scripts/assign_ndr_leads.py's
   // brand_of/agent_brand_filter.
   await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS ndr_brand_filter TEXT`;
-  // A process's own admin-defined disposition list - e.g. NDR Calling's Admin Panel, where
-  // (unlike RTO) there is no hardcoded disposition set in RtoCrmClient.js to fall back to, so
-  // an admin has to be able to build one from scratch. Deliberately per-process (process_key,
-  // not a global list) and deliberately NOT touching RTO's own connectedOutcomes/
-  // unreachableOutcomes arrays - those stay hardcoded exactly as they are; this table only
-  // backs processes that have no disposition list of their own yet.
-  await pgSql`
-    CREATE TABLE IF NOT EXISTS calling_process_dispositions (
-      id SERIAL PRIMARY KEY,
-      process_key TEXT NOT NULL,
-      label TEXT NOT NULL,
-      description TEXT,
-      sort_order INTEGER NOT NULL DEFAULT 0,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      created_by TEXT
-    )
-  `;
-  await pgSql`CREATE INDEX IF NOT EXISTS calling_process_dispositions_process_key_idx ON calling_process_dispositions (process_key, sort_order)`;
-  // One level of nesting - a disposition option (e.g. "Wrong Address") can have its own child
-  // reasons, same "N child ›" pattern as a normal ticket-field Category option. NULL = a
-  // top-level option; sort_order is scoped to siblings sharing the same parent_id (and
-  // separately to every top-level option, which all share parent_id IS NULL), not global -
-  // reordering one option's children never touches another option's order or the top level's.
-  // ON DELETE CASCADE: deleting a parent takes its children with it, since an orphaned child
-  // (pointing at a parent_id that no longer exists) has nowhere left to render.
-  await pgSql`ALTER TABLE calling_process_dispositions ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES calling_process_dispositions(id) ON DELETE CASCADE`;
-  await pgSql`CREATE INDEX IF NOT EXISTS calling_process_dispositions_parent_idx ON calling_process_dispositions (parent_id, sort_order)`;
-  // What an agent sees when they open THIS row's children: 'single' (buttons, may drill deeper
-  // into whichever child they pick - the only mode that existed before this column, hence the
-  // default) or 'multi' (checkboxes, one or more) or 'text' (free-typed, no picklist at all).
-  // multi/text are always a LEAF - the agent-side picker never drills past one (see
-  // DeliveryEscalationClient.js's dispLevels), so a node with children rows AND
-  // children_input_type='text' simply has those children rows ignored, not rendered.
-  // Delivery-Escalation-only today (see ProcessDispositionsCard's allowInputTypeControl prop) -
-  // the column itself is shared across every process's rows since it lives on this one table,
-  // but NDR/RTO's own admin UI never shows a control to set it, so their rows can only ever
-  // default to 'single' and their existing single-choice behavior is unaffected.
-  await pgSql`ALTER TABLE calling_process_dispositions ADD COLUMN IF NOT EXISTS children_input_type TEXT NOT NULL DEFAULT 'single'`;
-  // Postgres has no `ADD CONSTRAINT IF NOT EXISTS`, so this throws 42710 (duplicate_object) on
-  // EVERY run after the very first - permanently, unlike the transient race the function-level
-  // catch below exists for. Caught HERE, right at the statement, because that outer catch
-  // swallows 42710 and then SKIPS EVERY REMAINING STATEMENT while still setting
-  // pgSchemaReady = true. That silently truncated this whole bootstrap from 2026-08-18 (when
-  // this constraint landed) onward: the order_punch_* tables added further down on 2026-08-21
-  // were never created in production at all, and the Order Punch tab failed with
-  // `relation "order_punch_settings" does not exist` on a fully-deployed build.
-  //
-  // Any future non-idempotent DDL in this function needs its own guard exactly like this one -
-  // enforced offline by api/_lib/db.pgSchema.test.js so this cannot silently regress again.
-  try {
-    await pgSql`ALTER TABLE calling_process_dispositions ADD CONSTRAINT calling_process_dispositions_children_input_type_check CHECK (children_input_type IN ('single', 'multi', 'text'))`;
-  } catch (e) {
-    if (e.code !== '42710') throw e;
-  }
+  // A process's own admin-defined disposition list moved OFF this Postgres DB onto MySQL
+  // PEP_CLS.calling_process_dispositions (see migrate_calling_process_dispositions_to_mysql.py /
+  // api/_lib/db.js's own bootstrapSchema) - it is not one of the tables bootstrapped below.
   // Append-only history of every status transition an agent has ever had (Online /
   // Busy / Offline), so agent_presence above can stay a single row per agent while this
   // one answers "when did each change happen" - e.g. for a future audit trail or
@@ -603,29 +594,9 @@ async function bootstrapPgSchema() {
     )
   `;
   await pgSql`CREATE INDEX IF NOT EXISTS agent_presence_log_email_idx ON agent_presence_log (email, changed_at DESC)`;
-  // NDR Calling's own assignment/disposition history - the same role MySQL's CLS_RTO_calling
-  // plays for RTO (see migrate_cls_rto_calling_schema.py), but deliberately a SEPARATE table
-  // (not a shared/generic one) and still on this Postgres DB: NDR has no
-  // reassignment/connected/refund workflow yet, so this only carries the shape actually used
-  // today, and never had RTO's Supabase-storage-quota pressure that motivated moving RTO's
-  // table off Postgres. Parallel write alongside the Google Sheet (scripts/assign_ndr_leads.py's
-  // Q:R, the Call modal's S:U in app/rto-crm/RtoCrmClient.js) - the sheet stays what the UI reads
-  // from; this is the durable/queryable history side, same relationship RTO's own sheet
-  // Column Q + CLS_RTO_calling already have. reassigned_away_at exists for the same
-  // future-proofing reason RTO's table has it, but nothing sets it yet - NDR has no retry
-  // loop to reassign a lead away from anyone.
-  await pgSql`
-    CREATE TABLE IF NOT EXISTS ndr_lead_assignments (
-      id BIGSERIAL PRIMARY KEY,
-      awb_number TEXT NOT NULL,
-      email TEXT NOT NULL,
-      assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      reassigned_away_at TIMESTAMPTZ,
-      disposed_at TIMESTAMPTZ,
-      disposition TEXT,
-      agent_remarks TEXT
-    )
-  `;
+  // NDR Calling's own assignment/disposition history moved OFF this Postgres DB onto MySQL
+  // PEP_CLS.ndr_lead_assignments (see migrate_ndr_lead_assignments_to_mysql.py /
+  // api/_lib/db.js's own bootstrapSchema) - it is not one of the tables bootstrapped below.
   // Order Punch - background repunch pipeline, ported from the "Repunch Pipeline" Google Apps
   // Script. See docs/superpowers/specs/2026-08-21-order-punch-design.md. id is BIGSERIAL to
   // match rto_csv_upload_jobs' own id convention (not UUID).
@@ -693,11 +664,6 @@ async function bootstrapPgSchema() {
       ('max_suffix', '2'::jsonb, 'system')
     ON CONFLICT (key) DO NOTHING
   `;
-  // At most one live cycle per awb - same partial-unique-index pattern as RTO's own
-  // live-cycle uniqueness (now a generated-column emulation on MySQL, since Postgres has a
-  // real partial index and this table stays on Postgres), so claimNdrLead's ON CONFLICT
-  // below has a real arbiter to target.
-  await pgSql`CREATE UNIQUE INDEX IF NOT EXISTS ndr_lead_assignments_awb_current_key ON ndr_lead_assignments (awb_number) WHERE reassigned_away_at IS NULL`;
   } catch (e) {
     // Postgres codes for "already exists" (duplicate_column/duplicate_table/duplicate_object)
     // - a benign race, not a real failure: every statement above is its own ADD COLUMN IF NOT
@@ -1450,16 +1416,15 @@ async function getAgentPresenceRow(email) {
 }
 
 // NDR's own equivalent of the assignment half of record_lead_assignments (scripts/
-// assign_leads.py) - a fresh live cycle for this awb. ON CONFLICT targets the partial unique
-// index (ndr_lead_assignments_awb_current_key), so a re-claim of an already-live row (a race,
-// or the UI's own auto-claim firing twice) is a safe no-op rather than an error - the sheet's
-// own Q/R write already decided who holds the lead; this just mirrors that into Postgres.
+// assign_leads.py) - a fresh live cycle for this awb. INSERT IGNORE targets the unique key
+// (ndr_lead_assignments_awb_key), so a re-claim of an already-live row (a race, or the UI's
+// own auto-claim firing twice) is a safe no-op rather than an error - the sheet's own Q/R
+// write already decided who holds the lead; this just mirrors that into MySQL.
 async function claimNdrLead(awbNumber, email) {
-  await ensurePgSchema();
-  await pgSql`
-    INSERT INTO ndr_lead_assignments (awb_number, email)
+  await ensureSchema();
+  await sql`
+    INSERT IGNORE INTO ndr_lead_assignments (awb_number, email)
     VALUES (${awbNumber}, ${email})
-    ON CONFLICT (awb_number) WHERE reassigned_away_at IS NULL DO NOTHING
   `;
   invalidateCache('calling:ndrLeadDates');
 }
@@ -1470,10 +1435,10 @@ async function claimNdrLead(awbNumber, email) {
 // so there's nothing to upsert here unlike RTO's version (which also has to handle a
 // self-claimed lead with no prior assignment row).
 async function disposeNdrLead(awbNumber, disposition, agentRemarks) {
-  await ensurePgSchema();
-  await pgSql`
+  await ensureSchema();
+  await sql`
     UPDATE ndr_lead_assignments
-    SET disposed_at = now(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null}
+    SET disposed_at = NOW(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null}
     WHERE awb_number = ${awbNumber} AND reassigned_away_at IS NULL
   `;
   invalidateCache('calling:ndrLeadDates');
@@ -2335,9 +2300,9 @@ async function getAdministeredProcesses(email) {
 const DISPOSITION_LABEL_MAX = 120;
 
 async function getProcessDispositions(processKey) {
-  await ensurePgSchema();
+  await ensureSchema();
   if (!processKey) return [];
-  const { rows } = await pgSql`
+  const { rows } = await sql`
     SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
     WHERE process_key = ${processKey}
     ORDER BY sort_order ASC, id ASC
@@ -2367,22 +2332,22 @@ async function getProcessDispositions(processKey) {
 // sharing the same parentId, +1) - adding a child never reshuffles other top-level options,
 // and adding a top-level option never touches anyone's children.
 async function addProcessDisposition(processKey, label, description, createdBy, parentId) {
-  await ensurePgSchema();
+  await ensureSchema();
   if (!processKey) throw new Error('processKey is required');
   const trimmed = String(label || '').trim();
   if (!trimmed) throw new Error('A disposition label is required');
   if (trimmed.length > DISPOSITION_LABEL_MAX) throw new Error(`Label must be ${DISPOSITION_LABEL_MAX} characters or fewer`);
   const parent = parentId || null;
   if (parent) {
-    const { rows: parentRows } = await pgSql`
+    const { rows: parentRows } = await sql`
       SELECT id FROM calling_process_dispositions WHERE id = ${parent} AND process_key = ${processKey}
     `;
     if (!parentRows.length) throw new Error('Parent option not found for this process');
   }
   const maxRows = parent
-    ? (await pgSql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id = ${parent}`).rows
-    : (await pgSql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id IS NULL`).rows;
-  await pgSql`
+    ? (await sql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id = ${parent}`).rows
+    : (await sql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id IS NULL`).rows;
+  await sql`
     INSERT INTO calling_process_dispositions (process_key, parent_id, label, description, sort_order, created_by)
     VALUES (${processKey}, ${parent}, ${trimmed}, ${String(description || '').trim() || null}, ${maxRows[0].next}, ${createdBy || null})
   `;
@@ -2396,7 +2361,7 @@ async function addProcessDisposition(processKey, label, description, createdBy, 
 // Works the same regardless of whether id is a top-level option or a child - nesting depth
 // never changes once an option is created.
 async function updateProcessDisposition(processKey, id, { label, description, childrenInputType } = {}) {
-  await ensurePgSchema();
+  await ensureSchema();
   if (!processKey || !id) throw new Error('processKey and id are required');
   const labelText = label === undefined ? null : String(label).trim();
   if (label !== undefined && !labelText) throw new Error('A disposition label is required');
@@ -2405,24 +2370,29 @@ async function updateProcessDisposition(processKey, id, { label, description, ch
   if (childrenInputType !== undefined && !['single', 'multi', 'text'].includes(childrenInputType)) {
     throw new Error("childrenInputType must be 'single', 'multi', or 'text'");
   }
-  const { rows } = await pgSql`
+  // Existence checked separately, not via affected-row count: MySQL's affectedRows only counts
+  // rows actually CHANGED, not matched (unlike Postgres's RETURNING) - a no-op update (every
+  // field already equal to what's being set) would otherwise look like "not found".
+  const { rows: existing } = await sql`
+    SELECT id FROM calling_process_dispositions WHERE id = ${id} AND process_key = ${processKey}
+  `;
+  if (!existing.length) throw new Error('Disposition not found for this process');
+  await sql`
     UPDATE calling_process_dispositions
     SET label = COALESCE(${labelText}, label),
         description = COALESCE(${descText}, description),
         children_input_type = COALESCE(${childrenInputType ?? null}, children_input_type)
     WHERE id = ${id} AND process_key = ${processKey}
-    RETURNING id
   `;
-  if (!rows.length) throw new Error('Disposition not found for this process');
   return getProcessDispositions(processKey);
 }
 
 // Cascades to children automatically (ON DELETE CASCADE on parent_id) - deleting a parent
 // option takes its whole child list with it.
 async function deleteProcessDisposition(processKey, id) {
-  await ensurePgSchema();
+  await ensureSchema();
   if (!processKey || !id) throw new Error('processKey and id are required');
-  await pgSql`DELETE FROM calling_process_dispositions WHERE id = ${id} AND process_key = ${processKey}`;
+  await sql`DELETE FROM calling_process_dispositions WHERE id = ${id} AND process_key = ${processKey}`;
   return getProcessDispositions(processKey);
 }
 
@@ -2434,25 +2404,34 @@ async function deleteProcessDisposition(processKey, id) {
 // Transactional so a request that fails partway through never leaves sort_order in a
 // half-renumbered state.
 async function reorderProcessDispositions(processKey, parentId, orderedIds) {
-  await ensurePgSchema();
+  await ensureSchema();
   if (!processKey) throw new Error('processKey is required');
   if (!Array.isArray(orderedIds) || !orderedIds.length) throw new Error('orderedIds must be a non-empty array');
   const parent = parentId || null;
-  await withPgTransaction(async (client) => {
+  const p = await getPool();
+  const conn = await p.getConnection();
+  try {
+    await conn.beginTransaction();
     for (let i = 0; i < orderedIds.length; i++) {
       if (parent) {
-        await client.query(
-          'UPDATE calling_process_dispositions SET sort_order = $1 WHERE id = $2 AND process_key = $3 AND parent_id = $4',
+        await conn.execute(
+          'UPDATE calling_process_dispositions SET sort_order = ? WHERE id = ? AND process_key = ? AND parent_id = ?',
           [i, orderedIds[i], processKey, parent]
         );
       } else {
-        await client.query(
-          'UPDATE calling_process_dispositions SET sort_order = $1 WHERE id = $2 AND process_key = $3 AND parent_id IS NULL',
+        await conn.execute(
+          'UPDATE calling_process_dispositions SET sort_order = ? WHERE id = ? AND process_key = ? AND parent_id IS NULL',
           [i, orderedIds[i], processKey]
         );
       }
     }
-  });
+    await conn.commit();
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
   return getProcessDispositions(processKey);
 }
 
@@ -2718,8 +2697,8 @@ function getAllNdrLeadDates() {
 }
 
 async function fetchAllNdrLeadDates() {
-  await ensurePgSchema();
-  const { rows } = await pgSql`
+  await ensureSchema();
+  const { rows } = await sql`
     SELECT awb_number, assigned_at, disposed_at FROM ndr_lead_assignments WHERE reassigned_away_at IS NULL
   `;
   const out = {};
