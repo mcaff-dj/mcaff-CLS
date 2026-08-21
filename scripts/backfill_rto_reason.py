@@ -1,9 +1,10 @@
-"""One-off: backfills rto_reason for Postgres lead_assignments rows left NULL because
+"""One-off: backfills rto_reason for PEP_CLS.CLS_RTO_calling rows left NULL because
 assign_leads.py did not stamp it at assignment time until commit 25be910
 (2026-07-28) - every row assigned before that landed with no rto_reason at all, and
 the disposal-time fallback (api/_lib/db.js's recordLeadDisposition, COALESCE onto
 whatever the disposing client sent) evidently did not fill the gap for most of them
-either. 1670 of 3551 live rows were affected as of 2026-07-30.
+either. 1670 of 3551 live rows were affected as of 2026-07-30, back when this data
+still lived on Postgres lead_assignments (see migrate_lead_assignments_to_cls_rto_calling.py).
 
 Looks each row's order_id up against the RTO 'Data' sheet's RTO Reason column (D,
 index 3 - see scripts/lead_priority.py's COL_RTO_REASON), the same source
@@ -11,7 +12,7 @@ assign_leads.py itself reads from at assignment time.
 
 THIS IS A PROXY, NOT A RECOVERY. The sheet only has TODAY's value; there is no
 historical record of what Column D said back when each of these leads was assigned,
-and Postgres has never stored it either. rto_reason is documented (COL_RTO_REASON's
+and this table has never stored it either. rto_reason is documented (COL_RTO_REASON's
 own comment) as "the ORIGINAL system/courier RTO reason" - a fact about the order
 from the courier/return system, not something that changes with which agent is
 calling - so today's value is expected to still be correct, but that is an
@@ -31,10 +32,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib
+import mysql_lib
 from lead_priority import COL_ORDER_ID, COL_RTO_REASON, cell
 
 SPREADSHEET_ID = "1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI"
 SHEET_TAB = "Data"
+SCHEMA = "PEP_CLS"
+TABLE = "CLS_RTO_calling"
 
 
 def build_rto_reason_by_order_id():
@@ -48,19 +52,20 @@ def build_rto_reason_by_order_id():
     return mapping
 
 
-def fetch_missing(conn_str):
-    with lib.get_pg_connection(conn_str, prepare_threshold=None) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT order_id FROM lead_assignments WHERE rto_reason IS NULL")
-            return [row[0] for row in cur.fetchall()]
+def fetch_missing():
+    rows = mysql_lib.query(f"SELECT DISTINCT order_id FROM `{TABLE}` WHERE rto_reason IS NULL", database=SCHEMA)
+    return [row[0] for row in rows]
 
 
-def main(conn_str):
+def main():
+    if mysql_lib.get_credential() is None:
+        raise SystemExit("MYSQL_* credentials not configured.")
+
     rto_reason_by_order_id = build_rto_reason_by_order_id()
     print(f"Loaded {len(rto_reason_by_order_id)} order_id -> RTO Reason mappings from the sheet.")
 
-    missing = fetch_missing(conn_str)
-    print(f"Found {len(missing)} distinct order_id(s) in Postgres with rto_reason still NULL.")
+    missing = fetch_missing()
+    print(f"Found {len(missing)} distinct order_id(s) in {SCHEMA}.{TABLE} with rto_reason still NULL.")
 
     # Resolved against the sheet up front, same as before - only the write below changed.
     pairs = []  # (rto_reason, order_id)
@@ -79,22 +84,14 @@ def main(conn_str):
     # the current chunk's progress, not everything already written.
     CHUNK_SIZE = 500
     updated_orders = 0
-    # prepare_threshold=None: POSTGRES_URL is Supabase's pooled (PgBouncer transaction-mode)
-    # endpoint - psycopg3's default server-side prepared-statement caching can collide with
-    # another session's leftover statement on the same pooled backend
-    # (psycopg.errors.DuplicatePreparedStatement). See backfill_delivery_partner.py, which hit
-    # this for real.
-    with lib.get_pg_connection(conn_str, prepare_threshold=None) as conn:
-        with conn.cursor() as cur:
-            for start in range(0, len(pairs), CHUNK_SIZE):
-                chunk = pairs[start:start + CHUNK_SIZE]
-                cur.executemany(
-                    "UPDATE lead_assignments SET rto_reason = %s "
-                    "WHERE order_id = %s AND rto_reason IS NULL",
-                    chunk,
-                )
-                conn.commit()
-                updated_orders += len(chunk)
+    for start in range(0, len(pairs), CHUNK_SIZE):
+        chunk = pairs[start:start + CHUNK_SIZE]
+        mysql_lib.executemany(
+            f"UPDATE `{TABLE}` SET rto_reason = %s WHERE order_id = %s AND rto_reason IS NULL",
+            chunk,
+            database=SCHEMA,
+        )
+        updated_orders += len(chunk)
 
     # Row count (as opposed to order_id count) isn't tracked anymore - rto_reason is
     # order-level (see this script's own docstring: the same value can land on several
@@ -106,8 +103,4 @@ def main(conn_str):
 
 
 if __name__ == "__main__":
-    import os
-    conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str:
-        raise SystemExit("POSTGRES_URL not configured.")
-    main(conn_str)
+    main()
