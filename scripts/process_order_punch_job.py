@@ -186,7 +186,6 @@ def parse_timestamp(val):
 
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -194,7 +193,6 @@ from pathlib import Path
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import lib  # noqa: E402
 
 UC_BASE_URL = "https://pep.unicommerce.com"
 UC_SECRET_ID = "mcaff-cls/unicommerce"
@@ -407,7 +405,20 @@ def search_and_resolve(token, display_order_code, settings):
     }
 
 
-# ---- Postgres helpers - this worker's own psycopg connection, separate from Node's pgSql ----
+# ---- MySQL helpers - this worker's own pymysql connection, separate from Node's sql ----
+
+def _connect():
+    import mysql_lib
+    cred = mysql_lib.get_credential()
+    if cred is None:
+        raise RuntimeError("MYSQL_* credentials not configured")
+    import pymysql
+    return pymysql.connect(
+        host=cred["host"], user=cred["user"], password=cred["password"],
+        database=cred["database"], port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
+    )
+
+
 
 def fetch_job(conn, job_id):
     with conn.cursor() as cur:
@@ -586,11 +597,10 @@ def process_job(job_id):
     """Entrypoint - one Lambda invoke's worth of work. Self-invokes to continue if rows remain
     pending after CHUNK_BUDGET_SEC, mirroring the Apps Script's own always-resume design (see
     the design spec's Error handling section)."""
-    conn_str = os.environ.get("POSTGRES_URL")
     try:
-        conn = lib.get_pg_connection(conn_str)
+        conn = _connect()
     except Exception as e:
-        print(f"process_job({job_id}): could not connect to Postgres, giving up: {e}")
+        print(f"process_job({job_id}): could not connect to MySQL, giving up: {e}")
         return
 
     try:

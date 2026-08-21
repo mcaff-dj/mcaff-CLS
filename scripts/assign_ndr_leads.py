@@ -11,19 +11,16 @@ saveNdrDisposition for the (separate) three columns the Call modal's disposition
 
 Deliberately independent of scripts/assign_leads.py and scripts/lead_priority.py - NDR's rules
 are simpler and diverge from RTO's, so nothing here is shared with RTO beyond the generic,
-already-process-keyed availability tables (Postgres calling_agent_process, MySQL
-agent_presence - see fetch_online_ndr_agents for why the two live in different databases) and
-the generic lib.py Sheets helpers both processes already use.
+already-process-keyed availability tables (calling_agent_process, agent_presence - both MySQL
+PEP_CLS, see fetch_online_ndr_agents) and the generic lib.py Sheets helpers both processes
+already use.
 
 A lead is "unassigned" iff Agent Name is blank - once a row leaves that state, this script
 never touches it again, the same "never take back what's already handed out" contract RTO's
 own assign_leads.py uses. current_load is read straight off the sheet (a count of rows
 already carrying that agent's email in Agent Name) rather than a separate Postgres tally.
 """
-import os
 from datetime import datetime, timedelta, timezone
-
-import psycopg
 
 import lib
 import mysql_lib
@@ -138,25 +135,12 @@ def fetch_online_ndr_agents():
     empty value) is unrestricted, same "absent means no restriction" contract as RTO's
     reassign_payment_mode.
 
-    The two halves live in different databases and fail open INDEPENDENTLY, exactly as RTO's
-    own fetch_online_agents does:
-
-      * agent_presence ("are they at their desk?") is MySQL PEP_CLS - the same table
-        api/_lib/db.js's upsertAgentPresence writes on every heartbeat. Missing MYSQL_*
-        credentials, or a failed query, returns ([], {}, {}, {}, {}, {}): without it the run
-        has no idea who is online, so assigning nothing is the only safe answer.
-      * calling_agent_process ("available for NDR, with which filters?") is Postgres. A
-        missing POSTGRES_URL is a smaller blast radius - agents are still read from
-        agent_presence and DO get leads, just with no per-process quotas/filters applied.
-
-    Restored to MySQL on 2026-08-21, undoing the 2026-08-17 temporary revert to Postgres (the
-    live mcaff-cls-assign-ndr-leads Lambda had been missing the MYSQL_* env vars this path
-    needs - see docs/superpowers/plans/2026-08-17-agent-presence-to-mysql.md's cutover
-    checklist step 5). That Lambda's env vars MUST be confirmed present before this ships:
-    without them the credential check above fails open to "nobody is online" and NDR silently
-    assigns nothing at all. api/_lib/db.js's matching Postgres dual-write in
-    upsertAgentPresence is deliberately left in place for now as the one-file rollback net -
-    see its own comment there for when to delete it."""
+    Both halves now live in the same MySQL PEP_CLS schema (calling_agent_process moved off
+    Postgres alongside calling_business_hours - see
+    migrate_calling_business_hours_and_agent_process_to_mysql.py) but still fail open
+    INDEPENDENTLY, since agent_presence is the true fail-safe (no idea who's online without
+    it) while a calling_agent_process-specific failure is a smaller blast radius (agents still
+    get leads via global presence, just with no per-process quotas/filters applied)."""
     cred = mysql_lib.get_credential()
     if cred is None:
         print("MYSQL_* credentials not configured - cannot determine online agents.")
@@ -176,23 +160,17 @@ def fetch_online_ndr_agents():
         return [], {}, {}, {}, {}, {}
     present = {row[0].lower() for row in (rows or [])}
 
-    conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str:
-        print("POSTGRES_URL not configured - using global presence only.")
+    try:
+        per_process = mysql_lib.query(
+            "SELECT email, status, max_quota, attempt_count_filter, ndr_reason_filter, "
+            "ndr_payment_mode_filter, ndr_brand_filter "
+            "FROM calling_agent_process WHERE process_key = %s",
+            (PROCESS_KEY,),
+            database=PRESENCE_SCHEMA,
+        )
+    except Exception as e:
+        print(f"  (calling_agent_process unavailable: {e} - using global presence)")
         return sorted(present), {}, {}, {}, {}, {}
-    with psycopg.connect(conn_str) as conn:
-        with conn.cursor() as cur:
-            try:
-                cur.execute(
-                    "SELECT email, status, max_quota, attempt_count_filter, ndr_reason_filter, "
-                    "ndr_payment_mode_filter, ndr_brand_filter "
-                    "FROM calling_agent_process WHERE process_key = %s",
-                    (PROCESS_KEY,),
-                )
-                per_process = cur.fetchall()
-            except Exception as e:
-                print(f"  (calling_agent_process unavailable: {e} - using global presence)")
-                return sorted(present), {}, {}, {}, {}, {}
 
     if not per_process:
         print(f"  no per-process availability set for '{PROCESS_KEY}' - using global presence")
@@ -224,51 +202,54 @@ def fetch_online_ndr_agents():
 
 
 def record_new_assignments(new_assignments):
-    """Mirrors each freshly-assigned (awb_number, email) into Postgres ndr_lead_assignments -
-    NDR's own equivalent of assign_leads.py's record_lead_assignments, a parallel write
-    alongside the sheet, not a replacement (see api/_lib/db.js's claimNdrLead, which the Call
-    modal's own claim-on-open path uses for the exact same table).
+    """Mirrors each freshly-assigned (awb_number, email) into MySQL PEP_CLS.ndr_lead_assignments
+    (moved off Postgres - see migrate_ndr_lead_assignments_to_mysql.py) - NDR's own equivalent
+    of assign_leads.py's record_lead_assignments, a parallel write alongside the sheet, not a
+    replacement (see api/_lib/db.js's claimNdrLead, which the Call modal's own claim-on-open
+    path uses for the exact same table).
 
-    Retires any existing live row for the same awb_number (stamping reassigned_away_at)
-    BEFORE inserting the new one, in the same transaction - same fix assign_leads.py's own
-    record_lead_assignments already got for the identical bug (see lambda/README.md's
-    2026-08-13 NDR Postgres gap note). Without this, a plain INSERT ... ON CONFLICT DO
-    NOTHING silently drops the new assignment whenever an older live row already exists for
-    that awb_number - a lead reassigned after its first agent's cycle ended would have the
-    sheet correctly show the new agent while Postgres stayed stuck on the old one forever,
-    invisibly (confirmed in production: 88 of 1,104 AWBs checked for one agent had no
-    Postgres row at all, and others were found live under a stale prior agent). Retiring
-    first ensures the new insert never conflicts.
+    Retires any existing live row for the same awb_number (stamping reassigned_away_at) BEFORE
+    inserting the new one, in ONE transaction - same reasoning as assign_leads.py's own
+    record_lead_assignments (see its docstring): splitting these across two connections risks
+    landing the retire without the insert, leaving a lead with no live cycle at all - invisible
+    to any reader, even though the sheet says it is assigned.
 
-    Best-effort: a Postgres write failure here must never undo or block the sheet write
-    that already succeeded - the sheet is what the CRM reads from, this is just history."""
+    Only one unique key is in play here (live_awb_number - see api/_lib/db.js's bootstrapSchema),
+    unlike CLS_RTO_calling's two, so - unlike record_lead_assignments - there's no need to catch
+    an IntegrityError and fall back to an UPDATE: retiring first always leaves the insert's
+    target key open.
+
+    Best-effort: a MySQL write failure here must never undo or block the sheet write that
+    already succeeded - the sheet is what the CRM reads from, this is just history."""
     if not new_assignments:
         return
-    conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str:
-        print("  (POSTGRES_URL not configured - skipping ndr_lead_assignments write)")
+    cred = mysql_lib.get_credential()
+    if cred is None:
+        print("  (MYSQL_* credentials not configured - skipping ndr_lead_assignments write)")
         return
+    import pymysql
+    now = datetime.now(timezone.utc).replace(tzinfo=None)  # see fetch_current_assignment_times: stored naive-but-UTC
+    conn = pymysql.connect(
+        host=cred["host"], user=cred["user"], password=cred["password"],
+        database=cred["database"], port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
+    )
     try:
-        with psycopg.connect(conn_str) as conn:
-            with conn.cursor() as cur:
-                cur.executemany(
-                    """
-                    UPDATE ndr_lead_assignments SET reassigned_away_at = now()
-                    WHERE awb_number = %s AND reassigned_away_at IS NULL
-                    """,
-                    [(awb,) for awb, _email in new_assignments],
-                )
-                cur.executemany(
-                    """
-                    INSERT INTO ndr_lead_assignments (awb_number, email)
-                    VALUES (%s, %s)
-                    ON CONFLICT (awb_number) WHERE reassigned_away_at IS NULL DO NOTHING
-                    """,
-                    new_assignments,
-                )
-            conn.commit()
+        cur = conn.cursor()
+        cur.executemany(
+            "UPDATE ndr_lead_assignments SET reassigned_away_at = %s "
+            "WHERE awb_number = %s AND reassigned_away_at IS NULL",
+            [(now, awb) for awb, _email in new_assignments],
+        )
+        cur.executemany(
+            "INSERT INTO ndr_lead_assignments (awb_number, email, assigned_at) VALUES (%s, %s, %s)",
+            [(awb, email, now) for awb, email in new_assignments],
+        )
+        conn.commit()
     except Exception as e:
+        conn.rollback()
         print(f"  (ndr_lead_assignments write failed: {e} - sheet assignment already stands)")
+    finally:
+        conn.close()
 
 
 def main():

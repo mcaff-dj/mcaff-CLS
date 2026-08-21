@@ -1,13 +1,9 @@
-"""Self-check for assign_leads.py's shared-connection helper (_pg_cursor) and the
-gokwik-refund-cache functions' conn= param - the only remaining Postgres-backed functions
-that still take a shared conn (fetch_reassignment_attempts/fetch_current_assignment_times
-lost theirs when they moved onto MySQL CLS_RTO_calling, see e1ad531). No real Postgres
-involved, just fake conn/cursor doubles verifying the two things a botched refactor of this
-would get wrong on a live 5-minute cron:
-
-  1. A shared conn is never closed by the function that borrowed it (main() owns closing it).
-  2. A caught failure on a shared conn rolls it back, so the NEXT function sharing that same
-     connection doesn't inherit "current transaction is aborted" from a prior fail-open.
+"""Self-check for assign_leads.py's MySQL-backed lookups (agent_presence,
+calling_agent_process, gokwik_refund_cache) - every table this script touches now lives in
+MySQL PEP_CLS (Postgres/Supabase is gone from this file entirely, see
+migrate_calling_business_hours_and_agent_process_to_mysql.py). No real database involved,
+just mocking mysql_lib.query/get_credential to verify the fail-open contracts a botched
+refactor could break on a live 5-minute cron.
 
 Run directly: python scripts/test_assign_leads_pg_conn.py
 """
@@ -174,63 +170,13 @@ def test_resolve_refund_statuses_stops_at_time_budget():
         assign_leads.GOKWIK_TIME_BUDGET_SEC = orig_budget
 
 
-class FakeCursor:
-    def __init__(self, rows=None, raise_on_execute=False):
-        self.rows = rows or []
-        self.raise_on_execute = raise_on_execute
-        self.executed = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def execute(self, sql, params=None):
-        self.executed.append(sql)
-        if self.raise_on_execute:
-            raise RuntimeError("boom")
-
-    def fetchall(self):
-        return self.rows
-
-
-class FakeConn:
-    def __init__(self, cursor):
-        self._cursor = cursor
-        self.closed = False
-        self.committed = False
-        self.rolled_back = False
-
-    def cursor(self):
-        return self._cursor
-
-    def close(self):
-        self.closed = True
-
-    def commit(self):
-        self.committed = True
-
-    def rollback(self):
-        self.rolled_back = True
-
-
-def test_shared_conn_not_closed_by_pg_cursor():
-    conn = FakeConn(FakeCursor(rows=[("o1", "a@x.com")]))
-    with assign_leads._pg_cursor("unused", conn) as cur:
-        cur.execute("select 1")
-    assert not conn.closed, "a shared conn must outlive the _pg_cursor block that borrowed it"
-
-
-def test_no_conn_no_env_fails_open_without_touching_pg():
-    # No POSTGRES_URL in the environment and no conn passed - must return the fail-open
-    # default without ever calling lib.get_pg_connection (which would try a real network
-    # connection at import time otherwise). fetch_reassignment_attempts/
-    # fetch_current_assignment_times now go through mysql_lib.query() (CLS_RTO_calling moved
-    # onto MySQL), whose get_credential() calls _load_env_local() - same live-DB exposure as
-    # the MySQL-creds test above, so the same guard is needed here too.
+def test_fails_open_without_mysql_creds_touching_no_network():
+    # No MYSQL_* in the environment - every one of these must return its fail-open default
+    # without ever opening a real connection (which mysql_lib.get_credential()'s
+    # _load_env_local() would otherwise do from the repo's real .env.local).
     import os
-    old = os.environ.pop("POSTGRES_URL", None)
+    old = {k: os.environ.pop(k, None) for k in
+           ("MYSQL_HOST", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE")}
     old_env_loaded = assign_leads.mysql_lib._env_local_loaded
     assign_leads.mysql_lib._env_local_loaded = True
     try:
@@ -239,8 +185,9 @@ def test_no_conn_no_env_fails_open_without_touching_pg():
         assert assign_leads.fetch_gokwik_refund_cache() == {}
     finally:
         assign_leads.mysql_lib._env_local_loaded = old_env_loaded
-        if old is not None:
-            os.environ["POSTGRES_URL"] = old
+        for k, v in old.items():
+            if v is not None:
+                os.environ[k] = v
 
 
 if __name__ == "__main__":

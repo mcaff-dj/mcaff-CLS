@@ -5,11 +5,14 @@ Postgres move lead_assignments already made onto CLS_RTO_calling (see
 migrate_lead_assignments_to_cls_rto_calling.py) - but simpler, because unlike that table NDR
 has only ever been written to Postgres. There is no live dual-write cutover race to reconcile
 here: run this once, right after deploying the code change that points claimNdrLead/
-disposeNdrLead/fetchAllNdrLeadDates at MySQL, and every row moves over exactly as it was.
+disposeNdrLead/fetchAllNdrLeadDates/scripts/assign_ndr_leads.py's record_new_assignments at
+MySQL, and every row moves over exactly as it was.
 
-Dedup by awb_number (this table's unique key on both sides) so a re-run after a partial
-apply, or after the app has already written a few post-cutover rows into MySQL, only inserts
-what's missing rather than erroring on the unique key or double-counting.
+A lead CAN have more than one row (scripts/assign_ndr_leads.py's record_new_assignments
+retires a lead's old live cycle before writing its new one on reassignment), so dedup is by
+(awb_number, email, assigned_at) - the same natural key a retired-plus-live pair still
+differs on - not by awb_number alone, which would silently drop every earlier cycle of a
+reassigned lead.
 
 Dry-run by default (prints counts + a sample); --apply performs the insert, in one
 transaction. Does NOT delete anything from Postgres - verify the counts/spot-check MySQL
@@ -72,11 +75,11 @@ def main():
     )
     try:
         cur = conn.cursor()
-        cur.execute(f"SELECT awb_number FROM `{TABLE}`")
-        existing = {r[0] for r in cur.fetchall()}
-        print(f"{len(existing)} awb_number(s) already present in {SCHEMA}.{TABLE}.")
+        cur.execute(f"SELECT awb_number, email, assigned_at FROM `{TABLE}`")
+        existing = set(cur.fetchall())
+        print(f"{len(existing)} row(s) already present in {SCHEMA}.{TABLE}.")
 
-        to_insert = [row for row in pg_rows if row[0] not in existing]
+        to_insert = [row for row in pg_rows if (row[0], row[1], row[2]) not in existing]
         print(f"\n  new rows to insert : {len(to_insert)}")
         if to_insert:
             print("\n  sample of rows to insert:")

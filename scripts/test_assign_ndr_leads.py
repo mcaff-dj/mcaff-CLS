@@ -1,16 +1,12 @@
-"""Self-check for assign_ndr_leads.py's fetch_online_ndr_agents MySQL/Postgres split -
-mirrors scripts/test_assign_leads_pg_conn.py's coverage of the same pattern in
-assign_leads.py. No real database involved.
-
-agent_presence lives in MySQL PEP_CLS (see docs/superpowers/plans/
-2026-08-17-agent-presence-to-mysql.md); calling_agent_process stays on Postgres. The two
-halves fail open independently, and these tests pin that: missing MySQL creds yields no
-agents at all (the run has no idea who is online), while a missing POSTGRES_URL still
-returns the globally-present agents with no per-process filters applied.
+"""Self-check for assign_ndr_leads.py's fetch_online_ndr_agents - both agent_presence and
+calling_agent_process now live in MySQL PEP_CLS (see
+migrate_calling_business_hours_and_agent_process_to_mysql.py), but still fail open
+INDEPENDENTLY: missing MySQL creds yields no agents at all (the run has no idea who is
+online), while a calling_agent_process-specific failure still returns the globally-present
+agents with no per-process filters applied. No real database involved.
 
 Run directly: python scripts/test_assign_ndr_leads.py
 """
-import os
 import sys
 from pathlib import Path
 
@@ -43,39 +39,44 @@ def test_fetch_online_ndr_agents_fails_open_without_mysql_creds():
         assign_ndr_leads.mysql_lib.query = orig_query
 
 
-def test_fetch_online_ndr_agents_reads_mysql_not_postgres():
-    # POSTGRES_URL is popped too, not just left alone: with it set this would open a real
-    # connection to calling_agent_process, making the test environment-dependent and slow.
-    # Absent, the function returns global presence with empty filter dicts - which is exactly
-    # the half being asserted here (that agent_presence came from mysql_lib, not psycopg).
-    old_pg = os.environ.pop("POSTGRES_URL", None)
+def test_fetch_online_ndr_agents_reads_both_tables_from_mysql():
     calls = []
     orig_get_cred = assign_ndr_leads.mysql_lib.get_credential
     orig_query = assign_ndr_leads.mysql_lib.query
     assign_ndr_leads.mysql_lib.get_credential = lambda: {
         "host": "h", "user": "u", "password": "p", "database": "PEP_CLS", "port": 3306,
     }
-    assign_ndr_leads.mysql_lib.query = lambda sql, params=None, database=None: (
-        calls.append((sql, params, database)) or [("A@x.com",)]
-    )
+
+    def _fake_query(sql, params=None, database=None):
+        calls.append((sql, params, database))
+        if "agent_presence" in sql:
+            return [("A@x.com",)]
+        # calling_agent_process: email, status, max_quota, attempt_count_filter,
+        # ndr_reason_filter, ndr_payment_mode_filter, ndr_brand_filter
+        return [("a@x.com", "Online", 5, "1,2", "damaged", "Prepaid", "Hyphen")]
+
+    assign_ndr_leads.mysql_lib.query = _fake_query
     try:
         present, quotas, attempt_f, reason_f, mode_f, brand_f = \
             assign_ndr_leads.fetch_online_ndr_agents()
         assert present == ["a@x.com"], f"expected lowercased email, got {present!r}"
-        assert quotas == {} and attempt_f == {} and reason_f == {} and mode_f == {} \
-            and brand_f == {}, "no POSTGRES_URL means no per-process filters"
-        assert len(calls) == 1, f"expected exactly one MySQL query, got {len(calls)}"
-        assert "agent_presence" in calls[0][0], "the MySQL query must read agent_presence"
+        assert quotas == {"a@x.com": 5}
+        assert attempt_f == {"a@x.com": ["1", "2"]}
+        assert reason_f == {"a@x.com": ["damaged"]}
+        assert mode_f == {"a@x.com": "Prepaid"}
+        assert brand_f == {"a@x.com": "Hyphen"}
+        assert len(calls) == 2, f"expected exactly two MySQL queries, got {len(calls)}"
+        assert "agent_presence" in calls[0][0], "the first query must read agent_presence"
         assert calls[0][1][0] == "Online", "status parameter must be 'Online'"
+        assert "calling_agent_process" in calls[1][0], "the second query must read calling_agent_process"
         # The schema must be pinned explicitly, not inherited from MYSQL_DATABASE - see
         # PRESENCE_SCHEMA's comment in assign_ndr_leads.py. Inheriting it reads the wrong
         # schema and fails open to "nobody is online" with no visible error.
         assert calls[0][2] == "PEP_CLS", f"expected database='PEP_CLS', got {calls[0][2]!r}"
+        assert calls[1][2] == "PEP_CLS", f"expected database='PEP_CLS', got {calls[1][2]!r}"
     finally:
         assign_ndr_leads.mysql_lib.get_credential = orig_get_cred
         assign_ndr_leads.mysql_lib.query = orig_query
-        if old_pg is not None:
-            os.environ["POSTGRES_URL"] = old_pg
 
 
 def test_fetch_online_ndr_agents_fails_open_when_mysql_query_raises():

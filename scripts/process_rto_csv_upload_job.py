@@ -41,14 +41,15 @@ Never raises out of process_job (network/DB blips are caught and turn the job st
 'failed' with error_message set, rather than crashing the Lambda invocation silently) - the
 browser is polling this job's status and needs SOMETHING to show even on failure.
 """
-import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib
 import assign_leads
+import mysql_lib
 from lead_priority import is_prepaid
 
 SPREADSHEET_ID = "1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI"
@@ -93,19 +94,23 @@ def partition_and_stamp(rows, punched_ids, refund_results):
 
 def _update_job(conn, job_id, **fields):
     """Partial UPDATE of one job row - mirrors api/_lib/db.js's updateRtoCsvUploadJob in spirit
-    (both only ever touch this table's own columns), but this is Python's own psycopg
-    connection, not a call into the Node file. Always sets updated_at."""
+    (both only ever touch this table's own columns), but this is Python's own pymysql
+    connection, not a call into the Node file. Always sets updated_at - a Python-computed
+    naive-but-UTC value (see fetch_current_assignment_times in assign_leads.py), not SQL
+    NOW(), whose session time_zone this app does not control."""
     if not fields:
         return
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     set_clauses = []
     values = []
     for key, value in fields.items():
         set_clauses.append(f"{key} = %s")
         values.append(value)
+    values.append(now)
     values.append(job_id)
     with conn.cursor() as cur:
         cur.execute(
-            f"UPDATE rto_csv_upload_jobs SET {', '.join(set_clauses)}, updated_at = now() WHERE id = %s",
+            f"UPDATE rto_csv_upload_jobs SET {', '.join(set_clauses)}, updated_at = %s WHERE id = %s",
             values,
         )
     conn.commit()
@@ -148,12 +153,22 @@ def _header_index(full_header_row, target_header):
     return None
 
 
+def _connect():
+    cred = mysql_lib.get_credential()
+    if cred is None:
+        raise RuntimeError("MYSQL_* credentials not configured")
+    import pymysql
+    return pymysql.connect(
+        host=cred["host"], user=cred["user"], password=cred["password"],
+        database=cred["database"], port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
+    )
+
+
 def process_job(job_id):
-    conn_str = os.environ.get("POSTGRES_URL")
     try:
-        conn = lib.get_pg_connection(conn_str)
+        conn = _connect()
     except Exception as e:
-        print(f"process_job({job_id}): could not connect to Postgres, giving up: {e}")
+        print(f"process_job({job_id}): could not connect to MySQL, giving up: {e}")
         return
     try:
         status, rows = _fetch_job(conn, job_id)
@@ -219,7 +234,7 @@ def process_job(job_id):
             if remaining:
                 time.sleep(REFUND_CHECK_ROUND_PAUSE_SEC)
         try:
-            assign_leads.flush_gokwik_refund_cache(dirty, conn=conn)
+            assign_leads.flush_gokwik_refund_cache(dirty)
         except Exception as e:
             print(f"  gokwik cache flush failed (non-fatal): {e}")
 
@@ -296,10 +311,10 @@ def process_job(job_id):
         )
     except Exception as e:
         print(f"process_job({job_id}) failed: {e}")
-        # `conn` may be mid-aborted-transaction (a failed statement leaves Postgres refusing
-        # all further commands until ROLLBACK) or simply dropped (plausible after the refund-
-        # check phase holds it for up to 600s against a pooled Supabase connection) - roll back
-        # first, and if the failure-status write still doesn't take, retry once on a fresh
+        # `conn` may simply be dropped (plausible after the refund-check phase holds it for up
+        # to 600s - MySQL's own idle/wait_timeout, or a network blip) - roll back first (a
+        # no-op on a healthy connection), and if the failure-status write still doesn't take,
+        # retry once on a fresh
         # connection rather than letting the job silently never reach 'failed' (the browser is
         # polling this status and needs SOMETHING to show).
         try:
@@ -310,7 +325,7 @@ def process_job(job_id):
             _update_job(conn, job_id, status="failed", error_message=str(e))
         except Exception:
             try:
-                fresh_conn = lib.get_pg_connection(conn_str)
+                fresh_conn = _connect()
                 try:
                     _update_job(fresh_conn, job_id, status="failed", error_message=str(e))
                 finally:

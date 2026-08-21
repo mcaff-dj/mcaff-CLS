@@ -10,139 +10,8 @@ const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client
 const secretsClient = new SecretsManagerClient({});
 let pool = null;
 
-// RTO CRM operational state (agent_presence and a handful of admin-editable config tables)
-// intentionally stays on its own Postgres (Supabase) database, separate from the MySQL
-// PEP_CLS schema above - scripts/assign_leads.py already talks to this same Postgres
-// directly via psycopg; only this file's schema bootstrap and the handful of functions
-// below need a Postgres connection of their own. lead_assignments itself moved OFF this
-// Postgres DB onto MySQL PEP_CLS.CLS_RTO_calling (see migrate_cls_rto_calling_schema.py /
-// migrate_lead_assignments_to_cls_rto_calling.py) - it is not one of the tables bootstrapped
-// below.
-const { Pool: PgPool } = require('pg');
-let pgPool = null;
-
-// Supabase's pooler serves the SAME project on two ports, and which one the URL names decides
-// whether this app can scale at all:
-//   :5432 session mode     - a backend is pinned to a client for that client's whole life, so
-//                            the project's pool_size (15) is a cap on CONCURRENT CLIENTS. The
-//                            16th is refused outright: "(EMAXCONNSESSION) max clients reached
-//                            in session mode".
-//   :6543 transaction mode - a backend is held only for the duration of a statement/
-//                            transaction, so those same 15 backends multiplex across far more
-//                            clients than 15.
-// Lambda has no container cap that corresponds to pool_size - it answers load by adding
-// containers - so session mode's per-client pinning is the actual source of EMAXCONNSESSION,
-// and no `max` value can fix that by itself. Transaction mode is what serverless wants.
-//
-// Rewritten HERE rather than by editing POSTGRES_URL in Secrets Manager so it can't regress:
-// the secret is shared with the cron scripts and re-entered by hand, and a URL that silently
-// reverts to :5432 brings the outage straight back with no trace in the repo.
-//
-// Only ever touches Supabase's own pooler hostname - a direct Postgres host has nothing
-// listening on 6543, so rewriting one would take the app down instead of fixing it, and a URL
-// already naming an explicit non-5432 port is left exactly as written. Port surgery is done by
-// regex on the host segment specifically to avoid a URL parse/serialize round trip, which
-// would re-encode a password containing reserved characters and could change what it means.
-const POOLER_SESSION_PORT = /(@[^/@?]*\.pooler\.supabase\.com)(:5432)?(?=[/?]|$)/i;
-function toTransactionModePooler(conn) {
-  return conn.replace(POOLER_SESSION_PORT, '$1:6543');
-}
-
-function getPgPool() {
-  if (pgPool) return pgPool;
-  const raw = process.env.POSTGRES_URL;
-  if (!raw) throw new Error('Missing POSTGRES_URL env var');
-  const conn = toTransactionModePooler(raw);
-  const transactionMode = conn !== raw || /:6543(?=[/?]|$)/.test(conn);
-  if (conn !== raw) console.error('POSTGRES_URL named the Supabase pooler in session mode (5432); connecting in transaction mode (6543) instead');
-
-  // `pg`'s `max` is PER POOL INSTANCE and this pool is a per-container singleton, so the real
-  // connection footprint is max x (live containers). In transaction mode the pooler multiplexes
-  // and a few connections per container is cheap, which buys back the intra-request parallelism
-  // getCallingOverviewData's Promise.all wants. If the rewrite above did NOT apply - a legacy or
-  // non-Supabase host we must not guess about - we are still on a hard 15-CLIENT ceiling, so
-  // hold each container to a single connection and let ~15 of them fit rather than ~5.
-  // idleTimeoutMillis hands connections back quickly once traffic quiets instead of holding them.
-  pgPool = new PgPool({
-    connectionString: conn,
-    ssl: { rejectUnauthorized: false },
-    max: transactionMode ? 3 : 1,
-    idleTimeoutMillis: 10000,
-  });
-  return pgPool;
-}
-
-// The pooler admits a hard-capped number of client connections for the WHOLE project
-// (pool_size: 15) and refuses the next one outright. Lambda concurrency has no matching cap -
-// it just adds containers - so even in transaction mode a burst can still find the door shut.
-//
-// Safe to retry precisely because the refusal happens during CONNECT, before any SQL is
-// sent - the statement provably never reached Postgres, so a retry cannot double-apply a
-// write. That is why this is gated on that one message and nothing else: a genuine query
-// error (constraint violation, syntax, timeout mid-statement) must still propagate
-// untouched, since retrying those could re-run work that already partly happened.
-const PG_CONNECT_RETRIES = 4;
-function isPoolExhausted(e) {
-  return /EMAXCONNSESSION|max clients reached/i.test((e && e.message) || '');
-}
-async function withPgConnectRetry(fn) {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await fn();
-    } catch (e) {
-      if (attempt >= PG_CONNECT_RETRIES || !isPoolExhausted(e)) throw e;
-      // Exponential (100/200/400/800ms) plus jitter - a burst of containers all refused at the
-      // same instant would otherwise retry in lockstep and just refuse each other again.
-      const delay = 100 * 2 ** attempt + Math.floor(Math.random() * 100);
-      console.error(`Postgres pool exhausted; retry ${attempt + 1}/${PG_CONNECT_RETRIES} in ${delay}ms`);
-      await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-}
-
-// Same sql`...` tagged-template calling convention every call site below already
-// uses (and the same trick the MySQL sql() shim above plays) - just against a plain
-// `pg` Pool instead of a provider-specific driver, so this works against any
-// standard Postgres endpoint (Supabase, RDS, etc.), not tied to one vendor's proxy
-// protocol.
-async function pgSql(strings, ...values) {
-  let text = '';
-  strings.forEach((s, i) => {
-    text += s;
-    if (i < values.length) text += `$${i + 1}`;
-  });
-  const { rows } = await withPgConnectRetry(() => getPgPool().query(text, values));
-  return { rows };
-}
-
-// Runs `work` against ONE dedicated connection wrapped in BEGIN/COMMIT (ROLLBACK on
-// error) - unlike pgSql above, which checks out a fresh pooled connection per call, so
-// a session-scoped guarantee (a multi-statement transaction, an advisory lock held
-// across statements) needs this instead. work receives the raw `pg` client - use
-// client.query(text, params) with plain $1/$2 placeholders, not the pgSql tagged
-// template (which would grab a DIFFERENT connection and defeat the point).
-async function withPgTransaction(work) {
-  // Only the checkout retries - never `work` itself, which may already have written by the
-  // time it throws.
-  const client = await withPgConnectRetry(() => getPgPool().connect());
-  try {
-    await client.query('BEGIN');
-    const result = await work(client);
-    await client.query('COMMIT');
-    client.release();
-    return result;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    // Pass the error to release() so node-postgres discards this connection instead of
-    // returning a possibly-poisoned one (mid-transaction failure, connection reset mid-
-    // query, etc.) to the pool for the next caller to inherit.
-    client.release(err);
-    throw err;
-  }
-}
-
 // Short-lived read cache for the handful of queries that pull WHOLE tables back over the wire.
-// This exists for Supabase EGRESS, not latency - a few agents working a normal day can move
+// This exists for network egress, not latency - a few agents working a normal day can move
 // gigabytes out of Postgres for data that changes far more slowly than it is read.
 //
 // Caches the PROMISE, not the resolved value, so N concurrent requests that arrive together
@@ -217,10 +86,9 @@ async function sql(strings, ...values) {
 let schemaReady = false;
 let schemaPromise = null;
 
-// Same in-flight deduplication as ensurePgSchema below, for the same reason - see its comment.
-// MySQL is not the database that ran out of connections, but the amplification is identical
-// (api/auth/[action].js fans out to three functions that each land here), and one shared
-// bootstrap run per container is what this always meant to be.
+// Collapses concurrent first-callers onto ONE bootstrap run - api/auth/[action].js fans out to
+// three functions that each land here, and one shared bootstrap run per container is what this
+// always meant to be, not three racing DDL passes.
 async function ensureSchema() {
   if (schemaReady) return;
   if (!schemaPromise) schemaPromise = bootstrapSchema().finally(() => { schemaPromise = null; });
@@ -373,12 +241,14 @@ async function bootstrapSchema() {
   `;
   // NDR Calling's assignment/disposition history - moved here from Postgres (see
   // migrate_ndr_lead_assignments_to_mysql.py), the same MySQL-over-Postgres move
-  // lead_assignments already made onto CLS_RTO_calling. Plain UNIQUE on awb_number, not the
-  // generated-column trick CLS_RTO_calling uses for its partial-unique emulation: NDR has no
-  // reassignment loop, so reassigned_away_at is never actually set today and a real unique
-  // index enforces the same "at most one row per awb" guarantee the old Postgres partial index
-  // did. The column stays for the same future-proofing reason it always has - add the
-  // live_awb_number generated-column + unique-index pattern here first if that ever changes.
+  // lead_assignments already made onto CLS_RTO_calling. reassigned_away_at IS actually set,
+  // by scripts/assign_ndr_leads.py's own record_new_assignments (a lead can come back around
+  // to the unassigned pool and be handed to a different agent) - a plain UNIQUE on awb_number
+  // would collide the moment a retired cycle and its replacement coexist. live_awb_number is
+  // MySQL's emulation of Postgres's old partial unique index (`WHERE reassigned_away_at IS
+  // NULL`) - see migrate_cls_rto_calling_schema.py's live_order_id/live_awb_code for the same
+  // trick: NULL on every retired row (MySQL treats every NULL in a UNIQUE index as distinct),
+  // non-NULL (= awb_number) only on the one live cycle.
   await sql`
     CREATE TABLE IF NOT EXISTS ndr_lead_assignments (
       id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -389,7 +259,9 @@ async function bootstrapSchema() {
       disposed_at TIMESTAMP NULL,
       disposition VARCHAR(255),
       agent_remarks TEXT,
-      UNIQUE KEY ndr_lead_assignments_awb_key (awb_number)
+      live_awb_number VARCHAR(64) GENERATED ALWAYS AS
+        (IF(reassigned_away_at IS NULL, awb_number, NULL)) VIRTUAL,
+      UNIQUE KEY ndr_lead_assignments_live_awb_key (live_awb_number)
     )
   `;
   // A process's own admin-defined disposition list - moved here from Postgres (see
@@ -413,273 +285,155 @@ async function bootstrapSchema() {
       KEY calling_process_dispositions_parent_idx (parent_id, sort_order)
     )
   `;
-  schemaReady = true;
-}
-
-let pgSchemaReady = false;
-let pgSchemaPromise = null;
-
-// Collapses concurrent first-callers onto ONE bootstrap run. `pgSchemaReady` is only set after
-// the LAST statement below, so it cannot deduplicate callers that are already in flight: on a
-// cold container every function in a Promise.all (getCallingOverviewData fans out to four,
-// each of which awaits this) saw false and each re-ran the whole ~45-statement DDL list. That
-// multiplied both the statement count and - the part that actually broke - the number of
-// connections one container demanded at once, so a handful of containers could exhaust a
-// pool_size the connection settings alone were sized to fit comfortably. It also made every
-// concurrent run race every other one through the duplicate-object window the catch below
-// exists to absorb.
-//
-// Cleared once settled, so a bootstrap that failed for a real reason is retried by the next
-// request instead of leaving the container permanently stuck awaiting a rejected promise. On
-// success `pgSchemaReady` has already been set, so the fast path above short-circuits and this
-// promise is never rebuilt.
-async function ensurePgSchema() {
-  if (pgSchemaReady) return;
-  if (!pgSchemaPromise) pgSchemaPromise = bootstrapPgSchema().finally(() => { pgSchemaPromise = null; });
-  return pgSchemaPromise;
-}
-
-// RTO CRM operational tables - separate Postgres database (see the pgSql setup
-// above), separate idempotent-once-per-warm-instance flag from the MySQL schema.
-async function bootstrapPgSchema() {
-  try {
-  // Agent online/offline state (replaces the removed Supabase agent_status table) -
-  // one row per agent, upserted on every explicit status change and periodic
-  // heartbeat. scripts/assign_leads.py reads this directly (via its own psycopg
-  // connection) to decide who's eligible for new leads.
-  await pgSql`
-    CREATE TABLE IF NOT EXISTS agent_presence (
-      email TEXT PRIMARY KEY,
-      name TEXT,
-      status TEXT NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `;
-  // Per-process, per-weekday calling hours, editable by an admin from the CRM's own admin
-  // panel. Lives here rather than in api/_lib/callingProcesses.json because it has to be
-  // changeable at runtime - that file now only supplies the DEFAULTS used to seed a process
-  // that has never been edited. scripts/assign_leads.py reads this table directly (its own
-  // psycopg connection, same as agent_presence) to decide whether it may hand out leads.
-  //
-  // open_time/close_time are 'HH:MM' local wall-clock in the process's timezone, close
-  // exclusive. Either being NULL/'' means CLOSED that day - which is how a blank Sunday in the
-  // editor is stored, rather than deleting the row and losing the fact that it was set.
-  await pgSql`
+  // Per-process, per-weekday calling hours - moved here from Postgres (see
+  // migrate_calling_business_hours_and_agent_process_to_mysql.py). See getCallingBusinessHours
+  // for the open_time/close_time NULL-means-closed contract.
+  await sql`
     CREATE TABLE IF NOT EXISTS calling_business_hours (
-      process_key TEXT NOT NULL,
-      day TEXT NOT NULL,
-      open_time TEXT,
-      close_time TEXT,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_by TEXT,
+      process_key VARCHAR(64) NOT NULL,
+      day VARCHAR(16) NOT NULL,
+      open_time VARCHAR(8),
+      close_time VARCHAR(8),
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_by VARCHAR(320),
       PRIMARY KEY (process_key, day)
     )
   `;
-  // Per-process availability and capacity for one agent. The processes are independent, so an
-  // agent can be Online for RTO and Offline for NDR with a different quota in each - which a
-  // single row per agent (agent_presence, above) cannot express.
+  // Per-process availability/capacity/filters for one agent - moved here from Postgres (same
+  // migration as calling_business_hours above). scripts/assign_leads.py and
+  // scripts/assign_ndr_leads.py now read this directly via mysql_lib instead of psycopg.
   //
-  // This is operational state ONLY. Whether an agent belongs to a process at all is decided by
-  // their invitation (report_tab_permissions, card 'calling', tab '<process>'), so a row here
-  // for an uninvited agent grants nothing. It also replaces the browser-held
-  // 'rto_agent_roster' as the authority for status/quota: that lives in localStorage, which the
-  // agent can edit, so scripts/assign_leads.py could never have trusted it.
-  await pgSql`
+  // is_process_admin: administers this ONE process (roster/hours, full team data) without
+  // company-wide admin (users.is_admin) - see RtoCrmClient.js's isProcessAdmin exemptions.
+  // prepaid_pct: soft prepaid-mix target for this agent's round-robin (0-100, NULL = no
+  // target) - steers, never blocks outright (build_assignment_queue's agent_prepaid_target).
+  // priority_rto_reasons: comma-separated RTO-reason substrings this agent specializes in -
+  // a matching lead gets first refusal before the general round-robin.
+  // reassign_payment_mode: hard filter on Connected=No REASSIGNMENTS only - '' = no
+  // restriction, 'Prepaid'/'COD' = only that payment type, never relaxed on a later pass.
+  // attempt_count_filter/ndr_reason_filter/ndr_payment_mode_filter/ndr_brand_filter: NDR
+  // Calling's own hard filters, applied to EVERY lead (not just reassignments) - see
+  // scripts/assign_ndr_leads.py's agent_attempt_filter/agent_reason_filter/
+  // agent_payment_mode_filter/agent_brand_filter. '' = no restriction throughout.
+  await sql`
     CREATE TABLE IF NOT EXISTS calling_agent_process (
-      email TEXT NOT NULL,
-      process_key TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'Offline',
-      max_quota INTEGER,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_by TEXT,
+      email VARCHAR(320) NOT NULL,
+      process_key VARCHAR(64) NOT NULL,
+      status VARCHAR(32) NOT NULL DEFAULT 'Offline',
+      max_quota INT,
+      is_process_admin BOOLEAN NOT NULL DEFAULT FALSE,
+      prepaid_pct INT,
+      priority_rto_reasons TEXT,
+      reassign_payment_mode VARCHAR(16),
+      attempt_count_filter TEXT,
+      ndr_reason_filter TEXT,
+      ndr_payment_mode_filter VARCHAR(16),
+      ndr_brand_filter VARCHAR(16),
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_by VARCHAR(320),
       PRIMARY KEY (email, process_key)
     )
   `;
-  // One row per RTO CSV upload. rows_pending holds the validated, deduped rows still awaiting
-  // the background worker (scripts/process_rto_csv_upload_job.py) - cleared to NULL once the
-  // job reaches 'done' or 'failed', since nothing needs them after that. errors is a capped
-  // sample ({line, reason}[], max 50) - see api/_lib/rtoCsvImport.js's buildRowPlan for where
-  // these originate. See docs/superpowers/specs/2026-08-20-rto-csv-upload-design.md for the
-  // full job lifecycle.
-  await pgSql`
+  // One row per RTO CSV upload - moved here from Postgres (see
+  // migrate_rto_csv_upload_jobs_to_mysql.py). rows_pending holds the validated, deduped rows
+  // still awaiting the background worker (scripts/process_rto_csv_upload_job.py) - cleared to
+  // NULL once the job reaches 'done' or 'failed'. errors is a capped sample ({line, reason}[],
+  // max 50) - see api/_lib/rtoCsvImport.js's buildRowPlan for where these originate. See
+  // docs/superpowers/specs/2026-08-20-rto-csv-upload-design.md for the full job lifecycle.
+  await sql`
     CREATE TABLE IF NOT EXISTS rto_csv_upload_jobs (
-      id BIGSERIAL PRIMARY KEY,
-      status TEXT NOT NULL DEFAULT 'queued',
-      created_by TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      total_rows INTEGER NOT NULL,
-      prepaid_count INTEGER NOT NULL,
-      checked_count INTEGER NOT NULL DEFAULT 0,
-      already_refunded_count INTEGER NOT NULL DEFAULT 0,
-      already_punched_count INTEGER NOT NULL DEFAULT 0,
-      appended_count INTEGER NOT NULL DEFAULT 0,
-      duplicate_in_sheet_count INTEGER NOT NULL DEFAULT 0,
-      duplicate_in_file_count INTEGER NOT NULL DEFAULT 0,
-      missing_awb_count INTEGER NOT NULL DEFAULT 0,
-      rows_pending JSONB,
-      errors JSONB,
+      id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      status VARCHAR(32) NOT NULL DEFAULT 'queued',
+      created_by VARCHAR(320) NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      total_rows INT NOT NULL,
+      prepaid_count INT NOT NULL,
+      checked_count INT NOT NULL DEFAULT 0,
+      already_refunded_count INT NOT NULL DEFAULT 0,
+      already_punched_count INT NOT NULL DEFAULT 0,
+      appended_count INT NOT NULL DEFAULT 0,
+      duplicate_in_sheet_count INT NOT NULL DEFAULT 0,
+      duplicate_in_file_count INT NOT NULL DEFAULT 0,
+      missing_awb_count INT NOT NULL DEFAULT 0,
+      rows_pending JSON,
+      errors JSON,
       error_message TEXT
     )
   `;
-  // Admin OF ONE PROCESS: may manage that process's roster and calling hours, and sees that
-  // process's full team data (leads, tickets, per-agent metrics) the same way a company-wide
-  // admin would - RtoCrmClient.js exempts isProcessAdmin from every "an Agent only sees their
-  // own leads" restriction, same as it already exempted them from the Admin-tab redirect.
-  // Nothing outside this one process, and no access to other cards/reports/the /admin panel.
-  // Deliberately not users.is_admin, which is company-wide - it would also hand over every
-  // other report plus /admin, where someone can re-grant anyone's access and delete users.
-  // "Run the RTO desk" and "administer the whole site" are different jobs, and only this
-  // table can express the narrow one, since it is already keyed per (agent, process).
-  //
-  // Grants no data access on its own: the agent still needs the 'calling' card and that
-  // process's invitation row to see the process at all.
-  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS is_process_admin BOOLEAN NOT NULL DEFAULT false`;
-  // Soft prepaid-mix target for this agent's assignment round-robin (0-100, NULL = no target,
-  // i.e. unrestricted like every agent before this existed). Steers, never blocks outright -
-  // see build_assignment_queue's agent_prepaid_target parameter.
-  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS prepaid_pct INTEGER`;
-  // Comma-separated RTO-reason substrings (case-insensitive, same substring-match convention
-  // as leadAssignmentRules.json's own reason lists) this agent specializes in - a matching
-  // lead gets first refusal to them before the general round-robin, same as
-  // build_assignment_queue's agent_specializations parameter. NULL/empty = no specialization.
-  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS priority_rto_reasons TEXT`;
-  // Hard filter on Connected=No REASSIGNMENTS only (never a fresh/never-touched lead): '' =
-  // no restriction (reassigned leads of either payment type may land on this agent, same as
-  // every agent before this existed), 'Prepaid'/'COD' = this agent only ever receives a
-  // reassignment of that one payment type - unlike prepaid_pct above, this never relaxes on a
-  // later pass, so a reassignment whose type no online agent accepts is left unassigned rather
-  // than forced onto someone. See build_assignment_queue's agent_reassign_payment_mode
-  // parameter.
-  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS reassign_payment_mode TEXT`;
-  // Hard filter on how many prior delivery attempts (cp_ndr_attempts) a lead has had - NDR
-  // Calling's own equivalent of reassign_payment_mode above, same "'' = no restriction" real-
-  // value contract, but applied to EVERY lead (not just reassignments): comma-separated subset
-  // of '1', '2', '3', 'More than 3'. See scripts/assign_ndr_leads.py's agent_attempt_filter -
-  // a lead whose bucket no online agent's filter covers is left unassigned rather than forced
-  // onto someone.
-  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS attempt_count_filter TEXT`;
-  // Hard filter on a lead's Latest NDR Reason (NDR Calling only) - same "'' = no restriction"
-  // contract as attempt_count_filter above, but free-text substrings instead of a fixed bucket
-  // list, since courier NDR-reason strings aren't a small enumerable set. See
-  // scripts/assign_ndr_leads.py's agent_reason_filter - a lead whose reason no online agent's
-  // filter matches is left unassigned rather than forced onto someone.
-  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS ndr_reason_filter TEXT`;
-  // Hard filter on a lead's Payment Mode (NDR Calling only, sheet column L) - same "'' = no
-  // restriction" contract as attempt_count_filter/ndr_reason_filter above, applied to EVERY
-  // lead (unlike RTO's reassign_payment_mode, which only ever gates reassignments). Exact,
-  // case-insensitive match against 'Prepaid' or 'COD' - a fixed, controlled value set, unlike
-  // the free-text ndr_reason_filter. See scripts/assign_ndr_leads.py's agent_payment_mode_filter.
-  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS ndr_payment_mode_filter TEXT`;
-  // Hard filter on a lead's Brand - derived from Order ID (sheet column A), not a sheet column
-  // of its own: an order ID starting with "HYP" is Hyphen, everything else is mCaffeine. Same
-  // "'' = no restriction" contract as the filters above. See scripts/assign_ndr_leads.py's
-  // brand_of/agent_brand_filter.
-  await pgSql`ALTER TABLE calling_agent_process ADD COLUMN IF NOT EXISTS ndr_brand_filter TEXT`;
-  // A process's own admin-defined disposition list moved OFF this Postgres DB onto MySQL
-  // PEP_CLS.calling_process_dispositions (see migrate_calling_process_dispositions_to_mysql.py /
-  // api/_lib/db.js's own bootstrapSchema) - it is not one of the tables bootstrapped below.
-  // Append-only history of every status transition an agent has ever had (Online /
-  // Busy / Offline), so agent_presence above can stay a single row per agent while this
-  // one answers "when did each change happen" - e.g. for a future audit trail or
-  // break-duration report. Written by upsertAgentPresence only when the status actually
-  // changes, not on every heartbeat, so it doesn't fill up with repeated identical rows.
-  await pgSql`
-    CREATE TABLE IF NOT EXISTS agent_presence_log (
-      id SERIAL PRIMARY KEY,
-      email TEXT NOT NULL,
-      name TEXT,
-      status TEXT NOT NULL,
-      changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `;
-  await pgSql`CREATE INDEX IF NOT EXISTS agent_presence_log_email_idx ON agent_presence_log (email, changed_at DESC)`;
-  // NDR Calling's own assignment/disposition history moved OFF this Postgres DB onto MySQL
-  // PEP_CLS.ndr_lead_assignments (see migrate_ndr_lead_assignments_to_mysql.py /
-  // api/_lib/db.js's own bootstrapSchema) - it is not one of the tables bootstrapped below.
-  // Order Punch - background repunch pipeline, ported from the "Repunch Pipeline" Google Apps
-  // Script. See docs/superpowers/specs/2026-08-21-order-punch-design.md. id is BIGSERIAL to
-  // match rto_csv_upload_jobs' own id convention (not UUID).
-  await pgSql`
+  // Order Punch - background repunch pipeline - moved here from Postgres (see
+  // migrate_order_punch_to_mysql.py). id is BIGINT UNSIGNED to match rto_csv_upload_jobs' own
+  // id convention.
+  await sql`
     CREATE TABLE IF NOT EXISTS order_punch_jobs (
-      id BIGSERIAL PRIMARY KEY,
-      status TEXT NOT NULL DEFAULT 'queued',
-      created_by TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      total_rows INTEGER NOT NULL,
-      processed_count INTEGER NOT NULL DEFAULT 0,
-      success_count INTEGER NOT NULL DEFAULT 0,
-      error_count INTEGER NOT NULL DEFAULT 0,
-      skipped_count INTEGER NOT NULL DEFAULT 0,
-      stop_requested BOOLEAN NOT NULL DEFAULT false,
+      id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      status VARCHAR(32) NOT NULL DEFAULT 'queued',
+      created_by VARCHAR(320) NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      total_rows INT NOT NULL,
+      processed_count INT NOT NULL DEFAULT 0,
+      success_count INT NOT NULL DEFAULT 0,
+      error_count INT NOT NULL DEFAULT 0,
+      skipped_count INT NOT NULL DEFAULT 0,
+      stop_requested BOOLEAN NOT NULL DEFAULT FALSE,
       error_message TEXT
     )
   `;
   // One row per order to repunch. status/so_code/target_channel/error_message are written by
-  // the Python worker (its own psycopg connection) as each row is processed - Node only ever
+  // the Python worker (its own pymysql connection) as each row is processed - Node only ever
   // INSERTs these at job creation (see createOrderPunchJob below).
-  await pgSql`
+  await sql`
     CREATE TABLE IF NOT EXISTS order_punch_job_rows (
-      job_id BIGINT NOT NULL REFERENCES order_punch_jobs(id),
-      row_index INTEGER NOT NULL,
-      display_order_code TEXT NOT NULL,
+      job_id BIGINT UNSIGNED NOT NULL,
+      row_index INT NOT NULL,
+      display_order_code VARCHAR(64) NOT NULL,
       reason TEXT,
-      facility_code TEXT,
-      status TEXT NOT NULL DEFAULT 'pending',
-      so_code TEXT,
-      target_channel TEXT,
+      facility_code VARCHAR(64),
+      status VARCHAR(32) NOT NULL DEFAULT 'pending',
+      so_code VARCHAR(64),
+      target_channel VARCHAR(64),
       error_message TEXT,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      PRIMARY KEY (job_id, row_index)
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (job_id, row_index),
+      FOREIGN KEY (job_id) REFERENCES order_punch_jobs(id),
+      KEY order_punch_job_rows_pending_idx (job_id, status, row_index)
     )
-  `;
-  // Every worker invocation's first query is "pending rows for this job, in row_index order" -
-  // this partial index keeps that cheap regardless of job size (no cap - see the design spec).
-  await pgSql`
-    CREATE INDEX IF NOT EXISTS order_punch_job_rows_pending_idx
-    ON order_punch_job_rows (job_id, row_index) WHERE status = 'pending'
   `;
   // Admin-editable settings, seeded below with the Apps Script's own hardcoded constants so
   // behavior is identical on day one. The Python worker reads this table directly (its own
-  // psycopg connection) at the start of each invocation.
-  await pgSql`
+  // pymysql connection) at the start of each invocation.
+  await sql`
     CREATE TABLE IF NOT EXISTS order_punch_settings (
-      key TEXT PRIMARY KEY,
-      value JSONB NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_by TEXT NOT NULL
+      \`key\` VARCHAR(64) PRIMARY KEY,
+      value JSON NOT NULL,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_by VARCHAR(320) NOT NULL
     )
   `;
-  // Seed defaults once - ON CONFLICT DO NOTHING means an admin's later edit is never
-  // overwritten by a subsequent cold start re-running this bootstrap.
-  await pgSql`
-    INSERT INTO order_punch_settings (key, value, updated_by) VALUES
-      ('facility_codes', '["HYP_SRKOL","HYP_SRBGLR","mCaff_Mumbai2","mCaff_Gurgaon3","HYP_AHMD","HYP_SRLOK2","HYP_SRGWHT","Omnivio_Noida1","HYP_DLNAG"]'::jsonb, 'system'),
-      ('mcaffeine_channels', '["SHOPIFY","FIEN_SHOPIFY","HYPD","COMPENSATION","MCaf_Shopify.in","MCAFF_TEST"]'::jsonb, 'system'),
-      ('hyphen_channels', '["HYP_SHOPIFY","HYPD_HYPHEN","HYP_COMPENSATION","HYP_SHOPIFY_IN"]'::jsonb, 'system'),
-      ('target_mcaffeine', '"MCAFFEINE_D2C"'::jsonb, 'system'),
-      ('target_hyphen', '"HYPHEN_D2C"'::jsonb, 'system'),
-      ('cooldown_days', '3'::jsonb, 'system'),
-      ('max_suffix', '2'::jsonb, 'system')
-    ON CONFLICT (key) DO NOTHING
+  // Seed defaults once - ON DUPLICATE KEY UPDATE against itself (a no-op) means an admin's
+  // later edit is never overwritten by a subsequent cold start re-running this bootstrap.
+  await sql`
+    INSERT INTO order_punch_settings (\`key\`, value, updated_by) VALUES
+      ('facility_codes', '["HYP_SRKOL","HYP_SRBGLR","mCaff_Mumbai2","mCaff_Gurgaon3","HYP_AHMD","HYP_SRLOK2","HYP_SRGWHT","Omnivio_Noida1","HYP_DLNAG"]', 'system'),
+      ('mcaffeine_channels', '["SHOPIFY","FIEN_SHOPIFY","HYPD","COMPENSATION","MCaf_Shopify.in","MCAFF_TEST"]', 'system'),
+      ('hyphen_channels', '["HYP_SHOPIFY","HYPD_HYPHEN","HYP_COMPENSATION","HYP_SHOPIFY_IN"]', 'system'),
+      ('target_mcaffeine', '"MCAFFEINE_D2C"', 'system'),
+      ('target_hyphen', '"HYPHEN_D2C"', 'system'),
+      ('cooldown_days', '3', 'system'),
+      ('max_suffix', '2', 'system')
+    ON DUPLICATE KEY UPDATE \`key\` = \`key\`
   `;
-  } catch (e) {
-    // Postgres codes for "already exists" (duplicate_column/duplicate_table/duplicate_object)
-    // - a benign race, not a real failure: every statement above is its own ADD COLUMN IF NOT
-    // EXISTS/CREATE ... IF NOT EXISTS, but two concurrent cold Lambda starts can still both
-    // pass that check before either commits (a known Postgres race, most likely right after a
-    // deploy when a burst of containers all run this for the first time at once). The desired
-    // end state is already reached either way. Previously a hit here left pgSchemaReady false,
-    // so that same warm container re-ran this entire statement list - and could 500 again - on
-    // every subsequent request until it happened to win the race. Anything else (a real
-    // connectivity/permissions failure) still propagates - masking that would let callers query
-    // tables that were never actually created.
-    if (!['42701', '42P07', '42710'].includes(e.code)) throw e;
-    console.error('ensurePgSchema: benign already-exists race, continuing:', e.code, e.message);
-  }
-  pgSchemaReady = true;
+  schemaReady = true;
 }
+
+// Every RTO CRM operational table that used to live on a separate Postgres/Supabase database
+// (agent_presence, agent_presence_log, calling_business_hours, calling_agent_process,
+// calling_process_dispositions, ndr_lead_assignments, rto_csv_upload_jobs, order_punch_jobs/
+// order_punch_job_rows/order_punch_settings) has moved onto this same MySQL PEP_CLS schema -
+// see each table's own comment above in bootstrapSchema, and the migrate_*_to_mysql.py script
+// that moved its data. There is no longer a second database or a Postgres-specific bootstrap
+// in this file.
 
 const CARD_KEYS = ['mcaffeine', 'hyphen', 'productkyc', 'mom', 'calling', 'onboarding', 'deepdive', 'orgoverview', 'nps'];
 const CARD_LABELS = {
@@ -816,36 +570,6 @@ async function upsertAgentPresence(email, name, status) {
     } catch (e) {
       console.error('agent_presence_log insert failed (presence itself is recorded):', e.message);
     }
-  }
-
-  // ROLLBACK NET, pending verification (2026-08-21): nothing READS Postgres agent_presence
-  // any more. assign_ndr_leads.py - the last reader, reverted to Postgres on 2026-08-17
-  // because the live mcaff-cls-assign-ndr-leads Lambda was missing the MYSQL_* env vars this
-  // path needs - now reads MySQL again, same as assign_leads.py always did. Every reader in
-  // this file (getAllAgentPresence, getAgentPresenceLogSummary, getAgentPresenceRow) was
-  // already MySQL.
-  //
-  // This write is kept ONLY so that reverting assign_ndr_leads.py is a one-file rollback if
-  // that Lambda turns out to still lack the env vars: without it, Postgres would hold a
-  // snapshot frozen at cutover time - not "no data", but WRONG data - and a revert would
-  // silently assign against stale presence. Delete this block once NDR assignment is
-  // confirmed working on the MySQL read path in production (see
-  // docs/superpowers/plans/2026-08-17-agent-presence-to-mysql.md's cutover checklist step 5).
-  // ponytail: two redundant writes per status change, deleted after the verification above.
-  try {
-    await ensurePgSchema();
-    const { rows: prevPgRows } = await pgSql`SELECT status FROM agent_presence WHERE email = ${email}`;
-    const prevPgStatus = prevPgRows[0]?.status;
-    await pgSql`
-      INSERT INTO agent_presence (email, name, status, updated_at)
-      VALUES (${email}, ${name}, ${status}, ${now})
-      ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, status = EXCLUDED.status, updated_at = EXCLUDED.updated_at
-    `;
-    if (prevPgStatus !== status) {
-      await pgSql`INSERT INTO agent_presence_log (email, name, status, changed_at) VALUES (${email}, ${name}, ${status}, ${now})`;
-    }
-  } catch (e) {
-    console.error('TEMPORARY Postgres agent_presence dual-write failed (MySQL write above already succeeded):', e.message);
   }
 }
 
@@ -1206,8 +930,8 @@ async function claimRtoLead(orderId, email, awbCode, rtoReason, paymentMode) {
 // table cannot answer it yet.
 async function getRtoAgentQuota(email) {
   try {
-    await ensurePgSchema();
-    const { rows } = await pgSql`
+    await ensureSchema();
+    const { rows } = await sql`
       SELECT max_quota FROM calling_agent_process
       WHERE process_key = 'rto' AND LOWER(email) = LOWER(${email})
     `;
@@ -1238,8 +962,8 @@ async function getRtoAgentQuota(email) {
 // time, so that fallback does not apply here and replicating it would be dead code.
 async function getRtoAgentAvailability(email) {
   try {
-    await ensurePgSchema();
-    const { rows } = await pgSql`
+    await ensureSchema();
+    const { rows } = await sql`
       SELECT status FROM calling_agent_process
       WHERE process_key = 'rto' AND LOWER(email) = LOWER(${email})
     `;
@@ -1259,19 +983,18 @@ async function getRtoAgentAvailability(email) {
 // (mcaff-cls-csv-upload-worker) hasn't necessarily started yet by the time this returns, since
 // it's invoked fire-and-forget right after this insert (see api/rto/upload-start.js).
 async function createRtoCsvUploadJob({ createdBy, totalRows, prepaidCount, rowsPending }) {
-  await ensurePgSchema();
-  const { rows } = await pgSql`
+  await ensureSchema();
+  const { insertId } = await sql`
     INSERT INTO rto_csv_upload_jobs (created_by, total_rows, prepaid_count, rows_pending)
     VALUES (${createdBy}, ${totalRows}, ${prepaidCount}, ${JSON.stringify(rowsPending)})
-    RETURNING id
   `;
-  return rows[0].id;
+  return insertId;
 }
 
 // The full job row, or null if `id` doesn't exist - api/rto/upload-status.js's whole job.
 async function getRtoCsvUploadJob(id) {
-  await ensurePgSchema();
-  const { rows } = await pgSql`SELECT * FROM rto_csv_upload_jobs WHERE id = ${id}`;
+  await ensureSchema();
+  const { rows } = await sql`SELECT * FROM rto_csv_upload_jobs WHERE id = ${id}`;
   return rows[0] || null;
 }
 
@@ -1281,7 +1004,7 @@ async function getRtoCsvUploadJob(id) {
 // (api/rto/upload-start.js, for the non-prepaid immediate-append counts) writes to this table,
 // so both sides stay consistent about which columns exist.
 async function updateRtoCsvUploadJob(id, fields) {
-  await ensurePgSchema();
+  await ensureSchema();
   const allowed = new Set([
     'status', 'checked_count', 'already_refunded_count', 'already_punched_count',
     'appended_count', 'duplicate_in_sheet_count', 'duplicate_in_file_count',
@@ -1289,24 +1012,24 @@ async function updateRtoCsvUploadJob(id, fields) {
   ]);
   const keys = Object.keys(fields).filter((k) => allowed.has(k));
   if (!keys.length) return;
-  // pgSql is a tagged template (see its own definition earlier in this file), so the SET
+  // sql is a tagged template (see its own definition earlier in this file), so the SET
   // clause has to be built with real interpolation, not a loop of separate awaited queries -
   // one UPDATE per call, whatever fields are given.
   for (const key of keys) {
     const value = key === 'rows_pending' || key === 'errors'
       ? JSON.stringify(fields[key])
       : fields[key];
-    if (key === 'status') await pgSql`UPDATE rto_csv_upload_jobs SET status = ${value}, updated_at = now() WHERE id = ${id}`;
-    else if (key === 'checked_count') await pgSql`UPDATE rto_csv_upload_jobs SET checked_count = ${value}, updated_at = now() WHERE id = ${id}`;
-    else if (key === 'already_refunded_count') await pgSql`UPDATE rto_csv_upload_jobs SET already_refunded_count = ${value}, updated_at = now() WHERE id = ${id}`;
-    else if (key === 'already_punched_count') await pgSql`UPDATE rto_csv_upload_jobs SET already_punched_count = ${value}, updated_at = now() WHERE id = ${id}`;
-    else if (key === 'appended_count') await pgSql`UPDATE rto_csv_upload_jobs SET appended_count = ${value}, updated_at = now() WHERE id = ${id}`;
-    else if (key === 'duplicate_in_sheet_count') await pgSql`UPDATE rto_csv_upload_jobs SET duplicate_in_sheet_count = ${value}, updated_at = now() WHERE id = ${id}`;
-    else if (key === 'duplicate_in_file_count') await pgSql`UPDATE rto_csv_upload_jobs SET duplicate_in_file_count = ${value}, updated_at = now() WHERE id = ${id}`;
-    else if (key === 'missing_awb_count') await pgSql`UPDATE rto_csv_upload_jobs SET missing_awb_count = ${value}, updated_at = now() WHERE id = ${id}`;
-    else if (key === 'rows_pending') await pgSql`UPDATE rto_csv_upload_jobs SET rows_pending = ${value}::jsonb, updated_at = now() WHERE id = ${id}`;
-    else if (key === 'errors') await pgSql`UPDATE rto_csv_upload_jobs SET errors = ${value}::jsonb, updated_at = now() WHERE id = ${id}`;
-    else if (key === 'error_message') await pgSql`UPDATE rto_csv_upload_jobs SET error_message = ${value}, updated_at = now() WHERE id = ${id}`;
+    if (key === 'status') await sql`UPDATE rto_csv_upload_jobs SET status = ${value}, updated_at = NOW() WHERE id = ${id}`;
+    else if (key === 'checked_count') await sql`UPDATE rto_csv_upload_jobs SET checked_count = ${value}, updated_at = NOW() WHERE id = ${id}`;
+    else if (key === 'already_refunded_count') await sql`UPDATE rto_csv_upload_jobs SET already_refunded_count = ${value}, updated_at = NOW() WHERE id = ${id}`;
+    else if (key === 'already_punched_count') await sql`UPDATE rto_csv_upload_jobs SET already_punched_count = ${value}, updated_at = NOW() WHERE id = ${id}`;
+    else if (key === 'appended_count') await sql`UPDATE rto_csv_upload_jobs SET appended_count = ${value}, updated_at = NOW() WHERE id = ${id}`;
+    else if (key === 'duplicate_in_sheet_count') await sql`UPDATE rto_csv_upload_jobs SET duplicate_in_sheet_count = ${value}, updated_at = NOW() WHERE id = ${id}`;
+    else if (key === 'duplicate_in_file_count') await sql`UPDATE rto_csv_upload_jobs SET duplicate_in_file_count = ${value}, updated_at = NOW() WHERE id = ${id}`;
+    else if (key === 'missing_awb_count') await sql`UPDATE rto_csv_upload_jobs SET missing_awb_count = ${value}, updated_at = NOW() WHERE id = ${id}`;
+    else if (key === 'rows_pending') await sql`UPDATE rto_csv_upload_jobs SET rows_pending = ${value}, updated_at = NOW() WHERE id = ${id}`;
+    else if (key === 'errors') await sql`UPDATE rto_csv_upload_jobs SET errors = ${value}, updated_at = NOW() WHERE id = ${id}`;
+    else if (key === 'error_message') await sql`UPDATE rto_csv_upload_jobs SET error_message = ${value}, updated_at = NOW() WHERE id = ${id}`;
   }
 }
 
@@ -1316,30 +1039,39 @@ async function updateRtoCsvUploadJob(id, fields) {
 // facility_code}], already validated by the caller (see api/_lib/orderPunchRows.js) -
 // row_index is assigned here as submission order.
 async function createOrderPunchJob({ createdBy, rows }) {
-  await ensurePgSchema();
-  return withPgTransaction(async (client) => {
-    const { rows: jobRows } = await client.query(
-      'INSERT INTO order_punch_jobs (created_by, total_rows) VALUES ($1, $2) RETURNING id',
+  await ensureSchema();
+  const p = await getPool();
+  const conn = await p.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [jobResult] = await conn.execute(
+      'INSERT INTO order_punch_jobs (created_by, total_rows) VALUES (?, ?)',
       [createdBy, rows.length],
     );
-    const jobId = jobRows[0].id;
+    const jobId = jobResult.insertId;
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
-      await client.query(
+      await conn.execute(
         `INSERT INTO order_punch_job_rows (job_id, row_index, display_order_code, reason, facility_code)
-         VALUES ($1, $2, $3, $4, $5)`,
+         VALUES (?, ?, ?, ?, ?)`,
         [jobId, i, r.doc, r.reason || null, r.facility_code || null],
       );
     }
+    await conn.commit();
     return jobId;
-  });
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
 }
 
 // The full job row, including the Python worker's own progress counters, or null if `id`
 // doesn't exist.
 async function getOrderPunchJob(id) {
-  await ensurePgSchema();
-  const { rows } = await pgSql`SELECT * FROM order_punch_jobs WHERE id = ${id}`;
+  await ensureSchema();
+  const { rows } = await sql`SELECT * FROM order_punch_jobs WHERE id = ${id}`;
   return rows[0] || null;
 }
 
@@ -1349,23 +1081,23 @@ async function getOrderPunchJob(id) {
 // 2026-08-21 incident - see triggerLambda's own comment). Every other failure mode is the
 // worker's own to record, since only it knows how far it got.
 async function failOrderPunchJob(id, message) {
-  await ensurePgSchema();
-  await pgSql`
-    UPDATE order_punch_jobs SET status = 'failed', error_message = ${message}, updated_at = now()
+  await ensureSchema();
+  await sql`
+    UPDATE order_punch_jobs SET status = 'failed', error_message = ${message}, updated_at = NOW()
     WHERE id = ${id}
   `;
 }
 
 // Sets the flag the Python worker checks between rows/chunks - see api/order-punch/stop.js.
 async function setOrderPunchJobStopRequested(id) {
-  await ensurePgSchema();
-  await pgSql`UPDATE order_punch_jobs SET stop_requested = true, updated_at = now() WHERE id = ${id}`;
+  await ensureSchema();
+  await sql`UPDATE order_punch_jobs SET stop_requested = true, updated_at = NOW() WHERE id = ${id}`;
 }
 
 // Every row for a job, in submission order - api/order-punch/results.js's CSV source.
 async function getOrderPunchJobRowsForExport(id) {
-  await ensurePgSchema();
-  const { rows } = await pgSql`
+  await ensureSchema();
+  const { rows } = await sql`
     SELECT display_order_code, reason, facility_code, status, so_code, target_channel, error_message
     FROM order_punch_job_rows WHERE job_id = ${id} ORDER BY row_index
   `;
@@ -1388,19 +1120,19 @@ const ORDER_PUNCH_SETTINGS_DEFAULTS = {
 
 // { [key]: value } - api/order-punch/settings.js's GET, and the admin settings panel's source.
 async function getOrderPunchSettings() {
-  await ensurePgSchema();
-  const { rows } = await pgSql`SELECT key, value FROM order_punch_settings`;
+  await ensureSchema();
+  const { rows } = await sql`SELECT \`key\`, value FROM order_punch_settings`;
   const settings = { ...ORDER_PUNCH_SETTINGS_DEFAULTS };
   rows.forEach((r) => { settings[r.key] = r.value; });
   return settings;
 }
 
 async function upsertOrderPunchSetting(key, value, updatedBy) {
-  await ensurePgSchema();
+  await ensureSchema();
   const json = JSON.stringify(value);
-  await pgSql`
-    INSERT INTO order_punch_settings (key, value, updated_by) VALUES (${key}, ${json}::jsonb, ${updatedBy})
-    ON CONFLICT (key) DO UPDATE SET value = ${json}::jsonb, updated_at = now(), updated_by = ${updatedBy}
+  await sql`
+    INSERT INTO order_punch_settings (\`key\`, value, updated_by) VALUES (${key}, ${json}, ${updatedBy})
+    ON DUPLICATE KEY UPDATE value = ${json}, updated_at = NOW(), updated_by = ${updatedBy}
   `;
 }
 
@@ -1417,7 +1149,7 @@ async function getAgentPresenceRow(email) {
 
 // NDR's own equivalent of the assignment half of record_lead_assignments (scripts/
 // assign_leads.py) - a fresh live cycle for this awb. INSERT IGNORE targets the unique key
-// (ndr_lead_assignments_awb_key), so a re-claim of an already-live row (a race, or the UI's
+// (ndr_lead_assignments_live_awb_key), so a re-claim of an already-live row (a race, or the UI's
 // own auto-claim firing twice) is a safe no-op rather than an error - the sheet's own Q/R
 // write already decided who holds the lead; this just mirrors that into MySQL.
 async function claimNdrLead(awbNumber, email) {
@@ -2057,8 +1789,8 @@ function normalizeTimeOfDay(v) {
 // saved rows is simply absent - callers fall back to callingProcesses.json's defaults, so
 // hours behave as documented until an admin actually changes them.
 async function getCallingBusinessHours() {
-  await ensurePgSchema();
-  const { rows } = await pgSql`
+  await ensureSchema();
+  const { rows } = await sql`
     SELECT process_key, day, open_time, close_time FROM calling_business_hours
   `;
   const out = {};
@@ -2075,7 +1807,7 @@ async function getCallingBusinessHours() {
 // from `week` are left untouched rather than deleted, so a partial payload can't silently
 // close days the admin never looked at.
 async function setCallingBusinessHours(processKey, week, updatedBy) {
-  await ensurePgSchema();
+  await ensureSchema();
   if (!processKey) throw new Error('processKey is required');
   for (const day of Object.keys(week || {})) {
     if (!BUSINESS_HOUR_DAYS.includes(day)) {
@@ -2093,14 +1825,14 @@ async function setCallingBusinessHours(processKey, week, updatedBy) {
       // assign_leads.py treats the window as a single same-day range.
       throw new Error(`${day}: close time ${close} must be after open time ${open}`);
     }
-    await pgSql`
+    await sql`
       INSERT INTO calling_business_hours (process_key, day, open_time, close_time, updated_at, updated_by)
-      VALUES (${processKey}, ${day}, ${open}, ${close}, now(), ${updatedBy || null})
-      ON CONFLICT (process_key, day) DO UPDATE
-        SET open_time = EXCLUDED.open_time,
-            close_time = EXCLUDED.close_time,
-            updated_at = now(),
-            updated_by = EXCLUDED.updated_by
+      VALUES (${processKey}, ${day}, ${open}, ${close}, NOW(), ${updatedBy || null})
+      ON DUPLICATE KEY UPDATE
+        open_time = VALUES(open_time),
+        close_time = VALUES(close_time),
+        updated_at = VALUES(updated_at),
+        updated_by = VALUES(updated_by)
     `;
   }
   return getCallingBusinessHours();
@@ -2126,7 +1858,6 @@ const CALLING_STATUSES = ['Online', 'Busy', 'OnCall', 'Offline'];
 // which would quietly make them ineligible for any lead.
 async function getCallingProcessAgents(processKey) {
   await ensureSchema();
-  await ensurePgSchema();
   // Membership has to follow the same convention the rest of the app uses: holding the
   // 'calling' card with NO tab rows means unrestricted - every process - so those people
   // belong in every process's roster. An earlier version required an explicit tab row, which
@@ -2136,7 +1867,7 @@ async function getCallingProcessAgents(processKey) {
   // So: in if you hold the card and either have no calling tab rows at all, or have one for
   // THIS process. Global admins are always in, since they hold no tab rows by convention.
   // Neither query depends on the other's result - they're only combined in JS below (byEmail)
-  // - so fire both at once instead of waiting on MySQL before even starting the Postgres query.
+  // - both now against the same MySQL pool, so this Promise.all just avoids a round-trip wait.
   const [{ rows: members }, { rows: state }] = await Promise.all([
     sql`
       SELECT u.id, u.email, u.name, u.is_admin
@@ -2153,7 +1884,7 @@ async function getCallingProcessAgents(processKey) {
       GROUP BY u.id, u.email, u.name, u.is_admin
       ORDER BY u.is_admin DESC, u.name ASC
     `,
-    pgSql`
+    sql`
       SELECT email, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons,
              reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter,
              ndr_brand_filter, updated_at, updated_by
@@ -2187,7 +1918,7 @@ async function getCallingProcessAgents(processKey) {
 // Upserts one agent's status and/or quota for one process. Either field may be omitted, so an
 // agent flipping their own status can't accidentally reset a quota an admin set.
 async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons, reassignPaymentMode, attemptCountFilter, ndrReasonFilter, ndrPaymentModeFilter, ndrBrandFilter } = {}, updatedBy) {
-  await ensurePgSchema();
+  await ensureSchema();
   const key = String(email || '').trim().toLowerCase();
   if (!processKey || !key) throw new Error('processKey and email are required');
   if (status !== undefined && status !== null && !CALLING_STATUSES.includes(status)) {
@@ -2246,22 +1977,22 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
     throw new Error("ndrBrandFilter must be '', 'Hyphen', or 'mCaffeine'");
   }
   const ndrBrandFilterText = ndrBrandFilter === undefined ? null : String(ndrBrandFilter || '').trim();
-  await pgSql`
+  await sql`
     INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter, ndr_brand_filter, updated_at, updated_by)
-    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, ${reassignModeText || ''}, ${attemptFilterText || ''}, ${ndrReasonFilterText || ''}, ${ndrPaymentModeFilterText || ''}, ${ndrBrandFilterText || ''}, now(), ${updatedBy || null})
-    ON CONFLICT (email, process_key) DO UPDATE
-      SET status = COALESCE(${status || null}, calling_agent_process.status),
-          max_quota = COALESCE(${quota}, calling_agent_process.max_quota),
-          is_process_admin = COALESCE(${adminFlag}, calling_agent_process.is_process_admin),
-          prepaid_pct = COALESCE(${prepaidTarget}, calling_agent_process.prepaid_pct),
-          priority_rto_reasons = COALESCE(${reasonsText}, calling_agent_process.priority_rto_reasons),
-          reassign_payment_mode = COALESCE(${reassignModeText}, calling_agent_process.reassign_payment_mode),
-          attempt_count_filter = COALESCE(${attemptFilterText}, calling_agent_process.attempt_count_filter),
-          ndr_reason_filter = COALESCE(${ndrReasonFilterText}, calling_agent_process.ndr_reason_filter),
-          ndr_payment_mode_filter = COALESCE(${ndrPaymentModeFilterText}, calling_agent_process.ndr_payment_mode_filter),
-          ndr_brand_filter = COALESCE(${ndrBrandFilterText}, calling_agent_process.ndr_brand_filter),
-          updated_at = now(),
-          updated_by = ${updatedBy || null}
+    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, ${reassignModeText || ''}, ${attemptFilterText || ''}, ${ndrReasonFilterText || ''}, ${ndrPaymentModeFilterText || ''}, ${ndrBrandFilterText || ''}, NOW(), ${updatedBy || null})
+    ON DUPLICATE KEY UPDATE
+      status = COALESCE(${status || null}, status),
+      max_quota = COALESCE(${quota}, max_quota),
+      is_process_admin = COALESCE(${adminFlag}, is_process_admin),
+      prepaid_pct = COALESCE(${prepaidTarget}, prepaid_pct),
+      priority_rto_reasons = COALESCE(${reasonsText}, priority_rto_reasons),
+      reassign_payment_mode = COALESCE(${reassignModeText}, reassign_payment_mode),
+      attempt_count_filter = COALESCE(${attemptFilterText}, attempt_count_filter),
+      ndr_reason_filter = COALESCE(${ndrReasonFilterText}, ndr_reason_filter),
+      ndr_payment_mode_filter = COALESCE(${ndrPaymentModeFilterText}, ndr_payment_mode_filter),
+      ndr_brand_filter = COALESCE(${ndrBrandFilterText}, ndr_brand_filter),
+      updated_at = NOW(),
+      updated_by = ${updatedBy || null}
   `;
   return getCallingProcessAgents(processKey);
 }
@@ -2270,11 +2001,11 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
 // admin routes for their own process only - it is not company-wide admin (users.is_admin) and
 // must never be treated as such.
 async function isCallingProcessAdmin(email, processKey) {
-  await ensurePgSchema();
+  await ensureSchema();
   if (!email || !processKey) return false;
-  const { rows } = await pgSql`
+  const { rows } = await sql`
     SELECT 1 FROM calling_agent_process
-    WHERE lower(email) = ${String(email).toLowerCase()}
+    WHERE LOWER(email) = ${String(email).toLowerCase()}
       AND process_key = ${processKey}
       AND is_process_admin = true
     LIMIT 1
@@ -2284,11 +2015,11 @@ async function isCallingProcessAdmin(email, processKey) {
 
 // Every process this person administers, for narrowing what a process admin is shown.
 async function getAdministeredProcesses(email) {
-  await ensurePgSchema();
+  await ensureSchema();
   if (!email) return [];
-  const { rows } = await pgSql`
+  const { rows } = await sql`
     SELECT process_key FROM calling_agent_process
-    WHERE lower(email) = ${String(email).toLowerCase()} AND is_process_admin = true
+    WHERE LOWER(email) = ${String(email).toLowerCase()} AND is_process_admin = true
   `;
   return rows.map((r) => r.process_key);
 }
@@ -3171,10 +2902,10 @@ module.exports = {
   bulkDisposeDeliveryEscalationByAwb,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,
-  // Exported for api/_lib/db.retry.test.js, db.cache.test.js, db.refundExport.test.js and
+  // Exported for api/_lib/db.cache.test.js, db.refundExport.test.js and
   // db.deliveryEscalation.test.js only - nothing in the app calls these directly.
   deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS,
-  isPoolExhausted, withPgConnectRetry, toTransactionModePooler, cachedRead, invalidateCache, CACHE_TTL_MS,
+  cachedRead, invalidateCache, CACHE_TTL_MS,
   buildRefundExportWhere,
   resolveStatusForDeletion,
   getMomBoardsForUser, createMomBoard, getMomBoardRole, isMomBoardArchived, getMomBoardDetail,

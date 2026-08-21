@@ -81,7 +81,6 @@ import threading
 import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -509,93 +508,50 @@ def resolve_refund_statuses(order_ids, dirty):
     return {**results_over_budget, **results}
 
 
-@contextmanager
-def _pg_cursor(conn_str, conn):
-    """Cursor over `conn` if the caller already has one open (main()'s single connection
-    shared across the whole run - see its own comment for why), else a one-off connection
-    opened and closed just for this block, unchanged from how every function here used to
-    behave on its own. Kept as a context manager, not a plain helper returning a cursor, so
-    the "open my own, then close it" case still can't leak a connection on an exception.
-
-    Every caller must still `except` around its own `with _pg_cursor(...) as cur:` block and
-    roll back a SHARED conn there (see the shared-connection comment in main()) - a failed
-    statement leaves Postgres refusing every later command on that same connection
-    ("current transaction is aborted") until something rolls it back, and only the caller
-    knows whether the exception was one it's fail-opening past."""
-    if conn is not None:
-        with conn.cursor() as cur:
-            yield cur
-        return
-    with lib.get_pg_connection(conn_str) as owned_conn:
-        with owned_conn.cursor() as cur:
-            yield cur
-
-
-def fetch_gokwik_refund_cache(conn=None):
+def fetch_gokwik_refund_cache():
     """{order_id: (refunded, checked_at)} for every lead ever checked - one bulk read per run,
     same pattern as fetch_reassignment_attempts, so consulting it per-lead in the main loop is
-    a dict lookup, not a network call. Creates the table itself (idempotent) rather than
-    depending on api/_lib/db.js's ensurePgSchema, since this is Python-only and the whole
-    point is not to wait on anything else to take effect. Returns {} (never raises) if
-    POSTGRES_URL isn't configured or the query fails - every lead just gets live-checked this
-    run, same as before this cache existed.
-
-    conn: reuse main()'s already-open connection instead of opening a new one - see
-    _pg_cursor. Optional so this stays directly callable on its own (REPL, one-off script)."""
-    conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str and conn is None:
-        return {}
+    a dict lookup, not a network call. Creates the table itself (idempotent) via mysql_lib,
+    the same MySQL PEP_CLS schema every other table in this file now lives in - Python-only,
+    no dependency on api/_lib/db.js's ensureSchema. Returns {} (never raises) if MYSQL_*
+    credentials aren't configured or the query fails - every lead just gets live-checked this
+    run, same as before this cache existed."""
     try:
-        with _pg_cursor(conn_str, conn) as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS gokwik_refund_checks (
-                    order_id TEXT PRIMARY KEY,
-                    refunded BOOLEAN NOT NULL,
-                    checked_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                )
-                """
+        mysql_lib.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gokwik_refund_checks (
+                order_id VARCHAR(64) PRIMARY KEY,
+                refunded BOOLEAN NOT NULL,
+                checked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
-            cur.execute("SELECT order_id, refunded, checked_at FROM gokwik_refund_checks")
-            rows = cur.fetchall()
-        if conn is not None:
-            conn.commit()  # DDL/read on the shared connection - commit so it isn't left open
+            """
+        )
+        rows = mysql_lib.query("SELECT order_id, refunded, checked_at FROM gokwik_refund_checks")
     except Exception as e:
         print(f"  (gokwik_refund_checks fetch failed: {e} - every lead will be live-checked this run)")
-        if conn is not None:
-            conn.rollback()
         return {}
-    return {order_id: (refunded, checked_at) for order_id, refunded, checked_at in rows}
+    if rows is None:
+        return {}
+    return {order_id: (bool(refunded), checked_at) for order_id, refunded, checked_at in rows}
 
 
-def flush_gokwik_refund_cache(dirty, conn=None):
+def flush_gokwik_refund_cache(dirty):
     """One batched upsert for every result computed this run - not one write per lead, which
     would defeat the point of caching by adding back a per-lead network round-trip. Best
-    effort: a failure here just means those results get live-checked again next run.
-
-    conn: see fetch_gokwik_refund_cache - reuse main()'s connection when given."""
+    effort: a failure here just means those results get live-checked again next run."""
     if not dirty:
         return
-    conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str and conn is None:
-        return
     try:
-        with _pg_cursor(conn_str, conn) as cur:
-            cur.executemany(
-                """
-                INSERT INTO gokwik_refund_checks (order_id, refunded, checked_at)
-                VALUES (%s, %s, now())
-                ON CONFLICT (order_id) DO UPDATE SET
-                    refunded = EXCLUDED.refunded, checked_at = now()
-                """,
-                list(dirty.items()),
-            )
-        if conn is not None:
-            conn.commit()
+        mysql_lib.executemany(
+            """
+            INSERT INTO gokwik_refund_checks (order_id, refunded, checked_at)
+            VALUES (%s, %s, NOW())
+            ON DUPLICATE KEY UPDATE refunded = VALUES(refunded), checked_at = VALUES(checked_at)
+            """,
+            list(dirty.items()),
+        )
     except Exception as e:
         print(f"  (failed to save {len(dirty)} gokwik_refund_checks entries: {e})")
-        if conn is not None:
-            conn.rollback()
 
 
 def fetch_reassignment_attempts():
@@ -652,7 +608,7 @@ def fetch_current_assignment_times():
     return {order_id: (dt.replace(tzinfo=timezone.utc) if dt else dt) for order_id, dt in rows}
 
 
-def fetch_online_agents(process_key=None, conn=None):
+def fetch_online_agents(process_key=None):
     """(emails, quotas, prepaid_targets, specializations, reassign_payment_modes) of the agents
     eligible for this process's leads right now.
 
@@ -660,9 +616,9 @@ def fetch_online_agents(process_key=None, conn=None):
 
       * agent_presence (MySQL) - "are they actually at their desk?" One row per agent, refreshed
         by the CRM's heartbeat, so staleness is meaningful here.
-      * calling_agent_process - "are they available for THIS process, and for how many leads?"
-        One row per (agent, process). It has no heartbeat, so on its own it would keep somebody
-        Online forever after an admin set it once.
+      * calling_agent_process (MySQL) - "are they available for THIS process, and for how many
+        leads?" One row per (agent, process). It has no heartbeat, so on its own it would keep
+        somebody Online forever after an admin set it once.
 
     So eligibility is the INTERSECTION: marked Online for the process AND heartbeat-fresh.
     A process with no per-process rows at all falls back to the global agent_presence status,
@@ -683,16 +639,13 @@ def fetch_online_agents(process_key=None, conn=None):
     Returns ([], {}, {}, {}, {}) (not an error) if MYSQL_* credentials aren't configured, or if
     the agent_presence query itself errors (a dropped connection, a lock timeout) - agent_presence
     is the true fail-safe case, since the whole run has no idea who's online without it, and
-    every other MySQL/Postgres call in this file already fails open the same way (see
+    every other MySQL call in this file already fails open the same way (see
     lookup_platform_order_ids, check_already_punched, fetch_reassignment_attempts) rather than
     letting an unhandled exception here abort a run that would otherwise have assigned nothing
-    anyway. A missing POSTGRES_URL (with a process_key given) is a smaller-blast-radius gap:
-    agents are still read from agent_presence and DO get leads assigned, just without any
-    per-process quotas/specializations/hard filters applied - the pre-per-process
-    global-presence behaviour, not a no-assignment fail-safe.
-
-    conn: reuse main()'s already-open connection instead of opening a new one - see
-    _pg_cursor. Optional so this stays directly callable on its own (REPL, one-off script).
+    anyway. A calling_agent_process-specific failure is a smaller-blast-radius gap: agents are
+    still read from agent_presence and DO get leads assigned, just without any per-process
+    quotas/specializations/hard filters applied - the pre-per-process global-presence
+    behaviour, not a no-assignment fail-safe.
     """
     cred = mysql_lib.get_credential()
     if cred is None:
@@ -712,22 +665,14 @@ def fetch_online_agents(process_key=None, conn=None):
     if not process_key:
         return present, {}, {}, {}, {}
 
-    conn_str = os.environ.get("POSTGRES_URL")
-    if not conn_str and conn is None:
-        print("POSTGRES_URL not configured - using global presence only.")
-        return present, {}, {}, {}, {}
     try:
-        with _pg_cursor(conn_str, conn) as cur:
-            cur.execute(
-                "SELECT email, status, max_quota, prepaid_pct, priority_rto_reasons, "
-                "reassign_payment_mode FROM calling_agent_process WHERE process_key = %s",
-                (process_key,),
-            )
-            per_process = cur.fetchall()
+        per_process = mysql_lib.query(
+            "SELECT email, status, max_quota, prepaid_pct, priority_rto_reasons, "
+            "reassign_payment_mode FROM calling_agent_process WHERE process_key = %s",
+            (process_key,),
+        )
     except Exception as e:
         print(f"  (calling_agent_process unavailable: {e} - using global presence)")
-        if conn is not None:
-            conn.rollback()
         return present, {}, {}, {}, {}
 
     if not per_process:
@@ -882,32 +827,25 @@ def _default_week(process_key):
     return {d: ((bh.get("start"), bh.get("end")) if d in days else (None, None)) for d in DAY_KEYS}
 
 
-def _saved_week(process_key, conn=None):
+def _saved_week(process_key):
     """This process's week as saved by an admin: {day: (open, close)}. Days with no row are
     absent, and a row with either time NULL/'' means explicitly CLOSED that day. Returns {} if
-    the table isn't reachable/doesn't exist yet, so a fresh environment still runs on defaults
-    rather than refusing to assign anything.
-
-    conn: reuse main()'s already-open connection instead of opening a new one - see
-    _pg_cursor. Optional so this stays directly callable on its own (REPL, one-off script)."""
-    dsn = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
-    if not dsn and conn is None:
-        return {}
+    the table isn't reachable (MYSQL_* not configured, a dropped connection), so a fresh
+    environment still runs on defaults rather than refusing to assign anything."""
     try:
-        with _pg_cursor(dsn, conn) as cur:
-            cur.execute(
-                "SELECT day, open_time, close_time FROM calling_business_hours WHERE process_key = %s",
-                (process_key,),
-            )
-            return {d: (o or None, c or None) for d, o, c in cur.fetchall()}
+        rows = mysql_lib.query(
+            "SELECT day, open_time, close_time FROM calling_business_hours WHERE process_key = %s",
+            (process_key,),
+        )
     except Exception as e:
         print(f"  (could not read calling_business_hours: {e} - falling back to defaults)")
-        if conn is not None:
-            conn.rollback()
         return {}
+    if not rows:
+        return {}
+    return {d: (o or None, c or None) for d, o, c in rows}
 
 
-def within_business_hours(process_key=PROCESS_KEY, now_utc=None, conn=None):
+def within_business_hours(process_key=PROCESS_KEY, now_utc=None):
     """(allowed: bool, explanation: str) for a process's own business-hours window.
 
     Hours are per process AND per weekday, so Friday can close early and Sunday can be closed
@@ -923,7 +861,7 @@ def within_business_hours(process_key=PROCESS_KEY, now_utc=None, conn=None):
     they already hold outside these hours - a call that already happened has to be recordable.
     """
     week = _default_week(process_key)
-    week.update(_saved_week(process_key, conn=conn))
+    week.update(_saved_week(process_key))
 
     now = (now_utc or datetime.now(timezone.utc)) + timedelta(hours=5, minutes=30)
     day = DAY_KEYS[now.weekday()]
@@ -948,22 +886,11 @@ def within_business_hours(process_key=PROCESS_KEY, now_utc=None, conn=None):
 
 
 def main():
-    # One Postgres connection for the whole run, threaded through every call below instead of
-    # each fetch/record opening (and Supabase-pooler-contending for) its own - this used to be
-    # up to 7 separate connections per 5-minute cron run. Opened here rather than inside
-    # within_business_hours (the first thing that needs it) so there is exactly one place that
-    # owns closing it, on every exit path including the early `return`s below - see _main.
-    conn_str = os.environ.get("POSTGRES_URL") or os.environ.get("DATABASE_URL")
-    conn = lib.get_pg_connection(conn_str) if conn_str else None
-    try:
-        _main(conn)
-    finally:
-        if conn is not None:
-            conn.close()
+    _main()
 
 
-def _main(conn):
-    allowed, why = within_business_hours(conn=conn)
+def _main():
+    allowed, why = within_business_hours()
     print(f"Business hours ({PROCESS_KEY}): {why}")
     if not allowed:
         # Not an error: this job runs every 5 minutes around the clock, so most of its runs
@@ -971,8 +898,8 @@ def _main(conn):
         print("Outside business hours - not assigning any leads. Exiting.")
         return
 
-    print(f"Fetching agents available for '{PROCESS_KEY}' from Postgres...")
-    online_agents, agent_quotas, agent_prepaid_targets, agent_specializations, agent_reassign_payment_modes = fetch_online_agents(PROCESS_KEY, conn=conn)
+    print(f"Fetching agents available for '{PROCESS_KEY}' from MySQL...")
+    online_agents, agent_quotas, agent_prepaid_targets, agent_specializations, agent_reassign_payment_modes = fetch_online_agents(PROCESS_KEY)
     if not online_agents:
         print("No agents currently online - nothing to assign. Exiting.")
         return
@@ -994,8 +921,8 @@ def _main(conn):
     attempts_by_order = fetch_reassignment_attempts()
     current_assigned_at_by_order = fetch_current_assignment_times()
 
-    print("Fetching cached GoKwik refund-check results from Postgres...")
-    gokwik_cache = fetch_gokwik_refund_cache(conn=conn)
+    print("Fetching cached GoKwik refund-check results from MySQL...")
+    gokwik_cache = fetch_gokwik_refund_cache()
     gokwik_dirty = {}  # order_id -> refunded, for every result computed live this run
 
     # current_load: how many pending (undisposed) leads each eligible agent already holds -
@@ -1312,7 +1239,7 @@ def _main(conn):
         print(f"  Caching {len(gokwik_dirty)} GoKwik refund-check result(s) - {confirmed} refunded "
               f"(kept permanently), {len(gokwik_dirty) - confirmed} not (re-checked after "
               f"{GOKWIK_CACHE_TTL} + jitter)...")
-        flush_gokwik_refund_cache(gokwik_dirty, conn=conn)
+        flush_gokwik_refund_cache(gokwik_dirty)
 
     print("Done.")
 
