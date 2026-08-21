@@ -155,14 +155,27 @@ else
 fi
 ORDER_PUNCH_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${ORDER_PUNCH_ROLE_NAME}"
 
-# The Unicommerce credential is never created by this script (see the design spec's own note on
-# why) - it must already exist before this section can grant read access to it.
+# The Unicommerce credential is never created by this script (see the design spec's own note
+# on why) - it must already exist before this section can grant read access to it.
+#
+# Missing means THIS worker is skipped, not that the script stops. It used to exit 1 here,
+# which also skipped everything below - the API-role invoke grant in 5d, and the EventBridge
+# schedules for assign-leads/assign-ndr-leads that have nothing to do with Unicommerce. A run
+# on 2026-08-21 stopped exactly here, leaving csv-upload-worker created and every later
+# section unapplied, with the half-done state visible nowhere.
+ORDER_PUNCH_SKIPPED=""
 if ! aws secretsmanager describe-secret --secret-id mcaff-cls/unicommerce --region "$AWS_REGION" >/dev/null 2>&1; then
-  echo "ERROR: secret 'mcaff-cls/unicommerce' does not exist yet. Create it first, e.g.:" >&2
+  ORDER_PUNCH_SKIPPED=yes
+  echo "" >&2
+  echo "WARNING: secret 'mcaff-cls/unicommerce' does not exist, so $ORDER_PUNCH_ROLE_NAME's" >&2
+  echo "         policy and mcaff-cls-order-punch-worker are being SKIPPED. Order Punch will" >&2
+  echo "         not work until you create it and re-run this script:" >&2
   echo "  aws secretsmanager create-secret --name mcaff-cls/unicommerce --region $AWS_REGION \\" >&2
   echo "    --secret-string '{\"username\":\"...\",\"password\":\"...\"}'" >&2
-  exit 1
+  echo "" >&2
 fi
+
+if [ -z "$ORDER_PUNCH_SKIPPED" ]; then
 UC_SECRET_ARN="$(aws secretsmanager describe-secret --secret-id mcaff-cls/unicommerce --region "$AWS_REGION" --query ARN --output text)"
 
 FN_ORDER_PUNCH_WORKER=mcaff-cls-order-punch-worker
@@ -204,6 +217,7 @@ aws lambda put-function-concurrency --function-name "$FN_ORDER_PUNCH_WORKER" \
 # just avoids the wasted retry.
 aws lambda put-function-event-invoke-config --function-name "$FN_ORDER_PUNCH_WORKER" \
   --maximum-retry-attempts 0 --region "$AWS_REGION"
+fi  # end of the order-punch-worker section, skipped when its secret is absent
 
 # ---- 5d. Let the Node API Lambda actually invoke the worker Lambdas above ----
 # api/_lib/lambdaTrigger.js fires those invokes from mcaff-cls-api (Order Punch's /start, RTO
@@ -345,4 +359,9 @@ echo ""
 echo "Done. Two Lambdas are deployed and their EventBridge schedules are live:"
 echo "assign-leads and assign-ndr-leads, both every 5 minutes. (sync-lead-assignments is"
 echo "retired - its own Lambda/schedule sections above are commented out, not re-created here.)"
-echo "order-punch-worker is also deployed (on-demand invoke only, no schedule)."
+if [ -n "$ORDER_PUNCH_SKIPPED" ]; then
+  echo "order-punch-worker was SKIPPED - create the mcaff-cls/unicommerce secret (see the"
+  echo "warning above) and re-run this script."
+else
+  echo "order-punch-worker is also deployed (on-demand invoke only, no schedule)."
+fi
