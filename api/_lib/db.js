@@ -852,15 +852,20 @@ async function upsertAgentPresence(email, name, status) {
     }
   }
 
-  // TEMPORARY (2026-08-17): also write Postgres agent_presence, which assign_ndr_leads.py
-  // was reverted to read from - the live mcaff-cls-assign-ndr-leads Lambda is missing the
-  // MYSQL_* env vars this migration's MySQL read path needs (see
-  // docs/superpowers/plans/2026-08-17-agent-presence-to-mysql.md's cutover checklist step
-  // 5), and NDR assignment cannot wait for that AWS-side fix. Postgres's own write path
-  // stopped when this file cut over to MySQL, so without this it would serve a snapshot
-  // frozen at cutover time forever - not "no data", but WRONG data. Remove this block (and
-  // revert assign_ndr_leads.py back to MySQL) once the Lambda's env vars are fixed - RTO's
-  // own read path never used Postgres for this and needs no such revert.
+  // ROLLBACK NET, pending verification (2026-08-21): nothing READS Postgres agent_presence
+  // any more. assign_ndr_leads.py - the last reader, reverted to Postgres on 2026-08-17
+  // because the live mcaff-cls-assign-ndr-leads Lambda was missing the MYSQL_* env vars this
+  // path needs - now reads MySQL again, same as assign_leads.py always did. Every reader in
+  // this file (getAllAgentPresence, getAgentPresenceLogSummary, getAgentPresenceRow) was
+  // already MySQL.
+  //
+  // This write is kept ONLY so that reverting assign_ndr_leads.py is a one-file rollback if
+  // that Lambda turns out to still lack the env vars: without it, Postgres would hold a
+  // snapshot frozen at cutover time - not "no data", but WRONG data - and a revert would
+  // silently assign against stale presence. Delete this block once NDR assignment is
+  // confirmed working on the MySQL read path in production (see
+  // docs/superpowers/plans/2026-08-17-agent-presence-to-mysql.md's cutover checklist step 5).
+  // ponytail: two redundant writes per status change, deleted after the verification above.
   try {
     await ensurePgSchema();
     const { rows: prevPgRows } = await pgSql`SELECT status FROM agent_presence WHERE email = ${email}`;
