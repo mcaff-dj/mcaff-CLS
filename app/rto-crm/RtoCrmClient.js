@@ -2784,9 +2784,14 @@ import RtoUploadModal from './RtoUploadModal';
                 options={processOptions}
                 className="shrink-0"
               />
-              {/* Bulk-add new RTO leads from a CSV (see RtoUploadModal) - admin-only, same
-                  sessionIsAdmin gate the Team Roster table uses to restrict process-admin edits. */}
-              {sessionIsAdmin && (
+              {/* Bulk-add new RTO leads from a CSV (see RtoUploadModal) - admin or rto
+                  process-admin only. isProcessAdmin reflects whatever process the switcher is
+                  currently on (see useCallingSession.js), so it's paired with an explicit
+                  activeProcess check - this page's switcher can also show not-yet-implemented
+                  processes (detractor, productkyc), and this button is rto-specific. Server-side
+                  enforcement (api/rto/upload-start.js/upload-status.js) is the real gate; this is
+                  UX only. */}
+              {(sessionIsAdmin || (isProcessAdmin && activeProcess === 'rto')) && (
                 <button
                   type="button"
                   onClick={() => setShowUploadModal(true)}

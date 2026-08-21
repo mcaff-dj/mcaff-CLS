@@ -1,16 +1,18 @@
-// GET /api/rto/upload-status?jobId=123 - admin-only. Polled by the browser while a CSV
-// upload's background worker (mcaff-cls-csv-upload-worker) processes the prepaid-row
-// refund/punch checks - see api/rto/upload-start.js and
+// GET /api/rto/upload-status?jobId=123 - admin or rto process-admin only. Polled by the
+// browser while a CSV upload's background worker (mcaff-cls-csv-upload-worker) processes the
+// prepaid-row refund/punch checks - see api/rto/upload-start.js and
 // docs/superpowers/specs/2026-08-20-rto-csv-upload-design.md.
 const { getSession } = require('../_lib/session');
-const { getRtoCsvUploadJob } = require('../_lib/db');
+const { getRtoCsvUploadJob, isCallingProcessAdmin } = require('../_lib/db');
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'rto';
 
-function checkAccess(session) {
+async function checkAccess(session) {
   if (!session) return 'Not authenticated';
-  if (!session.isAdmin) return 'Only admins can view upload status.';
+  if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, TAB_KEY))) {
+    return 'Only admins or this process\'s admin can view upload status.';
+  }
   if (!(session.perms || []).includes(CARD_KEY)) return 'You do not have access to RTO-CRM.';
   const tabs = session.tabPerms && session.tabPerms[CARD_KEY];
   if (Array.isArray(tabs) && tabs.length && !tabs.includes(TAB_KEY)) return 'You do not have access to RTO-CRM.';
@@ -23,7 +25,7 @@ module.exports = async (req, res) => {
     return;
   }
   const session = await getSession(req);
-  const denied = checkAccess(session);
+  const denied = await checkAccess(session);
   if (denied) {
     res.status(session ? 403 : 401).json({ error: denied });
     return;

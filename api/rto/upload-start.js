@@ -1,4 +1,5 @@
-// POST /api/rto/upload-start - admin-only. The FAST half of the CSV upload feature: parses,
+// POST /api/rto/upload-start - admin or rto process-admin only. The FAST half of the CSV
+// upload feature: parses,
 // validates headers against the live sheet, dedupes by AWB, appends non-prepaid rows
 // immediately (nothing to check for them), and hands the prepaid rows off to a background
 // Lambda for the GoKwik/LMD checks - see docs/superpowers/specs/2026-08-20-rto-csv-upload-design.md
@@ -10,7 +11,7 @@ const { parseCSV } = require('../_lib/csv');
 const {
   matchHeaders, findRequiredMatch, buildRowPlan, headerToColumnLetter,
 } = require('../_lib/rtoCsvImport');
-const { createRtoCsvUploadJob, updateRtoCsvUploadJob } = require('../_lib/db');
+const { createRtoCsvUploadJob, updateRtoCsvUploadJob, isCallingProcessAdmin } = require('../_lib/db');
 const { triggerLambda } = require('../_lib/lambdaTrigger');
 
 const RTO_SHEET_ID = '1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI';
@@ -56,9 +57,11 @@ async function sheetsRequest(client, method, path, body) {
   return res.data;
 }
 
-function checkAccess(session) {
+async function checkAccess(session) {
   if (!session) return 'Not authenticated';
-  if (!session.isAdmin) return 'Only admins can upload leads.';
+  if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, TAB_KEY))) {
+    return 'Only admins or this process\'s admin can upload leads.';
+  }
   if (!(session.perms || []).includes(CARD_KEY)) return 'You do not have access to RTO-CRM.';
   const tabs = session.tabPerms && session.tabPerms[CARD_KEY];
   if (Array.isArray(tabs) && tabs.length && !tabs.includes(TAB_KEY)) return 'You do not have access to RTO-CRM.';
@@ -81,7 +84,7 @@ module.exports = async (req, res) => {
     return;
   }
   const session = await getSession(req);
-  const denied = checkAccess(session);
+  const denied = await checkAccess(session);
   if (denied) {
     res.status(session ? 403 : 401).json({ error: denied });
     return;
