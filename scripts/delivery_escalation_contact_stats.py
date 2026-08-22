@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Adds and maintains PEP_CLS.Delivery_escalation's repeat-contact columns:
 
-  contact_count     - how many tickets share this row's awb_code, i.e. how many times the
-                      customer came back about the same parcel
+  contact_count     - how many tickets share this row's (awb_code, brand), i.e. how many times
+                      the customer came back about the same parcel - scoped to brand because
+                      the same awb_code string can be reused by different brands' couriers
   first_added_date  - the EARLIEST added_date across those tickets, i.e. when they first
                       reached out (the row's own added_date is when THAT ticket was raised)
 
@@ -43,13 +44,13 @@ NEW_COLUMNS = [
 RECOMPUTE_SQL = f"""
 UPDATE {TABLE} d
 JOIN (
-    SELECT awb_code,
+    SELECT awb_code, brand,
            COUNT(*) AS n,
            MIN(added_date) AS first_added
     FROM {TABLE}
     WHERE awb_code IS NOT NULL AND awb_code <> ''
-    GROUP BY awb_code
-) agg ON agg.awb_code = d.awb_code
+    GROUP BY awb_code, brand
+) agg ON agg.awb_code = d.awb_code AND agg.brand = d.brand
 SET d.contact_count = agg.n,
     d.first_added_date = agg.first_added
 """
