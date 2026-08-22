@@ -70,7 +70,7 @@ function mapRow(row, readOnly) {
 // Every column after Brand, for one ticket row - shared between a group's parent row and its
 // collapsed timeline children (see groupedTicketRows) so the two can never drift out of sync
 // with each other or with the column headers above them.
-function ticketRowCells(t, tab, openAction) {
+function ticketRowCells(t, tab, openAction, isChild) {
   return (
     <>
       <td className="py-3 px-4 text-zinc-300 font-mono text-[12px]">{t.orderId}</td>
@@ -94,12 +94,19 @@ function ticketRowCells(t, tab, openAction) {
       {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400 max-w-xs truncate" title={t.remarks}>{t.remarks}</td>}
       {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.tatBucket}</td>}
       <td className="py-3 px-4 text-right">
-        <button
-          onClick={() => openAction(t)}
-          className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-semibold transition-colors"
-        >
-          {t.readOnly ? 'View' : t.outcome ? 'View / Edit' : 'Resolve'}
-        </button>
+        {/* Resolving is a parent-only action - a child is the same ticket-cascade target
+            saveAction already updates when its parent is disposed (see db.js's
+            disposeDeliveryEscalationTicketById), not something to action separately. */}
+        {isChild ? (
+          <span className="text-zinc-600 text-[12px]">—</span>
+        ) : (
+          <button
+            onClick={() => openAction(t)}
+            className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-semibold transition-all active:scale-95"
+          >
+            {t.readOnly ? 'View' : t.outcome ? 'View / Edit' : 'Resolve'}
+          </button>
+        )}
       </td>
     </>
   );
@@ -714,6 +721,16 @@ export default function DeliveryEscalationClient() {
       // (Escalated/RTO are still Fresh) - refetch rather than guessing which, since the server
       // owns that classification.
       showToast('Resolution saved');
+      // The server just cascaded this same outcome/remarks to every other still-open ticket for
+      // this AWB (see disposeDeliveryEscalationTicketById's own comment) - if that AWB's
+      // timeline is cached, it's now stale, so refetch it rather than leaving the expanded
+      // children showing the pre-resolve outcome until next expand.
+      if (detailTkt.awb && detailTkt.contactCount > 1) {
+        const key = `${detailTkt.brand}|${detailTkt.awb}`;
+        fetchAwbHistory(detailTkt.awb, detailTkt.brand)
+          .then(rows => setAwbHistory(prev => new Map(prev).set(key, { status: 'loaded', rows })))
+          .catch(() => setAwbHistory(prev => { const next = new Map(prev); next.delete(key); return next; }));
+      }
       setDetailTkt(null);
       refresh(true);
     } catch (e) {
@@ -744,6 +761,11 @@ export default function DeliveryEscalationClient() {
       const matchedCount = results.length - unmatched.length;
       setBulkResult({ total: results.length, matchedCount, unmatched });
       showToast(`Bulk upload: ${matchedCount}/${results.length} matched`);
+      // Could have touched any number of AWBs at once (each cascading, same as saveAction) -
+      // no point diffing which; drop the timeline cache and collapse any open groups so
+      // reopening one refetches fresh instead of showing a pre-upload outcome.
+      setAwbHistory(() => new Map());
+      setExpandedAwbGroups(() => new Set());
       refresh(true);
     } catch (err) {
       if (isSessionExpired(err)) setSessionExpired(true);
@@ -789,6 +811,13 @@ export default function DeliveryEscalationClient() {
     return order.map((key) => groups.get(key));
   }, [rows]);
 
+  const loadAwbHistoryInto = (key, awb, brand) => {
+    setAwbHistory(prev => new Map(prev).set(key, { status: 'loading', rows: [] }));
+    fetchAwbHistory(awb, brand)
+      .then(rows => setAwbHistory(prev => new Map(prev).set(key, { status: 'loaded', rows })))
+      .catch(e => setAwbHistory(prev => new Map(prev).set(key, { status: 'error', rows: [], error: e.message })));
+  };
+
   // Expands one repeat row's timeline, fetching its full cross-view history the first time
   // (awbHistory is a cache, not just a loading flag - re-expanding after a collapse reuses it).
   const toggleAwbGroup = (parent) => {
@@ -798,11 +827,12 @@ export default function DeliveryEscalationClient() {
     const key = `${parent.brand}|${parent.awb}`;
     const existing = awbHistory.get(key);
     if (existing && existing.status !== 'error') return;
-    setAwbHistory(prev => new Map(prev).set(key, { status: 'loading', rows: [] }));
-    fetchAwbHistory(parent.awb, parent.brand)
-      .then(rows => setAwbHistory(prev => new Map(prev).set(key, { status: 'loaded', rows })))
-      .catch(e => setAwbHistory(prev => new Map(prev).set(key, { status: 'error', rows: [], error: e.message })));
+    loadAwbHistoryInto(key, parent.awb, parent.brand);
   };
+
+  // A failed fetch retries without closing the row - clicking the error line itself, not the
+  // parent row (which would just collapse it back).
+  const retryAwbHistory = (parent) => loadAwbHistoryInto(`${parent.brand}|${parent.awb}`, parent.awb, parent.brand);
 
   // All counts come from SQL over the whole table (see fetchStats) rather than from the loaded
   // page - there's no client-side filtering or scoping left to do here.
@@ -1219,29 +1249,38 @@ export default function DeliveryEscalationClient() {
                               <Fragment key={parent.id}>
                                 <tr
                                   onClick={hasRepeat ? () => toggleAwbGroup(parent) : undefined}
-                                  className={`hover:bg-zinc-800/30 transition-colors ${hasRepeat ? 'cursor-pointer' : ''}`}
+                                  className={`hover:bg-zinc-800/30 active:bg-zinc-800/50 transition-colors ${hasRepeat ? 'cursor-pointer' : ''}`}
                                 >
                                   <td className="py-3 px-4 text-zinc-300">
                                     {hasRepeat && (
-                                      <span className="inline-block w-4 text-zinc-500">{isOpen ? '▾' : '▸'}</span>
+                                      <span
+                                        className={`inline-block w-4 text-zinc-500 transition-transform duration-200 ${isOpen ? 'rotate-90' : ''}`}
+                                      >▸</span>
                                     )}
                                     {parent.brand}
                                     {hasRepeat && (
-                                      <span className="ml-1.5 text-[11px] text-amber-400 font-semibold">×{parent.contactCount}</span>
+                                      <span className="ml-1.5 text-[11px] tracking-wide text-amber-400 font-semibold tabular-nums">×{parent.contactCount}</span>
                                     )}
                                   </td>
                                   {ticketRowCells(parent, tab, openAction)}
                                 </tr>
                                 {isOpen && history?.status === 'loading' && (
-                                  <tr><td colSpan={colSpan} className="py-2 px-4 pl-8 text-zinc-500 text-[12px]">Loading history…</td></tr>
+                                  <tr className="animate-fadeIn"><td colSpan={colSpan} className="py-2 px-4 pl-8 text-zinc-500 text-[12px] border-l-2 border-indigo-500/20">
+                                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-indigo-400 pulse-dot mr-2 align-middle"></span>
+                                    Loading history…
+                                  </td></tr>
                                 )}
                                 {isOpen && history?.status === 'error' && (
-                                  <tr><td colSpan={colSpan} className="py-2 px-4 pl-8 text-rose-400 text-[12px]">Couldn&apos;t load history: {history.error}</td></tr>
+                                  <tr className="animate-fadeIn cursor-pointer" onClick={() => retryAwbHistory(parent)}>
+                                    <td colSpan={colSpan} className="py-2 px-4 pl-8 text-rose-400 text-[12px] border-l-2 border-rose-500/30 hover:text-rose-300 transition-colors">
+                                      Couldn&apos;t load history: {history.error} - click to retry
+                                    </td>
+                                  </tr>
                                 )}
                                 {isOpen && childRows.map((t) => (
-                                  <tr key={t.id} className="bg-zinc-950/30 hover:bg-zinc-800/30 transition-colors">
-                                    <td className="py-3 px-4 pl-8 text-zinc-500 text-[12px] whitespace-nowrap">↳ {t.brand}</td>
-                                    {ticketRowCells(t, tab, openAction)}
+                                  <tr key={t.id} className="bg-zinc-950/30 hover:bg-zinc-800/30 transition-colors animate-fadeIn">
+                                    <td className="py-3 px-4 pl-8 text-zinc-500 text-[12px] whitespace-nowrap border-l-2 border-indigo-500/20">↳ {t.brand}</td>
+                                    {ticketRowCells(t, tab, openAction, true)}
                                   </tr>
                                 ))}
                               </Fragment>
