@@ -58,9 +58,17 @@
   .kpi .value{font-size:24px;font-weight:600;}
   .kpi .sub{font-size:12px;color:var(--text-muted);margin-top:4px;}
   .pivot-wrap{margin-bottom:32px;width:100%;max-width:100%;min-width:0;overflow:hidden;}
-  .pivot-title{font-size:16px;font-weight:600;text-align:center;margin-bottom:14px;position:relative;padding:0 84px;}
-  .export-btn{position:absolute;right:0;top:50%;transform:translateY(-50%);appearance:none;border:1px solid var(--border);background:var(--surface-card);color:var(--text-secondary);font-size:11px;font-weight:600;font-family:inherit;padding:5px 10px;border-radius:7px;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;}
+  .pivot-title{font-size:16px;font-weight:600;text-align:center;margin-bottom:14px;position:relative;padding:0 120px;}
+  .pivot-title-actions{position:absolute;right:0;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:6px;}
+  .export-btn{appearance:none;border:1px solid var(--border);background:var(--surface-card);color:var(--text-secondary);font-size:11px;font-weight:600;font-family:inherit;padding:5px 10px;border-radius:7px;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;}
   .export-btn:hover{color:var(--text-primary);border-color:var(--text-muted);}
+  .export-btn:disabled{opacity:.5;cursor:default;}
+  .tbl-refresh-btn{width:26px;height:26px;justify-content:center;padding:0;font-size:13px;line-height:1;}
+  .tbl-refresh-btn.spinning{animation:tblRefreshSpin 1s linear infinite;}
+  @keyframes tblRefreshSpin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}
+  .tbl-refresh-toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:40;background:var(--text-primary);color:var(--surface-card);font-size:12.5px;font-weight:500;padding:9px 16px;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.25);display:none;max-width:90vw;text-align:center;}
+  .tbl-refresh-toast.show{display:block;}
+  .tbl-refresh-toast.error{background:var(--s6);}
   .raw-export-row{display:flex;justify-content:flex-end;margin:0 0 12px;}
   .raw-export-btn{appearance:none;border:1px solid var(--border);background:var(--surface-card);color:var(--text-secondary);font-size:11.5px;font-weight:600;font-family:inherit;padding:6px 12px;border-radius:7px;text-decoration:none;white-space:nowrap;display:inline-flex;align-items:center;gap:5px;}
   .raw-export-btn:hover{color:var(--text-primary);border-color:var(--text-muted);}
@@ -668,26 +676,152 @@
     } catch (e) { /* logging must never block or break the export itself */ }
   };
 
-  function injectButtons(){
-    document.querySelectorAll('.pivot-wrap').forEach(function(wrap){
-      var title = wrap.querySelector('.pivot-title');
-      var table = wrap.querySelector('table');
-      if (!title || !table || title.querySelector('.export-btn')) return;
+  // Shared right-aligned button strip in a pivot-title, used by both this CSV export
+  // button and the refresh button injected by the script block below - a single
+  // absolutely-positioned wrapper rather than two independently-positioned buttons, so
+  // adding the second button doesn't require each injector to know about the other's
+  // width. Idempotent/order-independent: whichever injector runs first creates the
+  // wrapper and the .pivot-title-text span; the other just appends into what's there.
+  function titleActions(wrap){
+    var title = wrap.querySelector('.pivot-title');
+    var table = wrap.querySelector('table');
+    if (!title || !table) return null;
+    if (!title.querySelector('.pivot-title-text')) {
       var span = document.createElement('span');
       span.className = 'pivot-title-text';
       while (title.firstChild) { span.appendChild(title.firstChild); }
       title.appendChild(span);
+    }
+    var actions = title.querySelector('.pivot-title-actions');
+    if (!actions) {
+      actions = document.createElement('span');
+      actions.className = 'pivot-title-actions';
+      title.appendChild(actions);
+    }
+    return actions;
+  }
+  window.titleActions = titleActions;
+
+  function injectButtons(){
+    document.querySelectorAll('.pivot-wrap').forEach(function(wrap){
+      var actions = titleActions(wrap);
+      // :not(.tbl-refresh-btn) - the refresh button also carries .export-btn for shared
+      // styling, so a plain .export-btn lookup would find that and skip adding this one.
+      if (!actions || actions.querySelector('.export-btn:not(.tbl-refresh-btn)')) return;
       var btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'export-btn';
       btn.title = 'Export this table as CSV';
       btn.innerHTML = '&#8595; CSV';
       btn.onclick = function(){ window.exportPivotTable(btn); };
-      title.appendChild(btn);
+      actions.appendChild(btn);
     });
   }
   window.injectButtons = injectButtons;
   if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', injectButtons); } else { injectButtons(); }
+})();
+</script>
+<script>
+(function(){
+  // Per-table "refresh" button - same /api/refresh + /api/refresh-status endpoints
+  // HomeClient.js's "Refresh Data" button already uses, just triggerable from wherever
+  // in the report the visitor happens to be looking rather than only from Home. There is
+  // no per-table live recompute - the underlying pipeline (scripts/refresh.py via
+  // refresh.yml) always regenerates the WHOLE report, ~2-4 min - so every button on the
+  // page does the exact same thing and they're all disabled/re-enabled together. Added
+  // once here (like the CSV export button above) rather than per Python table-builder,
+  // since every table already shares the .pivot-wrap > .pivot-title structure.
+  var pollTimer = null, toast = null;
+
+  function ensureToast(){
+    if (toast) return toast;
+    toast = document.createElement('div');
+    toast.className = 'tbl-refresh-toast';
+    document.body.appendChild(toast);
+    return toast;
+  }
+  function showToast(text, isError){
+    var t = ensureToast();
+    t.textContent = text || '';
+    t.classList.toggle('error', !!isError);
+    t.classList.toggle('show', !!text);
+  }
+  function setAllBusy(busy){
+    document.querySelectorAll('.tbl-refresh-btn').forEach(function(b){
+      b.disabled = busy;
+      b.classList.toggle('spinning', busy);
+    });
+  }
+  function pollStatus(){
+    fetch('/api/refresh-status').then(function(r){ return r.json(); }).then(function(d){
+      if (d.status === 'completed') {
+        clearInterval(pollTimer); pollTimer = null;
+        setAllBusy(false);
+        if (d.conclusion === 'success') {
+          showToast('Refresh complete - reloading...');
+          setTimeout(function(){ location.reload(); }, 1200);
+        } else {
+          showToast('Refresh finished with issues - try again or check the workflow run.', true);
+          setTimeout(function(){ showToast(''); }, 6000);
+        }
+      } else if (d.status === 'in_progress' || d.status === 'queued') {
+        setAllBusy(true);
+        showToast('Refreshing report data... (' + d.status.replace('_', ' ') + ')');
+      }
+    }).catch(function(){ /* keep polling silently through a transient network blip */ });
+  }
+  function triggerTableRefresh(){
+    setAllBusy(true);
+    showToast('Starting refresh...');
+    fetch('/api/refresh', { method: 'POST' }).then(function(r){ return r.json(); }).then(function(d){
+      if (d.status === 'started' || d.status === 'already_running') {
+        showToast(d.message);
+        if (!pollTimer) pollTimer = setInterval(pollStatus, 10000);
+      } else {
+        setAllBusy(false);
+        showToast(d.message || 'Could not start refresh.', true);
+        setTimeout(function(){ showToast(''); }, 6000);
+      }
+    }).catch(function(){
+      setAllBusy(false);
+      showToast('Could not reach the server - try again.', true);
+      setTimeout(function(){ showToast(''); }, 6000);
+    });
+  }
+
+  function injectRefreshButtons(){
+    document.querySelectorAll('.pivot-wrap').forEach(function(wrap){
+      var actions = window.titleActions ? window.titleActions(wrap) : null;
+      if (!actions || actions.querySelector('.tbl-refresh-btn')) return;
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'export-btn tbl-refresh-btn';
+      btn.title = "Refresh this report's data (recomputes every table on the page, takes 2-4 min)";
+      btn.innerHTML = '&#8635;';
+      btn.onclick = triggerTableRefresh;
+      actions.insertBefore(btn, actions.firstChild);
+    });
+  }
+  if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', injectRefreshButtons); } else { injectRefreshButtons(); }
+
+  // Pick up an already-running refresh (started from Home, another table's button, or
+  // the daily cron) immediately on load, same reasoning as HomeClient.js's initRefreshStatus.
+  // The fetch itself can fire right away, but reacting to it (setAllBusy/showToast, both
+  // of which touch document.body) has to wait for DOMContentLoaded like injectRefreshButtons
+  // above - this script runs inside <head>, on a multi-MB report page, so this response can
+  // genuinely resolve before the parser even reaches <body>. Without this guard,
+  // ensureToast()'s document.body.appendChild throws on a null body, silently swallowed by
+  // the .catch() below - confirmed by hand (a real repro, not a hypothetical) while testing
+  // this feature: the toast/busy-state never appeared even though the fetch clearly ran.
+  fetch('/api/refresh-status').then(function(r){ return r.json(); }).then(function(d){
+    if (d.status !== 'in_progress' && d.status !== 'queued') return;
+    var applyAlreadyRunning = function(){
+      setAllBusy(true);
+      showToast('Refreshing report data... (' + d.status.replace('_', ' ') + ')');
+      if (!pollTimer) pollTimer = setInterval(pollStatus, 10000);
+    };
+    if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', applyAlreadyRunning); } else { applyAlreadyRunning(); }
+  }).catch(function(){});
 })();
 </script>
 <script>
