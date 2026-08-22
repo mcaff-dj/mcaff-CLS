@@ -1,89 +1,84 @@
-// Self-check for the RTO CSV upload's pure logic - header matching, dedup, row planning.
-// No network, no DB. Run with `node api/_lib/rtoCsvImport.test.js`.
+// Self-check for the RTO CSV upload's pure logic - fixed column mapping, dedup, row planning,
+// sheet-layout drift detection. No network, no DB. Run with `node api/_lib/rtoCsvImport.test.js`.
 const assert = require('assert');
 const {
-  normalizeHeader, matchHeaders, findRequiredMatch, normalizeAwb, buildRowPlan,
-  headerToColumnLetter,
+  normalizeHeader, normalizeAwb, columnLetterToIndex, indexToColumnLetter,
+  CSV_TO_COLUMN, checkSheetLayout, buildRowPlan,
 } = require('./rtoCsvImport');
 
-// 1. normalizeHeader - lowercase, strip non-alphanumeric.
-assert.strictEqual(normalizeHeader('  Payment Method'), 'paymentmethod');
-assert.strictEqual(normalizeHeader('AWB Code'), 'awbcode');
-assert.strictEqual(normalizeHeader('Address'), 'address');
-assert.strictEqual(normalizeHeader('Address City'), 'addresscity');
+// 1. columnLetterToIndex / indexToColumnLetter - bijective base-26, round-trips past Z.
+assert.strictEqual(columnLetterToIndex('A'), 0);
+assert.strictEqual(columnLetterToIndex('G'), 6);
+assert.strictEqual(columnLetterToIndex('P'), 15);
+assert.strictEqual(columnLetterToIndex('AB'), 27);
+assert.strictEqual(columnLetterToIndex('AC'), 28);
+assert.strictEqual(indexToColumnLetter(28), 'AC');
+assert.strictEqual(indexToColumnLetter(columnLetterToIndex('AC')), 'AC');
 
-// 2. matchHeaders - exact pass resolves the Address family correctly, without the fuzzy
-// pass ever getting a chance to misassign City/State/Pincode data into the bare Address
-// column (the collision risk identified during design: all four share "address" as a
-// normalized substring).
-{
-  const sheetHeaders = ['Address', 'Address City', 'Address State', 'Address Pincode'];
-  const csvHeaders = ['Address', 'Address City', 'Address State', 'Address Pincode'];
-  const result = matchHeaders(sheetHeaders, csvHeaders);
-  const byTarget = Object.fromEntries(result.map((r) => [r.sheetHeader, r.csvHeader]));
-  assert.strictEqual(byTarget['Address'], 'Address');
-  assert.strictEqual(byTarget['Address City'], 'Address City');
-  assert.strictEqual(byTarget['Address State'], 'Address State');
-  assert.strictEqual(byTarget['Address Pincode'], 'Address Pincode');
-}
-
-// 3. matchHeaders - fuzzy fallback for a genuine substring-containment case.
-{
-  const result = matchHeaders(['RTO Reason'], ['RTO Reason Code']);
-  assert.strictEqual(result[0].csvHeader, 'RTO Reason Code', 'RTO Reason Code must fuzzy-match RTO Reason (substring: rtoreason is contained in rtoreasoncode)');
-}
-
-// 4. matchHeaders - an extra CSV column matching nothing is simply absent from any target's
-// match (never errors, never claimed).
-{
-  const result = matchHeaders(['Order ID'], ['Order ID', 'Some Extra Column']);
-  assert.strictEqual(result.length, 1, 'only target headers appear in the result, not extras');
-  assert.strictEqual(result[0].csvHeader, 'Order ID');
-}
-
-// 5. matchHeaders - a target with no match at all (neither exact nor fuzzy) resolves to null,
-// not a throw.
-{
-  const result = matchHeaders(['Latest NDR Date'], ['Order ID', 'AWB Code']);
-  assert.strictEqual(result[0].csvHeader, null);
-}
-
-// 6. findRequiredMatch - locates the matched CSV header for a conceptual required column,
-// case/spacing-insensitively, and returns null cleanly when absent.
-{
-  const matchResult = matchHeaders(['RTO Reason', 'Order ID'], ['RTO Reason Code', 'Order ID']);
-  assert.strictEqual(findRequiredMatch(matchResult, 'rto reason'), 'RTO Reason Code');
-  assert.strictEqual(findRequiredMatch(matchResult, 'order id'), 'Order ID');
-  assert.strictEqual(findRequiredMatch(matchResult, 'payment method'), null,
-    'a conceptual name not even present among sheetTargetHeaders must return null, not throw');
-}
-
-// 7. normalizeAwb - trim + uppercase, the dedup key everywhere else in this module uses.
+// 2. normalizeAwb - trim + uppercase, the dedup key everywhere else in this module uses.
 assert.strictEqual(normalizeAwb('  awb123 '), 'AWB123');
 assert.strictEqual(normalizeAwb(''), '');
 
-// 8. buildRowPlan - the full orchestration: blank AWB rejected, in-file duplicate rejected
-// (first occurrence wins), already-in-sheet duplicate rejected, valid rows get both a `cells`
-// map (by TARGET header name) and top-level convenience fields.
+// 3. buildRowPlan - Order ID is split on the first "_", only the part before it is kept -
+// this is the real value shape seen in production ("HYP44089510_SP/G3/2627/984539").
 {
-  const sheetTargetHeaders = ['Order ID', 'AWB Code', 'Payment Method', 'RTO Reason'];
-  const csvHeaders = ['Order ID', 'AWB Code', 'Payment Method', 'RTO Reason'];
-  const matchResult = matchHeaders(sheetTargetHeaders, csvHeaders);
+  const csvRows = [{
+    'Order ID': 'HYP44089510_SP/G3/2627/984539',
+    'AWB Code': 'GS4593447281',
+    'Shiprocket Created At': '2026-08-22 10:09:47',
+    'RTO Initiated Date': '2026-08-22 16:14:32',
+    'Latest NDR Date': '',
+    'Latest NDR Reason': '',
+    'Customer Email': 'gunjan.r@rishihood.edu.in',
+    'Customer Name': 'Gunjan .',
+    'Customer Mobile': '8392939313',
+    'Address Line 1': 'Rishihood University Gate No 2',
+    'Address City': 'Sonipat',
+    'Address State': 'Haryana',
+    'Address Pincode': '131001',
+    'Payment Method': 'prepaid',
+    'Order Total': '778.00',
+    'Pickup Address Name': 'mCaff_Gurgaon3',
+    'Courier Company': 'Blitz Intercity NDD',
+  }];
+  const plan = buildRowPlan({ csvRows, existingAwbSet: new Set() });
+  assert.strictEqual(plan.validRows.length, 1);
+  const row = plan.validRows[0];
+  assert.strictEqual(row.orderId, 'HYP44089510', 'Order ID must be split on first "_", tail dropped');
+  assert.strictEqual(row.awbCode, 'GS4593447281');
+  assert.strictEqual(row.paymentMethod, 'prepaid');
+  assert.strictEqual(row.cellsByColumn.A, '2026-08-22 10:09:47', 'Shiprocket Created At -> A');
+  assert.strictEqual(row.cellsByColumn.B, '2026-08-22 16:14:32', 'RTO Initiated Date -> B');
+  assert.strictEqual(row.cellsByColumn.E, 'HYP44089510', 'split Order ID -> E');
+  assert.strictEqual(row.cellsByColumn.G, 'GS4593447281', 'AWB Code -> G');
+  assert.strictEqual(row.cellsByColumn.H, 'gunjan.r@rishihood.edu.in', 'Customer Email -> H');
+  assert.strictEqual(row.cellsByColumn.I, 'Gunjan .', 'Customer Name -> I');
+  assert.strictEqual(row.cellsByColumn.J, '8392939313', 'Customer Mobile -> J');
+  assert.strictEqual(row.cellsByColumn.K, 'Rishihood University Gate No 2', 'Address Line 1 -> K');
+  assert.strictEqual(row.cellsByColumn.AB, 'mCaff_Gurgaon3', 'Pickup Address Name -> AB');
+  assert.strictEqual(row.cellsByColumn.AC, 'Blitz Intercity NDD', 'Courier Company -> AC');
+}
+
+// 4. buildRowPlan - blank AWB rejected, in-file duplicate rejected (first occurrence wins),
+// already-in-sheet duplicate rejected.
+{
+  const base = (orderId, awb, payment) => ({
+    'Order ID': orderId, 'AWB Code': awb, 'Payment Method': payment,
+  });
   const csvRows = [
-    { 'Order ID': 'HYP1', 'AWB Code': 'awb1', 'Payment Method': 'Prepaid', 'RTO Reason': 'X' },
-    { 'Order ID': 'HYP2', 'AWB Code': '', 'Payment Method': 'COD', 'RTO Reason': 'Y' }, // blank AWB
-    { 'Order ID': 'HYP3', 'AWB Code': 'AWB1', 'Payment Method': 'COD', 'RTO Reason': 'Z' }, // dup of row 1 (case-insensitive)
-    { 'Order ID': 'HYP4', 'AWB Code': 'awb4', 'Payment Method': 'COD', 'RTO Reason': 'W' }, // already in sheet
-    { 'Order ID': 'HYP5', 'AWB Code': 'awb5', 'Payment Method': 'COD', 'RTO Reason': 'V' }, // valid
+    base('HYP1_X', 'awb1', 'prepaid'),
+    base('HYP2_X', '', 'cod'), // blank AWB
+    base('HYP3_X', 'AWB1', 'cod'), // dup of row 1 (case-insensitive)
+    base('HYP4_X', 'awb4', 'cod'), // already in sheet
+    base('HYP5_X', 'awb5', 'cod'), // valid
   ];
   const existingAwbSet = new Set(['AWB4']);
-  const plan = buildRowPlan({ matchResult, csvRows, existingAwbSet });
+  const plan = buildRowPlan({ csvRows, existingAwbSet });
 
   assert.strictEqual(plan.validRows.length, 2, 'only HYP1 and HYP5 survive');
   assert.deepStrictEqual(plan.validRows.map((r) => r.orderId), ['HYP1', 'HYP5']);
   assert.strictEqual(plan.validRows[0].awbCode, 'AWB1');
-  assert.strictEqual(plan.validRows[0].paymentMethod, 'Prepaid');
-  assert.strictEqual(plan.validRows[0].cells['RTO Reason'], 'X');
+  assert.strictEqual(plan.validRows[0].paymentMethod, 'prepaid');
 
   assert.strictEqual(plan.counts.missingAwb, 1);
   assert.strictEqual(plan.counts.duplicateInFile, 1);
@@ -93,18 +88,24 @@ assert.strictEqual(normalizeAwb(''), '');
     'line numbers are 1-based data rows (header is not counted), so the blank-AWB row (2nd data row) is line 3');
 }
 
-// 9. headerToColumnLetter - maps a header's text to its actual column letter from a full
-// header row, including past column Z (two-letter columns) and a header that starts/ends
-// with whitespace exactly like the real sheet's own header row does.
+// 5. checkSheetLayout - clean when the live header row matches EXPECTED_SHEET_HEADER exactly
+// at every relevant column (including real whitespace quirks), and reports every mismatch when
+// a column has drifted.
 {
-  const fullHeaderRow = [' CXB CV', 'RTO Initiated Date', 'Latest NDR Date', 'RTO Reason',
-    'Order ID', 'Unique', 'AWB Code', 'Customer Email', 'Customer Name', 'Customer Mobile',
-    'Address', 'Address City', 'Address State', 'Address Pincode', '  Payment Method', 'Order Total'];
-  assert.strictEqual(headerToColumnLetter(fullHeaderRow, 'AWB Code'), 'G');
-  assert.strictEqual(headerToColumnLetter(fullHeaderRow, 'Payment Method'), 'O',
-    'must match despite the real sheet header carrying leading whitespace');
-  assert.strictEqual(headerToColumnLetter(fullHeaderRow, 'Order Total'), 'P');
-  assert.strictEqual(headerToColumnLetter(fullHeaderRow, 'Nonexistent'), null);
+  const fullHeaderRow = [
+    ' CXB CV', 'RTO Initiated Date', 'Latest NDR Date', 'RTO Reason', 'Order ID', 'Unique',
+    'AWB Code', 'Customer Email', 'Customer Name', 'Customer Mobile', 'Address', 'Address City',
+    'Address State', 'Address Pincode', '  Payment Method', 'Order Total', 'Agent Name',
+    'Connected', 'Attempt', '', 'New product needed', 'New  order ID', 'Change in address',
+    'x', 'Calling Date', ' Remark', 'Key', 'Facility Name', 'Courier Company',
+  ];
+  assert.deepStrictEqual(checkSheetLayout(fullHeaderRow), [], 'matches production layout exactly');
+
+  const drifted = [...fullHeaderRow];
+  drifted[6] = 'Some New Column'; // column G, was 'AWB Code'
+  const issues = checkSheetLayout(drifted);
+  assert.strictEqual(issues.length, 1);
+  assert.ok(issues[0].includes('Column G'), 'must name the drifted column');
 }
 
 console.log('rtoCsvImport.test.js: all assertions passed');

@@ -143,15 +143,49 @@ def _normalize_header(h):
     return "".join(c for c in (h or "").lower() if c.isalnum())
 
 
-def _header_index(full_header_row, target_header):
-    """0-based column index of target_header in a live header row (exact normalized-equality
-    match, no substring fallback - matching headerToColumnLetter's own contract), or None if
-    not found."""
-    target_norm = _normalize_header(target_header)
-    for i, h in enumerate(full_header_row):
-        if _normalize_header(h) == target_norm:
-            return i
-    return None
+def _column_letter_to_index(letter):
+    """Bijective base-26: A=0, B=1, ..., Z=25, AA=26, AB=27, ... - Python mirror of
+    api/_lib/rtoCsvImport.js's columnLetterToIndex."""
+    n = 0
+    for c in letter:
+        n = n * 26 + (ord(c) - 64)
+    return n - 1
+
+
+# The live "Data" sheet's own header text at each column this feature writes to, as read on
+# 2026-08-22 - Python mirror of api/_lib/rtoCsvImport.js's EXPECTED_SHEET_HEADER. Not used to
+# LOCATE columns (COLUMN_FOR below fixes those absolutely) - only to detect drift before
+# writing: if a column gets inserted/reordered in the live sheet, refuse rather than silently
+# land data in the wrong place.
+EXPECTED_SHEET_HEADER = {
+    "A": "CXB CV", "B": "RTO Initiated Date", "C": "Latest NDR Date", "D": "RTO Reason",
+    "E": "Order ID", "F": "Unique", "G": "AWB Code", "H": "Customer Email",
+    "I": "Customer Name", "J": "Customer Mobile", "K": "Address", "L": "Address City",
+    "M": "Address State", "N": "Address Pincode", "O": "Payment Method", "P": "Order Total",
+    "AB": "Facility Name", "AC": "Courier Company",
+}
+
+# Fixed sheet column each row's cellsByColumn key maps to what column letter it already is
+# (api/_lib/rtoCsvImport.js's buildRowPlan already keys cellsByColumn by column letter, so
+# this worker just needs AWB Code's own letter, not a full mapping).
+AWB_COLUMN = "G"
+LAST_COLUMN_LETTER = "AC"
+ROW_WIDTH = _column_letter_to_index(LAST_COLUMN_LETTER) + 1
+# Q (Agent Name) blank, R (Connected) blank, then S/T/U carry the punched/refunded stamp -
+# same layout PUNCHED_STAMP/REFUNDED_STAMP above have always targeted.
+STAMP_START_INDEX = _column_letter_to_index("S")
+
+
+def _check_sheet_layout(full_header_row):
+    """Returns a list of human-readable mismatch descriptions (empty if the live header row
+    still matches EXPECTED_SHEET_HEADER at every column this feature writes to)."""
+    issues = []
+    for letter, expected in EXPECTED_SHEET_HEADER.items():
+        idx = _column_letter_to_index(letter)
+        actual = full_header_row[idx] if idx < len(full_header_row) else ""
+        if _normalize_header(actual) != _normalize_header(expected):
+            issues.append(f'Column {letter} is now "{actual}", expected "{expected}"')
+    return issues
 
 
 def _connect():
@@ -242,32 +276,22 @@ def process_job(job_id):
         # Step 4: final batched append.
         _update_job(conn, job_id, status="appending")
         stamped_rows = partition_and_stamp(rows, punched_ids, all_refund_results)
-        target_headers = [
-            "RTO Initiated Date", "Latest NDR Date", "RTO Reason", "Order ID", "Unique",
-            "AWB Code", "Customer Email", "Customer Name", "Customer Mobile", "Address",
-            "Address City", "Address State", "Address Pincode", "Payment Method", "Order Total",
-        ]
+
         # Fresh live read of the header row, right before writing - this worker runs
         # asynchronously and possibly minutes after api/rto/upload-start.js did its own header
-        # read, so that snapshot can no longer be trusted. Same contiguity guard that endpoint
-        # applies to its own (synchronous, immediately-followed-by-append) read: only columns
-        # that DID resolve are checked (a null is a legitimately-missing column, not
-        # misalignment), and each resolved column must sit exactly `i` positions after
-        # target_headers[0]'s own column.
+        # read, so that snapshot can no longer be trusted. Same drift check that endpoint
+        # applies to its own (synchronous, immediately-followed-by-append) read: the column
+        # each field goes to is fixed (see EXPECTED_SHEET_HEADER above), this only confirms the
+        # live sheet still agrees before writing to it.
         full_header_row = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!A1:AD1")
         full_header_row = full_header_row[0] if full_header_row else []
-        start_index = _header_index(full_header_row, target_headers[0])
-        resolved_indices = [_header_index(full_header_row, h) for h in target_headers]
-        misaligned = start_index is None or any(
-            idx is not None and idx != start_index + i for i, idx in enumerate(resolved_indices)
-        )
-        if misaligned:
+        layout_issues = _check_sheet_layout(full_header_row)
+        if layout_issues:
             _update_job(
                 conn, job_id, status="failed",
                 error_message=(
-                    f"Sheet column layout has changed unexpectedly - could not find '"
-                    f"{target_headers[0]}' or the target columns are no longer contiguous. "
-                    "Refusing to append to avoid writing misaligned data."
+                    "Sheet column layout has changed unexpectedly - refusing to append to avoid "
+                    "writing misaligned data: " + "; ".join(layout_issues)
                 ),
             )
             return
@@ -281,8 +305,7 @@ def process_job(job_id):
         # Re-checking against the sheet as it stands right this moment is what actually closes
         # both gaps - upload-start.js's own dedup only ever protected against what was in the
         # sheet at upload time.
-        awb_col_letter = lib.get_column_letter(resolved_indices[target_headers.index("AWB Code")])
-        awb_data = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!{awb_col_letter}2:{awb_col_letter}")
+        awb_data = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!{AWB_COLUMN}2:{AWB_COLUMN}")
         live_awb_set = {(r[0] if r else "").strip().upper() for r in awb_data}
         live_awb_set.discard("")
         before_dedup = len(stamped_rows)
@@ -294,31 +317,31 @@ def process_job(job_id):
 
         values_to_append = []
         for row in stamped_rows:
-            cells = row["cells"]
-            base_row = [cells.get(h, "") for h in target_headers]
+            base_row = [""] * ROW_WIDTH
+            for col, val in row["cellsByColumn"].items():
+                base_row[_column_letter_to_index(col)] = val
             if row["stamp"]:
-                # Columns Q (agent) through U line up right after P (Order Total, the last of
-                # target_headers) - Q blank (never assigned), then the S/T/U stamp. R (Connected)
-                # stays blank too, matching how assign_leads.py stamps its own already-
+                # S/T/U carry the punched/refunded stamp - Q (Agent Name) and R (Connected)
+                # stay blank, matching how assign_leads.py stamps its own already-
                 # refunded/already-punched rows (see its own value_ranges construction).
                 s, t, u = row["stamp"]
-                base_row += ["", "", s, t, u]
+                base_row[STAMP_START_INDEX:STAMP_START_INDEX + 3] = [s, t, u]
             values_to_append.append(base_row)
-        append_resp = lib.append_sheet_rows(SPREADSHEET_ID, f"'{SHEET_TAB}'!B2:U", values_to_append)
+        append_resp = lib.append_sheet_rows(SPREADSHEET_ID, f"'{SHEET_TAB}'!A2:{LAST_COLUMN_LETTER}", values_to_append)
 
         # Post-write sanity check - same reasoning as api/rto/upload-start.js's own AWB
-        # canary check on its immediate-append path: target_headers-positional writes assume
-        # this worker's deployed code matches what's on disk, which is exactly what didn't
-        # hold for the 2026-08-22 corrupted rows (replaying that upload through the current
-        # matching code produced correct output; the live append still landed shifted). AWB
-        # Code is the one column checked because row["awbCode"] comes straight from the
-        # dedup step above, independent of the cells map this is verifying.
+        # canary check on its immediate-append path: fixed-column writes assume this worker's
+        # deployed code matches what's on disk, which is exactly what didn't hold for the
+        # 2026-08-22 corrupted rows (replaying that upload through the current matching code
+        # produced correct output; the live append still landed shifted). AWB Code is the one
+        # column checked because row["awbCode"] comes straight from the dedup step above,
+        # independent of the cellsByColumn map this is verifying.
         # ponytail: single-column canary, not a full-row round-trip - upgrade if insufficient.
         range_match = re.search(r"!\w+(\d+):\w+(\d+)$", (append_resp.get("updates") or {}).get("updatedRange", ""))
         mapping_failed = False
         if range_match and stamped_rows:
             first_row, last_row = range_match.group(1), range_match.group(2)
-            awb_check = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!{awb_col_letter}{first_row}:{awb_col_letter}{last_row}")
+            awb_check = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!{AWB_COLUMN}{first_row}:{AWB_COLUMN}{last_row}")
             actual_awbs = [(r[0] if r else "").strip().upper() for r in awb_check]
             mapping_failed = any(
                 i >= len(actual_awbs) or actual_awbs[i] != stamped_rows[i]["awbCode"]

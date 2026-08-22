@@ -44,6 +44,35 @@ def test_partition_and_stamp_punched_wins_over_refunded():
     assert result[0]["stamp"] == worker.PUNCHED_STAMP
 
 
+def test_column_letter_to_index_matches_js_mirror():
+    assert worker._column_letter_to_index("A") == 0
+    assert worker._column_letter_to_index("G") == 6
+    assert worker._column_letter_to_index("P") == 15
+    assert worker._column_letter_to_index("AB") == 27
+    assert worker._column_letter_to_index("AC") == 28
+
+
+def test_check_sheet_layout_clean_on_production_header_row():
+    full_header_row = [
+        " CXB CV", "RTO Initiated Date", "Latest NDR Date", "RTO Reason", "Order ID", "Unique",
+        "AWB Code", "Customer Email", "Customer Name", "Customer Mobile", "Address",
+        "Address City", "Address State", "Address Pincode", "  Payment Method", "Order Total",
+        "Agent Name", "Connected", "Attempt", "", "New product needed", "New  order ID",
+        "Change in address", "x", "Calling Date", " Remark", "Key", "Facility Name",
+        "Courier Company",
+    ]
+    assert worker._check_sheet_layout(full_header_row) == []
+
+
+def test_check_sheet_layout_reports_drifted_column():
+    full_header_row = [
+        " CXB CV", "RTO Initiated Date", "Latest NDR Date", "RTO Reason", "Order ID", "Unique",
+        "Some New Column",  # column G, was 'AWB Code'
+    ]
+    issues = worker._check_sheet_layout(full_header_row)
+    assert any("Column G" in issue for issue in issues)
+
+
 if __name__ == "__main__":
     test_partition_and_stamp_marks_punched_rows()
     print("  ok  test_partition_and_stamp_marks_punched_rows")
@@ -51,4 +80,10 @@ if __name__ == "__main__":
     print("  ok  test_partition_and_stamp_marks_refunded_rows_prepaid_only")
     test_partition_and_stamp_punched_wins_over_refunded()
     print("  ok  test_partition_and_stamp_punched_wins_over_refunded")
-    print("3 passed")
+    test_column_letter_to_index_matches_js_mirror()
+    print("  ok  test_column_letter_to_index_matches_js_mirror")
+    test_check_sheet_layout_clean_on_production_header_row()
+    print("  ok  test_check_sheet_layout_clean_on_production_header_row")
+    test_check_sheet_layout_reports_drifted_column()
+    print("  ok  test_check_sheet_layout_reports_drifted_column")
+    print("6 passed")

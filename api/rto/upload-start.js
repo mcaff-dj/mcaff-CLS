@@ -1,15 +1,16 @@
 // POST /api/rto/upload-start - admin or rto process-admin only. The FAST half of the CSV
-// upload feature: parses,
-// validates headers against the live sheet, dedupes by AWB, appends non-prepaid rows
-// immediately (nothing to check for them), and hands the prepaid rows off to a background
-// Lambda for the GoKwik/LMD checks - see docs/superpowers/specs/2026-08-20-rto-csv-upload-design.md
-// for why those checks cannot run here (mcaff_prod MySQL is reachable only from Python) or
-// synchronously within one browser request (API Gateway's ~29s ceiling).
+// upload feature: parses, validates the sheet layout + CSV headers against a fixed column
+// mapping, dedupes by AWB, appends non-prepaid rows immediately (nothing to check for them),
+// and hands the prepaid rows off to a background Lambda for the GoKwik/LMD checks - see
+// docs/superpowers/specs/2026-08-20-rto-csv-upload-design.md for why those checks cannot run
+// here (mcaff_prod MySQL is reachable only from Python) or synchronously within one browser
+// request (API Gateway's ~29s ceiling).
 const { JWT } = require('google-auth-library');
 const { getSession } = require('../_lib/session');
 const { parseCSV } = require('../_lib/csv');
 const {
-  matchHeaders, findRequiredMatch, buildRowPlan, headerToColumnLetter,
+  buildRowPlan, checkSheetLayout, columnLetterToIndex, normalizeAwb,
+  CSV_TO_COLUMN, LAST_COLUMN_LETTER, REQUIRED_CSV_HEADERS,
 } = require('../_lib/rtoCsvImport');
 const { createRtoCsvUploadJob, updateRtoCsvUploadJob, isCallingProcessAdmin } = require('../_lib/db');
 const { triggerLambda } = require('../_lib/lambdaTrigger');
@@ -20,22 +21,8 @@ const CARD_KEY = 'calling';
 const TAB_KEY = 'rto';
 const MAX_ROWS = 5000;
 const CSV_UPLOAD_WORKER_LAMBDA = 'mcaff-cls-csv-upload-worker';
-
-// Same 15 target columns the user specified, matched against the LIVE sheet by name (see
-// api/_lib/rtoCsvImport.js) - this list exists only to know which of the sheet's own header
-// row entries are the ones this feature cares about mapping; it is never used as a source of
-// truth for what the sheet's headers actually say right now.
-const TARGET_HEADERS = [
-  'RTO Initiated Date', 'Latest NDR Date', 'RTO Reason', 'Order ID', 'Unique', 'AWB Code',
-  'Customer Email', 'Customer Name', 'Customer Mobile', 'Address', 'Address City',
-  'Address State', 'Address Pincode', 'Payment Method', 'Order Total',
-];
-
-// Inverse of headerToColumnLetter's bijective base-26 arithmetic (A=0, B=1, ..., Z=25, AA=26, ...).
-// Local to this file on purpose - only needed here, to detect column drift before the append below.
-function columnLetterToIndex(letter) {
-  return letter.split('').reduce((acc, c) => acc * 26 + (c.charCodeAt(0) - 64), 0) - 1;
-}
+const AWB_COLUMN = CSV_TO_COLUMN['AWB Code']; // 'G' - fixed, not derived from any header search
+const ROW_WIDTH = columnLetterToIndex(LAST_COLUMN_LETTER) + 1;
 
 let _client = null;
 function getClient() {
@@ -71,11 +58,22 @@ async function checkAccess(session) {
 // COD/blank-payment-method is never GoKwik-checked (nothing was paid upfront to refund) -
 // same is_prepaid rule as scripts/lead_priority.py, kept in sync manually since Python cannot
 // execute JS (see leadAssignmentRules.json's own _readme for this codebase's existing
-// precedent for that constraint). Only used here to split rows for the job's prepaid_count and
-// to decide which rows even need queuing for the worker's refund-check phase.
+// precedent for that constraint).
 function isPrepaid(paymentRaw) {
   const p = (paymentRaw || '').toUpperCase();
   return !(p.includes('COD') || p.includes('CASH'));
+}
+
+// Places each row's { columnLetter: value } map into a fixed-width array (index 0 = column A,
+// ... up to LAST_COLUMN_LETTER), ready for a single contiguous values:append covering the
+// whole width. Columns with no entry (F/Unique, Q-AA/agent-worked fields) stay '' - a single
+// wide append is used rather than two narrower ones (e.g. A:P then AB:AC) because Sheets'
+// append picks its target row independently per call based on that range's own last-used row,
+// and there is no guarantee A:P and AB:AC would land on the same row.
+function rowToFullArray(cellsByColumn) {
+  const arr = new Array(ROW_WIDTH).fill('');
+  Object.entries(cellsByColumn).forEach(([col, val]) => { arr[columnLetterToIndex(col)] = val; });
+  return arr;
 }
 
 module.exports = async (req, res) => {
@@ -112,37 +110,42 @@ module.exports = async (req, res) => {
     return;
   }
 
+  const csvHeaders = Object.keys(csvRows[0]);
+  const missingCsvHeaders = REQUIRED_CSV_HEADERS.filter((h) => !csvHeaders.includes(h));
+  if (missingCsvHeaders.length) {
+    res.status(400).json({
+      error: `This CSV is missing required column(s): ${missingCsvHeaders.join(', ')}.`,
+      csvHeaders,
+    });
+    return;
+  }
+
   try {
     const client = getClient();
 
-    // Live sheet headers - the source of truth for matching, never a hardcoded list beyond
-    // TARGET_HEADERS' own names above (which only say WHICH 15 concepts this feature maps,
-    // not what the sheet currently calls them).
+    // Sheet-layout drift check - the column mapping this feature writes to is fixed
+    // (CSV_TO_COLUMN), not derived from the live header row, so this exists purely to catch
+    // someone inserting/reordering a column in the live sheet before this silently writes
+    // into the wrong place.
     const headerData = await sheetsRequest(client, 'GET', `/values/${encodeURIComponent(`'${SHEET_TAB}'!A1:AD1`)}`);
     const fullHeaderRow = (headerData.values || [[]])[0] || [];
-    const csvHeaders = Object.keys(csvRows[0]);
-    const matchResult = matchHeaders(TARGET_HEADERS, csvHeaders);
-
-    const missingRequired = [];
-    if (!findRequiredMatch(matchResult, 'awb code')) missingRequired.push('AWB Code');
-    if (!findRequiredMatch(matchResult, 'order id')) missingRequired.push('Order ID');
-    if (missingRequired.length) {
-      res.status(400).json({
-        error: `Could not find a column matching ${missingRequired.join(' or ')} in the CSV headers.`,
-        csvHeaders,
+    const layoutIssues = checkSheetLayout(fullHeaderRow);
+    if (layoutIssues.length) {
+      res.status(500).json({
+        error: 'Sheet column layout has changed unexpectedly - refusing to append to avoid writing misaligned data. Contact an admin.',
+        details: layoutIssues,
       });
       return;
     }
 
     // Existing AWBs across the WHOLE sheet, not just unassigned rows - see the spec's dedup
     // section for why a duplicate of an already-disposed lead still counts.
-    const awbColLetter = headerToColumnLetter(fullHeaderRow, 'AWB Code');
-    const awbData = await sheetsRequest(client, 'GET', `/values/${encodeURIComponent(`'${SHEET_TAB}'!${awbColLetter}2:${awbColLetter}`)}`);
+    const awbData = await sheetsRequest(client, 'GET', `/values/${encodeURIComponent(`'${SHEET_TAB}'!${AWB_COLUMN}2:${AWB_COLUMN}`)}`);
     const existingAwbSet = new Set(
       (awbData.values || []).map((r) => ((r && r[0]) || '').toString().trim().toUpperCase()).filter(Boolean),
     );
 
-    const plan = buildRowPlan({ matchResult, csvRows, existingAwbSet });
+    const plan = buildRowPlan({ csvRows, existingAwbSet });
 
     const prepaidRows = plan.validRows.filter((r) => isPrepaid(r.paymentMethod));
     const nonPrepaidRows = plan.validRows.filter((r) => !isPrepaid(r.paymentMethod));
@@ -155,54 +158,30 @@ module.exports = async (req, res) => {
     let appendedNow = 0;
     let mappingWarning = null;
     if (nonPrepaidRows.length) {
-      const startCol = headerToColumnLetter(fullHeaderRow, TARGET_HEADERS[0]);
-
-      // Guard against silent column misalignment: the append below writes 15 values
-      // positionally starting at startCol, assuming the live sheet's columns run in
-      // TARGET_HEADERS order with no gaps. If someone manually inserts/reorders a column in
-      // the live sheet, that assumption breaks silently and every value lands in the wrong
-      // cell. Only columns that DID resolve are checked (a null is a legitimately-missing
-      // column, not misalignment) - each resolved column must sit exactly `i` positions after
-      // startCol, matching its index in TARGET_HEADERS.
-      const startColIndex = columnLetterToIndex(startCol);
-      const resolvedCols = TARGET_HEADERS.map((h) => headerToColumnLetter(fullHeaderRow, h));
-      const misaligned = resolvedCols.some(
-        (col, i) => col !== null && columnLetterToIndex(col) !== startColIndex + i,
-      );
-      if (misaligned) {
-        res.status(500).json({ error: 'Sheet column layout has changed unexpectedly - the target columns are no longer contiguous. Refusing to append to avoid writing misaligned data. Contact an admin.' });
-        return;
-      }
-
-      const rowsToAppend = nonPrepaidRows.map((r) => TARGET_HEADERS.map((h) => r.cells[h] || ''));
+      const rowsToAppend = nonPrepaidRows.map((r) => rowToFullArray(r.cellsByColumn));
       const appendResp = await sheetsRequest(
         client, 'POST',
-        `/values/${encodeURIComponent(`'${SHEET_TAB}'!${startCol}2`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+        `/values/${encodeURIComponent(`'${SHEET_TAB}'!A2`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
         { values: rowsToAppend },
       );
       appendedNow = nonPrepaidRows.length;
 
-      // Post-write sanity check: the misalignment guard above only catches a HEADER-row
-      // drift, not a mismatch between what this function computed and what actually landed
-      // in the sheet (e.g. the deployed copy of this file/rtoCsvImport.js being out of sync
-      // with what's on disk right now - confirmed as the cause of the 2026-08-22 corrupted
-      // rows, where replaying that upload's CSV through this exact matching code produced
-      // the correct row, yet the live append still landed shifted). AWB Code is checked
-      // because it's independent of matchHeaders - buildRowPlan derives r.awbCode straight
-      // from the CSV's own AWB column, not from the cells map this endpoint is verifying.
-      // ponytail: single-column canary, not a full 15-column round-trip - upgrade if this
-      // ever proves insufficient.
+      // Post-write sanity check: the layout check above only catches a HEADER-row drift, not
+      // a mismatch between what this function computed and what actually landed in the sheet
+      // (e.g. the deployed copy of this file being out of sync with what's on disk - confirmed
+      // as the cause of the 2026-08-22 corrupted rows). AWB Code is checked because it's
+      // independent of cellsByColumn - buildRowPlan derives r.awbCode straight from the CSV's
+      // own AWB column, not from the map this endpoint is verifying.
+      // ponytail: single-column canary, not a full-row round-trip - upgrade if insufficient.
       const updatedRange = (appendResp && appendResp.updates && appendResp.updates.updatedRange) || '';
       const rangeMatch = updatedRange.match(/!\w+(\d+):\w+(\d+)$/);
       if (rangeMatch) {
         const [, firstRow, lastRow] = rangeMatch;
         const verifyData = await sheetsRequest(
           client, 'GET',
-          `/values/${encodeURIComponent(`'${SHEET_TAB}'!${awbColLetter}${firstRow}:${awbColLetter}${lastRow}`)}`,
+          `/values/${encodeURIComponent(`'${SHEET_TAB}'!${AWB_COLUMN}${firstRow}:${AWB_COLUMN}${lastRow}`)}`,
         );
-        const actualAwbs = (verifyData.values || []).map(
-          (r) => ((r && r[0]) || '').toString().trim().toUpperCase(),
-        );
+        const actualAwbs = (verifyData.values || []).map((r) => normalizeAwb((r && r[0]) || ''));
         const mismatch = nonPrepaidRows.some((r, i) => actualAwbs[i] !== r.awbCode);
         if (mismatch) {
           console.error(

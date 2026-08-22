@@ -1,66 +1,97 @@
-// Pure logic for the RTO CSV upload feature: header matching against the LIVE sheet (never a
-// hardcoded list - the sheet's own header row is read fresh by the caller, api/rto/upload-start.js,
-// and passed in here), AWB-based dedup, and row-plan construction. No network, no DB - every
-// function here takes plain data in and returns plain data out, so it is fully unit-testable
-// (see rtoCsvImport.test.js) without a live Sheets connection.
+// Pure logic for the RTO CSV upload feature: fixed CSV-column -> sheet-column-letter mapping,
+// AWB-based dedup, row-plan construction, and a sheet-layout drift check. No network, no DB -
+// every function here takes plain data in and returns plain data out, so it is fully
+// unit-testable (see rtoCsvImport.test.js) without a live Sheets connection.
+//
+// This used to match CSV headers to sheet headers by NAME (matchHeaders/headerToColumnLetter),
+// which broke silently when the deployed matching code drifted from what was on disk (see the
+// 2026-08-22 incident where two appended rows landed with every value shifted one column). It
+// was replaced with the explicit mapping below, given directly by the business: each CSV column
+// from this fixed Shiprocket export format goes to one specific, hardcoded sheet column letter.
+// The sheet's own header text for a column does NOT have to match the CSV field name feeding
+// it - e.g. column D is titled "RTO Reason" in the live sheet but is deliberately filled from
+// the CSV's "Latest NDR Reason" field, per explicit instruction.
 
-// Same normalization convention already used by app/rto-crm/RtoCrmClient.js's own header-
-// matching helper (mapTkt's g()) - reused here rather than invented fresh, so this codebase
-// has exactly one idea of "how two header strings are compared", not two.
 function normalizeHeader(h) {
   return (h || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-// Two-pass matching: exact-normalized-equality first for EVERY target column, then a
-// substring-fuzzy fallback only for targets still unmatched after that first pass. This order
-// matters - see the Address-family test in rtoCsvImport.test.js for exactly why. A CSV header
-// claimed by one target is removed from the pool so it cannot be double-assigned.
-function matchHeaders(sheetTargetHeaders, csvHeaders) {
-  const remaining = new Map(csvHeaders.map((h) => [h, normalizeHeader(h)]));
-  const result = sheetTargetHeaders.map((sheetHeader) => ({ sheetHeader, csvHeader: null }));
-
-  // Pass 1: exact normalized equality.
-  result.forEach((entry) => {
-    const targetNorm = normalizeHeader(entry.sheetHeader);
-    for (const [csvHeader, csvNorm] of remaining) {
-      if (csvNorm === targetNorm) {
-        entry.csvHeader = csvHeader;
-        remaining.delete(csvHeader);
-        break;
-      }
-    }
-  });
-
-  // Pass 2: substring fuzzy, only for what pass 1 left unmatched.
-  result.forEach((entry) => {
-    if (entry.csvHeader !== null) return;
-    const targetNorm = normalizeHeader(entry.sheetHeader);
-    if (!targetNorm) return;
-    for (const [csvHeader, csvNorm] of remaining) {
-      if (!csvNorm) continue;
-      if (csvNorm.includes(targetNorm) || targetNorm.includes(csvNorm)) {
-        entry.csvHeader = csvHeader;
-        remaining.delete(csvHeader);
-        break;
-      }
-    }
-  });
-
-  return result;
-}
-
-// Finds the CSV header matched to whichever target header conceptually means `conceptualName`
-// (e.g. 'awb code', 'order id') - conceptualName is compared via the SAME normalization, so
-// callers pass a human-readable string, not an exact-cased header. Returns null (never throws)
-// if no target header matches that concept at all, or if it matched no CSV column.
-function findRequiredMatch(matchResult, conceptualName) {
-  const target = normalizeHeader(conceptualName);
-  const entry = matchResult.find((r) => normalizeHeader(r.sheetHeader) === target);
-  return entry ? entry.csvHeader : null;
-}
-
 function normalizeAwb(v) {
   return (v || '').toString().trim().toUpperCase();
+}
+
+// bijective base-26: A=0, B=1, ..., Z=25, AA=26, AB=27, ...
+function columnLetterToIndex(letter) {
+  return letter.split('').reduce((acc, c) => acc * 26 + (c.charCodeAt(0) - 64), 0) - 1;
+}
+
+function indexToColumnLetter(index) {
+  let n = index;
+  let col = '';
+  while (true) {
+    col = String.fromCharCode(65 + (n % 26)) + col;
+    n = Math.floor(n / 26) - 1;
+    if (n < 0) break;
+  }
+  return col;
+}
+
+// Which CSV column (exact header text from this Shiprocket export) feeds which sheet column
+// letter. Order ID is special-cased in buildRowPlan below: only the part before the first "_"
+// is written (e.g. "HYP44089510_SP/G3/2627/984539" -> "HYP44089510").
+const CSV_TO_COLUMN = {
+  'Shiprocket Created At': 'A',
+  'RTO Initiated Date': 'B',
+  'Latest NDR Date': 'C',
+  'Latest NDR Reason': 'D',
+  'Order ID': 'E',
+  'AWB Code': 'G',
+  'Customer Email': 'H',
+  'Customer Name': 'I',
+  'Customer Mobile': 'J',
+  'Address Line 1': 'K',
+  'Address City': 'L',
+  'Address State': 'M',
+  'Address Pincode': 'N',
+  'Payment Method': 'O',
+  'Order Total': 'P',
+  'Pickup Address Name': 'AB',
+  'Courier Company': 'AC',
+};
+
+// The live "Data" sheet's own header text at each column this feature writes to, as read on
+// 2026-08-22 - not used to LOCATE columns (CSV_TO_COLUMN above already fixes those absolutely),
+// only to detect drift: if a column gets inserted/reordered in the live sheet, the header found
+// there will no longer match what's expected, and callers should refuse to write rather than
+// silently landing data in the wrong place.
+const EXPECTED_SHEET_HEADER = {
+  A: 'CXB CV', B: 'RTO Initiated Date', C: 'Latest NDR Date', D: 'RTO Reason', E: 'Order ID',
+  F: 'Unique', G: 'AWB Code', H: 'Customer Email', I: 'Customer Name', J: 'Customer Mobile',
+  K: 'Address', L: 'Address City', M: 'Address State', N: 'Address Pincode',
+  O: 'Payment Method', P: 'Order Total', AB: 'Facility Name', AC: 'Courier Company',
+};
+
+// Widest column this feature ever writes to - callers size their output row arrays to this.
+const LAST_COLUMN_LETTER = 'AC';
+
+// Every CSV column this feature depends on - callers reject the whole upload if any is absent
+// from the file's own header row, rather than silently writing blanks into that column for
+// every row.
+const REQUIRED_CSV_HEADERS = Object.keys(CSV_TO_COLUMN);
+
+// Compares the live sheet's header row (as read fresh by the caller, e.g. `Data!A1:AD1`)
+// against EXPECTED_SHEET_HEADER. Returns an array of human-readable mismatch descriptions -
+// empty if everything still lines up.
+function checkSheetLayout(fullHeaderRow) {
+  const issues = [];
+  Object.entries(EXPECTED_SHEET_HEADER).forEach(([letter, expected]) => {
+    const idx = columnLetterToIndex(letter);
+    const actual = (fullHeaderRow[idx] || '').toString();
+    if (normalizeHeader(actual) !== normalizeHeader(expected)) {
+      issues.push(`Column ${letter} is now "${actual}", expected "${expected}"`);
+    }
+  });
+  return issues;
 }
 
 // The main orchestration: turns parsed CSV row objects (keyed by RAW csv header, exactly
@@ -68,20 +99,10 @@ function normalizeAwb(v) {
 // within-file dedup (first occurrence wins), and against-the-sheet dedup, in that order.
 //
 // Each valid row gets:
-//   - orderId, awbCode, paymentMethod, rtoReason: convenience top-level fields, pulled via
-//     whichever CSV header matched each concept (awbCode/orderId are guaranteed matched by
-//     the time this runs - the caller rejects the whole upload upfront otherwise; paymentMethod/
-//     rtoReason may be '' if that target had no CSV match, which is fine - they're best-effort).
-//   - cells: { targetSheetHeader: value }, one entry per target header that DID find a CSV
-//     match - the caller converts this to column letters via headerToColumnLetter for the
-//     actual sheet write. A target with no CSV match is simply absent from `cells`, which the
-//     caller treats as "leave that column blank for this row".
-function buildRowPlan({ matchResult, csvRows, existingAwbSet }) {
-  const awbCsvHeader = findRequiredMatch(matchResult, 'awb code');
-  const orderIdCsvHeader = findRequiredMatch(matchResult, 'order id');
-  const paymentCsvHeader = findRequiredMatch(matchResult, 'payment method');
-  const reasonCsvHeader = findRequiredMatch(matchResult, 'rto reason');
-
+//   - orderId, awbCode, paymentMethod: convenience top-level fields.
+//   - cellsByColumn: { columnLetter: value }, one entry per CSV_TO_COLUMN mapping - the caller
+//     places these directly into a fixed-width row array by column index, no further lookup.
+function buildRowPlan({ csvRows, existingAwbSet }) {
   const validRows = [];
   const errors = [];
   const counts = { missingAwb: 0, duplicateInFile: 0, duplicateInSheet: 0 };
@@ -89,8 +110,7 @@ function buildRowPlan({ matchResult, csvRows, existingAwbSet }) {
 
   csvRows.forEach((row, i) => {
     const line = i + 2; // +1 for 1-based, +1 for the header row not being a data row
-    const rawAwb = awbCsvHeader ? row[awbCsvHeader] : '';
-    const awb = normalizeAwb(rawAwb);
+    const awb = normalizeAwb(row['AWB Code']);
 
     if (!awb) {
       counts.missingAwb++;
@@ -109,41 +129,26 @@ function buildRowPlan({ matchResult, csvRows, existingAwbSet }) {
     }
     seenInFile.add(awb);
 
-    const cells = {};
-    matchResult.forEach(({ sheetHeader, csvHeader }) => {
-      if (csvHeader !== null) cells[sheetHeader] = (row[csvHeader] || '').toString().trim();
+    const cellsByColumn = {};
+    Object.entries(CSV_TO_COLUMN).forEach(([csvHeader, col]) => {
+      let value = (row[csvHeader] || '').toString().trim();
+      if (csvHeader === 'Order ID') value = value.split('_')[0];
+      cellsByColumn[col] = value;
     });
 
     validRows.push({
-      orderId: (orderIdCsvHeader ? row[orderIdCsvHeader] : '') || '',
+      orderId: cellsByColumn.E,
       awbCode: awb,
-      paymentMethod: (paymentCsvHeader ? row[paymentCsvHeader] : '') || '',
-      rtoReason: (reasonCsvHeader ? row[reasonCsvHeader] : '') || '',
-      cells,
+      paymentMethod: cellsByColumn.O,
+      cellsByColumn,
     });
   });
 
   return { validRows, errors, counts };
 }
 
-// Maps a header's text to its column letter (A, B, ..., Z, AA, AB, ...) within a full header
-// row read as `Data!A1:AD1` - normalized comparison, so this tolerates the live sheet's own
-// header whitespace quirks (e.g. '  Payment Method' with two leading spaces, confirmed live).
-function headerToColumnLetter(fullHeaderRow, targetHeader) {
-  const targetNorm = normalizeHeader(targetHeader);
-  const idx = fullHeaderRow.findIndex((h) => normalizeHeader(h) === targetNorm);
-  if (idx === -1) return null;
-  let n = idx;
-  let col = '';
-  while (true) {
-    col = String.fromCharCode(65 + (n % 26)) + col;
-    n = Math.floor(n / 26) - 1;
-    if (n < 0) break;
-  }
-  return col;
-}
-
 module.exports = {
-  normalizeHeader, matchHeaders, findRequiredMatch, normalizeAwb, buildRowPlan,
-  headerToColumnLetter,
+  normalizeHeader, normalizeAwb, columnLetterToIndex, indexToColumnLetter,
+  CSV_TO_COLUMN, EXPECTED_SHEET_HEADER, LAST_COLUMN_LETTER, REQUIRED_CSV_HEADERS,
+  checkSheetLayout, buildRowPlan,
 };
