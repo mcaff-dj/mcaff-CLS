@@ -109,15 +109,21 @@ build_order_punch_worker() {
 
   cp "$LAMBDA_DIR/order_punch_worker/handler.py" "$work/handler.py"
   cp "$REPO_ROOT/scripts/process_order_punch_job.py" \
-     "$REPO_ROOT/scripts/lib.py" \
+     "$REPO_ROOT/scripts/mysql_lib.py" \
      "$work/scripts/"
 
-  # Only requests (Unicommerce HTTP) + psycopg (Postgres) - no MySQL, no Sheets, no GoKwik, so
-  # no pymysql/cryptography needed here (unlike assign_leads.zip/csv_upload_worker.zip). boto3
-  # ships in every AWS Python Lambda runtime already, so it is NOT installed here.
+  # The order_punch_* tables live in MySQL, so this needs mysql_lib.py AND pymysql (plus
+  # cryptography, which pymysql needs for MySQL 8's caching_sha2_password auth) - the same
+  # copy-the-module-but-not-its-driver mistake build_assign_leads above already documents.
+  # It shipped without them and every invoke died on "No module named 'mysql_lib'" while
+  # the job row sat at 'queued' with nothing anywhere to say why (caught live 2026-08-22).
+  #
+  # NOT installed: psycopg (process_order_punch_job.py imports no Postgres client) and boto3,
+  # which every AWS Python runtime already ships. lib.py is likewise no longer copied - this
+  # worker imports nothing from it.
   pip3 install --disable-pip-version-check --only-binary=:all: \
     --platform manylinux2014_x86_64 --python-version 3.12 --implementation cp --abi cp312 \
-    -t "$work" psycopg[binary] requests
+    -t "$work" requests pymysql cryptography
 
   ( cd "$work" && zip -r -q "$OUT_DIR/order_punch_worker.zip" . )
   rm -rf "$work"

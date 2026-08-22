@@ -248,12 +248,20 @@ else
     --zip-file "fileb://$DIST/order_punch_worker.zip" --region "$AWS_REGION" >/dev/null
 fi
 aws lambda wait function-updated --function-name "$FN_ORDER_PUNCH_WORKER" --region "$AWS_REGION"
-# Only POSTGRES_URL as a plain env var - the Unicommerce credential deliberately does NOT
-# follow the other workers' plain-env-var pattern (see the design spec's "why deviate" note):
-# it's read from Secrets Manager at runtime via the IAM policy granted above.
+# MYSQL_* because the order_punch_* tables live in MySQL (process_order_punch_job.py opens
+# its own pymysql connection). This used to set POSTGRES_URL alone, which the worker never
+# reads - every job died at 'could not connect to MySQL' and sat at 'queued' (2026-08-22).
+#
+# The Unicommerce credential deliberately does NOT join them as a plain env var (see the
+# design spec's "why deviate" note): it is read from Secrets Manager at runtime via the
+# IAM policy granted above.
+write_env_json "$DIST/env-order-punch-worker.json" \
+  MYSQL_HOST=MYSQL_HOST MYSQL_USER=MYSQL_USER MYSQL_PASSWORD=MYSQL_PASSWORD \
+  MYSQL_DATABASE=MYSQL_DATABASE MYSQL_PORT=MYSQL_PORT
 aws lambda update-function-configuration --function-name "$FN_ORDER_PUNCH_WORKER" --region "$AWS_REGION" \
-  --environment "Variables={POSTGRES_URL=${POSTGRES_URL}}" \
+  --environment file://"$DIST/env-order-punch-worker.json" \
   >/dev/null
+rm -f "$DIST/env-order-punch-worker.json"
 # Reserved concurrency 1: serializes this job's own continuations and any other queued job, so
 # two workers never race the same display-code's _1/_2 suffix assignment.
 aws lambda put-function-concurrency --function-name "$FN_ORDER_PUNCH_WORKER" \
