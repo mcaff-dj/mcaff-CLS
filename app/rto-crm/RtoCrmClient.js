@@ -1211,6 +1211,13 @@ import RtoUploadModal from './RtoUploadModal';
       // consecutive failures so the retry below can back off instead of hammering Google's
       // Sheets API at a fixed cadence forever once it starts throttling.
       const syncFailCountRef = useRef(0);
+      // Read inside sync() via refs, not closed-over state, so referencing them here can't
+      // change sync's own useCallback identity - effectiveAgentRoster is recomputed on every
+      // tickets/overrides change, and putting it in sync's deps would recreate sync() on every
+      // successful sync, which would re-fire the mount effect below (`useEffect(()=>{
+      // sync(true) },[sync])`) and turn one poll into a runaway loop.
+      const agentStatusRef = useRef(agentStatus);
+      const effectiveAgentRosterRef = useRef([]);
       const sync = useCallback(async(silent=false)=>{
         const sid=extractSheetId(DEFAULT_SHEET_URL);if(!sid)return;setIsSyncing(true);
         try{
@@ -1222,6 +1229,26 @@ import RtoUploadModal from './RtoUploadModal';
           setSyncError(null);
           syncFailCountRef.current = 0;
           if(!silent)showToast(`${mapped.length.toLocaleString('en-IN')} leads synced`);
+
+          // Silent quota top-up, piggybacked on this same poll. api/rto/next-lead.js's
+          // instant-fill only ever fires right after THIS agent's own disposal - an agent
+          // already sitting at zero has nothing left to dispose, so that trigger never runs for
+          // them, and they're left waiting on scripts/assign_leads.py's own up-to-5-minute (and,
+          // per that file's docstring, not always on-time) sweep instead. Piggybacking on the
+          // poll that already runs every 60s (see the interval effect below) closes that gap
+          // with no new timer. next-lead.js re-derives load/quota itself from the live sheet and
+          // no-ops fast if this agent doesn't actually need one - the checks here are just to
+          // skip the round-trip entirely for every agent who's already full.
+          if (googleUser?.email && agentStatusRef.current !== 'Offline') {
+            const load = countUndisposedLoad(mapped, googleUser.email);
+            const quota = resolveAgentQuota(effectiveAgentRosterRef.current, googleUser.email, ASSIGNMENT_QUOTA);
+            if (load < quota) {
+              fetch('/api/rto/next-lead', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+                .then((r) => r.json().catch(() => ({})))
+                .then((d) => { if (d && d.assigned) sync(true); })
+                .catch((e) => console.error('periodic top-up failed:', e));
+            }
+          }
         } catch(e) {
           // A background sync failure used to fail completely silently (silent=true suppressed
           // the toast, and nothing else surfaced it) - the UI just kept showing whatever stale
@@ -1379,6 +1406,11 @@ import RtoUploadModal from './RtoUploadModal';
         // resolves - without it this memo would keep the pre-auth value and leave an admin
         // labelled 'Agent' in their own roster row.
       }, [agentRoster, tickets, overrides, googleUser, agentStatus, serverPresence, processAgents, sessionIsAdmin]);
+
+      // Keeps sync()'s periodic top-up reading the latest roster/status without being one of
+      // its own useCallback deps - see that ref's own comment for why.
+      useEffect(() => { effectiveAgentRosterRef.current = effectiveAgentRoster; }, [effectiveAgentRoster]);
+      useEffect(() => { agentStatusRef.current = agentStatus; }, [agentStatus]);
 
       // Derived data & STRICT Calling Date (Latest First) Sorting
       const allTickets = useMemo(()=>{
