@@ -243,11 +243,24 @@ def build_class_period_narrative(ctx, cls, data, period, cur_idx):
             continue
         growth = (cur_c / prev_c) if prev_c > 0 else math.inf
         abs_delta = cur_c - prev_c
-        qualifies = (prev_c == 0 and cur_c >= 3) or (prev_c > 0 and (growth >= 1.3 or abs_delta >= 10))
-        if not qualifies:
-            continue
         p_c = (cur_c / sales_cur * 100) if sales_cur > 0 else 0
         p_p = (prev_c / sales_prev * 100) if sales_prev > 0 else 0
+        # Raw-count growth/delta alone misses a category whose ticket count fell but whose
+        # rate-of-sales rose because sales fell faster (e.g. an MTD partial month) - the
+        # rate is what's actually shown in the bullet (p_p -> p_c) and is the more honest
+        # "getting worse" signal. Same OR-of-relative-and-absolute shape as the count check
+        # above: rate_growth catches a rate that multiplies up, pp_delta catches a rate that
+        # climbs a fixed amount off a base too large for 1.3x to trip (0.6% -> 0.7% is only
+        # 1.17x but is still +0.1 percentage point of sales going the wrong way).
+        # ponytail: 0.1pp is a judgment-call floor, not measured off real distribution -
+        # tighten/loosen here if it over- or under-fires once the next report regenerates.
+        rate_growth = (p_c / p_p) if p_p > 0 else math.inf
+        pp_delta = p_c - p_p
+        qualifies = (prev_c == 0 and cur_c >= 3) or (prev_c > 0 and (
+            growth >= 1.3 or abs_delta >= 10 or rate_growth >= 1.3 or pp_delta >= 0.1
+        ))
+        if not qualifies:
+            continue
         verb = change_verb(prev_c, cur_c)
         line = f"<b>{h_enc(cat)}</b>: Complaints {verb} from {n0(prev_c)} to {n0(cur_c)} ({pct_fmt(p_p)} &rarr; {pct_fmt(p_c)})."
 
