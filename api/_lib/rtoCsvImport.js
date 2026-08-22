@@ -133,7 +133,10 @@ function buildRowPlan({ csvRows, existingAwbSet }) {
     Object.entries(CSV_TO_COLUMN).forEach(([csvHeader, col]) => {
       let value = (row[csvHeader] || '').toString().trim();
       if (csvHeader === 'Order ID') value = value.split('_')[0];
-      cellsByColumn[col] = value;
+      // A blank source value is written as the literal text "NA" rather than an empty cell -
+      // explicit business instruction, so a blank in the sheet always means "not yet worked",
+      // never "the source had nothing here".
+      cellsByColumn[col] = value || 'NA';
     });
 
     validRows.push({

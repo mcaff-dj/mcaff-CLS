@@ -57,6 +57,8 @@ assert.strictEqual(normalizeAwb(''), '');
   assert.strictEqual(row.cellsByColumn.K, 'Rishihood University Gate No 2', 'Address Line 1 -> K');
   assert.strictEqual(row.cellsByColumn.AB, 'mCaff_Gurgaon3', 'Pickup Address Name -> AB');
   assert.strictEqual(row.cellsByColumn.AC, 'Blitz Intercity NDD', 'Courier Company -> AC');
+  assert.strictEqual(row.cellsByColumn.C, 'NA', 'blank source value is written as "NA", not empty');
+  assert.strictEqual(row.cellsByColumn.D, 'NA', 'blank source value is written as "NA", not empty');
 }
 
 // 4. buildRowPlan - blank AWB rejected, in-file duplicate rejected (first occurrence wins),
