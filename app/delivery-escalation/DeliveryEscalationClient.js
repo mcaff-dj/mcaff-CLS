@@ -67,6 +67,44 @@ function mapRow(row, readOnly) {
   };
 }
 
+// Every column after Brand, for one ticket row - shared between a group's parent row and its
+// collapsed timeline children (see groupedTicketRows) so the two can never drift out of sync
+// with each other or with the column headers above them.
+function ticketRowCells(t, tab, openAction) {
+  return (
+    <>
+      <td className="py-3 px-4 text-zinc-300 font-mono text-[12px]">{t.orderId}</td>
+      <td className="py-3 px-4 text-zinc-300 font-mono text-[12px]">{t.awb}</td>
+      <td className="py-3 px-4 text-zinc-400">{t.deliveryPartner}</td>
+      <td className="py-3 px-4 text-zinc-400">{t.queryCategory}</td>
+      <td className="py-3 px-4 text-zinc-400 whitespace-nowrap">{t.addedDate || '—'}</td>
+      <td className="py-3 px-4 text-zinc-400">{t.tat}</td>
+      <td className="py-3 px-4 text-zinc-400 tabular-nums">
+        {t.contactCount === '' ? '—' : (
+          <span className={t.contactCount > 1 ? 'text-amber-400 font-semibold' : ''}>
+            {t.contactCount}{t.contactCount > 1 ? '×' : ''}
+          </span>
+        )}
+      </td>
+      <td className="py-3 px-4 text-zinc-400">{t.firstContactDate || '—'}</td>
+      <td className="py-3 px-4 text-zinc-400 text-[12px]">{t.assignedAgent ? t.assignedAgent.split('@')[0] : '—'}</td>
+      <td className="py-3 px-4 text-zinc-400">{t.outcome || '—'}</td>
+      <td className="py-3 px-4 text-zinc-400">{t.childDisposition || '—'}</td>
+      {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.actionDate}</td>}
+      {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400 max-w-xs truncate" title={t.remarks}>{t.remarks}</td>}
+      {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.tatBucket}</td>}
+      <td className="py-3 px-4 text-right">
+        <button
+          onClick={() => openAction(t)}
+          className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-semibold transition-colors"
+        >
+          {t.readOnly ? 'View' : t.outcome ? 'View / Edit' : 'Resolve'}
+        </button>
+      </td>
+    </>
+  );
+}
+
 // record.js's own catch puts the real exception message in the body - surface that rather than
 // a bare status code, so a failure is diagnosable from the error banner alone without needing
 // Lambda CloudWatch access.
@@ -447,6 +485,11 @@ export default function DeliveryEscalationClient() {
   // problem being fixed here. Keys are month key ('2026-07') and week key ('2026-07-W2').
   const [expandedMonths, setExpandedMonths] = useState(() => new Set());
   const [expandedWeeks, setExpandedWeeks] = useState(() => new Set());
+  // Fresh/Resolved list's own expand state - same repeat-contact AWBs contactCount already
+  // flags, collapsed to one parent (the newest row, since rows arrive id/disposed_at DESC)
+  // with every older ticket for that AWB nested under it as a timeline. Keyed by the parent's
+  // own id, not the AWB string, so two different parents never collide.
+  const [expandedAwbGroups, setExpandedAwbGroups] = useState(() => new Set());
   const toggleExpanded = (setFn, key) => setFn((prev) => {
     const next = new Set(prev);
     if (next.has(key)) next.delete(key); else next.add(key);
@@ -709,6 +752,21 @@ export default function DeliveryEscalationClient() {
       setExporting(false);
     }
   };
+
+  // Groups the loaded page by AWB (falling back to brand+orderId for the ~144 rows with no
+  // AWB at all - see db.js's own note on those) - NOT a re-sort, just a stable partition, so
+  // each group still surfaces at the position of its first (i.e. newest, given the server's
+  // DESC order) member. One row per group renders as the parent; the rest become its timeline.
+  const groupedTicketRows = useMemo(() => {
+    const groups = new Map();
+    const order = [];
+    for (const t of rows) {
+      const key = t.awb || `${t.brand}|${t.orderId}`;
+      if (!groups.has(key)) { groups.set(key, []); order.push(key); }
+      groups.get(key).push(t);
+    }
+    return order.map((key) => groups.get(key));
+  }, [rows]);
 
   // All counts come from SQL over the whole table (see fetchStats) rather than from the loaded
   // page - there's no client-side filtering or scoping left to do here.
@@ -1114,40 +1172,37 @@ export default function DeliveryEscalationClient() {
                           <th className="py-3 px-4 text-right font-medium">Action</th>
                         </tr></thead>
                         <tbody className="divide-y divide-zinc-800/50">
-                          {rows.map(t => (
-                            <tr key={t.id} className="hover:bg-zinc-800/30 transition-colors">
-                              <td className="py-3 px-4 text-zinc-300">{t.brand}</td>
-                              <td className="py-3 px-4 text-zinc-300 font-mono text-[12px]">{t.orderId}</td>
-                              <td className="py-3 px-4 text-zinc-300 font-mono text-[12px]">{t.awb}</td>
-                              <td className="py-3 px-4 text-zinc-400">{t.deliveryPartner}</td>
-                              <td className="py-3 px-4 text-zinc-400">{t.queryCategory}</td>
-                              <td className="py-3 px-4 text-zinc-400 whitespace-nowrap">{t.addedDate || '—'}</td>
-                              <td className="py-3 px-4 text-zinc-400">{t.tat}</td>
-                              <td className="py-3 px-4 text-zinc-400 tabular-nums">
-                                {t.contactCount === '' ? '—' : (
-                                  <span className={t.contactCount > 1 ? 'text-amber-400 font-semibold' : ''}>
-                                    {t.contactCount}{t.contactCount > 1 ? '×' : ''}
-                                  </span>
-                                )}
-                              </td>
-                              <td className="py-3 px-4 text-zinc-400">{t.firstContactDate || '—'}</td>
-                              <td className="py-3 px-4 text-zinc-400 text-[12px]">{t.assignedAgent ? t.assignedAgent.split('@')[0] : '—'}</td>
-                              <td className="py-3 px-4 text-zinc-400">{t.outcome || '—'}</td>
-                              <td className="py-3 px-4 text-zinc-400">{t.childDisposition || '—'}</td>
-                              {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.actionDate}</td>}
-                              {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400 max-w-xs truncate" title={t.remarks}>{t.remarks}</td>}
-                              {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.tatBucket}</td>}
-                              <td className="py-3 px-4 text-right">
-                                <button
-                                  onClick={() => openAction(t)}
-                                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-semibold transition-colors"
+                          {groupedTicketRows.map((group) => {
+                            const parent = group[0];
+                            const children = group.slice(1);
+                            const isOpen = children.length > 0 && expandedAwbGroups.has(parent.id);
+                            return (
+                              <Fragment key={parent.id}>
+                                <tr
+                                  onClick={children.length ? () => toggleExpanded(setExpandedAwbGroups, parent.id) : undefined}
+                                  className={`hover:bg-zinc-800/30 transition-colors ${children.length ? 'cursor-pointer' : ''}`}
                                 >
-                                  {t.readOnly ? 'View' : t.outcome ? 'View / Edit' : 'Resolve'}
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                          {rows.length === 0 && (
+                                  <td className="py-3 px-4 text-zinc-300">
+                                    {children.length > 0 && (
+                                      <span className="inline-block w-4 text-zinc-500">{isOpen ? '▾' : '▸'}</span>
+                                    )}
+                                    {parent.brand}
+                                    {children.length > 0 && (
+                                      <span className="ml-1.5 text-[11px] text-zinc-500">({group.length})</span>
+                                    )}
+                                  </td>
+                                  {ticketRowCells(parent, tab, openAction)}
+                                </tr>
+                                {isOpen && children.map((t) => (
+                                  <tr key={t.id} className="bg-zinc-950/30 hover:bg-zinc-800/30 transition-colors">
+                                    <td className="py-3 px-4 pl-8 text-zinc-500 text-[12px] whitespace-nowrap">↳ {t.brand}</td>
+                                    {ticketRowCells(t, tab, openAction)}
+                                  </tr>
+                                ))}
+                              </Fragment>
+                            );
+                          })}
+                          {groupedTicketRows.length === 0 && (
                             <tr><td colSpan={tab === 'resolved' ? 16 : 13} className="py-8 text-center text-zinc-500">
                               {syncing ? 'Loading…' : 'No tickets in this view.'}
                             </td></tr>
