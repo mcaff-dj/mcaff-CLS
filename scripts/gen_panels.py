@@ -878,12 +878,28 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
     # Hoisted: both passes read these five columns on every row.
     sku_col, prod_col, cls_col = ctx.col["sku"], ctx.col["prod"], ctx.col["cls"]
     cat_col, batch_col, prosales_col = ctx.col["cat"], ctx.col["batch"], ctx.col["prosales"]
+    # A SKU is meant to identify one product, but the sheet sometimes carries several
+    # Product Name spellings for the same SKU over time (a size suffix added/dropped, a
+    # rename) - which used to fan the drill-down's second level out into one node per
+    # spelling instead of one per SKU. Tracked per SKU here so every row collapses onto a
+    # single display product below: whichever spelling was used in that SKU's own most
+    # recent period, tie-broken by the most-used spelling within that period.
+    sku_period_prod_count, sku_max_pidx = {}, {}
     for r in subset:
-        sku_set.setdefault(ci_key(_norm(ctx.cell(r, sku_col)), sku_cache), True)
-        prod_set.setdefault(ci_key(_norm(ctx.cell(r, prod_col)), prod_cache), True)
+        sk = ci_key(_norm(ctx.cell(r, sku_col)), sku_cache)
+        pd = ci_key(_norm(ctx.cell(r, prod_col)), prod_cache)
+        sku_set.setdefault(sk, True)
+        prod_set.setdefault(pd, True)
         cls_set.setdefault(ci_key(_norm(ctx.cell(r, cls_col)), cls_cache), True)
         cat_set.setdefault(ci_key(_norm(ctx.cell(r, cat_col)), cat_cache), True)
         batch_set.setdefault(ci_key(_norm(ctx.cell(r, batch_col)), batch_cache), True)
+        pidx = period_index_fn(r)
+        if pidx < 0 or pidx >= n:
+            continue
+        if pidx > sku_max_pidx.get(sk, -1):
+            sku_max_pidx[sk] = pidx
+        sku_period_prod_count.setdefault(sk, {}).setdefault(pidx, {})
+        sku_period_prod_count[sk][pidx][pd] = sku_period_prod_count[sk][pidx].get(pd, 0) + 1
     SKUS, PRODS, CLASSES, CATS, BATCHES = list(sku_set), list(prod_set), list(cls_set), list(cat_set), list(batch_set)
     # The second pass needs each value's position in those five lists on every row. As
     # .index() calls that was five linear scans per row against lists running from a handful
@@ -891,6 +907,12 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
     # instance, so a real saving but a small one.
     SKU_I, PROD_I, CLS_I = index_map(SKUS), index_map(PRODS), index_map(CLASSES)
     CAT_I, BATCH_I = index_map(CATS), index_map(BATCHES)
+
+    sku_display_prod = [None] * len(SKUS)
+    for sk, per_period in sku_period_prod_count.items():
+        counts = per_period[sku_max_pidx[sk]]
+        best_pd = sorted(counts.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)[0][0]
+        sku_display_prod[SKU_I[sk]] = PROD_I[best_pd]
 
     # "Pro Sales" (raw sheet column, never named/read anywhere else in the pipeline) is a
     # per-SKU-per-MONTH sales figure - unlike "Total Sales M" (company-wide, one value per
@@ -909,7 +931,7 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
         if pidx < 0 or pidx >= n:
             continue
         si = SKU_I[ci_key(_norm(ctx.cell(r, sku_col)), sku_cache)]
-        pi = PROD_I[ci_key(_norm(ctx.cell(r, prod_col)), prod_cache)]
+        pi = sku_display_prod[si]
         li = CLS_I[ci_key(_norm(ctx.cell(r, cls_col)), cls_cache)]
         ci = CAT_I[ci_key(_norm(ctx.cell(r, cat_col)), cat_cache)]
         bi = BATCH_I[ci_key(_norm(ctx.cell(r, batch_col)), batch_cache)]
