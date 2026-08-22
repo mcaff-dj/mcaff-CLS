@@ -432,6 +432,12 @@ export default function NpsAdminClient() {
     getJson('/api/nps-admin/surveys').then((d) => setSurveys(d.surveys)).catch(() => {});
   }, []);
 
+  // Same theme setup as every other Calling page - one theme, always; body.theme-light in
+  // app/globals.css repaints the zinc-9xx/bg-[#09090b] classes below to a light background.
+  useEffect(() => {
+    document.body.className = 'font-sans antialiased min-h-screen theme-light';
+  }, []);
+
   useEffect(() => {
     fetch('/api/auth/me').then((r) => r.json()).then((d) => {
       if (!d.authenticated) {
