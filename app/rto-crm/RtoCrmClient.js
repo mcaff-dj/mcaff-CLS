@@ -831,6 +831,36 @@ import RtoUploadModal from './RtoUploadModal';
         const agentAssignedTag = `${googleUser.email}`;
         const isAlreadyRef = alreadyRefunded === 'YES' || dispReason === 'Already Refunded';
 
+        // Resolve Column S (Attempt) value:
+        // - If refund was initiated, auto-set to 'Already Refunded'
+        // - If user explicitly selected an attempt type, use that
+        // - If disposition is 'Already Refunded', set to 'Already Refunded'
+        const resolvedAttempt = isRef ? 'Already Refunded'
+          : isAlreadyRef ? 'Already Refunded'
+          : dispReason === 'Delivered' ? 'Delivered'
+          : attemptType || '';
+
+        // MySQL write goes first, before any Sheets round trip: it's what the disposal
+        // actually depends on, and its payload needs none of the live-assignment lookup
+        // below - that lookup only feeds sheetUpdates.assignedAgent/ov, not this call.
+        // Awaited (with one retry, see postJsonWithRetry) so a failure is visible to the
+        // agent instead of vanishing silently.
+        const dbSynced = await postJsonWithRetry('/api/auth/recordDisposition', {
+          orderId: dispTkt.orderNumber,
+          awbCode: dispTkt.awbCode,
+          rtoReason: dispTkt.rtoReason,
+          paymentMode: dispTkt.paymentMethod,
+          disposition: dispReason,
+          agentRemarks: (isAlreadyRef ? '[Already Refunded] ' : '') + agentRemarks.trim(),
+          connected: dispConn==='YES'?'Yes':'No',
+          attempt: resolvedAttempt,
+          refundAmount: (isRef || isAlreadyRef) ? dispTkt.orderAmount : null,
+          newOrderId: newOrder==='YES'?newOrderId:'',
+        });
+        if (!dbSynced) {
+          showToast(`⚠️ Database sync failed for ${dispTkt.orderNumber} — check console. Continuing with sheet write.`);
+        }
+
         // Once a lead has a real assigned agent, that assignment must never change - not to
         // blank, not to a different agent - even if someone else (e.g. a Team Lead helping
         // out) is the one submitting the disposition. Live-check Column Q's current value
@@ -854,15 +884,6 @@ import RtoUploadModal from './RtoUploadModal';
         } catch (e) {
           console.error('Live assignment check error:', e);
         }
-
-        // Resolve Column S (Attempt) value:
-        // - If refund was initiated, auto-set to 'Already Refunded'
-        // - If user explicitly selected an attempt type, use that
-        // - If disposition is 'Already Refunded', set to 'Already Refunded'
-        const resolvedAttempt = isRef ? 'Already Refunded'
-          : isAlreadyRef ? 'Already Refunded'
-          : dispReason === 'Delivered' ? 'Delivered'
-          : attemptType || '';
 
         const ov={
           status: isAlreadyRef ? 'Refunded' : st,
@@ -899,27 +920,6 @@ import RtoUploadModal from './RtoUploadModal';
           sheetUpdates.assignedAgent = agentAssignedTag;
         }
         writeToSheetRow(dispTkt.orderNumber, dispTkt.rawIndex, sheetUpdates);
-
-        // Mirror the disposal into MySQL's CLS_RTO_calling table (assigned_at's
-        // counterpart - see api/_lib/db.js), same submit action as the Sheet write above -
-        // awaited (with one retry, see postJsonWithRetry) so a failure is actually visible
-        // to the agent instead of vanishing silently. The Sheet write already landed above
-        // regardless, so a DB-side failure here is surfaced, not blocking.
-        const dbSynced = await postJsonWithRetry('/api/auth/recordDisposition', {
-          orderId: dispTkt.orderNumber,
-          awbCode: dispTkt.awbCode,
-          rtoReason: dispTkt.rtoReason,
-          paymentMode: dispTkt.paymentMethod,
-          disposition: dispReason,
-          agentRemarks: (isAlreadyRef ? '[Already Refunded] ' : '') + agentRemarks.trim(),
-          connected: dispConn==='YES'?'Yes':'No',
-          attempt: resolvedAttempt,
-          refundAmount: (isRef || isAlreadyRef) ? dispTkt.orderAmount : null,
-          newOrderId: newOrder==='YES'?newOrderId:'',
-        });
-        if (!dbSynced) {
-          showToast(`⚠️ Disposed ${dispTkt.orderNumber} in the sheet, but the database sync failed — check console.`);
-        }
 
         const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
         

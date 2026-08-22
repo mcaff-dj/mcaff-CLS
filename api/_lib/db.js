@@ -1256,7 +1256,13 @@ const DELIVERY_ESCALATION_MAX_EXPORT = 5000;
 // guard, that NULL poisoned the whole NOT() for every blank-outcome row and wrongly excluded
 // all of Fresh's ordinary (never-disposed) tickets, not just the RTO ones this was meant to
 // catch - caught live: stats.fresh dropped from ~3645 to 2 before this guard was added.
-const DE_FORCED_RTO_WHERE = `(tat = 'Forced to be marked as RTO' OR (outcome IS NOT NULL AND (outcome = 'RTO' OR outcome LIKE 'RTO > %')))`;
+//
+// `tat IS NOT NULL AND` guards the tat comparison for the identical reason - missed the first
+// time around. A row whose tat hasn't been backfilled yet (tat NULL, common: 5,724 rows/3,763
+// AWBs found live) made this whole OR evaluate to NULL instead of FALSE, which poisoned
+// NOT(FORCED) the same way, silently dropping those rows out of Fresh, Forced RTO, AND
+// Resolved - visible nowhere except the unconditional `total` tile.
+const DE_FORCED_RTO_WHERE = `((tat IS NOT NULL AND tat = 'Forced to be marked as RTO') OR (outcome IS NOT NULL AND (outcome = 'RTO' OR outcome LIKE 'RTO > %')))`;
 
 // A ticket is Fresh while its outcome is blank (never disposed), RTO (an RTO'd order can still
 // be re-shipped and later delivered, so it isn't terminal), or Escalated (still waiting on the
@@ -1295,6 +1301,13 @@ const DE_TAT_BUCKET_SQL = `CASE
 // disposed_at/added_date IS NULL branch is a defensive catch-all for a Delivered row somehow
 // missing one of those dates (2 rows total right now, see getDeliveryEscalationDaywiseStats'
 // own missingDateCount) - it can't be dated, so it can't be aged either.
+//
+// getDeliveryEscalationDaywiseStats itself counts DISTINCT awb_code per (date, bucket), not
+// rows, so this table's 'unresolved' lines up with the Fresh tile instead of over-counting
+// repeat-contact AWBs. That distinct count is taken per date+bucket group, not globally - an
+// AWB that legitimately shows up unresolved on two different Query dates (re-escalated later)
+// is counted once in each, same tradeoff getDeliveryEscalationRepeatStats already accepts for
+// its own per-AWB grouping.
 const DE_DAYWISE_BUCKET_SQL = `CASE
     WHEN ${DE_FORCED_RTO_WHERE} THEN 'Forced to be marked as RTO'
     WHEN ${DE_FRESH_WHERE} THEN 'unresolved'
@@ -1477,15 +1490,20 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
   if (agent) { extraClauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
   const extra = extraClauses.length ? ` AND ${extraClauses.join(' AND ')}` : '';
   const pool = await getPool();
+  // COUNT(DISTINCT awb_code), not COUNT(*) - same "how many parcels, not how many rows" fix
+  // getDeliveryEscalationStats' own Fresh tile already applies (see its comment): a repeat-
+  // contact AWB gets a fresh ticket_number per day it's still flagged, so row count double-
+  // (or triple-, ...) counts it. Ignores NULL/blank awb_code the same way COUNT(DISTINCT) does
+  // there too - a ticket with no AWB at all doesn't land in any bucket.
   const [rows] = await pool.execute(`
-    SELECT DATE_FORMAT(added_date, '%Y-%m-%d') AS d, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(*) AS c
+    SELECT DATE_FORMAT(added_date, '%Y-%m-%d') AS d, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(DISTINCT awb_code) AS c
     FROM Delivery_escalation
     WHERE added_date IS NOT NULL${extra}
     GROUP BY d, bucket
     ORDER BY d
   `, params);
   const [[{ noDateCount }]] = await pool.execute(
-    `SELECT COUNT(*) AS noDateCount FROM Delivery_escalation WHERE added_date IS NULL${extra}`, params);
+    `SELECT COUNT(DISTINCT awb_code) AS noDateCount FROM Delivery_escalation WHERE added_date IS NULL${extra}`, params);
 
   const byDate = new Map();
   const grandTotal = {};

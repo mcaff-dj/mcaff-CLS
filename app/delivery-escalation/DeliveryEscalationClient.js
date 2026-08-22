@@ -865,11 +865,11 @@ export default function DeliveryEscalationClient() {
                     </div>
                   </div>
                   <p className="text-[12px] text-zinc-500 mb-3">
-                    Every ticket, bucketed by days since Query Date - resolved tickets use their
-                    actual resolution date, still-open tickets use today's date. % is each
-                    bucket's share of that date's own total.
+                    Every parcel (distinct AWB), bucketed by days since Query Date - resolved
+                    parcels use their actual resolution date, still-open parcels use today's
+                    date. % is each bucket's share of that date's own total.
                     {daywise.missingDateCount > 0 && (
-                      <> {daywise.missingDateCount} ticket(s) have no Query date at all and can&apos;t
+                      <> {daywise.missingDateCount} parcel(s) have no Query date at all and can&apos;t
                       sit under any date row - counted only in Grand Total &rarr; unresolved.</>
                     )}
                   </p>
