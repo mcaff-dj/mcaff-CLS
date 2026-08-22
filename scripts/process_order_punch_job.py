@@ -480,7 +480,9 @@ def update_job_counters(conn, job_id, **fields):
 
 def fetch_settings(conn):
     with conn.cursor() as cur:
-        cur.execute("SELECT key, value FROM order_punch_settings")
+        # `key` backticked: it is a MySQL reserved word, so the unquoted form is a 1064
+        # syntax error (api/_lib/db.js quotes it everywhere for the same reason).
+        cur.execute("SELECT `key`, value FROM order_punch_settings")
         rows = cur.fetchall()
     settings = dict(DEFAULT_SETTINGS)
     for key, value in rows:
