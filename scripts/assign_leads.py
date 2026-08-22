@@ -119,13 +119,16 @@ GOKWIK_TIMEOUT_SEC = 8
 # from one that still needs the write - so this string is load-bearing in both directions.
 ALREADY_REFUNDED = "Already Refunded"
 
-# Written to S and T when an order is found already re-punched under a D2C channel in LMD (see
-# check_already_punched) - same load-bearing read-back-out-of-S contract as ALREADY_REFUNDED,
-# so a lead already marked this way is never re-checked or re-stamped on a later run.
+# Written to S and T when an order is found already re-punched under a D2C channel in
+# Item_level_data (see check_already_punched) - same load-bearing read-back-out-of-S contract as
+# ALREADY_REFUNDED, so a lead already marked this way is never re-checked or re-stamped on a
+# later run.
 ALREADY_PUNCHED = "Already Punched"
 
-# LMD lives in the same mcaff_prod schema as Item_level_data (see ITEM_LEVEL_SCHEMA above).
-LMD_TABLE = "LMD"
+# Same table lookup_platform_order_ids already queries - both live in ITEM_LEVEL_SCHEMA
+# (mcaff_prod). Kept as its own name (not reused inline) since it's what the log messages and
+# check_already_punched docstring below refer to.
+LMD_TABLE = "Item_level_data"
 
 # A live GoKwik/MySQL check is a real network round-trip, and with hundreds of eligible
 # prepaid leads (fresh + Connected=No reassignment candidates combined) checking every one on
@@ -291,7 +294,7 @@ def lookup_platform_order_ids(order_ids):
 
 
 def check_already_punched(order_ids):
-    """{order_id, ...} - the subset of order_ids that already have a row in LMD under a D2C
+    """{order_id, ...} - the subset of order_ids that already have a row in Item_level_data under a D2C
     channel (Channel_Name LIKE '%D2C%') - i.e. a replacement order has already been punched for
     this return, so calling the customer about the original RTO is now pointless.
 
