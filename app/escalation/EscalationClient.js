@@ -1003,7 +1003,7 @@ export default function EscalationClient() {
   const PROCESS_KEY = 'escalation';
   const session = useCallingSession(PROCESS_KEY, {});
   const {
-    googleUser, sessionIsAdmin, processAgents, isProcessAdmin,
+    googleUser, sessionIsAdmin, processAgents, isProcessAdmin, processPermsLoaded,
     agentStatus, setStatus, toast,
   } = session;
   const isAdmin = sessionIsAdmin || isProcessAdmin;
@@ -1080,10 +1080,13 @@ export default function EscalationClient() {
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
-    if (!isAdmin && (view === 'overview' || view === 'agents' || view === 'assigns')) {
+    // Gated on processPermsLoaded - sessionIsAdmin starts false until that same fetch
+    // resolves, so without this an admin got bounced to Settings by the pre-load false
+    // reading and stayed there forever (nothing ever redirects back to Overview).
+    if (processPermsLoaded && !isAdmin && (view === 'overview' || view === 'agents' || view === 'assigns')) {
       setView('settings');
     }
-  }, [isAdmin, view]);
+  }, [processPermsLoaded, isAdmin, view]);
 
   function handleSaved(rowNumber) {
     setOrders((p) => p.filter((o) => o.rowNumber !== rowNumber));
