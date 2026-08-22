@@ -1121,23 +1121,31 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
   var e1={},e2={},e3={},e4={},EB={1:e1,2:e2,3:e3,4:e4};
   function eid(s){return PFX+s;}
   function fmt(n){return n.toLocaleString('en-IN');}
+  function inSet(s,v){ return s.size===0||s.has(v); }
   function leafCounts(f){ var c=[]; for(var ri=0;ri<ROWS.length;ri++){c.push(new Array(N).fill(0));} var idx={}; for(var r2=0;r2<ROWS.length;r2++){idx[ROWS[r2].join('|')]=r2;}
     for(var i=0;i<TICKETS.length;i++){ var t=TICKETS[i],mo=t[0],sku=t[1],pr=t[2],cl=t[3],ca=t[4],ba=t[5];
       if(mo<0||mo>=N||sku<0||sku>=SKUS.length||pr<0||pr>=PRODS.length||cl<0||cl>=CLASSES.length||ca<0||ca>=CATS.length||ba<0||ba>=BATCHES.length)continue;
-      if(f.month!==null&&mo!==f.month)continue; if(f.product!==null&&pr!==f.product)continue; if(f.sku!==null&&sku!==f.sku)continue; if(f.cls!==null&&cl!==f.cls)continue; if(f.category!==null&&ca!==f.category)continue;
+      if(!inSet(f.month,mo)||!inSet(f.product,pr)||!inSet(f.sku,sku)||!inSet(f.cls,cl)||!inSet(f.category,ca))continue;
       var k=sku+'|'+pr+'|'+cl+'|'+ca+'|'+ba; var ri=idx[k]; if(ri===undefined)continue; c[ri][mo]++; } return c; }
   function sm(a,b){var o=new Array(a.length);for(var i=0;i<a.length;i++){o[i]=a[i]+b[i];}return o;}
   function has(a){for(var i=0;i<a.length;i++){if(a[i]>0)return true;}return false;}
   function wc(sub,idx,arr,skuIdx){ var psRow=(skuIdx!=null&&PROSALES[skuIdx])?PROSALES[skuIdx]:null; for(var mi=0;mi<N;mi++){ var v=arr[mi],s=psRow?psRow[mi]:0,p=s>0?Math.round(v/s*100000)/1000:0; var cc=document.getElementById(eid(sub+'-'+idx+'-'+mi+'-cnt')),pc=document.getElementById(eid(sub+'-'+idx+'-'+mi+'-pct')); if(cc)cc.textContent=v>0?fmt(v):'-'; if(pc)pc.textContent=v>0?(p+'%'):'-'; } }
   var DIMS=['month','product','sku','cls','category'],SIDS={month:eid('-filter-month'),product:eid('-filter-product'),sku:eid('-filter-sku'),cls:eid('-filter-class'),category:eid('-filter-category')},TP={month:0,sku:1,product:2,cls:3,category:4};
-  function rf(){ var g=function(fid){var e=document.getElementById(fid);return e?e.value:'';}; return {month:g(SIDS.month)?PERIODS.indexOf(g(SIDS.month)):null,product:g(SIDS.product)?PRODS.indexOf(g(SIDS.product)):null,sku:g(SIDS.sku)?SKUS.indexOf(g(SIDS.sku)):null,cls:g(SIDS.cls)?CLASSES.indexOf(g(SIDS.cls)):null,category:g(SIDS.category)?CATS.indexOf(g(SIDS.category)):null}; }
-  function tmatch(t,f,ex){ for(var d=0;d<DIMS.length;d++){var dim=DIMS[d]; if(dim===ex)continue; var w=f[dim]; if(w===null)continue; if(t[TP[dim]]!==w)return false;} return true; }
+  var FSEL={month:new Set(),product:new Set(),sku:new Set(),cls:new Set(),category:new Set()};
+  var DIM_LABELS={month:function(i){return PERIODS[i];},product:function(i){return PRODS[i];},sku:function(i){return SKUS[i];},cls:function(i){return CLASSES[i];},category:function(i){return CATS[i];}};
+  function boxLabel(dim){ var s=FSEL[dim]; if(s.size===0)return 'All'; if(s.size===1){var only;s.forEach(function(v){only=v;});return DIM_LABELS[dim](only);} return s.size+' selected'; }
+  function rf(){ return FSEL; }
+  function tmatch(t,f,ex){ for(var d=0;d<DIMS.length;d++){var dim=DIMS[d]; if(dim===ex)continue; if(!inSet(f[dim],t[TP[dim]]))return false;} return true; }
+  // Options that would zero out the result set given every OTHER dimension's current
+  // selections are hidden from that dimension's own list (same "narrow the other dropdowns"
+  // behavior the old single-select had); an already-selected option that becomes invalid
+  // this way is dropped from the selection instead of silently keeping a dead filter active.
   function upd(f){ DIMS.forEach(function(dim){ var valid={}; for(var i=0;i<TICKETS.length;i++){var t=TICKETS[i]; if(tmatch(t,f,dim)){valid[t[TP[dim]]]=true;}}
-    var input=document.getElementById(SIDS[dim]); if(!input)return; var list=document.getElementById(SIDS[dim]+'-list'); if(!list)return;
-    var curConfirmed=input.dataset.confirmed||''; var curStillValid=true;
-    list.querySelectorAll('.ss-opt').forEach(function(o){ var ix=o.getAttribute('data-idx'),ok=(ix==='')?true:!!valid[parseInt(ix,10)]; o.setAttribute('data-invalid',ok?'0':'1'); if(curConfirmed!==''&&o.getAttribute('data-value')===curConfirmed&&!ok){curStillValid=false;} });
-    if(!curStillValid){ input.value=''; input.dataset.confirmed=''; }
-    window.ssRefresh(input,list);
+    var list=document.getElementById(SIDS[dim]+'-list'); if(!list)return;
+    FSEL[dim].forEach(function(v){ if(!valid[v])FSEL[dim].delete(v); });
+    list.querySelectorAll('.ss-opt').forEach(function(o){ var ix=o.getAttribute('data-idx'); if(ix==='')return; var iv=parseInt(ix,10),ok=!!valid[iv]; o.setAttribute('data-invalid',ok?'0':'1'); var cb=o.querySelector('.ss-check'); if(cb)cb.checked=FSEL[dim].has(iv); });
+    var box=document.getElementById(SIDS[dim]); if(box)box.textContent=boxLabel(dim);
+    var search=list.querySelector('.ss-search'); if(search)window.ssFilterList(SIDS[dim]+'-list',search.value);
   }); }
   function sk_(a,skuIdx){var LP=N-1,c=a[LP],ps=(skuIdx!=null&&PROSALES[skuIdx])?PROSALES[skuIdx][LP]:0,p=ps>0?c/ps:0;return {c:c,p:p};}
   function cmp(a,b,skuA,skuB){var ka=sk_(a,skuA),kb=sk_(b,skuB); if(kb.c!==ka.c)return kb.c-ka.c; return kb.p-ka.p;}
@@ -1171,7 +1179,7 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
       var note=document.getElementById(eid('-filter-note')); if(note){note.textContent=withData+' of '+PARENTS.length+' SKUs have complaints for the selected filters, sorted by '+PERIODS[N-1]+' complaints. Expand SKU → Product → Query Class → Query Category to drill down.'; note.style.color='';}
     }catch(e){ var n2=document.getElementById(eid('-filter-note')); if(n2){n2.textContent='Filter error: '+e.message;n2.style.color='var(--s6)';} if(window.console)console.error('ProdPkg error ('+PFX+')',e); } }
   window.PPK_INSTANCES = window.PPK_INSTANCES || {};
-  window.PPK_INSTANCES[PFX] = { render: render, toggle: function(lv,idx,ev){ if(ev)ev.stopPropagation(); var s=EB[lv]; s[idx]=!s[idx]; var ic=document.getElementById(eid('-icon-'+lv+'-'+idx)); if(ic)ic.innerHTML=s[idx]?'&#9662;':'&#9656;'; render(); } };
+  window.PPK_INSTANCES[PFX] = { render: render, filterToggle: function(dim,idx){ if(idx===''){FSEL[dim].clear();}else{idx=parseInt(idx,10); if(FSEL[dim].has(idx))FSEL[dim].delete(idx);else FSEL[dim].add(idx);} render(); }, toggle: function(lv,idx,ev){ if(ev)ev.stopPropagation(); var s=EB[lv]; s[idx]=!s[idx]; var ic=document.getElementById(eid('-icon-'+lv+'-'+idx)); if(ic)ic.innerHTML=s[idx]?'&#9662;':'&#9656;'; render(); } };
   function init(){render();}
   if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',init);}else{init();}
 })();
@@ -1186,30 +1194,33 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
             .replace("__PARENTS_JSON__", parents_json).replace("__PROD_G_JSON__", prod_g_json)
             .replace("__CLS_G_JSON__", cls_g_json).replace("__CAT_G_JSON__", cat_g_json))
 
-    def dd(id_, lbl, opts):
+    def dd(id_, lbl, opts, dim):
         s = [f"<div style='display:flex;flex-direction:column;gap:4px;min-width:150px;position:relative;'>"
-             f"<label for='{id_}' style='font-size:11px;color:var(--text-muted);'>{h_enc(lbl)}</label>"]
-        # oninput/onfocus open the dropdown (and live-filter it as you type); onblur reverts
-        # any uncommitted text back to the last confirmed value (deferred via
-        # window.ssBlurCheck so a same-click .ss-opt selection - which updates
-        # value/data-confirmed together - lands first, making the revert a no-op); onchange
-        # covers manually typing an exact match and tabbing/clicking away without using the
-        # dropdown, syncing data-confirmed the same way window.ssPick does.
-        s.append(f"<div style='position:relative;'><input type='text' id='{id_}' class='ss-input' data-confirmed='' placeholder='All' autocomplete='off' "
-                 f"oninput=\"window.ssOpen(this)\" onfocus=\"window.ssOpen(this)\" onblur=\"window.ssBlurCheck(this)\" "
-                 f"onchange=\"this.dataset.confirmed=this.value; onProdPkgFilterChange('{prefix}')\" "
-                 f"style='font-size:12.5px;padding:7px 26px 7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;max-width:220px;width:100%;box-sizing:border-box;'>"
+             f"<label style='font-size:11px;color:var(--text-muted);'>{h_enc(lbl)}</label>"]
+        # Clicking the box opens/closes its own option list (window.ssToggleList); each
+        # option row toggles itself into/out of that dimension's selection on click
+        # (window.ppkFilterToggle -> this instance's FSEL, see filterToggle above) rather
+        # than replacing a single confirmed value, so more than one value can be active at
+        # once. The checkbox inside each row is display-only (pointer-events:none in
+        # _PPK_CSS) - its checked state is driven from FSEL by upd() on every render, not
+        # by the browser's own click handling, so it can never drift out of sync with what's
+        # actually filtered.
+        s.append(f"<div style='position:relative;'>"
+                 f"<div id='{id_}' class='ss-box' tabindex='0' onclick=\"window.ssToggleList('{id_}')\">All</div>"
                  f"<span style='position:absolute;right:9px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--text-muted);font-size:10px;'>&#9662;</span></div>")
-        s.append(f"<div class='ss-list' id='{id_}-list'><div class='ss-opt' data-value='' data-idx='' onclick=\"window.ssPick('{prefix}','{id_}',this)\">All</div>")
+        s.append(f"<div class='ss-list' id='{id_}-list'>"
+                 f"<input type='text' class='ss-search' placeholder='Search\u2026' autocomplete='off' oninput=\"window.ssFilterList('{id_}-list',this.value)\">"
+                 f"<div class='ss-opt ss-opt-all' data-idx='' onclick=\"ppkFilterToggle('{prefix}','{dim}','')\">All</div>")
         for oi, opt in enumerate(opts):
-            s.append(f"<div class='ss-opt' data-value=\"{h_enc(opt)}\" data-idx='{oi}' onclick=\"window.ssPick('{prefix}','{id_}',this)\">{h_enc(opt)}</div>")
+            s.append(f"<div class='ss-opt' data-idx='{oi}' onclick=\"ppkFilterToggle('{prefix}','{dim}','{oi}')\">"
+                     f"<input type='checkbox' class='ss-check'>{h_enc(opt)}</div>")
         s.append("</div></div>")
         return "".join(s)
 
     filter_html = ("<div style='display:flex;gap:14px;flex-wrap:wrap;margin-bottom:16px;align-items:flex-end;'>"
-                   + dd(f"{prefix}-filter-month", filter_label, period_labels) + dd(f"{prefix}-filter-product", "Product Name", PRODS)
-                   + dd(f"{prefix}-filter-sku", "SKU", SKUS) + dd(f"{prefix}-filter-class", "Query Class", CLASSES)
-                   + dd(f"{prefix}-filter-category", "Query Category", CATS)
+                   + dd(f"{prefix}-filter-month", filter_label, period_labels, "month") + dd(f"{prefix}-filter-product", "Product Name", PRODS, "product")
+                   + dd(f"{prefix}-filter-sku", "SKU", SKUS, "sku") + dd(f"{prefix}-filter-class", "Query Class", CLASSES, "cls")
+                   + dd(f"{prefix}-filter-category", "Query Category", CATS, "category")
                    + f"</div><div id='{prefix}-filter-note' style='font-size:12px;color:var(--text-muted);margin-bottom:14px;'></div>")
 
     return {
@@ -1222,38 +1233,29 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
 
 _PPK_DISPATCH_JS = """<script>
 window.ppkToggle=function(prefix,lv,idx,ev){ var inst=window.PPK_INSTANCES&&window.PPK_INSTANCES[prefix]; if(inst)inst.toggle(lv,idx,ev); };
+window.ppkFilterToggle=function(prefix,dim,idx){ var inst=window.PPK_INSTANCES&&window.PPK_INSTANCES[prefix]; if(inst)inst.filterToggle(dim,idx); };
 window.onProdPkgFilterChange=function(prefix){ var inst=window.PPK_INSTANCES&&window.PPK_INSTANCES[prefix]; if(inst)inst.render(); };
 
-// Searchable-combobox interactivity for every ProdPkg filter (.ss-input/.ss-list/.ss-opt) -
+// Multiselect-checklist interactivity for every ProdPkg filter (.ss-box/.ss-list/.ss-opt) -
 // shared once across every instance (monthly + one per weekly-eligible month) rather than
 // duplicated per instance, since none of this depends on which prefix's data is involved.
-window.ssRefresh=function(input,list){
-  var q=(input.value||'').toLowerCase();
+// Each dimension's actual selection lives in that instance's own FSEL (see _build_ppk_core's
+// JS) - this file only ever opens/closes a list or filters its rows by search text.
+window.ssToggleList=function(boxId){
+  var list=document.getElementById(boxId+'-list'); if(!list) return;
+  var willOpen=list.style.display!=='block';
+  document.querySelectorAll('.ss-list').forEach(function(l){l.style.display='none';});
+  if(willOpen) list.style.display='block';
+};
+window.ssFilterList=function(listId,q){
+  var list=document.getElementById(listId); if(!list) return;
+  q=(q||'').toLowerCase();
   list.querySelectorAll('.ss-opt').forEach(function(o){
+    if(o.getAttribute('data-idx')==='') return;
     var invalid=o.getAttribute('data-invalid')==='1';
     var matches=q===''||o.textContent.toLowerCase().indexOf(q)!==-1;
     o.style.display=(matches&&!invalid)?'':'none';
   });
-};
-window.ssOpen=function(input){
-  var list=document.getElementById(input.id+'-list'); if(!list) return;
-  window.ssRefresh(input,list);
-  list.style.display='block';
-};
-window.ssPick=function(prefix,inputId,opt){
-  var input=document.getElementById(inputId); if(!input) return;
-  var val=opt.getAttribute('data-value')||'';
-  input.value=val; input.dataset.confirmed=val;
-  var list=document.getElementById(inputId+'-list'); if(list) list.style.display='none';
-  window.onProdPkgFilterChange(prefix);
-};
-window.ssBlurCheck=function(input){
-  // Deferred (not synchronous) so a same-click selection on a .ss-opt - whose onclick
-  // updates .value/.dataset.confirmed together - finishes first; this then becomes a
-  // harmless no-op reset to the value that selection just set. Without the defer, blur
-  // (which fires before the option's click) would revert the input before the click's
-  // own handler ever runs.
-  setTimeout(function(){ input.value = input.dataset.confirmed || ''; }, 0);
 };
 document.addEventListener('click', function(ev){
   document.querySelectorAll('.ss-list').forEach(function(list){
@@ -1263,7 +1265,7 @@ document.addEventListener('click', function(ev){
 });
 </script>"""
 
-_PPK_CSS = ("<style>.ppk-scroll{max-height:640px;overflow-y:auto;}.ppk-pivot-table thead th{position:sticky;top:0;z-index:4;}"
+_PPK_CSS = ("<style>.ss-box{font-size:12.5px;padding:7px 26px 7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;max-width:220px;width:100%;box-sizing:border-box;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}.ss-search{width:100%;box-sizing:border-box;padding:7px 10px;font-size:12px;border:none;border-bottom:1px solid var(--border);background:var(--surface-card);color:var(--text-primary);font-family:inherit;}.ss-opt-all{font-weight:600;border-bottom:1px solid var(--border);}.ss-check{pointer-events:none;margin-right:6px;vertical-align:middle;}.ppk-scroll{max-height:640px;overflow-y:auto;}.ppk-pivot-table thead th{position:sticky;top:0;z-index:4;}"
             ".ppk-pivot-table thead tr:nth-child(2) th{top:28px;}"
             ".ppk-toggle-icon{display:inline-block;width:14px;font-size:10px;color:var(--text-muted);}"
             ".ppk-pivot-table td.rowlabel{position:sticky;z-index:3;background:var(--surface-card);}.ppk-pivot-table th.corner{z-index:6;}"

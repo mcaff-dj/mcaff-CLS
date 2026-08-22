@@ -111,6 +111,24 @@ def test_sku_collapses_to_its_most_recent_product_spelling():
     assert ">Guava Tini De-Tan Body Wash<" not in body
 
 
+def test_filters_are_checkbox_multiselect_not_single_value():
+    core = _core()
+    html = core["filter_html"]
+    # Every filter is a clickable box + a checklist, not the old single-value text input
+    # that stored one "confirmed" value - so each option can be checked independently.
+    assert "ss-input" not in html, "old single-select text input still emitted"
+    assert html.count("class='ss-box'") == 5, "expected one box per filter dimension"
+    assert "class='ss-check'" in html
+    assert html.count("ss-opt-all") == 5, "each dimension needs its own All row"
+
+    js = core["js"]
+    # Selection state is a per-dimension Set (multiple values active at once), matched by
+    # membership rather than the old strict equality against one confirmed index.
+    assert "FSEL={month:newSet()" in js.replace(" ", "")
+    assert "filterToggle" in js
+    assert "inSet(f.month,mo)" in js
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
