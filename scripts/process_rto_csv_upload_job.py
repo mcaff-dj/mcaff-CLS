@@ -41,6 +41,7 @@ Never raises out of process_job (network/DB blips are caught and turn the job st
 'failed' with error_message set, rather than crashing the Lambda invocation silently) - the
 browser is polling this job's status and needs SOMETHING to show even on failure.
 """
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -303,12 +304,42 @@ def process_job(job_id):
                 s, t, u = row["stamp"]
                 base_row += ["", "", s, t, u]
             values_to_append.append(base_row)
-        lib.append_sheet_rows(SPREADSHEET_ID, f"'{SHEET_TAB}'!B2:U", values_to_append)
+        append_resp = lib.append_sheet_rows(SPREADSHEET_ID, f"'{SHEET_TAB}'!B2:U", values_to_append)
 
-        _update_job(
-            conn, job_id, status="done", appended_count=len(values_to_append),
-            rows_pending=None,
-        )
+        # Post-write sanity check - same reasoning as api/rto/upload-start.js's own AWB
+        # canary check on its immediate-append path: target_headers-positional writes assume
+        # this worker's deployed code matches what's on disk, which is exactly what didn't
+        # hold for the 2026-08-22 corrupted rows (replaying that upload through the current
+        # matching code produced correct output; the live append still landed shifted). AWB
+        # Code is the one column checked because row["awbCode"] comes straight from the
+        # dedup step above, independent of the cells map this is verifying.
+        # ponytail: single-column canary, not a full-row round-trip - upgrade if insufficient.
+        range_match = re.search(r"!\w+(\d+):\w+(\d+)$", (append_resp.get("updates") or {}).get("updatedRange", ""))
+        mapping_failed = False
+        if range_match and stamped_rows:
+            first_row, last_row = range_match.group(1), range_match.group(2)
+            awb_check = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!{awb_col_letter}{first_row}:{awb_col_letter}{last_row}")
+            actual_awbs = [(r[0] if r else "").strip().upper() for r in awb_check]
+            mapping_failed = any(
+                i >= len(actual_awbs) or actual_awbs[i] != stamped_rows[i]["awbCode"]
+                for i in range(len(stamped_rows))
+            )
+        if mapping_failed:
+            print(f"process_job({job_id}): post-append AWB verification FAILED for rows "
+                  f"{first_row}-{last_row} - appended data landed in the wrong columns")
+            _update_job(
+                conn, job_id, status="failed", appended_count=len(values_to_append), rows_pending=None,
+                error_message=(
+                    f"Appended {len(values_to_append)} row(s) but a post-write check found them in "
+                    f"the wrong columns (rows {first_row}-{last_row}). Data is already written in the "
+                    "sheet - contact an admin, do not trust it."
+                ),
+            )
+        else:
+            _update_job(
+                conn, job_id, status="done", appended_count=len(values_to_append),
+                rows_pending=None,
+            )
     except Exception as e:
         print(f"process_job({job_id}) failed: {e}")
         # `conn` may simply be dropped (plausible after the refund-check phase holds it for up

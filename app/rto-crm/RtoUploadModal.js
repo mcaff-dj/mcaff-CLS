@@ -91,6 +91,11 @@ export default function RtoUploadModal({ onClose, onDone }) {
         // Non-prepaid rows (if any) already landed - only the prepaid batch failed to queue.
         // Surface it rather than silently calling onDone(), which would read as "all done".
         setError(data.queueError);
+      } else if (data.mappingWarning) {
+        // The immediate-append rows are already written but failed their post-write AWB
+        // check - same reasoning as queueError above, don't call onDone() and let this read
+        // as a clean success.
+        setError(data.mappingWarning);
       } else {
         onDone(); // nothing prepaid was queued - everything that was going to append already did
       }

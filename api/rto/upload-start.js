@@ -153,6 +153,7 @@ module.exports = async (req, res) => {
     // it has no append semantics) - so this hits the Sheets API directly, same as every other
     // write in this file, but via values:append specifically.
     let appendedNow = 0;
+    let mappingWarning = null;
     if (nonPrepaidRows.length) {
       const startCol = headerToColumnLetter(fullHeaderRow, TARGET_HEADERS[0]);
 
@@ -174,12 +175,44 @@ module.exports = async (req, res) => {
       }
 
       const rowsToAppend = nonPrepaidRows.map((r) => TARGET_HEADERS.map((h) => r.cells[h] || ''));
-      await sheetsRequest(
+      const appendResp = await sheetsRequest(
         client, 'POST',
         `/values/${encodeURIComponent(`'${SHEET_TAB}'!${startCol}2`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
         { values: rowsToAppend },
       );
       appendedNow = nonPrepaidRows.length;
+
+      // Post-write sanity check: the misalignment guard above only catches a HEADER-row
+      // drift, not a mismatch between what this function computed and what actually landed
+      // in the sheet (e.g. the deployed copy of this file/rtoCsvImport.js being out of sync
+      // with what's on disk right now - confirmed as the cause of the 2026-08-22 corrupted
+      // rows, where replaying that upload's CSV through this exact matching code produced
+      // the correct row, yet the live append still landed shifted). AWB Code is checked
+      // because it's independent of matchHeaders - buildRowPlan derives r.awbCode straight
+      // from the CSV's own AWB column, not from the cells map this endpoint is verifying.
+      // ponytail: single-column canary, not a full 15-column round-trip - upgrade if this
+      // ever proves insufficient.
+      const updatedRange = (appendResp && appendResp.updates && appendResp.updates.updatedRange) || '';
+      const rangeMatch = updatedRange.match(/!\w+(\d+):\w+(\d+)$/);
+      if (rangeMatch) {
+        const [, firstRow, lastRow] = rangeMatch;
+        const verifyData = await sheetsRequest(
+          client, 'GET',
+          `/values/${encodeURIComponent(`'${SHEET_TAB}'!${awbColLetter}${firstRow}:${awbColLetter}${lastRow}`)}`,
+        );
+        const actualAwbs = (verifyData.values || []).map(
+          (r) => ((r && r[0]) || '').toString().trim().toUpperCase(),
+        );
+        const mismatch = nonPrepaidRows.some((r, i) => actualAwbs[i] !== r.awbCode);
+        if (mismatch) {
+          console.error(
+            `api/rto/upload-start: post-append AWB verification FAILED for rows ${firstRow}-${lastRow} `
+            + '- appended data landed in the wrong columns. Rows are already written and need manual correction.',
+          );
+          mappingWarning = `Appended ${appendedNow} row(s) but a post-write check found them in the wrong `
+            + `columns (rows ${firstRow}-${lastRow}). Do not trust this data - contact an admin.`;
+        }
+      }
     }
 
     // The non-prepaid append above (if any) has already succeeded by this point - a failure
@@ -237,6 +270,7 @@ module.exports = async (req, res) => {
       total: csvRows.length,
       errors: plan.errors.slice(0, 50),
       ...(queueError ? { queueError } : {}),
+      ...(mappingWarning ? { mappingWarning } : {}),
     });
   } catch (e) {
     console.error('api/rto/upload-start error:', e);
