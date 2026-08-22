@@ -1256,7 +1256,13 @@ const DELIVERY_ESCALATION_MAX_EXPORT = 5000;
 // guard, that NULL poisoned the whole NOT() for every blank-outcome row and wrongly excluded
 // all of Fresh's ordinary (never-disposed) tickets, not just the RTO ones this was meant to
 // catch - caught live: stats.fresh dropped from ~3645 to 2 before this guard was added.
-const DE_FORCED_RTO_WHERE = `(tat = 'Forced to be marked as RTO' OR (outcome IS NOT NULL AND (outcome = 'RTO' OR outcome LIKE 'RTO > %')))`;
+//
+// `tat IS NOT NULL AND` guards the tat comparison for the identical reason - missed the first
+// time around. A row whose tat hasn't been backfilled yet (tat NULL, common: 5,724 rows/3,763
+// AWBs found live) made this whole OR evaluate to NULL instead of FALSE, which poisoned
+// NOT(FORCED) the same way, silently dropping those rows out of Fresh, Forced RTO, AND
+// Resolved - visible nowhere except the unconditional `total` tile.
+const DE_FORCED_RTO_WHERE = `((tat IS NOT NULL AND tat = 'Forced to be marked as RTO') OR (outcome IS NOT NULL AND (outcome = 'RTO' OR outcome LIKE 'RTO > %')))`;
 
 // A ticket is Fresh while its outcome is blank (never disposed), RTO (an RTO'd order can still
 // be re-shipped and later delivered, so it isn't terminal), or Escalated (still waiting on the
