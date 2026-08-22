@@ -210,6 +210,22 @@ async function fetchPage({ view, page, perPage, search, brand, agent, date, cont
   return { rows: (d.rows || []).map((r) => mapRow(r, view === 'resolved')), total: d.total || 0 };
 }
 
+// Mirrors db.js's DE_RESOLVED_WHERE - a history row is read-only once it's actually Delivered,
+// regardless of which tab (Fresh/Resolved/Forced RTO) the currently loaded page is showing.
+function isDeResolvedOutcome(outcome) {
+  return outcome === 'Delivered' || (outcome || '').startsWith('Delivered > ');
+}
+
+// Every ticket ever raised for one parcel (see db.js's getDeliveryEscalationAwbHistory) - the
+// repeat's OTHER tickets can land on any page of the id-ordered table, not just this one, so
+// contactCount > 1 alone can't be expanded from what's already loaded; this is the fetch that
+// actually gets them, called lazily the first time a repeat row is expanded.
+async function fetchAwbHistory(awb, brand) {
+  const p = new URLSearchParams({ op: 'awbHistory', awb, brand });
+  const d = await getJson(`/api/delivery-escalation/record?${p}`);
+  return (d.rows || []).map((r) => mapRow(r, isDeResolvedOutcome(r.outcome)));
+}
+
 // Overview's tiles + the admin Agent filter's options. Counted in SQL over the whole table,
 // not derived from the loaded page.
 async function fetchStats() {
@@ -490,6 +506,9 @@ export default function DeliveryEscalationClient() {
   // with every older ticket for that AWB nested under it as a timeline. Keyed by the parent's
   // own id, not the AWB string, so two different parents never collide.
   const [expandedAwbGroups, setExpandedAwbGroups] = useState(() => new Set());
+  // Fetched lazily on first expand, keyed by `${brand}|${awb}` - {status: 'loading'|'loaded'|
+  // 'error', rows, error}. Cached so re-collapsing and re-expanding the same row doesn't refetch.
+  const [awbHistory, setAwbHistory] = useState(() => new Map());
   const toggleExpanded = (setFn, key) => setFn((prev) => {
     const next = new Set(prev);
     if (next.has(key)) next.delete(key); else next.add(key);
@@ -753,20 +772,37 @@ export default function DeliveryEscalationClient() {
     }
   };
 
-  // Groups the loaded page by AWB (falling back to brand+orderId for the ~144 rows with no
-  // AWB at all - see db.js's own note on those) - NOT a re-sort, just a stable partition, so
-  // each group still surfaces at the position of its first (i.e. newest, given the server's
-  // DESC order) member. One row per group renders as the parent; the rest become its timeline.
+  // Collapses same-page duplicates (an AWB can legitimately appear more than once on one page)
+  // down to a single row - NOT a re-sort, just a stable partition, so each group still surfaces
+  // at the position of its first (i.e. newest, given the server's DESC order) member. That's
+  // only ever a same-PAGE fix though: a repeat's other tickets usually land on a different page
+  // entirely (this table isn't grouped by AWB server-side), which is what expanding via
+  // contactCount + fetchAwbHistory below is actually for. Falls back to brand+orderId for the
+  // ~144 rows with no AWB at all (see db.js's own note on those) - those can't repeat by AWB.
   const groupedTicketRows = useMemo(() => {
     const groups = new Map();
     const order = [];
     for (const t of rows) {
       const key = t.awb || `${t.brand}|${t.orderId}`;
-      if (!groups.has(key)) { groups.set(key, []); order.push(key); }
-      groups.get(key).push(t);
+      if (!groups.has(key)) { groups.set(key, t); order.push(key); }
     }
     return order.map((key) => groups.get(key));
   }, [rows]);
+
+  // Expands one repeat row's timeline, fetching its full cross-view history the first time
+  // (awbHistory is a cache, not just a loading flag - re-expanding after a collapse reuses it).
+  const toggleAwbGroup = (parent) => {
+    const opening = !expandedAwbGroups.has(parent.id);
+    toggleExpanded(setExpandedAwbGroups, parent.id);
+    if (!opening) return;
+    const key = `${parent.brand}|${parent.awb}`;
+    const existing = awbHistory.get(key);
+    if (existing && existing.status !== 'error') return;
+    setAwbHistory(prev => new Map(prev).set(key, { status: 'loading', rows: [] }));
+    fetchAwbHistory(parent.awb, parent.brand)
+      .then(rows => setAwbHistory(prev => new Map(prev).set(key, { status: 'loaded', rows })))
+      .catch(e => setAwbHistory(prev => new Map(prev).set(key, { status: 'error', rows: [], error: e.message })));
+  };
 
   // All counts come from SQL over the whole table (see fetchStats) rather than from the loaded
   // page - there's no client-side filtering or scoping left to do here.
@@ -1172,28 +1208,37 @@ export default function DeliveryEscalationClient() {
                           <th className="py-3 px-4 text-right font-medium">Action</th>
                         </tr></thead>
                         <tbody className="divide-y divide-zinc-800/50">
-                          {groupedTicketRows.map((group) => {
-                            const parent = group[0];
-                            const children = group.slice(1);
-                            const isOpen = children.length > 0 && expandedAwbGroups.has(parent.id);
+                          {groupedTicketRows.map((parent) => {
+                            const hasRepeat = parent.contactCount !== '' && parent.contactCount > 1;
+                            const isOpen = hasRepeat && expandedAwbGroups.has(parent.id);
+                            const history = hasRepeat ? awbHistory.get(`${parent.brand}|${parent.awb}`) : null;
+                            const childRows = history?.status === 'loaded'
+                              ? history.rows.filter((t) => t.id !== parent.id) : [];
+                            const colSpan = tab === 'resolved' ? 16 : 13;
                             return (
                               <Fragment key={parent.id}>
                                 <tr
-                                  onClick={children.length ? () => toggleExpanded(setExpandedAwbGroups, parent.id) : undefined}
-                                  className={`hover:bg-zinc-800/30 transition-colors ${children.length ? 'cursor-pointer' : ''}`}
+                                  onClick={hasRepeat ? () => toggleAwbGroup(parent) : undefined}
+                                  className={`hover:bg-zinc-800/30 transition-colors ${hasRepeat ? 'cursor-pointer' : ''}`}
                                 >
                                   <td className="py-3 px-4 text-zinc-300">
-                                    {children.length > 0 && (
+                                    {hasRepeat && (
                                       <span className="inline-block w-4 text-zinc-500">{isOpen ? '▾' : '▸'}</span>
                                     )}
                                     {parent.brand}
-                                    {children.length > 0 && (
-                                      <span className="ml-1.5 text-[11px] text-zinc-500">({group.length})</span>
+                                    {hasRepeat && (
+                                      <span className="ml-1.5 text-[11px] text-amber-400 font-semibold">×{parent.contactCount}</span>
                                     )}
                                   </td>
                                   {ticketRowCells(parent, tab, openAction)}
                                 </tr>
-                                {isOpen && children.map((t) => (
+                                {isOpen && history?.status === 'loading' && (
+                                  <tr><td colSpan={colSpan} className="py-2 px-4 pl-8 text-zinc-500 text-[12px]">Loading history…</td></tr>
+                                )}
+                                {isOpen && history?.status === 'error' && (
+                                  <tr><td colSpan={colSpan} className="py-2 px-4 pl-8 text-rose-400 text-[12px]">Couldn&apos;t load history: {history.error}</td></tr>
+                                )}
+                                {isOpen && childRows.map((t) => (
                                   <tr key={t.id} className="bg-zinc-950/30 hover:bg-zinc-800/30 transition-colors">
                                     <td className="py-3 px-4 pl-8 text-zinc-500 text-[12px] whitespace-nowrap">↳ {t.brand}</td>
                                     {ticketRowCells(t, tab, openAction)}

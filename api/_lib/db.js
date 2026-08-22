@@ -1562,6 +1562,23 @@ async function getDeliveryEscalationAgents() {
   return rows.map((r) => r.agent_email);
 }
 
+// Every ticket ever raised for one parcel, across ALL views (Fresh/Resolved/Forced RTO) - not
+// just the one whose page happened to load it. contact_count already tells the client a repeat
+// exists; this is what the client's expand-to-timeline calls to actually fetch the rest, since
+// a repeat's other tickets can land anywhere in the id-ordered table, not necessarily on the
+// same page as the newest one. Scoped to brand as well as awb_code, matching the same brand
+// scoping disposeDeliveryEscalationTicketById's cascade already uses for "this AWB" - a bare
+// awb_code isn't guaranteed unique across both brands. No paging: contact_count (bounded, see
+// its own sync) keeps this a handful of rows, never the whole table.
+async function getDeliveryEscalationAwbHistory(awb, brand) {
+  const pool = await getPool();
+  const [rows] = await pool.execute(
+    `SELECT ${DE_SELECT_COLUMNS} FROM Delivery_escalation WHERE awb_code = ? AND brand = ? ORDER BY id DESC`,
+    [awb, brand]
+  );
+  return rows;
+}
+
 // One CHUNK of a CSV export - current filter/scope, ordered, LIMIT/OFFSET by opts.page (1-based).
 // DELIVERY_ESCALATION_MAX_EXPORT is a per-request chunk size, not a total cap: it exists only
 // to keep any one response inside Lambda's 6MB ceiling. The client (see downloadCsv in
@@ -2932,7 +2949,7 @@ module.exports = {
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
-  getDeliveryEscalationDaywiseStats,
+  getDeliveryEscalationDaywiseStats, getDeliveryEscalationAwbHistory,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,

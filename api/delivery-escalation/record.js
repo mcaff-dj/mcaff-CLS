@@ -7,6 +7,7 @@
 //   ?view=fresh|resolved&page&perPage&search&brand&agent&date&contactBucket -> { rows, total, page, perPage }
 //   ?op=stats                                            -> { stats, agents }
 //   ?op=export&view=...(+ same filters)                  -> { rows, capped }
+//   ?op=awbHistory&awb&brand                             -> { rows } (every ticket for that parcel)
 //
 // POST action 'claim'/'dispose' is the Fresh tab's own claim/resolve, and 'bulkDispose' its CSV
 // upload - all MySQL-only, no sheet write, same model as CLS_RTO_calling's own claim/dispose.
@@ -23,7 +24,7 @@ const {
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
-  getDeliveryEscalationDaywiseStats,
+  getDeliveryEscalationDaywiseStats, getDeliveryEscalationAwbHistory,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
 } = require('../_lib/db');
@@ -81,6 +82,19 @@ module.exports = async (req, res) => {
           getDeliveryEscalationRepeatStats(),
         ]);
         res.status(200).json({ stats, agents, repeatStats });
+        return;
+      }
+
+      if (q.op === 'awbHistory') {
+        // Powers the ticket list's expand-to-timeline (see DeliveryEscalationClient.js) -
+        // every ticket ever raised for this parcel, spanning all three views, not just the one
+        // the client is currently looking at.
+        if (!q.awb || !q.brand) {
+          res.status(400).json({ error: 'awb and brand are required' });
+          return;
+        }
+        const history = await getDeliveryEscalationAwbHistory(q.awb, q.brand);
+        res.status(200).json({ rows: history });
         return;
       }
 
