@@ -1337,14 +1337,31 @@ const DE_SELECT_COLUMNS = `id, brand, order_id, awb_code, delivery_partner, quer
     contact_count, first_added_date,
     ${DE_TAT_BUCKET_SQL} AS tat_bucket`;
 
+// Same buckets getDeliveryEscalationRepeatStats groups by - reused here so the Total-times-
+// user-came filter and that Overview tile can never disagree on what "2-4 times" means.
+const DE_CONTACT_BUCKET_RANGES = {
+  '1': { sql: 'contact_count = ?', params: [1] },
+  '2-4': { sql: 'contact_count BETWEEN ? AND ?', params: [2, 4] },
+  '5-9': { sql: 'contact_count BETWEEN ? AND ?', params: [5, 9] },
+  '10+': { sql: 'contact_count >= ?', params: [10] },
+};
+
 // Every user-supplied value here becomes a bound parameter - none is ever concatenated into
 // the SQL text. `agent` is the optional Agent-filter dropdown, a user's own choice of view -
-// there is no forced per-agent scope (see the header comment above).
-function deFilterSql({ search, brand, agent } = {}) {
+// there is no forced per-agent scope (see the header comment above). `date` filters on
+// added_date's calendar day (the Query date shown elsewhere on this page, e.g. the day-wise
+// table), not disposed_at - a ticket's "date" is when the customer first raised it.
+function deFilterSql({ search, brand, agent, date, contactBucket } = {}) {
   const clauses = [];
   const params = [];
   if (brand) { clauses.push('brand = ?'); params.push(brand); }
   if (agent) { clauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
+  if (date) { clauses.push('DATE(added_date) = ?'); params.push(date); }
+  if (contactBucket && DE_CONTACT_BUCKET_RANGES[contactBucket]) {
+    const range = DE_CONTACT_BUCKET_RANGES[contactBucket];
+    clauses.push(range.sql);
+    params.push(...range.params);
+  }
   if (search) {
     // Escape LIKE's own wildcards so a literal % or _ in an AWB/order id searches as itself
     // rather than as a pattern.

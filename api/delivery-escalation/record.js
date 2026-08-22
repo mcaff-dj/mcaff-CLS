@@ -4,7 +4,7 @@
 //
 // GET serves three shapes, all paged/filtered in SQL (see db.js's own header comment on
 // why - Lambda's 6MB response cap):
-//   ?view=fresh|resolved&page&perPage&search&brand&agent -> { rows, total, page, perPage }
+//   ?view=fresh|resolved&page&perPage&search&brand&agent&date&contactBucket -> { rows, total, page, perPage }
 //   ?op=stats                                            -> { stats, agents }
 //   ?op=export&view=...(+ same filters)                  -> { rows, capped }
 //
@@ -68,6 +68,8 @@ module.exports = async (req, res) => {
       search: q.search || '',
       brand: q.brand && q.brand !== 'ALL' ? q.brand : '',
       agent: q.agent && q.agent !== 'ALL' ? q.agent : '',
+      date: q.date || '',
+      contactBucket: q.contactBucket && q.contactBucket !== 'ALL' ? q.contactBucket : '',
     };
     try {
       if (q.op === 'stats') {
