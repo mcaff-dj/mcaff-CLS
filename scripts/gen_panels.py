@@ -1041,54 +1041,50 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
         rows_by_cat.setdefault(k, []).append(i)
 
     t = [f"<div class='pivot-scroll ppk-scroll'><table class='pivot-table ppk-pivot-table' id='{prefix}-pivot-table'><thead><tr>"
-         "<th class='corner'>SKU</th><th class='corner'>Product Name</th><th class='corner'>Query Class</th>"
-         "<th class='corner'>Query Category</th><th class='corner'>Batch Number</th>"]
+         "<th class='corner'>SKU &rarr; Product &rarr; Query &rarr; Batch</th>"]
     for i, lbl in enumerate(period_labels):
         t.append(f"<th colspan='2' class='month-hdr'{yr_attrs[i]}>{h_enc(lbl)}</th>")
-    t.append("</tr><tr><th class='corner'></th><th class='corner'></th><th class='corner'></th><th class='corner'></th><th class='corner'></th>")
+    t.append("</tr><tr><th class='corner'></th>")
     for i in range(n):
         t.append(f"<th class='sub-hdr'{yr_attrs[i]}>complain</th><th class='sub-hdr'{yr_attrs[i]}>complain%</th>")
     t.append("</tr></thead><tbody>")
     for pi, p in enumerate(parents_out):
         z = "zebra" if (pi + 1) % 2 == 1 else ""
-        t.append(f"<tr class='{z} ppk-lvl1' id='{prefix}-parent-{pi}' style='font-weight:700;'><td class='rowlabel' title=\"{h_enc(SKUS[p['sku']])}\">"
-                 f"<span id='{prefix}-icon-1-{pi}' class='ppk-toggle-icon' onclick=\"ppkToggle('{prefix}',1,{pi},event)\" style='cursor:pointer;'>+</span>{h_enc(SKUS[p['sku']])}</td>"
-                 f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td>")
+        t.append(f"<tr class='{z} ppk-lvl1 ppk-drill' id='{prefix}-parent-{pi}' onclick=\"ppkToggle('{prefix}',1,{pi},event)\" style='font-weight:700;'>"
+                 f"<td class='rowlabel ppk-ind1' title=\"{h_enc(SKUS[p['sku']])}\">"
+                 f"<span id='{prefix}-icon-1-{pi}' class='ppk-toggle-icon'>&#9656;</span>{h_enc(SKUS[p['sku']])}</td>")
         for mi in range(n):
             t.append(f"<td class='num' id='{prefix}-p-{pi}-{mi}-cnt'{yr_attrs[mi]}>-</td><td class='pct' id='{prefix}-p-{pi}-{mi}-pct'{yr_attrs[mi]}>-</td>")
         t.append("</tr>")
         for pgi in pg_by_p.get(pi, []):
             pg = prod_groups[pgi]
-            t.append(f"<tr class='ppk-lvl2 {prefix}-child-of-p{pi}' id='{prefix}-pg-{pgi}' style='display:none;font-weight:600;background:var(--surface-1);'>"
-                     f"<td class='rowlabel'></td><td class='rowlabel' title=\"{h_enc(PRODS[pg['prod']])}\">"
-                     f"<span id='{prefix}-icon-2-{pgi}' class='ppk-toggle-icon' onclick=\"ppkToggle('{prefix}',2,{pgi},event)\" style='cursor:pointer;'>+</span>{h_enc(PRODS[pg['prod']])}</td>"
-                     f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td>")
+            t.append(f"<tr class='ppk-lvl2 ppk-drill {prefix}-child-of-p{pi}' id='{prefix}-pg-{pgi}' onclick=\"ppkToggle('{prefix}',2,{pgi},event)\" style='display:none;font-weight:600;background:var(--surface-1);'>"
+                     f"<td class='rowlabel ppk-ind2' title=\"{h_enc(PRODS[pg['prod']])}\">"
+                     f"<span id='{prefix}-icon-2-{pgi}' class='ppk-toggle-icon'>&#9656;</span>{h_enc(PRODS[pg['prod']])}</td>")
             for mi in range(n):
                 t.append(f"<td class='num' id='{prefix}-pg-{pgi}-{mi}-cnt'{yr_attrs[mi]}>-</td><td class='pct' id='{prefix}-pg-{pgi}-{mi}-pct'{yr_attrs[mi]}>-</td>")
             t.append("</tr>")
             for cgi in cg_by_pg.get(pgi, []):
                 cg = cls_groups[cgi]
-                t.append(f"<tr class='ppk-lvl3 {prefix}-child-of-pg{pgi}' id='{prefix}-cg-{cgi}' style='display:none;background:var(--pivot-zebra-bg);'>"
-                         f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel' title=\"{h_enc(CLASSES[cg['cls']])}\">"
-                         f"<span id='{prefix}-icon-3-{cgi}' class='ppk-toggle-icon' onclick=\"ppkToggle('{prefix}',3,{cgi},event)\" style='cursor:pointer;'>+</span>{h_enc(CLASSES[cg['cls']])}</td>"
-                         f"<td class='rowlabel'></td><td class='rowlabel'></td>")
+                t.append(f"<tr class='ppk-lvl3 ppk-drill {prefix}-child-of-pg{pgi}' id='{prefix}-cg-{cgi}' onclick=\"ppkToggle('{prefix}',3,{cgi},event)\" style='display:none;background:var(--pivot-zebra-bg);'>"
+                         f"<td class='rowlabel ppk-ind3' title=\"{h_enc(CLASSES[cg['cls']])}\">"
+                         f"<span id='{prefix}-icon-3-{cgi}' class='ppk-toggle-icon'>&#9656;</span>{h_enc(CLASSES[cg['cls']])}</td>")
                 for mi in range(n):
                     t.append(f"<td class='num' id='{prefix}-cg-{cgi}-{mi}-cnt'{yr_attrs[mi]}>-</td><td class='pct' id='{prefix}-cg-{cgi}-{mi}-pct'{yr_attrs[mi]}>-</td>")
                 t.append("</tr>")
                 for catgi in cat_by_cg.get(cgi, []):
                     catg = cat_groups[catgi]
-                    t.append(f"<tr class='ppk-lvl4 {prefix}-child-of-cg{cgi}' id='{prefix}-catg-{catgi}' style='display:none;'>"
-                             f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel' title=\"{h_enc(CATS[catg['cat']])}\">"
-                             f"<span id='{prefix}-icon-4-{catgi}' class='ppk-toggle-icon' onclick=\"ppkToggle('{prefix}',4,{catgi},event)\" style='cursor:pointer;'>+</span>{h_enc(CATS[catg['cat']])}</td>"
-                             f"<td class='rowlabel'></td>")
+                    t.append(f"<tr class='ppk-lvl4 ppk-drill {prefix}-child-of-cg{cgi}' id='{prefix}-catg-{catgi}' onclick=\"ppkToggle('{prefix}',4,{catgi},event)\" style='display:none;'>"
+                             f"<td class='rowlabel ppk-ind4' title=\"{h_enc(CATS[catg['cat']])}\">"
+                             f"<span id='{prefix}-icon-4-{catgi}' class='ppk-toggle-icon'>&#9656;</span>{h_enc(CATS[catg['cat']])}</td>")
                     for mi in range(n):
                         t.append(f"<td class='num' id='{prefix}-catg-{catgi}-{mi}-cnt'{yr_attrs[mi]}>-</td><td class='pct' id='{prefix}-catg-{catgi}-{mi}-pct'{yr_attrs[mi]}>-</td>")
                     t.append("</tr>")
                     for ri in rows_by_cat.get(catgi, []):
                         c = rows_out[ri]
                         t.append(f"<tr class='ppk-lvl5 {prefix}-child-of-catg{catgi}' id='{prefix}-row-{ri}' style='display:none;background:var(--surface-card);'>"
-                                 f"<td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td><td class='rowlabel'></td>"
-                                 f"<td class='rowlabel' title=\"{h_enc(BATCHES[c['batch']])}\">{h_enc(BATCHES[c['batch']])}</td>")
+                                 f"<td class='rowlabel ppk-ind5' title=\"{h_enc(BATCHES[c['batch']])}\">"
+                                 f"<span class='ppk-toggle-icon'></span>{h_enc(BATCHES[c['batch']])}</td>")
                         for mi in range(n):
                             t.append(f"<td class='num' id='{prefix}-row-{ri}-{mi}-cnt'{yr_attrs[mi]}>-</td><td class='pct' id='{prefix}-row-{ri}-{mi}-pct'{yr_attrs[mi]}>-</td>")
                         t.append("</tr>")
@@ -1153,7 +1149,7 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
       var note=document.getElementById(eid('-filter-note')); if(note){note.textContent=withData+' of '+PARENTS.length+' SKUs have complaints for the selected filters, sorted by '+PERIODS[N-1]+' complaints. Expand SKU → Product → Query Class → Query Category to drill down.'; note.style.color='';}
     }catch(e){ var n2=document.getElementById(eid('-filter-note')); if(n2){n2.textContent='Filter error: '+e.message;n2.style.color='var(--s6)';} if(window.console)console.error('ProdPkg error ('+PFX+')',e); } }
   window.PPK_INSTANCES = window.PPK_INSTANCES || {};
-  window.PPK_INSTANCES[PFX] = { render: render, toggle: function(lv,idx,ev){ if(ev)ev.stopPropagation(); var s=EB[lv]; s[idx]=!s[idx]; var ic=document.getElementById(eid('-icon-'+lv+'-'+idx)); if(ic)ic.textContent=s[idx]?'−':'+'; render(); } };
+  window.PPK_INSTANCES[PFX] = { render: render, toggle: function(lv,idx,ev){ if(ev)ev.stopPropagation(); var s=EB[lv]; s[idx]=!s[idx]; var ic=document.getElementById(eid('-icon-'+lv+'-'+idx)); if(ic)ic.innerHTML=s[idx]?'&#9662;':'&#9656;'; render(); } };
   function init(){render();}
   if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',init);}else{init();}
 })();
@@ -1246,13 +1242,20 @@ document.addEventListener('click', function(ev){
 </script>"""
 
 _PPK_CSS = ("<style>.ppk-scroll{max-height:640px;overflow-y:auto;}.ppk-pivot-table thead th{position:sticky;top:0;z-index:4;}"
-            ".ppk-pivot-table thead tr:nth-child(2) th{top:28px;}.ppk-toggle-icon{display:inline-block;width:14px;font-weight:700;color:var(--s1);}"
+            ".ppk-pivot-table thead tr:nth-child(2) th{top:28px;}"
+            ".ppk-toggle-icon{display:inline-block;width:14px;font-size:10px;color:var(--text-muted);}"
             ".ppk-pivot-table td.rowlabel{position:sticky;z-index:3;background:var(--surface-card);}.ppk-pivot-table th.corner{z-index:6;}"
-            ".ppk-pivot-table th.corner:nth-child(1),.ppk-pivot-table td.rowlabel:nth-child(1){left:0;width:90px;min-width:90px;max-width:90px;}"
-            ".ppk-pivot-table th.corner:nth-child(2),.ppk-pivot-table td.rowlabel:nth-child(2){left:90px;width:190px;min-width:190px;max-width:190px;}"
-            ".ppk-pivot-table th.corner:nth-child(3),.ppk-pivot-table td.rowlabel:nth-child(3){left:280px;width:130px;min-width:130px;max-width:130px;}"
-            ".ppk-pivot-table th.corner:nth-child(4),.ppk-pivot-table td.rowlabel:nth-child(4){left:410px;width:170px;min-width:170px;max-width:170px;}"
-            ".ppk-pivot-table th.corner:nth-child(5),.ppk-pivot-table td.rowlabel:nth-child(5){left:580px;width:110px;min-width:110px;max-width:110px;box-shadow:2px 0 4px -2px rgba(0,0,0,0.25);}</style>")
+            # One frozen label column carrying the whole SKU -> Product -> Query Class ->
+            # Query Category -> Batch hierarchy as indentation, replacing five frozen
+            # columns (690px of viewport, four of them blank on any given row) - same
+            # single-column drill-down as the Month/Week/Day table in app/delivery-escalation.
+            ".ppk-pivot-table th.corner:nth-child(1),.ppk-pivot-table td.rowlabel:nth-child(1)"
+            "{left:0;width:320px;min-width:320px;max-width:320px;overflow:hidden;text-overflow:ellipsis;"
+            "box-shadow:2px 0 4px -2px rgba(0,0,0,0.25);}"
+            ".ppk-pivot-table td.ppk-ind2{padding-left:24px;}.ppk-pivot-table td.ppk-ind3{padding-left:42px;}"
+            ".ppk-pivot-table td.ppk-ind4{padding-left:60px;}.ppk-pivot-table td.ppk-ind5{padding-left:78px;}"
+            ".ppk-pivot-table tr.ppk-drill{cursor:pointer;}"
+            ".ppk-pivot-table tbody tr.ppk-drill:hover td{background:var(--pivot-header-bg);}</style>")
 
 
 def build_prod_pkg_panel(ctx):
