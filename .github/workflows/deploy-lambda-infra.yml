@@ -1,0 +1,62 @@
+name: Bootstrap Lambda infra (deploy_infra.sh)
+
+# Manual-only: this runs lambda/deploy_infra.sh, the one-time/idempotent bootstrap script
+# (creates missing IAM roles, Lambdas, EventBridge schedules; update-code/no-op for what
+# already exists). Not on push/schedule - deploy-cron-lambdas.yml already handles ongoing
+# code updates on every push. Use this only when a NEW Lambda/role/schedule needs creating,
+# e.g. mcaff-cls-order-punch-worker not existing yet.
+#
+# Needs github-actions-mcaff-cls-deploy's role to hold lambda/mcaff-cls-admin-policy.json
+# (iam:*/lambda:*/scheduler:*/secretsmanager:* scoped to mcaff-cls-*) in addition to its
+# existing narrow update-function-code rights - see lambda/README.md.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write   # OIDC -> assume the AWS role below, no stored AWS keys
+  contents: read
+
+concurrency:
+  group: deploy-lambda-infra
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install zip (build.sh needs it)
+        run: sudo apt-get update -y && sudo apt-get install -y zip
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::157320387454:role/github-actions-mcaff-cls-deploy
+          aws-region: ap-south-1
+
+      # No --query restriction here unlike deploy-cron-lambdas.yml's steps: deploy_infra.sh
+      # already redirects every env-var-echoing AWS CLI response to >/dev/null itself (see
+      # its own comments on the 2026-08-14 plaintext-secret incident) - nothing to add.
+      - name: Run deploy_infra.sh
+        env:
+          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+          GOKWIK_HYPHEN_APPID: ${{ secrets.GOKWIK_HYPHEN_APPID }}
+          GOKWIK_HYPHEN_APPSECRET: ${{ secrets.GOKWIK_HYPHEN_APPSECRET }}
+          GOKWIK_FIEN_APPID: ${{ secrets.GOKWIK_FIEN_APPID }}
+          GOKWIK_FIEN_APPSECRET: ${{ secrets.GOKWIK_FIEN_APPSECRET }}
+          GOKWIK_MCAFFEINE_APPID: ${{ secrets.GOKWIK_MCAFFEINE_APPID }}
+          GOKWIK_MCAFFEINE_APPSECRET: ${{ secrets.GOKWIK_MCAFFEINE_APPSECRET }}
+        run: bash lambda/deploy_infra.sh
