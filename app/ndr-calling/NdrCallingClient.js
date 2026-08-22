@@ -392,14 +392,16 @@ export default function NdrCallingClient() {
       if (partnerCallValue) ranges.push({ range: `V${ndrDetailTkt.rowNum}`, values: [partnerCallValue] });
       const claimNow = !ndrDetailTkt.assignedAgent && googleUser?.email;
       if (claimNow) ranges.push({ range: `S${ndrDetailTkt.rowNum}`, values: [googleUser.email] });
+      // MySQL writes go first: neither depends on the Sheets round trip below, so making the
+      // agent's disposal wait on Sheets before it even reaches the DB is pure added latency.
+      if (claimNow) await recordNdrLeadAssignment({ action: 'claim', awbNumber: ndrDetailTkt.awb, email: googleUser.email });
+      await recordNdrLeadAssignment({ action: 'dispose', awbNumber: ndrDetailTkt.awb, disposition: ndrDispSelection, agentRemarks: ndrDispRemarks });
       await writeNdrCells(ranges);
       setNdrTickets(prev => prev.map(x => x.id === ndrDetailTkt.id
         ? { ...x, callingDate, connected: connectedValue, outcome: outcomeValue, remarks: remarksValue,
             ...(partnerCallValue ? { deliveryAgentCall: partnerCallValue } : {}),
             ...(claimNow ? { assignedAgent: googleUser.email } : {}) }
         : x));
-      if (claimNow) await recordNdrLeadAssignment({ action: 'claim', awbNumber: ndrDetailTkt.awb, email: googleUser.email });
-      await recordNdrLeadAssignment({ action: 'dispose', awbNumber: ndrDetailTkt.awb, disposition: ndrDispSelection, agentRemarks: ndrDispRemarks });
       showToast('Disposition saved');
       setNdrDetailTkt(null);
     } catch (e) {
