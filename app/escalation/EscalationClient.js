@@ -66,7 +66,6 @@ const TAG_FILTER_OPTIONS = [
 // Which of this page's own nav items are admin-only (Overview / Agent Management / Assignments) -
 // same distinction the standalone app drew, just gated on the real session now.
 const VIEW_LABELS = {
-  queue:    'RTO Queue',
   overview: 'Overview',
   agents:   'Agent Management',
   assigns:  'Assignments',
@@ -297,9 +296,8 @@ function OverviewPanel({ overview, agents, loading, resolvedCount }) {
 /* ============================================================
    Sidebar
    ============================================================ */
-function Sidebar({ collapsed, isAdmin, googleUser, pendingCount, view, onViewChange }) {
+function Sidebar({ collapsed, isAdmin, googleUser, view, onViewChange }) {
   const navItems = [
-    { id: 'queue',    icon: I.inbox,    label: 'RTO Queue',        badge: pendingCount },
     ...(isAdmin ? [
       { id: 'overview', icon: I.zap,     label: 'Overview',         badge: null },
       { id: 'agents',   icon: I.users,   label: 'Agent Management', badge: null },
@@ -1012,7 +1010,7 @@ export default function EscalationClient() {
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [theme,            setTheme]            = useState('dark');
-  const [view,             setView]             = useState('queue'); // 'queue' | 'overview' | 'agents' | 'assigns' | 'settings'
+  const [view,             setView]             = useState('overview'); // 'overview' | 'agents' | 'assigns' | 'settings'
 
   const [orders,      setOrders]      = useState([]);
   const [loading,     setLoading]     = useState(true);
@@ -1083,7 +1081,7 @@ export default function EscalationClient() {
 
   useEffect(() => {
     if (!isAdmin && (view === 'overview' || view === 'agents' || view === 'assigns')) {
-      setView('queue');
+      setView('settings');
     }
   }, [isAdmin, view]);
 
@@ -1336,7 +1334,7 @@ export default function EscalationClient() {
 
   return (
     <div className={`appShell${sidebarCollapsed ? ' sidebarCollapsed' : ''}`}>
-      <Sidebar collapsed={sidebarCollapsed} isAdmin={isAdmin} googleUser={googleUser} pendingCount={totalPending}
+      <Sidebar collapsed={sidebarCollapsed} isAdmin={isAdmin} googleUser={googleUser}
         view={view} onViewChange={setView} />
 
       <div className="mainContent">
@@ -1349,7 +1347,7 @@ export default function EscalationClient() {
             <div className="breadcrumb">
               <span className="breadcrumbItem">Escalation</span>
               <span className="breadcrumbSep">/</span>
-              <span className="breadcrumbCurrent">{VIEW_LABELS[view] || 'RTO Queue'}</span>
+              <span className="breadcrumbCurrent">{VIEW_LABELS[view] || 'Overview'}</span>
             </div>
           </div>
           <div className="topbarRight">
@@ -1372,235 +1370,6 @@ export default function EscalationClient() {
         <main className="pageBody">
           {view === 'overview' ? (
             <OverviewPanel overview={overview} agents={agents} loading={loading} resolvedCount={resolvedCount} />
-          ) : view === 'queue' ? (
-            <>
-          <div className="pageHeader">
-            <div>
-              <h1 className="pageTitle">RTO Action Queue</h1>
-              <p className="pageSubtitle">
-                Google Sheet-backed resolution · sorted by priority · {totalPending} orders pending
-              </p>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <button
-                type="button"
-                className="btn btnSecondary"
-                onClick={handleExport}
-                disabled={exporting || loading || orders.length === 0}
-                title="Download eligible orders as CSV"
-                style={{ fontSize: 12 }}
-              >
-                {exporting ? <span className="spinner spinnerMuted" /> : <Icon path={I.download} size={13} />}
-                {exporting ? 'Exporting…' : 'Download CSV'}
-              </button>
-              {isAdmin && (
-                <button
-                  type="button"
-                  className="btn btnSecondary"
-                  onClick={() => setShowImport(true)}
-                  disabled={loading}
-                  title="Upload a CSV to resolve orders in bulk"
-                  style={{ fontSize: 12 }}
-                >
-                  <Icon path={I.upload} size={13} />
-                  Upload CSV
-                </button>
-              )}
-              <button
-                type="button"
-                className="btn btnSecondary"
-                onClick={handleAutoAssign}
-                disabled={autoAssigning || loading || orders.length === 0}
-                title={isAdmin ? 'Round-robin assign to all agents' : 'Assign all unassigned to me'}
-                style={{ fontSize: 12 }}
-              >
-                {autoAssigning ? <span className="spinner spinnerMuted" /> : <Icon path={I.autoAssign} size={13} />}
-                {autoAssigning ? 'Assigning…' : isAdmin ? 'Auto-Assign All' : 'Auto-Assign My Queue'}
-              </button>
-              <div className="livePill">
-                <span className="pulseDot" />
-                Live
-              </div>
-            </div>
-          </div>
-
-          {isAdmin && (
-            <div className="adminBanner">
-              <Icon path={I.users} size={12} />
-              Admin mode — assign leads, bulk update, and manage all agents.
-            </div>
-          )}
-
-          {error && (
-            <div className="banner bannerError" role="alert">
-              <Icon path={I.alert} size={12} /> {error}
-            </div>
-          )}
-
-          <div className="statsGrid">
-            <StatCard variant="pending"    icon="🚨" value={loading ? null : totalPending}    label="Total Pending"   sub="Needs resolution" />
-            <StatCard variant="unassigned" icon="⏳" value={loading ? null : unassignedCount} label="Unassigned"      sub="No agent yet" />
-            <StatCard variant="assigned"   icon="👤" value={loading ? null : assignedCount}   label="Assigned"        sub="In progress" />
-            <StatCard variant="resolved"   icon="✅" value={resolvedCount}                    label="Resolved"        sub="This session" />
-          </div>
-
-          <div className="toolbar">
-            <div className="searchWrap">
-              <span className="searchIcon"><Icon path={I.search} size={13} /></span>
-              <label htmlFor="order-search" className="srOnly">Search orders</label>
-              <input id="order-search" className="searchInput"
-                placeholder="Search order, AWB, category, city…"
-                value={search} onChange={(e) => setSearch(e.target.value)} />
-              {search && (
-                <button type="button" className="searchClear" onClick={() => setSearch('')} aria-label="Clear">✕</button>
-              )}
-            </div>
-
-            <select className={`filterSelect${filterStatus ? ' filterSelectActive' : ''}`} value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} aria-label="Filter status">
-              {STATUS_FILTER_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-
-            <select className={`filterSelect${filterPriority ? ' filterSelectActive' : ''}`} value={filterPriority} onChange={(e) => setFilterPriority(e.target.value)} aria-label="Filter priority">
-              {PRIORITY_FILTER_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-
-            <select className={`filterSelect${filterTag ? ' filterSelectActive' : ''}`} value={filterTag} onChange={(e) => setFilterTag(e.target.value)} aria-label="Filter tag">
-              {TAG_FILTER_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-
-            <select className={`filterSelect${filterPartner ? ' filterSelectActive' : ''}`} value={filterPartner} onChange={(e) => setFilterPartner(e.target.value)} aria-label="Filter partner">
-              <option value="">All Partners</option>
-              {partnerOptions.map((p) => <option key={p} value={p}>{p}</option>)}
-            </select>
-
-            {isAdmin && agents.length > 0 && (
-              <select className={`filterSelect${filterAgent ? ' filterSelectActive' : ''}`} value={filterAgent} onChange={(e) => setFilterAgent(e.target.value)} aria-label="Filter agent">
-                <option value="">All Agents</option>
-                {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-              </select>
-            )}
-
-            <span className="statPill">
-              <span className="dot" />
-              {loading ? '…' : `${filtered.length} of ${orders.length}`}
-              {highCount > 0 && !loading && (
-                <span style={{ color: 'var(--danger)', marginLeft: 6, fontSize: 10, fontWeight: 600 }}>
-                  {highCount} high
-                </span>
-              )}
-            </span>
-          </div>
-
-          {activeFilters.length > 0 && (
-            <div className="filterChips">
-              <span className="filterChipsLabel">Filters:</span>
-              {activeFilters.map((f) => (
-                <button key={f.key} type="button" className="filterChip" onClick={f.clear} title="Remove filter">
-                  {f.label}
-                  <Icon path={I.x} size={10} />
-                </button>
-              ))}
-              <button type="button" className="filterChipClear" onClick={clearAllFilters}>
-                Clear all
-              </button>
-            </div>
-          )}
-
-          {selectedRows.size > 0 && (
-            <BulkActionBar
-              count={selectedRows.size}
-              onApply={handleBulkApply}
-              onClear={() => setSelectedRows(new Set())}
-              loading={bulkLoading}
-            />
-          )}
-
-          <div className="card">
-            {loading ? (
-              <SkeletonRows count={7} />
-            ) : filtered.length === 0 ? (
-              <div className="emptyState">
-                <span className="emptyEmoji">{orders.length === 0 ? '✅' : '🔍'}</span>
-                <div className="emptyTitle">{orders.length === 0 ? 'All clear' : 'No matches'}</div>
-                <div className="emptyDesc">
-                  {orders.length === 0 ? 'No orders need action right now.' : 'Try adjusting your search or filters.'}
-                </div>
-              </div>
-            ) : (
-              <>
-                <div className="tableWrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th scope="col" className="thCheck">
-                          <input type="checkbox" className="rowCheckbox"
-                            checked={allPageSelected}
-                            ref={(el) => { if (el) el.indeterminate = somePageSelected && !allPageSelected; }}
-                            onChange={(e) => handleSelectAll(e.target.checked, pageItems)}
-                            aria-label="Select all on page"
-                          />
-                        </th>
-                        <th scope="col">Parent Order</th>
-                        <th scope="col">Query Category</th>
-                        <th scope="col" className={`thSortable${sortDir ? ' thSorted' : ''}`} onClick={cycleSortDir}
-                          title={sortDir === 'asc' ? 'Sorted low → high · click for high → low' : 'Sorted high → low · click for low → high'}>
-                          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                            Priority <SortIcon />
-                          </span>
-                        </th>
-                        <th scope="col">Status</th>
-                        <th scope="col">Tags</th>
-                        <th scope="col">Location</th>
-                        {isAdmin && <th scope="col">Assigned To</th>}
-                        <th scope="col" className="thAction">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pageItems.map((o) => (
-                        <OrderRow
-                          key={o.rowNumber}
-                          order={o}
-                          expanded={expandedRow === o.rowNumber}
-                          onToggle={(next) => setExpandedRow(next ? o.rowNumber : null)}
-                          onSaved={handleSaved}
-                          onToast={showToast}
-                          isAdmin={isAdmin}
-                          agents={agents}
-                          assignment={assignments[o.rowNumber] || null}
-                          onAssign={handleAssign}
-                          selected={selectedRows.has(o.rowNumber)}
-                          onSelect={handleSelect}
-                          tags={new Set(o.tags || [])}
-                          onToggleTag={handleToggleTag}
-                        />
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div className="pagination">
-                  <span className="paginationInfo">{rangeStart}–{rangeEnd} of {filtered.length} orders</span>
-                  <div className="paginationControls">
-                    <label htmlFor="page-size" className="srOnly">Rows per page</label>
-                    <select id="page-size" className="pageSizeSelect" value={pageSize}
-                      onChange={(e) => setPageSize(Number(e.target.value))}>
-                      {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n} / page</option>)}
-                    </select>
-                    <button type="button" className="btn btnSm btnIcon"
-                      onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={safePage <= 1} aria-label="Previous">
-                      <Icon path={I.chevL} size={12} />
-                    </button>
-                    <span className="paginationPage">{safePage} / {totalPages}</span>
-                    <button type="button" className="btn btnSm btnIcon"
-                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={safePage >= totalPages} aria-label="Next">
-                      <Icon path={I.chevR} size={12} />
-                    </button>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-            </>
           ) : (
             <div className="pageHeader">
               <div>
