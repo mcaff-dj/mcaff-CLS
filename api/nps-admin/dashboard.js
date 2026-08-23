@@ -36,7 +36,7 @@ module.exports = async (req, res) => {
   `;
 
   const { rows: answers } = await sql`
-    SELECT a.question_id, a.answer_value, r.recipient_id, resp.submitted_at
+    SELECT a.question_id, a.answer_value, r.id AS recipient_id, resp.submitted_at
     FROM nps_response_answer a
     JOIN nps_response resp ON resp.id = a.response_id
     JOIN nps_recipient r ON r.id = resp.recipient_id
