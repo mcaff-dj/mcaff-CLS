@@ -1,0 +1,78 @@
+Subcategory,Class
+Delayed Order,Delivery
+Delayed Order-Product,Delivery
+Delivery Boy Complaint,Delivery
+Fake Order RTO,Delivery
+Fake update,Delivery
+Lost/Damaged/Destroyed,Delivery
+Marked Delivered but customer did not receive order,Delivery
+Order Misrouted,Delivery
+others,Delivery
+Pickup Exception,Delivery
+Pincode not serviceable,Delivery
+Broken Bottle,Packaging and Operational
+Broken Cap,Packaging and Operational
+Broken Nozzle,Packaging and Operational
+Broken Tube,Packaging and Operational
+Damaged Outer packaging-  Carton(brown/Green box),Packaging and Operational
+Damaged Outer packaging-  Product box,Packaging and Operational
+Empty Product,Packaging and Operational
+Half - Empty product,Packaging and Operational
+Others,Packaging and Operational
+Product not Dispensing,Packaging and Operational
+Product not sealed,Packaging and Operational
+Product Spillage,Packaging and Operational
+Refund enquiry,Packaging and Operational
+Burning Sensation,Product
+Change in color,Product
+Change in Smell,Product
+Disatisfied-Smell,Product
+Enquiry about offers/coupons,Product
+Formation of Fungus,Product
+Fragrance not long-lasting,Product
+Others,Product
+Presence of foreign particles(Hair/glass/pins),Product
+"Product enquiry( price, how to, ingredients,effects)",Product
+Product Not Effective,Product
+Reacted-Acne/Pimples,Product
+Reacted-Skin Irritation,Product
+Texture Issue,Product
+Dark-spots issue,Product Suggestion/Recommendation
+Dull-skin issue,Product Suggestion/Recommendation
+Oil-control issue,Product Suggestion/Recommendation
+Simple routine,Product Suggestion/Recommendation
+Expired/Near to Expiry Products,Warehouse
+Late/Delay Dispatch,Warehouse
+Others,Warehouse
+Product Missing,Warehouse
+Split Order,Warehouse
+Wrong Product Dispatched,Warehouse
+Amount captured and auto refunded,Technical
+Amount deducted order not placed not refunded,Technical
+Coupon Code Error,Technical
+Freebie not added in the cart,Technical
+Login issue-App,Technical
+Misleading Ads,Technical
+Offer Confusion,Technical
+Order confirmation not received,Technical
+Others,Technical
+"Payment Captured, wrong message sent",Technical
+Payment Failure,Technical
+Payment mode Availability,Technical
+"Product enquiry( price, how to, ingredients,effects)",Technical
+Tracking link not received,Technical
+Unable to do Payment,Technical
+Unable to place order,Technical
+Unable to see COD Option,Technical
+Unable to see order history,Technical
+Acne-breakout issue,Product Suggestion/Recommendation
+Aging/wrinkles issue,Product Suggestion/Recommendation
+Change in consistency,Product
+Dehydrated skin issue,Product Suggestion/Recommendation
+Dissatisfied - Smell,Product
+Dusty Products,Packaging and Operational
+Hycash Related,Technical
+Total  order amount  mismatch,Technical
+Unable to add products in the cart,Technical
+Unable to login on App,Technical
+Unable to see order history-Merged,Technical

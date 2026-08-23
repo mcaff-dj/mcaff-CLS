@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from push_mcaffeine_to_dashboard import (
     extract_mcaffeine_order_code,
+    is_excluded_from_dashboard,
     parse_created_at,
     pick_awb_before_ticket_date,
 )
@@ -48,10 +49,23 @@ def test_pick_awb_before_ticket_date_exact_match_qualifies():
     assert pick_awb_before_ticket_date(candidates, ticket_dt) == "AWB_SAME_INSTANT"
 
 
+def test_is_excluded_from_dashboard():
+    assert is_excluded_from_dashboard("Cancelation request", "")
+    assert is_excluded_from_dashboard("General", "")
+    assert is_excluded_from_dashboard("Wrong Item Delivered", "Awaiting Response")
+    assert not is_excluded_from_dashboard("Wrong Item Delivered", "Resolved")
+    assert not is_excluded_from_dashboard("", "")
+    # Moved out of the exclusion bucket - the pivot table now gives these a
+    # real Query Class, so they're pushed rather than excluded.
+    assert not is_excluded_from_dashboard("Refund enquiry", "Packaging and Operational")
+    assert not is_excluded_from_dashboard("Enquiry about offers/coupons", "Product")
+
+
 if __name__ == "__main__":
     test_extract_order_code()
     test_parse_created_at()
     test_pick_awb_before_ticket_date_picks_latest_prior()
     test_pick_awb_before_ticket_date_none_qualify()
     test_pick_awb_before_ticket_date_exact_match_qualifies()
+    test_is_excluded_from_dashboard()
     print("all tests passed")

@@ -132,6 +132,37 @@ def fetch_awb_candidates(rows_to_push, src_idx):
 DASHBOARD_SHEET_ID = "1fjrwKgi26q3kxsLsFrXP0KY0uAJNfcpTeHBQhCXwkPA"
 DASHBOARD_TAB = "mCaffeine"
 
+# Subcategories that fall under the "Request and enquiry" bucket - these
+# tickets are pure requests/enquiries, not delivery/order issues, so they're
+# excluded from the dashboard rather than pushed.
+# NOTE: "Enquiry about offers/coupons", "Refund enquiry", and "Product
+# enquiry( price, how to, ingredients,effects)" are NOT here even though they
+# started in this bucket - "Update_tickets - Pivot Table 1.csv" gives them a
+# real business Query Class (Product / Packaging and Operational / Product
+# or Technical), so they're pushed to the dashboard like any classified
+# ticket instead of being excluded.
+REQUEST_AND_ENQUIRY_SUBCATEGORIES = frozenset({
+    "Cancelation request",
+    "Change in detail(Account/Order)",
+    "Dissatisfied",
+    "Estimated time of delivery",
+    "General",
+    "Unsubscription",
+    "Appreciation",
+    "Return Requested",
+})
+
+# Query Classes excluded from the dashboard outright - "Awaiting Response"
+# tickets aren't resolved yet, so they don't belong in the dashboard.
+EXCLUDED_QUERY_CLASSES = frozenset({"Awaiting Response"})
+
+
+def is_excluded_from_dashboard(subcategory, query_class):
+    """True if the ticket is a pure request/enquiry (by Subcategory) or still
+    Awaiting Response (by Query Class) - either way it's skipped, never pushed."""
+    return (str(subcategory).strip() in REQUEST_AND_ENQUIRY_SUBCATEGORIES
+            or str(query_class).strip() in EXCLUDED_QUERY_CLASSES)
+
 # Destination column -> source ("mcaffeine" tab) column, for columns that are
 # plain literal values in the dashboard (not sheet formulas).
 # NOTE: "Delivery Partner Name" is intentionally NOT mapped (left blank),
@@ -219,17 +250,24 @@ def parse_flowcall_date(value):
     return s
 
 
-def main():
+def fetch_source_rows():
+    """Default row source: the live FlowCall-mirrored 'mcaffeine' tab. A caller
+    with rows from elsewhere (e.g. a one-off xlsx import) can skip this and
+    call push_rows_to_dashboard(headers, rows) directly - same mapping/dedup/
+    formula logic either way."""
     src_last_row = lib.get_last_data_row(SOURCE_SHEET_ID, SOURCE_TAB)
     if src_last_row < 2:
         print("[dashboard] source mcaffeine tab has no data rows - nothing to push")
-        return
+        return None, None
 
     src_headers = lib.get_sheet_values(SOURCE_SHEET_ID, f"'{SOURCE_TAB}'!A1:ZZ1")[0]
     src_last_col = lib.get_column_letter(len(src_headers) - 1)
     src_rows = lib.get_sheet_rows_chunked(SOURCE_SHEET_ID, SOURCE_TAB, src_last_col, chunk_size=5000, start_row=2)
     print(f"[dashboard] source mcaffeine has {len(src_rows)} rows, {len(src_headers)} columns")
+    return src_headers, src_rows
 
+
+def push_rows_to_dashboard(src_headers, src_rows):
     src_idx = {name: i for i, name in enumerate(src_headers)}
     idx_ticket_src = src_idx.get("Ticket Number")
     if idx_ticket_src is None:
@@ -251,20 +289,30 @@ def main():
                 existing_ids.add(str(r[0]))
     print(f"[dashboard] {len(existing_ids)} existing Ticket No values in dashboard")
 
+    idx_subcategory_src = src_idx.get("Subcategory")
+    idx_qclass_filter_src = src_idx.get("Disposition: Query Class")
+
     rows_to_push = []
     seen_this_batch = set()
+    skipped_excluded = 0
     for src_row in src_rows:
         if idx_ticket_src >= len(src_row):
             continue
         ticket_id = str(src_row[idx_ticket_src])
         if not ticket_id or ticket_id in existing_ids or ticket_id in seen_this_batch:
             continue
+        subcategory = src_row[idx_subcategory_src] if idx_subcategory_src is not None and idx_subcategory_src < len(src_row) else ""
+        query_class = src_row[idx_qclass_filter_src] if idx_qclass_filter_src is not None and idx_qclass_filter_src < len(src_row) else ""
+        if is_excluded_from_dashboard(subcategory, query_class):
+            skipped_excluded += 1
+            continue
         seen_this_batch.add(ticket_id)
         rows_to_push.append(src_row)
 
-    print(f"[dashboard] {len(rows_to_push)} new unique tickets to push")
+    print(f"[dashboard] {len(rows_to_push)} new unique tickets to push "
+          f"({skipped_excluded} excluded as request/enquiry or awaiting-response)")
     if not rows_to_push:
-        return
+        return 0
 
     awb_candidates_by_code = fetch_awb_candidates(rows_to_push, src_idx)
     idx_qclass_src = src_idx.get("Disposition: Query Class")
@@ -337,6 +385,14 @@ def main():
             "values": formulas,
         }])
     print(f"[dashboard] wrote templated formulas for {len(FORMULA_COLUMNS)} columns, rows {start_row}-{dest_row_end}")
+    return len(new_rows)
+
+
+def main():
+    src_headers, src_rows = fetch_source_rows()
+    if src_headers is None:
+        return
+    push_rows_to_dashboard(src_headers, src_rows)
 
 
 if __name__ == "__main__":

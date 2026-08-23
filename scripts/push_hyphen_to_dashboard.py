@@ -60,6 +60,39 @@ FIELD_MAP = {
     "platform": "Objective: platform_name",
 }
 
+# Subcategories that fall under the "Request and enquiry" bucket - these
+# tickets are pure requests/enquiries, not delivery/order issues, so they're
+# excluded from the dashboard rather than pushed. Kept duplicated from
+# push_mcaffeine_to_dashboard.py per this file's own "self-contained" policy.
+# NOTE: "Enquiry about offers/coupons", "Refund enquiry", and "Product
+# enquiry( price, how to, ingredients,effects)" are NOT here even though they
+# started in this bucket - "Update_tickets - Pivot Table 1.csv" gives them a
+# real business Query Class (Product / Packaging and Operational / Product
+# or Technical), so they're pushed to the dashboard like any classified
+# ticket instead of being excluded.
+REQUEST_AND_ENQUIRY_SUBCATEGORIES = frozenset({
+    "Cancelation request",
+    "Change in detail(Account/Order)",
+    "Dissatisfied",
+    "Estimated time of delivery",
+    "General",
+    "Unsubscription",
+    "Appreciation",
+    "Return Requested",
+})
+
+# Query Classes excluded from the dashboard outright - "Awaiting Response"
+# tickets aren't resolved yet, so they don't belong in the dashboard.
+EXCLUDED_QUERY_CLASSES = frozenset({"Awaiting Response"})
+
+
+def is_excluded_from_dashboard(subcategory, query_class):
+    """True if the ticket is a pure request/enquiry (by Subcategory) or still
+    Awaiting Response (by Query Class) - either way it's skipped, never pushed."""
+    return (str(subcategory).strip() in REQUEST_AND_ENQUIRY_SUBCATEGORIES
+            or str(query_class).strip() in EXCLUDED_QUERY_CLASSES)
+
+
 # Destination columns holding sheet formulas - see module docstring.
 FORMULA_COLUMNS = [
     "SKU", "Month", "Week", "Order  Month", "Order Week", "Year", "Unique",
@@ -155,13 +188,22 @@ def main():
                 existing_ids.add(str(r[0]))
     print(f"[dashboard] {len(existing_ids)} existing Ticket No values in dashboard")
 
+    idx_subcategory_src = src_idx.get("Subcategory")
+    idx_qclass_filter_src = src_idx.get("Disposition: Query Class")
+
     new_rows = []
     seen_this_batch = set()
+    skipped_excluded = 0
     for src_row in src_rows:
         if idx_ticket_src >= len(src_row):
             continue
         ticket_id = str(src_row[idx_ticket_src])
         if not ticket_id or ticket_id in existing_ids or ticket_id in seen_this_batch:
+            continue
+        subcategory = src_row[idx_subcategory_src] if idx_subcategory_src is not None and idx_subcategory_src < len(src_row) else ""
+        query_class = src_row[idx_qclass_filter_src] if idx_qclass_filter_src is not None and idx_qclass_filter_src < len(src_row) else ""
+        if is_excluded_from_dashboard(subcategory, query_class):
+            skipped_excluded += 1
             continue
         seen_this_batch.add(ticket_id)
 
@@ -182,7 +224,8 @@ def main():
                 dest_row.append("")  # no source column for this destination field
         new_rows.append(dest_row)
 
-    print(f"[dashboard] {len(new_rows)} new unique tickets to push")
+    print(f"[dashboard] {len(new_rows)} new unique tickets to push "
+          f"({skipped_excluded} excluded as request/enquiry or awaiting-response)")
     if not new_rows:
         return
 
