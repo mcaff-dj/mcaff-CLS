@@ -283,12 +283,15 @@ def search_display_code(token, display_order_code):
             data = resp.json()
             return (data.get("elements") or []) if data.get("successful") else []
         if code == 401:
-            raise TokenExpiredError("search returned 401 - token expired")
+            raise TokenExpiredError(f"search returned 401 - token expired: {resp.text[:200]}")
         if code in (403, 429) and attempt == 0:
             time.sleep(BACKOFF_ON_403_SEC)
             continue
         if code in (403, 429):
-            raise RateLimitedError(f"search returned {code} - Unicommerce is rate limiting")
+            # Body included, not just the code - a persistent 403 can mean IP not whitelisted
+            # or a revoked/scoped-down API user, not necessarily rate limiting; the class name
+            # (RateLimitedError) predates finding that out, kept for the retry behavior it drives.
+            raise RateLimitedError(f"search returned {code} - Unicommerce: {resp.text[:200]}")
         return []
     return []
 
