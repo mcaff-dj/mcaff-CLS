@@ -210,6 +210,18 @@ TOKEN_REFRESH_SEC = 120
 # Leaves ~100s of the Lambda's 900s timeout for the in-flight row to finish, a final progress
 # write, and the continuation self-invoke itself.
 CHUNK_BUDGET_SEC = 800
+# A crash before any row finishes (bad UC creds, MySQL unreachable, ...) is deterministic - it
+# will crash again next invoke too. Without a cap, the except-block below re-invokes forever:
+# status stays 'running', processed_count stays put, updated_at keeps getting bumped so
+# isJobStalled() (api/_lib/orderPunchRows.js) never fires either - a silent infinite loop, not a
+# stall. crashRetries rides the invoke payload itself (see invoke_self/handler.py) rather than a
+# new DB column, since Lambda invokes are otherwise stateless between attempts.
+MAX_CRASH_RETRIES = 3
+
+
+def should_retry_after_crash(crash_retries):
+    """Pure so it's covered by test_process_order_punch_job.py without a live DB/Lambda."""
+    return crash_retries < MAX_CRASH_RETRIES
 
 DEFAULT_SETTINGS = {
     "facility_codes": ["HYP_SRKOL", "HYP_SRBGLR", "mCaff_Mumbai2", "mCaff_Gurgaon3", "HYP_AHMD",
@@ -490,12 +502,15 @@ def fetch_settings(conn):
     return settings
 
 
-def invoke_self(job_id):
+def invoke_self(job_id, crash_retries=0):
     import boto3
+    payload = {"jobId": job_id}
+    if crash_retries:
+        payload["crashRetries"] = crash_retries
     boto3.client("lambda").invoke(
         FunctionName=WORKER_FUNCTION_NAME,
         InvocationType="Event",
-        Payload=json.dumps({"jobId": job_id}).encode("utf-8"),
+        Payload=json.dumps(payload).encode("utf-8"),
     )
 
 
@@ -595,10 +610,12 @@ def process_one_row(conn, job_id, row, token, settings, agent_email):
             return "error", token
 
 
-def process_job(job_id):
+def process_job(job_id, crash_retries=0):
     """Entrypoint - one Lambda invoke's worth of work. Self-invokes to continue if rows remain
     pending after CHUNK_BUDGET_SEC, mirroring the Apps Script's own always-resume design (see
-    the design spec's Error handling section)."""
+    the design spec's Error handling section). crash_retries counts consecutive invokes that
+    crashed before finishing normally - reset to 0 on the normal continuation path since that
+    means real progress happened; only the except-block below carries it forward."""
     try:
         conn = _connect()
     except Exception as e:
@@ -700,9 +717,16 @@ def process_job(job_id):
                 update_job_counters(conn, job_id, status="stopped")
             except Exception:
                 pass
+        elif not should_retry_after_crash(crash_retries):
+            print(f"process_job({job_id}): {crash_retries} consecutive crashes, giving up: {e}")
+            try:
+                update_job_counters(conn, job_id, status="failed",
+                                     error_message=f"Worker crashed {crash_retries + 1}x in a row: {e}")
+            except Exception:
+                pass
         else:
             try:
-                invoke_self(job_id)
+                invoke_self(job_id, crash_retries=crash_retries + 1)
             except Exception as invoke_err:
                 print(f"process_job({job_id}): could not schedule continuation after crash: {invoke_err}")
                 try:

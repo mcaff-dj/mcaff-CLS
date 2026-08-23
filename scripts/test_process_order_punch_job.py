@@ -102,6 +102,15 @@ def test_parse_timestamp_invalid_returns_none():
     assert worker.parse_timestamp(None) is None
 
 
+def test_should_retry_after_crash_caps_at_max():
+    # Below the cap: keep retrying. At/above: stop, so a deterministic crash (bad creds, DB
+    # unreachable) can't loop invoke_self forever - see MAX_CRASH_RETRIES's comment.
+    for n in range(worker.MAX_CRASH_RETRIES):
+        assert worker.should_retry_after_crash(n) is True
+    assert worker.should_retry_after_crash(worker.MAX_CRASH_RETRIES) is False
+    assert worker.should_retry_after_crash(worker.MAX_CRASH_RETRIES + 5) is False
+
+
 if __name__ == "__main__":
     tests = [
         test_resolve_target_channel_known_channels,
@@ -119,6 +128,7 @@ if __name__ == "__main__":
         test_parse_timestamp_epoch_seconds,
         test_parse_timestamp_iso_string,
         test_parse_timestamp_invalid_returns_none,
+        test_should_retry_after_crash_caps_at_max,
     ]
     for t in tests:
         t()

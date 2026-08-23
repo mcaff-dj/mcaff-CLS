@@ -19,7 +19,8 @@ def handler(event, context):
     if job_id is None:
         print("order-punch-worker: no jobId in event, nothing to do")
         return {"ok": False, "error": "missing jobId"}
-    print(f"order-punch-worker: starting job {job_id}")
-    process_order_punch_job.process_job(int(job_id))
+    crash_retries = int(event.get("crashRetries") or 0)
+    print(f"order-punch-worker: starting job {job_id}" + (f" (crash retry {crash_retries})" if crash_retries else ""))
+    process_order_punch_job.process_job(int(job_id), crash_retries=crash_retries)
     print(f"order-punch-worker: finished this invoke for job {job_id}")
     return {"ok": True}
