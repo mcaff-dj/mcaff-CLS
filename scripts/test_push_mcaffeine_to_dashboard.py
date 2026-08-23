@@ -57,8 +57,10 @@ def test_is_excluded_from_dashboard():
     assert not is_excluded_from_dashboard("", "")
     # Moved out of the exclusion bucket - the pivot table now gives these a
     # real Query Class, so they're pushed rather than excluded.
-    assert not is_excluded_from_dashboard("Refund enquiry", "Packaging and Operational")
     assert not is_excluded_from_dashboard("Enquiry about offers/coupons", "Product")
+    # "Refund enquiry" briefly had a pivot-table mapping too, but that row
+    # was removed from the CSV again - back to excluded.
+    assert is_excluded_from_dashboard("Refund enquiry", "Packaging and Operational")
 
 
 if __name__ == "__main__":

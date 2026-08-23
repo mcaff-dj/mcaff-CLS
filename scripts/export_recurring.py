@@ -81,7 +81,6 @@ SUBCATEGORY_QUERY_CLASS_ROWS = [
     ("Product not Dispensing", "Packaging and Operational"),
     ("Product not sealed", "Packaging and Operational"),
     ("Product Spillage", "Packaging and Operational"),
-    ("Refund enquiry", "Packaging and Operational"),
     ("Burning Sensation", "Product"),
     ("Change in color", "Product"),
     ("Change in Smell", "Product"),

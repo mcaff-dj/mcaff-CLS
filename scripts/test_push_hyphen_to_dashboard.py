@@ -11,8 +11,8 @@ def test_is_excluded_from_dashboard():
     assert is_excluded_from_dashboard("Wrong Item Delivered", "Awaiting Response")
     assert not is_excluded_from_dashboard("Wrong Item Delivered", "Resolved")
     assert not is_excluded_from_dashboard("", "")
-    assert not is_excluded_from_dashboard("Refund enquiry", "Packaging and Operational")
     assert not is_excluded_from_dashboard("Enquiry about offers/coupons", "Product")
+    assert is_excluded_from_dashboard("Refund enquiry", "Packaging and Operational")
 
 
 if __name__ == "__main__":
