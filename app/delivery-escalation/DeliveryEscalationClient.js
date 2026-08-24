@@ -155,6 +155,16 @@ function sumDaywiseRows(dayRows, buckets) {
   return { counts, total, pct };
 }
 
+// Heatmap shading for a % cell, shared by every pct column in both TAT tables - 0% stays plain,
+// higher % ramps up an indigo tint (same accent as the tables' own hover/link color) and switches
+// to light text once the background gets dark enough to need it.
+function pctHeatStyle(pct) {
+  const v = Math.max(0, Math.min(100, pct || 0));
+  if (v === 0) return undefined;
+  const alpha = 0.12 + (v / 100) * 0.55;
+  return { backgroundColor: `rgba(99, 102, 241, ${alpha})`, color: alpha > 0.4 ? '#e4e4e7' : undefined };
+}
+
 // Buckets a flat list of {date, counts, total} rows (all within one month) into Week-of-month ->
 // Day. Week is "days 1-7 of the month = week 1, 8-14 = week 2, ..." rather than a calendar/ISO
 // week (which can straddle two months) - it keeps every week fully nested inside one month.
@@ -215,6 +225,8 @@ const PARTNER_NAME_MAP = {
   'Bluedart Surface - Select  500gm': 'Blue Dart',
   'Bluedart Surface - Select 500gm': 'Blue Dart',
   'Bluedart Surface 500 gms- Select': 'Blue Dart',
+  'SR Bluedart': 'Blue Dart',
+  'Bluedart': 'Blue Dart',
   Cuberooteeine: 'PurpleDrone',
   CuberooteKatalyst: 'PurpleDrone',
   CuberooteMcaffeine: 'PurpleDrone',
@@ -1126,11 +1138,10 @@ export default function DeliveryEscalationClient() {
                 <button
                   key={t.key}
                   onClick={() => { setDateDrill(null); setTab(t.key); }}
-                  className={`relative px-4 py-2 rounded-xl text-[13px] font-bold whitespace-nowrap transition-all flex items-center gap-2.5 ${
-                    tab === t.key
+                  className={`relative px-4 py-2 rounded-xl text-[13px] font-bold whitespace-nowrap transition-all flex items-center gap-2.5 ${tab === t.key
                       ? 'text-white bg-indigo-600 shadow-md shadow-indigo-950/50 border border-indigo-500/40'
                       : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 border border-transparent'
-                  }`}
+                    }`}
                 >
                   {t.label}
                   <span className={`text-[11px] px-1.5 py-0.5 rounded-md ${tab === t.key ? 'bg-white/20' : 'bg-zinc-800'}`}>{t.count}</span>
@@ -1210,7 +1221,7 @@ export default function DeliveryEscalationClient() {
                     date. % is each bucket's share of that date's own total.
                     {daywise.missingDateCount > 0 && (
                       <> {daywise.missingDateCount} parcel(s) have no {daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} date at all and can&apos;t
-                      sit under any date row - counted only in Grand Total &rarr; unresolved.</>
+                        sit under any date row - counted only in Grand Total &rarr; unresolved.</>
                     )}
                   </p>
                   <div className="rounded-xl border border-zinc-800/80 overflow-hidden">
@@ -1254,7 +1265,7 @@ export default function DeliveryEscalationClient() {
                                         title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
                                         className={`py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
                                       >{count}</td>,
-                                      <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
+                                      <td key={`${b}-pct`} style={pctHeatStyle(month.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
                                     ];
                                   })}
                                   <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
@@ -1280,7 +1291,7 @@ export default function DeliveryEscalationClient() {
                                               title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
                                               className={`py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
                                             >{count}</td>,
-                                            <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{week.pct[b] || 0}%</td>,
+                                            <td key={`${b}-pct`} style={pctHeatStyle(week.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{week.pct[b] || 0}%</td>,
                                           ];
                                         })}
                                         <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{week.total.toLocaleString('en-IN')}</td>
@@ -1321,7 +1332,7 @@ export default function DeliveryEscalationClient() {
                               <td className="py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
                               {daywise.buckets.flatMap((b) => ([
                                 <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{(daywise.grandTotal[b] || 0).toLocaleString('en-IN')}</td>,
-                                <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">
+                                <td key={`${b}-pct`} style={pctHeatStyle(daywise.grandTotalAll ? Math.round(((daywise.grandTotal[b] || 0) / daywise.grandTotalAll) * 100) : 0)} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">
                                   {daywise.grandTotalAll ? Math.round(((daywise.grandTotal[b] || 0) / daywise.grandTotalAll) * 100) : 0}%
                                 </td>,
                               ]))}
@@ -1387,7 +1398,7 @@ export default function DeliveryEscalationClient() {
                                         title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
                                         className={`py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
                                       >{count}</td>,
-                                      <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{partner.pct[b] || 0}%</td>,
+                                      <td key={`${b}-pct`} style={pctHeatStyle(partner.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{partner.pct[b] || 0}%</td>,
                                     ];
                                   })}
                                   <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{partner.total.toLocaleString('en-IN')}</td>
@@ -1414,7 +1425,7 @@ export default function DeliveryEscalationClient() {
                                               title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
                                               className={`py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
                                             >{count}</td>,
-                                            <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
+                                            <td key={`${b}-pct`} style={pctHeatStyle(month.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
                                           ];
                                         })}
                                         <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
@@ -1440,7 +1451,7 @@ export default function DeliveryEscalationClient() {
                                                     title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
                                                     className={`py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
                                                   >{count}</td>,
-                                                  <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{week.pct[b] || 0}%</td>,
+                                                  <td key={`${b}-pct`} style={pctHeatStyle(week.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{week.pct[b] || 0}%</td>,
                                                 ];
                                               })}
                                               <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{week.total.toLocaleString('en-IN')}</td>
@@ -1457,7 +1468,7 @@ export default function DeliveryEscalationClient() {
                                                       title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
                                                       className={`py-2 px-3 text-right text-zinc-400 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
                                                     >{count}</td>,
-                                                    <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-600 tabular-nums text-[12px]">{r.pct[b] || 0}%</td>,
+                                                    <td key={`${b}-pct`} style={pctHeatStyle(r.pct[b])} className="py-2 px-3 text-right text-zinc-600 tabular-nums text-[12px]">{r.pct[b] || 0}%</td>,
                                                   ];
                                                 })}
                                                 <td className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">{r.total.toLocaleString('en-IN')}</td>
@@ -1484,7 +1495,7 @@ export default function DeliveryEscalationClient() {
                               <td className="py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
                               {daywise.buckets.flatMap((b) => ([
                                 <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{(partnerwiseGrandTotal.totals[b] || 0).toLocaleString('en-IN')}</td>,
-                                <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">
+                                <td key={`${b}-pct`} style={pctHeatStyle(partnerwiseGrandTotal.all ? Math.round(((partnerwiseGrandTotal.totals[b] || 0) / partnerwiseGrandTotal.all) * 100) : 0)} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">
                                   {partnerwiseGrandTotal.all ? Math.round(((partnerwiseGrandTotal.totals[b] || 0) / partnerwiseGrandTotal.all) * 100) : 0}%
                                 </td>,
                               ]))}
@@ -1746,70 +1757,69 @@ export default function DeliveryEscalationClient() {
                 <p><span className="text-zinc-500">Remarks:</span> {detailTkt.remarks || '—'}</p>
               </div>
             ) : (
-            <>
-            <div>
-              <label className="text-[12px] font-semibold text-zinc-400 mb-1 block">Outcome</label>
-              {(processDispositions || []).length === 0 ? (
-                <p className="text-[12px] text-amber-400 bg-amber-950/30 border border-amber-900/50 rounded-lg px-3 py-2">
-                  No outcomes configured yet - an admin adds them from Admin Panel &rarr; Disposition List.
-                </p>
-              ) : (
-                <div className="space-y-2">
-                  {dispLevels.map((lvl, level) => (
-                    <div key={level}>
-                      {lvl.type === 'text' ? (
-                        <input
-                          type="text"
-                          value={dispPath[level] || ''}
-                          onChange={(e) => setTextDisp(level, e.target.value)}
-                          placeholder="Type the reason…"
-                          className="w-full px-3 py-1.5 text-[12px] bg-zinc-950/60 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                        />
-                      ) : (
-                        <>
-                        {lvl.type === 'multi' && (
-                          <p className="text-[11px] text-zinc-500 mb-1">Select one or more:</p>
-                        )}
-                        <div className="flex flex-wrap gap-1.5">
-                          {lvl.options.map(d => {
-                            const checked = lvl.type === 'multi'
-                              ? (dispPath[level] || '').split(', ').filter(Boolean).includes(d.label)
-                              : dispPath[level] === d.label;
-                            return (
-                              <button
-                                key={d.id}
-                                type="button"
-                                onClick={() => lvl.type === 'multi' ? toggleMultiDisp(level, d.label) : pickDisp(level, d.label)}
-                                title={d.description || undefined}
-                                className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition-colors ${
-                                  checked
-                                    ? 'bg-indigo-600 border-indigo-500 text-white'
-                                    : 'bg-zinc-950/60 border-zinc-800 text-zinc-300 hover:border-zinc-700'
-                                }`}
-                              >
-                                {d.label}
-                              </button>
-                            );
-                          })}
+              <>
+                <div>
+                  <label className="text-[12px] font-semibold text-zinc-400 mb-1 block">Outcome</label>
+                  {(processDispositions || []).length === 0 ? (
+                    <p className="text-[12px] text-amber-400 bg-amber-950/30 border border-amber-900/50 rounded-lg px-3 py-2">
+                      No outcomes configured yet - an admin adds them from Admin Panel &rarr; Disposition List.
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {dispLevels.map((lvl, level) => (
+                        <div key={level}>
+                          {lvl.type === 'text' ? (
+                            <input
+                              type="text"
+                              value={dispPath[level] || ''}
+                              onChange={(e) => setTextDisp(level, e.target.value)}
+                              placeholder="Type the reason…"
+                              className="w-full px-3 py-1.5 text-[12px] bg-zinc-950/60 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                            />
+                          ) : (
+                            <>
+                              {lvl.type === 'multi' && (
+                                <p className="text-[11px] text-zinc-500 mb-1">Select one or more:</p>
+                              )}
+                              <div className="flex flex-wrap gap-1.5">
+                                {lvl.options.map(d => {
+                                  const checked = lvl.type === 'multi'
+                                    ? (dispPath[level] || '').split(', ').filter(Boolean).includes(d.label)
+                                    : dispPath[level] === d.label;
+                                  return (
+                                    <button
+                                      key={d.id}
+                                      type="button"
+                                      onClick={() => lvl.type === 'multi' ? toggleMultiDisp(level, d.label) : pickDisp(level, d.label)}
+                                      title={d.description || undefined}
+                                      className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition-colors ${checked
+                                          ? 'bg-indigo-600 border-indigo-500 text-white'
+                                          : 'bg-zinc-950/60 border-zinc-800 text-zinc-300 hover:border-zinc-700'
+                                        }`}
+                                    >
+                                      {d.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </>
+                          )}
                         </div>
-                        </>
-                      )}
+                      ))}
                     </div>
-                  ))}
+                  )}
                 </div>
-              )}
-            </div>
-            <div>
-              <label className="text-[12px] font-semibold text-zinc-400 mb-1 block">Remarks</label>
-              <textarea
-                value={remarks}
-                onChange={e => setRemarks(e.target.value)}
-                rows={3}
-                className="w-full px-3 py-2 bg-zinc-950/60 border border-zinc-800 rounded-lg text-[13px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                placeholder="Notes on what was done…"
-              />
-            </div>
-            </>
+                <div>
+                  <label className="text-[12px] font-semibold text-zinc-400 mb-1 block">Remarks</label>
+                  <textarea
+                    value={remarks}
+                    onChange={e => setRemarks(e.target.value)}
+                    rows={3}
+                    className="w-full px-3 py-2 bg-zinc-950/60 border border-zinc-800 rounded-lg text-[13px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                    placeholder="Notes on what was done…"
+                  />
+                </div>
+              </>
             )}
             <div className="flex justify-end gap-2">
               <button onClick={() => setDetailTkt(null)} className="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[13px] font-semibold transition-colors">{detailTkt.readOnly ? 'Close' : 'Cancel'}</button>
