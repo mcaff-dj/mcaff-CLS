@@ -38,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mysql_lib
 import delivery_escalation_contact_stats
+import auto_dispose_de_categories
 from lead_priority import prefix_rule_partner
 
 TAB_TABLE = {
@@ -65,7 +66,7 @@ def fetch_today_delivery_tickets(table, since=None):
                disposition_warehouse_name
         FROM {table}
         WHERE category LIKE %s AND {date_filter}
-              AND (subcategory IS NULL OR subcategory != 'Estimated time of delivery')
+              AND (subcategory IS NULL OR subcategory NOT IN ('Estimated time of delivery', 'Late/Delay Dispatch'))
         ORDER BY resolved_at
     """
     rows = mysql_lib.query(sql, params=params, database="PEP_CLS")
@@ -258,6 +259,18 @@ def sync_tab(tab, dry_run, since=None):
 
     upsert_delivery_escalation_rows(rows, tab, terminal_by_awb)
     print(f"  upserted {len(rows)} row(s) into MySQL Delivery_escalation")
+    # Categories whose outcome follows from the category alone never reach an agent - see
+    # auto_dispose_de_categories.py. Runs after the upsert so tickets mirrored a moment ago are
+    # included, and only ever touches blank-outcome rows, so it can't overwrite the
+    # terminal-carry-forward outcome build_delivery_escalation_row just stamped. Not scoped to
+    # `tab`: the rule is brand-independent, and being idempotent means the second tab's run
+    # simply finds nothing left. Best-effort for the same reason the recompute below is - a
+    # failure here must not fail a run whose upsert already succeeded.
+    try:
+        n = auto_dispose_de_categories.auto_dispose(dry_run=False)
+        print(f"  auto-disposed {n} row(s) by query_category")
+    except Exception as e:
+        print(f"  WARNING: category auto-dispose failed (rows left in Fresh): {e}")
     # Repeat-contact columns are aggregates over every ticket sharing an AWB, so newly-inserted
     # rows change them for their OLDER siblings too - they have to be recomputed after the
     # insert, not derived per-row during it. Best-effort: a failure here leaves the previous

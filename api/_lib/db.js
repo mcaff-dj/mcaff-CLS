@@ -1273,7 +1273,17 @@ const DE_FRESH_WHERE = `((outcome IS NULL OR outcome = ''
    OR outcome = 'RTO' OR outcome LIKE 'RTO > %'
    OR outcome = 'Escalated' OR outcome LIKE 'Escalated > %')
    AND NOT (${DE_FORCED_RTO_WHERE}))`;
-const DE_RESOLVED_WHERE = `(outcome = 'Delivered' OR outcome LIKE 'Delivered > %')`;
+// 'Resolved' is scripts/auto_dispose_de_categories.py's own root: query categories whose
+// outcome is known from the category alone (Fake Order RTO -> new order placed, Pincode not
+// serviceable -> cancelled and refunded, ...) are stamped by that job rather than clicked
+// through by an agent. Nested under one root ON PURPOSE - matching on the top-level label is
+// what this clause does, so each such outcome as its own top-level sibling would have landed in
+// no view at all (not Fresh, not Resolved, not Forced RTO), the same silent-disappearance the
+// two comments above record. Kept separate from 'Delivered' rather than reusing it: those 18.5k
+// rows mean the parcel actually reached the customer, which a cancelled-and-refunded or
+// POD-requested ticket does not.
+const DE_RESOLVED_WHERE = `(outcome = 'Delivered' OR outcome LIKE 'Delivered > %'
+   OR outcome = 'Resolved' OR outcome LIKE 'Resolved > %')`;
 const DE_VIEW_WHERE = { fresh: DE_FRESH_WHERE, resolved: DE_RESOLVED_WHERE, forced_rto: DE_FORCED_RTO_WHERE };
 
 // Days-to-deliver (disposed_at, when the agent actually marked it Delivered, minus added_date)
