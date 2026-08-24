@@ -246,10 +246,11 @@ async function fetchStats() {
 
 // Overview's day-wise TAT table - unlike fetchStats above, this DOES take the page's current
 // brand/agent filters (see record.js's own op=daywise comment on why).
-async function fetchDaywiseStats({ brand, agent }) {
+async function fetchDaywiseStats({ brand, agent, dateField }) {
   const p = new URLSearchParams({ op: 'daywise' });
   if (brand && brand !== 'ALL') p.set('brand', brand);
   if (agent && agent !== 'ALL') p.set('agent', agent);
+  if (dateField) p.set('dateField', dateField);
   const d = await getJson(`/api/delivery-escalation/record?${p}`);
   return {
     buckets: d.buckets || [],
@@ -491,6 +492,9 @@ export default function DeliveryEscalationClient() {
   const [tab, setTab] = useState('overview');
   const [search, setSearch] = useState('');
   const [brandFilter, setBrandFilter] = useState(() => safeStorage.getItem('de_brand_filter') || 'ALL');
+  // Which date column the TAT-by-date table's rows are grouped under - 'added_date' (labeled
+  // Query Date here, same as the rest of this page) or 'order_date' (when the order was placed).
+  const [daywiseDateBasis, setDaywiseDateBasis] = useState(() => safeStorage.getItem('de_daywise_date_basis') || 'added_date');
   const [agentFilter, setAgentFilter] = useState('ALL');
   const [dateFilter, setDateFilter] = useState('');
   const [contactBucketFilter, setContactBucketFilter] = useState('ALL');
@@ -599,14 +603,14 @@ export default function DeliveryEscalationClient() {
     if (tab !== 'overview') return;
     setDaywiseLoading(true);
     try {
-      setDaywise(await fetchDaywiseStats({ brand: brandFilter, agent: agentFilter }));
+      setDaywise(await fetchDaywiseStats({ brand: brandFilter, agent: agentFilter, dateField: daywiseDateBasis }));
     } catch (e) {
       console.error('Delivery-Escalation daywise stats failed:', e);
       if (isSessionExpired(e)) setSessionExpired(true);
     } finally {
       setDaywiseLoading(false);
     }
-  }, [tab, brandFilter, agentFilter]);
+  }, [tab, brandFilter, agentFilter, daywiseDateBasis]);
 
   const refresh = useCallback(async (silent = true) => {
     // Once the session is known expired, every one of these will just 401 again - retrying
@@ -991,10 +995,16 @@ export default function DeliveryEscalationClient() {
                 <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
                   <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
                     <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500">
-                      TAT by Query Date
+                      TAT by {daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} Date
                     </p>
                     <div className="flex items-center gap-2">
                       {daywiseLoading && <span className="text-[11px] text-zinc-600">Loading…</span>}
+                      <CustomSelect
+                        value={daywiseDateBasis}
+                        onChange={(v) => { setDaywiseDateBasis(v); safeStorage.setItem('de_daywise_date_basis', v); }}
+                        options={[{ value: 'added_date', label: 'Query Date' }, { value: 'order_date', label: 'Order Date' }]}
+                        placeholder="Date"
+                      />
                       <CustomSelect
                         value={brandFilter}
                         onChange={(v) => { setBrandFilter(v); safeStorage.setItem('de_brand_filter', v); }}
@@ -1008,7 +1018,7 @@ export default function DeliveryEscalationClient() {
                     parcels use their actual resolution date, still-open parcels use today's
                     date. % is each bucket's share of that date's own total.
                     {daywise.missingDateCount > 0 && (
-                      <> {daywise.missingDateCount} parcel(s) have no Query date at all and can&apos;t
+                      <> {daywise.missingDateCount} parcel(s) have no {daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} date at all and can&apos;t
                       sit under any date row - counted only in Grand Total &rarr; unresolved.</>
                     )}
                   </p>
@@ -1017,7 +1027,7 @@ export default function DeliveryEscalationClient() {
                       <table className="w-full text-[13px]">
                         <thead>
                           <tr className="border-b border-zinc-800/80 text-zinc-500">
-                            <th rowSpan={2} className="py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">Query date</th>
+                            <th rowSpan={2} className="py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">{daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} date</th>
                             {daywise.buckets.map((b) => (
                               <th key={b} colSpan={2} className="py-2 px-3 text-center font-medium border-l border-zinc-800/60 whitespace-nowrap">{b}</th>
                             ))}

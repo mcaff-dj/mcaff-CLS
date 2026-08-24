@@ -102,7 +102,9 @@ module.exports = async (req, res) => {
         // Overview's day-wise TAT table - respects the page's current brand/agent filters
         // (unlike op=stats, which is deliberately whole-desk); view is irrelevant here since it
         // spans Fresh+Resolved+Forced RTO in one table.
-        const daywise = await getDeliveryEscalationDaywiseStats({ brand: filters.brand, agent: filters.agent });
+        const daywise = await getDeliveryEscalationDaywiseStats({
+          brand: filters.brand, agent: filters.agent, dateField: q.dateField,
+        });
         res.status(200).json(daywise);
         return;
       }

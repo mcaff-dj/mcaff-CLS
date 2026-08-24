@@ -1499,8 +1499,17 @@ async function getDeliveryEscalationRepeatStats() {
 // second query (grouped by nothing, since these rows share no date to group by) folds them into
 // the grand total only; they still contribute no per-date row, because there is no date to put
 // one under.
+// dateField picks which column the table's rows are grouped/bucketed under - 'added_date'
+// (the Query date shown elsewhere on this page) or 'order_date' (when the underlying order was
+// placed, per sync_delivery_tickets_to_sheet.py). Whitelisted, not user-supplied SQL, since it's
+// interpolated as a bare column name rather than bound as a value. The TAT bucket itself
+// (DE_DAYWISE_BUCKET_SQL) always measures against added_date regardless of dateField - this only
+// changes which date a row is grouped under, not how its own turnaround is computed.
+const DE_DAYWISE_DATE_FIELDS = { added_date: 'added_date', order_date: 'order_date' };
+
 async function getDeliveryEscalationDaywiseStats(opts = {}) {
-  const { brand, agent } = opts;
+  const { brand, agent, dateField } = opts;
+  const col = DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date';
   const extraClauses = [];
   const params = [];
   if (brand) { extraClauses.push('brand = ?'); params.push(brand); }
@@ -1513,14 +1522,14 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
   // (or triple-, ...) counts it. Ignores NULL/blank awb_code the same way COUNT(DISTINCT) does
   // there too - a ticket with no AWB at all doesn't land in any bucket.
   const [rows] = await pool.execute(`
-    SELECT DATE_FORMAT(added_date, '%Y-%m-%d') AS d, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(DISTINCT awb_code) AS c
+    SELECT DATE_FORMAT(${col}, '%Y-%m-%d') AS d, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(DISTINCT awb_code) AS c
     FROM Delivery_escalation
-    WHERE added_date IS NOT NULL${extra}
+    WHERE ${col} IS NOT NULL${extra}
     GROUP BY d, bucket
     ORDER BY d
   `, params);
   const [[{ noDateCount }]] = await pool.execute(
-    `SELECT COUNT(DISTINCT awb_code) AS noDateCount FROM Delivery_escalation WHERE added_date IS NULL${extra}`, params);
+    `SELECT COUNT(DISTINCT awb_code) AS noDateCount FROM Delivery_escalation WHERE ${col} IS NULL${extra}`, params);
 
   const byDate = new Map();
   const grandTotal = {};
