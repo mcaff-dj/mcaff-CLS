@@ -135,20 +135,15 @@ DASHBOARD_TAB = "mCaffeine"
 # Subcategories that fall under the "Request and enquiry" bucket - these
 # tickets are pure requests/enquiries, not delivery/order issues, so they're
 # excluded from the dashboard rather than pushed.
-# NOTE: "Enquiry about offers/coupons" and "Product enquiry( price, how to,
-# ingredients,effects)" are NOT here even though they started in this bucket -
-# "Update_tickets - Pivot Table 1.csv" gives them a real business Query Class
-# (Product / Product or Technical), so they're pushed to the dashboard like
-# any classified ticket instead of being excluded. "Refund enquiry" WAS also
-# moved out (it briefly had a Packaging and Operational mapping) but the CSV
-# dropped that row again, so it's back here.
 REQUEST_AND_ENQUIRY_SUBCATEGORIES = frozenset({
+    "Enquiry about offers/coupons",
     "Refund enquiry",
     "Cancelation request",
     "Change in detail(Account/Order)",
     "Dissatisfied",
     "Estimated time of delivery",
     "General",
+    "Product enquiry( price, how to, ingredients,effects)",
     "Unsubscription",
     "Appreciation",
     "Return Requested",

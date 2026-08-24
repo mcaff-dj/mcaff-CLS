@@ -52,108 +52,6 @@ DEFAULT_TARGET_COLUMNS = [
 
 DISPATCH_DELAY_TRIGGER_CLASSES = ("Delivery", "Requests & Enquiries")
 
-# Subcategory -> Query Class, from "Update_tickets - Pivot Table 1.csv".
-# A few Subcategories repeat across Classes in that pivot ("Others" spans
-# Delivery/Packaging and Operational/Product/Warehouse/Technical depending on
-# casing; "Product enquiry( price, how to, ingredients,effects)" spans
-# Product/Technical) - kept as a set per subcategory rather than picking one.
-SUBCATEGORY_QUERY_CLASS_ROWS = [
-    ("Delayed Order", "Delivery"),
-    ("Delayed Order-Product", "Delivery"),
-    ("Delivery Boy Complaint", "Delivery"),
-    ("Fake Order RTO", "Delivery"),
-    ("Fake update", "Delivery"),
-    ("Lost/Damaged/Destroyed", "Delivery"),
-    ("Marked Delivered but customer did not receive order", "Delivery"),
-    ("Order Misrouted", "Delivery"),
-    ("others", "Delivery"),
-    ("Pickup Exception", "Delivery"),
-    ("Pincode not serviceable", "Delivery"),
-    ("Broken Bottle", "Packaging and Operational"),
-    ("Broken Cap", "Packaging and Operational"),
-    ("Broken Nozzle", "Packaging and Operational"),
-    ("Broken Tube", "Packaging and Operational"),
-    ("Damaged Outer packaging-  Carton(brown/Green box)", "Packaging and Operational"),
-    ("Damaged Outer packaging-  Product box", "Packaging and Operational"),
-    ("Empty Product", "Packaging and Operational"),
-    ("Half - Empty product", "Packaging and Operational"),
-    ("Others", "Packaging and Operational"),
-    ("Product not Dispensing", "Packaging and Operational"),
-    ("Product not sealed", "Packaging and Operational"),
-    ("Product Spillage", "Packaging and Operational"),
-    ("Burning Sensation", "Product"),
-    ("Change in color", "Product"),
-    ("Change in Smell", "Product"),
-    ("Disatisfied-Smell", "Product"),
-    ("Enquiry about offers/coupons", "Product"),
-    ("Formation of Fungus", "Product"),
-    ("Fragrance not long-lasting", "Product"),
-    ("Others", "Product"),
-    ("Presence of foreign particles(Hair/glass/pins)", "Product"),
-    ("Product enquiry( price, how to, ingredients,effects)", "Product"),
-    ("Product Not Effective", "Product"),
-    ("Reacted-Acne/Pimples", "Product"),
-    ("Reacted-Skin Irritation", "Product"),
-    ("Texture Issue", "Product"),
-    ("Dark-spots issue", "Product Suggestion/Recommendation"),
-    ("Dull-skin issue", "Product Suggestion/Recommendation"),
-    ("Oil-control issue", "Product Suggestion/Recommendation"),
-    ("Simple routine", "Product Suggestion/Recommendation"),
-    ("Expired/Near to Expiry Products", "Warehouse"),
-    ("Late/Delay Dispatch", "Warehouse"),
-    ("Others", "Warehouse"),
-    ("Product Missing", "Warehouse"),
-    ("Split Order", "Warehouse"),
-    ("Wrong Product Dispatched", "Warehouse"),
-    ("Amount captured and auto refunded", "Technical"),
-    ("Amount deducted order not placed not refunded", "Technical"),
-    ("Coupon Code Error", "Technical"),
-    ("Freebie not added in the cart", "Technical"),
-    ("Login issue-App", "Technical"),
-    ("Misleading Ads", "Technical"),
-    ("Offer Confusion", "Technical"),
-    ("Order confirmation not received", "Technical"),
-    ("Others", "Technical"),
-    ("Payment Captured, wrong message sent", "Technical"),
-    ("Payment Failure", "Technical"),
-    ("Payment mode Availability", "Technical"),
-    ("Product enquiry( price, how to, ingredients,effects)", "Technical"),
-    ("Tracking link not received", "Technical"),
-    ("Unable to do Payment", "Technical"),
-    ("Unable to place order", "Technical"),
-    ("Unable to see COD Option", "Technical"),
-    ("Unable to see order history", "Technical"),
-    ("Acne-breakout issue", "Product Suggestion/Recommendation"),
-    ("Aging/wrinkles issue", "Product Suggestion/Recommendation"),
-    ("Change in consistency", "Product"),
-    ("Dehydrated skin issue", "Product Suggestion/Recommendation"),
-    ("Dissatisfied - Smell", "Product"),
-    ("Dusty Products", "Packaging and Operational"),
-    ("Hycash Related", "Technical"),
-    ("Total  order amount  mismatch", "Technical"),
-    ("Unable to add products in the cart", "Technical"),
-    ("Unable to login on App", "Technical"),
-    ("Unable to see order history-Merged", "Technical"),
-]
-SUBCATEGORY_TO_QUERY_CLASSES = {}
-for _sub, _cls in SUBCATEGORY_QUERY_CLASS_ROWS:
-    SUBCATEGORY_TO_QUERY_CLASSES.setdefault(_sub, set()).add(_cls)
-
-
-def resolve_query_class(subcategory, current_query_class):
-    """Looks up Subcategory in SUBCATEGORY_TO_QUERY_CLASSES. A Subcategory
-    with exactly one Class in the pivot always resolves to that Class. One
-    that spans several Classes ("Others", "Product enquiry(...)") keeps
-    whatever's already there if it's already one of the valid options;
-    otherwise there's no way to pick, so it's left untouched (a blank stays
-    blank, and gets dropped by the blank-Query-Class filter that follows)."""
-    valid = SUBCATEGORY_TO_QUERY_CLASSES.get(str(subcategory).strip())
-    if not valid:
-        return current_query_class
-    if str(current_query_class).strip() in valid:
-        return current_query_class
-    return next(iter(valid)) if len(valid) == 1 else current_query_class
-
 
 def build_dispatch_delay_duplicate(row, idx_dispatch, idx_qclass, idx_ticket, idx_subcategory):
     """Returns a Warehouse/Late-Delay-Dispatch duplicate of `row` when its dispatch
@@ -268,7 +166,6 @@ def main():
 
     fallback_count = 0
     replace_count = 0
-    query_class_mapped_count = 0
     for row in raw_rows:
         if idx_order_name >= 0 and len(row) > idx_order_name:
             val = str(row[idx_order_name]).strip().upper()
@@ -286,20 +183,8 @@ def main():
             if row[c] and "Marked Undelivered" in str(row[c]):
                 row[c] = str(row[c]).replace("Marked Undelivered", "Fake update")
                 replace_count += 1
-        if idx_subcategory >= 0 and idx_query_class >= 0 and len(row) > max(idx_subcategory, idx_query_class):
-            resolved = resolve_query_class(row[idx_subcategory], row[idx_query_class])
-            if resolved != row[idx_query_class]:
-                row[idx_query_class] = resolved
-                query_class_mapped_count += 1
     print(f"[{tab_name}] Order Name fallback applied to {fallback_count} rows; "
-          f"'Marked Undelivered' replaced in {replace_count} cells; "
-          f"Query Class mapped from Subcategory pivot in {query_class_mapped_count} rows")
-
-    before_qc_blank = len(raw_rows)
-    if idx_query_class >= 0:
-        raw_rows = [r for r in raw_rows if len(r) > idx_query_class and str(r[idx_query_class]).strip() != ""]
-    print(f"[{tab_name}] dropped {before_qc_blank - len(raw_rows)} rows with blank Query Class "
-          f"after Subcategory mapping ({before_qc_blank} -> {len(raw_rows)})")
+          f"'Marked Undelivered' replaced in {replace_count} cells")
 
     dispatch_duplicates = [
         dup for row in raw_rows
