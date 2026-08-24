@@ -173,35 +173,155 @@ function buildWeeksOfMonth(dayRows, buckets, keyPrefix) {
   });
 }
 
-// Groups the flat day-level rows the server returns into Month -> Delivery Partner -> Week-of-
-// month -> Day, purely client-side - the server keeps returning one row per real date (needed for
-// the exact per-day numbers, and for each date's own partner breakdown), and this just re-buckets
-// what's already there for the drill-down UI.
-function groupDaywiseRows(dayRows, buckets) {
+// Buckets a flat list of {date, counts, total} rows into Month -> Week-of-month -> Day.
+// keyPrefix scopes month/week keys so the same helper serves both the plain date table and,
+// nested one level under a partner for groupPartnerwiseRows below, the partner-wise table -
+// two different partners' (or a partner's vs. the plain table's own) "2026-07" never collide
+// in expandedMonths/expandedWeeks.
+function buildMonthsFromDayRows(dayRows, buckets, keyPrefix = '') {
   const months = new Map();
   for (const r of dayRows) {
     const [y, m] = r.date.split('-').map(Number);
-    const monthKey = `${y}-${String(m).padStart(2, '0')}`;
-    if (!months.has(monthKey)) months.set(monthKey, { key: monthKey, days: [], partnerDays: new Map() });
-    const month = months.get(monthKey);
-    month.days.push(r);
-    for (const p of (r.partners || [])) {
-      if (!month.partnerDays.has(p.partner)) month.partnerDays.set(p.partner, []);
-      month.partnerDays.get(p.partner).push({ date: r.date, counts: p.counts, total: p.total });
-    }
+    const monthKey = `${keyPrefix}${y}-${String(m).padStart(2, '0')}`;
+    if (!months.has(monthKey)) months.set(monthKey, { key: monthKey, days: [] });
+    months.get(monthKey).days.push(r);
   }
   return [...months.values()].sort((a, b) => a.key.localeCompare(b.key)).map((month) => {
-    const partners = [...month.partnerDays.entries()].map(([partner, partnerDayRows]) => {
-      const weeks = buildWeeksOfMonth(partnerDayRows, buckets, `${month.key}::${partner}`);
-      const allDays = weeks.flatMap((w) => w.days);
-      return { key: `${month.key}::${partner}`, partner, weeks, ...sumDaywiseRows(allDays, buckets) };
-    }).sort((a, b) => b.total - a.total);
-    return { key: month.key, days: month.days, partners, ...sumDaywiseRows(month.days, buckets) };
+    const weeks = buildWeeksOfMonth(month.days, buckets, month.key);
+    return { key: month.key, days: month.days, weeks, ...sumDaywiseRows(month.days, buckets) };
   });
 }
 
+// Groups the flat day-level rows the server returns into Month -> Week-of-month -> Day, purely
+// client-side, for the plain date table (no partner nesting - see groupPartnerwiseRows below for
+// that breakdown as its own table).
+function groupDaywiseRows(dayRows, buckets) {
+  return buildMonthsFromDayRows(dayRows, buckets);
+}
+
+// delivery_partner is the raw shipping_courier string (many account/vendor variants per real
+// courier - "DLSRF_Direct", "HYP_DELHIVERY", "Delhivery Air" are all Delhivery). This collapses
+// them to one canonical name for the partner-wise table below; anything not in the map (a new
+// courier code that hasn't been mapped yet, or 'Unknown' from a null delivery_partner) falls
+// through as its own raw value rather than disappearing.
+const PARTNER_NAME_MAP = {
+  AIRTRANS: 'AIRTRANS',
+  ATS___AMAZON_TRANSPORT_SERVICES___: 'ATS',
+  'Blue Dart': 'Blue Dart',
+  'Blue Dart Air': 'Blue Dart',
+  'Blue Dart Brand Air': 'Blue Dart',
+  'Blue Dart Surface': 'Blue Dart',
+  'Bluedart brands 500 g Surface': 'Blue Dart',
+  'Bluedart Surface - Select  500gm': 'Blue Dart',
+  'Bluedart Surface - Select 500gm': 'Blue Dart',
+  'Bluedart Surface 500 gms- Select': 'Blue Dart',
+  Cuberooteeine: 'PurpleDrone',
+  CuberooteKatalyst: 'PurpleDrone',
+  CuberooteMcaffeine: 'PurpleDrone',
+  DELHIVERY: 'DELHIVERY',
+  'Delhivery Air': 'DELHIVERY',
+  'Delhivery Surface': 'DELHIVERY',
+  Delhivery_Air: 'DELHIVERY',
+  Delhivery_Direct: 'DELHIVERY',
+  DELHIVERY_SMYTTEN: 'DELHIVERY',
+  DLSRF_Direct: 'DELHIVERY',
+  Dlv_Direct_Air: 'DELHIVERY',
+  DTDC: 'DTDC',
+  'DTDC Surface': 'DTDC',
+  'DTDC Surface 10kg': 'DTDC',
+  DTDC_Surface_Direct: 'DTDC',
+  DTDC_Surface_Direct_HYP: 'DTDC',
+  'Ekart Logistics Surface': 'Ekart',
+  Elasticrun: 'ElasticRun',
+  'ElasticRun SDD': 'ElasticRun',
+  Elasticrun_direct_H: 'ElasticRun',
+  Elasticrun_direct_M: 'ElasticRun',
+  HYP_DELHIVERY: 'DELHIVERY',
+  pidge: 'Pidge',
+  Pidge_Omnivio: 'Pidge',
+  Pikndel: 'Pikndel',
+  'Pikndel NDD': 'Pikndel',
+  Pikndel_H_SDD: 'Pikndel',
+  Pikndel_M_SDD: 'Pikndel',
+  Purpledrone_mCaff: 'PurpleDrone',
+  Shadowfax: 'Shadowfax',
+  'Shadowfax Heavy 10Kg': 'Shadowfax',
+  'Shadowfax Intercity NDD': 'Shadowfax',
+  'Shadowfax NDD': 'Shadowfax',
+  'Shadowfax Surface': 'Shadowfax',
+  SHADOWFAX_DIRECT: 'Shadowfax',
+  SHADOWFAX_DIRECT_HYP: 'Shadowfax',
+  Shadowfax_H_NDD: 'Shadowfax',
+  Shadowfax_H_SDD: 'Shadowfax',
+  Shadowfax_M_NDD: 'Shadowfax',
+  Shadowfax_M_SDD: 'Shadowfax',
+  'Shadowfax_NDD/SDD': 'Shadowfax',
+  SITICS_LOGISTICS_TRAIN: 'STICS',
+  XB_AIR: 'Xpressbees',
+  'XBSRF_ Air_Direct': 'Xpressbees',
+  XBSRF_Direct: 'Xpressbees',
+  XBSRF_Direct_NDD: 'Xpressbees',
+  XBSRF_Direct_NDD_HYPHEN: 'Xpressbees',
+  Xpressbees: 'Xpressbees',
+  'Xpressbees 2kg': 'Xpressbees',
+  'Xpressbees Surface': 'Xpressbees',
+  Xpressbees_Direct: 'Xpressbees',
+  XPRESSBEES_DIRECT_HYP: 'Xpressbees',
+  Xpressbees_NDD: 'Xpressbees',
+  Pikndel_M_Rapid: 'Pikndel',
+  DELHIVERY_NDD_MDIRECT: 'DELHIVERY',
+  'Blitz Intercity NDD': 'Blitz',
+  'Blitz Intercity Metro NDD': 'Blitz',
+  'Blitz NDD': 'Blitz',
+  XpressbeesAir_Direct: 'Xpressbees',
+  Pikndel_H_NDD: 'Pikndel',
+  Pikndel_H_Rapid: 'Pikndel',
+  DELHIVERY_NDD_DIRECT_H: 'DELHIVERY',
+};
+
+function mapPartnerName(raw) {
+  const key = (raw || '').trim();
+  return PARTNER_NAME_MAP[key] || key;
+}
+
+// Several raw couriers can fold into the same final partner (see PARTNER_NAME_MAP) - if two of
+// them fire on the same date, sums them into one row per date rather than leaving two rows that
+// would collide on the same React key when the day level renders.
+function mergeDayRowsByDate(rows, buckets) {
+  const byDate = new Map();
+  for (const r of rows) {
+    if (!byDate.has(r.date)) {
+      byDate.set(r.date, { date: r.date, counts: Object.fromEntries(buckets.map((b) => [b, 0])), total: 0 });
+    }
+    const entry = byDate.get(r.date);
+    buckets.forEach((b) => { entry.counts[b] += r.counts[b] || 0; });
+    entry.total += r.total;
+  }
+  return [...byDate.values()];
+}
+
+// Each date row carries its own partner split (r.partners, from the server) - this re-groups by
+// final partner (after mapPartnerName folds raw courier variants together), then Month ->
+// Week-of-month -> Day underneath, for a standalone partner-wise TAT table.
+function groupPartnerwiseRows(dayRows, buckets) {
+  const partners = new Map();
+  for (const r of dayRows) {
+    for (const p of (r.partners || [])) {
+      const partner = mapPartnerName(p.partner);
+      if (!partners.has(partner)) partners.set(partner, []);
+      partners.get(partner).push({ date: r.date, counts: p.counts, total: p.total });
+    }
+  }
+  return [...partners.entries()].map(([partner, partnerDayRows]) => {
+    const merged = mergeDayRowsByDate(partnerDayRows, buckets);
+    const months = buildMonthsFromDayRows(merged, buckets, `${partner}::`);
+    return { key: partner, partner, months, ...sumDaywiseRows(merged, buckets) };
+  }).sort((a, b) => b.total - a.total);
+}
+
 function formatDaywiseMonth(monthKey) {
-  const [y, m] = monthKey.split('-').map(Number);
+  const plain = monthKey.includes('::') ? monthKey.split('::').pop() : monthKey;
+  const [y, m] = plain.split('-').map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 }
 
@@ -537,8 +657,10 @@ export default function DeliveryEscalationClient() {
   const [daywise, setDaywise] = useState({ buckets: [], rows: [], grandTotal: {}, grandTotalAll: 0, missingDateCount: 0 });
   const [daywiseLoading, setDaywiseLoading] = useState(false);
   // Collapsed by default at every level - a flat list of every individual day was the whole
-  // problem being fixed here. Keys are month key ('2026-07'), partner key ('2026-07::Delhivery'),
-  // and week key ('2026-07::Delhivery-W2').
+  // problem being fixed here. Shared between the date table and the partner-wise table below it:
+  // date table keys are month key ('2026-07') and week key ('2026-07-W2'); partner-wise table
+  // keys are partner key ('Delhivery'), month key ('Delhivery::2026-07'), and week key
+  // ('Delhivery::2026-07-W2') - the prefixes keep the two tables' keys from colliding.
   const [expandedMonths, setExpandedMonths] = useState(() => new Set());
   const [expandedPartners, setExpandedPartners] = useState(() => new Set());
   const [expandedWeeks, setExpandedWeeks] = useState(() => new Set());
@@ -559,6 +681,19 @@ export default function DeliveryEscalationClient() {
     () => groupDaywiseRows(daywise.rows, daywise.buckets),
     [daywise.rows, daywise.buckets]
   );
+  const groupedPartnerwise = useMemo(
+    () => groupPartnerwiseRows(daywise.rows, daywise.buckets),
+    [daywise.rows, daywise.buckets]
+  );
+  const partnerwiseGrandTotal = useMemo(() => {
+    const totals = Object.fromEntries(daywise.buckets.map((b) => [b, 0]));
+    let all = 0;
+    for (const p of groupedPartnerwise) {
+      daywise.buckets.forEach((b) => { totals[b] += p.counts[b] || 0; });
+      all += p.total;
+    }
+    return { totals, all };
+  }, [groupedPartnerwise, daywise.buckets]);
   const [bulkUploading, setBulkUploading] = useState(false);
   const [bulkResult, setBulkResult] = useState(null);
   const [exporting, setExporting] = useState(false);
@@ -1121,34 +1256,167 @@ export default function DeliveryEscalationClient() {
                                   })}
                                   <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
                                 </tr>
-                                {monthOpen && month.partners.map((partner) => {
-                                  const partnerOpen = expandedPartners.has(partner.key);
+                                {monthOpen && month.weeks.map((week) => {
+                                  const weekOpen = expandedWeeks.has(week.key);
                                   return (
-                                    <Fragment key={partner.key}>
+                                    <Fragment key={week.key}>
                                       <tr
-                                        onClick={() => toggleExpanded(setExpandedPartners, partner.key)}
+                                        onClick={() => toggleExpanded(setExpandedWeeks, week.key)}
                                         className="hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/30"
                                       >
                                         <td className="py-2 px-3 pl-8 text-zinc-300 whitespace-nowrap">
-                                          <span className="inline-block w-4 text-zinc-500">{partnerOpen ? '▾' : '▸'}</span>
-                                          {partner.partner}
+                                          <span className="inline-block w-4 text-zinc-500">{weekOpen ? '▾' : '▸'}</span>
+                                          {formatDaywiseWeek(week)}
                                         </td>
                                         {daywise.buckets.flatMap((b) => {
-                                          const count = partner.counts[b] || 0;
-                                          const partnerDays = partner.weeks.flatMap((w) => w.days);
+                                          const count = week.counts[b] || 0;
                                           return [
                                             <td
                                               key={`${b}-n`}
-                                              onClick={count ? (e) => { e.stopPropagation(); drillIntoDaywise(partnerDays[0]?.date, partnerDays[partnerDays.length - 1]?.date, b); } : undefined}
+                                              onClick={count ? (e) => { e.stopPropagation(); drillIntoDaywise(week.days[0]?.date, week.days[week.days.length - 1]?.date, b); } : undefined}
                                               title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
                                               className={`py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
                                             >{count}</td>,
-                                            <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{partner.pct[b] || 0}%</td>,
+                                            <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{week.pct[b] || 0}%</td>,
                                           ];
                                         })}
-                                        <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{partner.total.toLocaleString('en-IN')}</td>
+                                        <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{week.total.toLocaleString('en-IN')}</td>
                                       </tr>
-                                      {partnerOpen && partner.weeks.map((week) => {
+                                      {weekOpen && week.days.map((r) => (
+                                        <tr key={r.date} className="hover:bg-zinc-800/30 transition-colors">
+                                          <td className="py-2 px-3 pl-14 text-zinc-400 whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
+                                          {daywise.buckets.flatMap((b) => {
+                                            const count = r.counts[b] || 0;
+                                            return [
+                                              <td
+                                                key={`${b}-n`}
+                                                onClick={count ? () => drillIntoDaywise(r.date, r.date, b) : undefined}
+                                                title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
+                                                className={`py-2 px-3 text-right text-zinc-400 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
+                                              >{count}</td>,
+                                              <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-600 tabular-nums text-[12px]">{r.pct[b] || 0}%</td>,
+                                            ];
+                                          })}
+                                          <td className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">{r.total.toLocaleString('en-IN')}</td>
+                                        </tr>
+                                      ))}
+                                    </Fragment>
+                                  );
+                                })}
+                              </Fragment>
+                            );
+                          })}
+                          {groupedDaywise.length === 0 && (
+                            <tr><td colSpan={daywise.buckets.length * 2 + 2} className="py-8 text-center text-zinc-500">
+                              {daywiseLoading ? 'Loading…' : 'No data.'}
+                            </td></tr>
+                          )}
+                        </tbody>
+                        {daywise.rows.length > 0 && (
+                          <tfoot>
+                            <tr className="border-t border-zinc-800/80 bg-zinc-950/40 font-semibold">
+                              <td className="py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
+                              {daywise.buckets.flatMap((b) => ([
+                                <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{(daywise.grandTotal[b] || 0).toLocaleString('en-IN')}</td>,
+                                <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">
+                                  {daywise.grandTotalAll ? Math.round(((daywise.grandTotal[b] || 0) / daywise.grandTotalAll) * 100) : 0}%
+                                </td>,
+                              ]))}
+                              <td className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{daywise.grandTotalAll.toLocaleString('en-IN')}</td>
+                            </tr>
+                          </tfoot>
+                        )}
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {tab === 'overview' && (
+                <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
+                  <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500">
+                      TAT by Delivery Partner
+                    </p>
+                    {daywiseLoading && <span className="text-[11px] text-zinc-600">Loading…</span>}
+                  </div>
+                  <p className="text-[12px] text-zinc-500 mb-3">
+                    Same {daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} Date buckets as above, grouped by delivery partner instead of by date.
+                  </p>
+                  <div className="rounded-xl border border-zinc-800/80 overflow-hidden">
+                    <div className="overflow-x-auto custom-scroll">
+                      <table className="w-full text-[13px]">
+                        <thead>
+                          <tr className="border-b border-zinc-800/80 text-zinc-500">
+                            <th rowSpan={2} className="py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">Delivery Partner</th>
+                            {daywise.buckets.map((b) => (
+                              <th key={b} colSpan={2} className="py-2 px-3 text-center font-medium border-l border-zinc-800/60 whitespace-nowrap">{b}</th>
+                            ))}
+                            <th rowSpan={2} className="py-2 px-3 text-right font-medium align-bottom border-l border-zinc-800/60 whitespace-nowrap">Grand Total</th>
+                          </tr>
+                          <tr className="border-b border-zinc-800/80 text-zinc-600 text-[11px]">
+                            {daywise.buckets.flatMap((b) => ([
+                              <th key={`${b}-n`} className="py-1 px-3 text-right font-medium border-l border-zinc-800/60"> </th>,
+                              <th key={`${b}-pct`} className="py-1 px-3 text-right font-medium">%</th>,
+                            ]))}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-zinc-800/50">
+                          {groupedPartnerwise.map((partner) => {
+                            const partnerOpen = expandedPartners.has(partner.key);
+                            return (
+                              <Fragment key={partner.key}>
+                                <tr
+                                  onClick={() => toggleExpanded(setExpandedPartners, partner.key)}
+                                  className="hover:bg-zinc-800/30 transition-colors cursor-pointer"
+                                >
+                                  <td className="py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">
+                                    <span className="inline-block w-4 text-zinc-500">{partnerOpen ? '▾' : '▸'}</span>
+                                    {partner.partner}
+                                  </td>
+                                  {daywise.buckets.flatMap((b) => {
+                                    const count = partner.counts[b] || 0;
+                                    const allDays = partner.months.flatMap((mo) => mo.days);
+                                    return [
+                                      <td
+                                        key={`${b}-n`}
+                                        onClick={count ? (e) => { e.stopPropagation(); drillIntoDaywise(allDays[0]?.date, allDays[allDays.length - 1]?.date, b); } : undefined}
+                                        title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
+                                        className={`py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
+                                      >{count}</td>,
+                                      <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{partner.pct[b] || 0}%</td>,
+                                    ];
+                                  })}
+                                  <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{partner.total.toLocaleString('en-IN')}</td>
+                                </tr>
+                                {partnerOpen && partner.months.map((month) => {
+                                  const monthOpen = expandedMonths.has(month.key);
+                                  return (
+                                    <Fragment key={month.key}>
+                                      <tr
+                                        onClick={() => toggleExpanded(setExpandedMonths, month.key)}
+                                        className="hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/30"
+                                      >
+                                        <td className="py-2 px-3 pl-8 text-zinc-300 whitespace-nowrap">
+                                          <span className="inline-block w-4 text-zinc-500">{monthOpen ? '▾' : '▸'}</span>
+                                          {formatDaywiseMonth(month.key)}
+                                        </td>
+                                        {daywise.buckets.flatMap((b) => {
+                                          const count = month.counts[b] || 0;
+                                          const days = month.days;
+                                          return [
+                                            <td
+                                              key={`${b}-n`}
+                                              onClick={count ? (e) => { e.stopPropagation(); drillIntoDaywise(days[0]?.date, days[days.length - 1]?.date, b); } : undefined}
+                                              title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
+                                              className={`py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
+                                            >{count}</td>,
+                                            <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
+                                          ];
+                                        })}
+                                        <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
+                                      </tr>
+                                      {monthOpen && month.weeks.map((week) => {
                                         const weekOpen = expandedWeeks.has(week.key);
                                         return (
                                           <Fragment key={week.key}>
@@ -1201,23 +1469,23 @@ export default function DeliveryEscalationClient() {
                               </Fragment>
                             );
                           })}
-                          {groupedDaywise.length === 0 && (
+                          {groupedPartnerwise.length === 0 && (
                             <tr><td colSpan={daywise.buckets.length * 2 + 2} className="py-8 text-center text-zinc-500">
                               {daywiseLoading ? 'Loading…' : 'No data.'}
                             </td></tr>
                           )}
                         </tbody>
-                        {daywise.rows.length > 0 && (
+                        {groupedPartnerwise.length > 0 && (
                           <tfoot>
                             <tr className="border-t border-zinc-800/80 bg-zinc-950/40 font-semibold">
                               <td className="py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
                               {daywise.buckets.flatMap((b) => ([
-                                <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{(daywise.grandTotal[b] || 0).toLocaleString('en-IN')}</td>,
+                                <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{(partnerwiseGrandTotal.totals[b] || 0).toLocaleString('en-IN')}</td>,
                                 <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">
-                                  {daywise.grandTotalAll ? Math.round(((daywise.grandTotal[b] || 0) / daywise.grandTotalAll) * 100) : 0}%
+                                  {partnerwiseGrandTotal.all ? Math.round(((partnerwiseGrandTotal.totals[b] || 0) / partnerwiseGrandTotal.all) * 100) : 0}%
                                 </td>,
                               ]))}
-                              <td className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{daywise.grandTotalAll.toLocaleString('en-IN')}</td>
+                              <td className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{partnerwiseGrandTotal.all.toLocaleString('en-IN')}</td>
                             </tr>
                           </tfoot>
                         )}
