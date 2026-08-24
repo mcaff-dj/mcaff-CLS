@@ -189,13 +189,19 @@ def _check_sheet_layout(full_header_row):
 
 
 def _connect():
+    """This connection is used only for rto_csv_upload_jobs (_fetch_job/_update_job below) -
+    the DWH-side LMD/Item_level_data/GoKwik calls go through assign_leads.py's own separately
+    scoped mysql_lib.query(..., database=ITEM_LEVEL_SCHEMA) calls, not this connection. That
+    table lives in PEP_CLS (same schema api/_lib/db.js's pool defaults to), not
+    MYSQL_DATABASE's mcaff_prod - hardcoding it here, same as db.js's own 'PEP_CLS' default,
+    rather than trusting cred["database"]."""
     cred = mysql_lib.get_credential()
     if cred is None:
         raise RuntimeError("MYSQL_* credentials not configured")
     import pymysql
     return pymysql.connect(
         host=cred["host"], user=cred["user"], password=cred["password"],
-        database=cred["database"], port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
+        database="PEP_CLS", port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
     )
 
 
