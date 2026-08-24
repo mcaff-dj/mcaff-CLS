@@ -197,21 +197,23 @@ function formatDaywiseWeek(week) {
   return `Week ${week.weekOfMonth}${range ? ` (${formatDaywiseDate(first).split(' ')[0]} ${range})` : ''}`;
 }
 
-function filterQuery({ view, search, brand, agent, date, dateField, contactBucket }) {
+function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket }) {
   const p = new URLSearchParams();
   if (view) p.set('view', view);
   if (search) p.set('search', search);
   if (brand && brand !== 'ALL') p.set('brand', brand);
   if (agent && agent !== 'ALL') p.set('agent', agent);
   if (date) p.set('date', date);
+  if (date && dateTo) p.set('dateTo', dateTo);
   if (date && dateField) p.set('dateField', dateField);
+  if (tatBucket) p.set('tatBucket', tatBucket);
   if (contactBucket && contactBucket !== 'ALL') p.set('contactBucket', contactBucket);
   return p;
 }
 
 // One page of whichever tab is open, with the current filters applied server-side.
-async function fetchPage({ view, page, perPage, search, brand, agent, date, dateField, contactBucket }) {
-  const p = filterQuery({ view, search, brand, agent, date, dateField, contactBucket });
+async function fetchPage({ view, page, perPage, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket }) {
+  const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket });
   p.set('page', String(page));
   p.set('perPage', String(perPage));
   const d = await getJson(`/api/delivery-escalation/record?${p}`);
@@ -366,10 +368,10 @@ const EXPORT_COLUMNS = [
 // db.js/record.js); this walks page 1, 2, 3... until a chunk comes back short, then builds one
 // CSV from everything collected. onChunk reports progress for a long export.
 // ﻿ prefix: without a BOM Excel reads a UTF-8 CSV as ANSI and mangles non-ASCII text.
-async function downloadCsv({ view, search, brand, agent, date, dateField, contactBucket }, onChunk) {
+async function downloadCsv({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket }, onChunk) {
   const rows = [];
   for (let page = 1; ; page++) {
-    const p = filterQuery({ view, search, brand, agent, date, dateField, contactBucket });
+    const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket });
     p.set('op', 'export');
     p.set('page', String(page));
     const d = await getJson(`/api/delivery-escalation/record?${p}`);
@@ -501,6 +503,11 @@ export default function DeliveryEscalationClient() {
   // Which date column the ticket list's date filter (and its CSV export) matches against -
   // same 'added_date'/'order_date' choice as the Overview tab's day-wise table.
   const [dateFilterBasis, setDateFilterBasis] = useState(() => safeStorage.getItem('de_date_filter_basis') || 'added_date');
+  // Set by clicking a bucket cell in the Overview day-wise table (see drillIntoDaywise) -
+  // { dateFrom, dateTo, dateField, tatBucket, label } overrides dateFilter/dateFilterBasis
+  // entirely while active, since a month/week cell spans a date range the single-day picker
+  // can't express. Cleared by the chip's × or by picking a tab from the nav bar directly.
+  const [dateDrill, setDateDrill] = useState(null);
   const [contactBucketFilter, setContactBucketFilter] = useState('ALL');
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(50);
@@ -552,9 +559,19 @@ export default function DeliveryEscalationClient() {
     return () => clearTimeout(t);
   }, [search]);
 
+  // dateDrill (set by clicking a day-wise bucket cell) overrides the manual date picker
+  // entirely while active - the two are never combined. Memoized on the primitive values, not
+  // just recomputed inline, so its identity is stable across renders it doesn't actually change
+  // on - loadPage below depends on it, and an unstable identity would refire that effect (and
+  // therefore refetch) on every render, not just on an actual filter change.
+  const effectiveDateFilter = useMemo(() => (dateDrill
+    ? { date: dateDrill.dateFrom, dateTo: dateDrill.dateTo, dateField: dateDrill.dateField, tatBucket: dateDrill.tatBucket }
+    : { date: dateFilter, dateTo: '', dateField: dateFilterBasis, tatBucket: '' }
+  ), [dateDrill, dateFilter, dateFilterBasis]);
+
   // Any change to what's being asked for restarts at page 1 - staying on page 12 of a filter
   // that now has 3 pages would just show an empty table.
-  useEffect(() => { setPage(1); }, [tab, debouncedSearch, brandFilter, agentFilter, dateFilter, dateFilterBasis, contactBucketFilter, perPage]);
+  useEffect(() => { setPage(1); }, [tab, debouncedSearch, brandFilter, agentFilter, dateFilter, dateFilterBasis, dateDrill, contactBucketFilter, perPage]);
 
   // Guards against a slow earlier request landing after a faster later one and overwriting the
   // newer rows - only the most recent request is allowed to apply its result.
@@ -568,7 +585,7 @@ export default function DeliveryEscalationClient() {
     try {
       const res = await fetchPage({
         view: tab, page, perPage, search: debouncedSearch, brand: brandFilter, agent: agentFilter,
-        date: dateFilter, dateField: dateFilterBasis, contactBucket: contactBucketFilter,
+        contactBucket: contactBucketFilter, ...effectiveDateFilter,
       });
       if (reqId !== reqIdRef.current) return;
       setRows(res.rows);
@@ -585,7 +602,7 @@ export default function DeliveryEscalationClient() {
     } finally {
       if (reqId === reqIdRef.current) setSyncing(false);
     }
-  }, [listTab, tab, page, perPage, debouncedSearch, brandFilter, agentFilter, dateFilter, dateFilterBasis, contactBucketFilter, showToast]);
+  }, [listTab, tab, page, perPage, debouncedSearch, brandFilter, agentFilter, contactBucketFilter, effectiveDateFilter, showToast]);
 
   const loadStats = useCallback(async () => {
     try {
@@ -615,6 +632,19 @@ export default function DeliveryEscalationClient() {
       setDaywiseLoading(false);
     }
   }, [tab, brandFilter, agentFilter, daywiseDateBasis]);
+
+  // Clicking a bucket cell in the day-wise table (a month/week's rolled-up count, or a single
+  // day once expanded) jumps to the tab that actually holds those rows and filters the list down
+  // to exactly this cell - the same brand/agent already applied to the table carries over
+  // untouched. 'Forced to be marked as RTO' and 'unresolved' are each a whole view on their own
+  // (see DE_DAYWISE_BUCKET_SQL's own comment), so no tatBucket is needed there; every other
+  // bucket is a TAT slice WITHIN Resolved, so tatBucket narrows it to just that slice.
+  const drillIntoDaywise = (dateFrom, dateTo, bucket) => {
+    const view = bucket === 'Forced to be marked as RTO' ? 'forced_rto'
+      : bucket === 'unresolved' ? 'fresh' : 'resolved';
+    setDateDrill({ dateFrom, dateTo, dateField: daywiseDateBasis, tatBucket: view === 'resolved' ? bucket : '', bucket, view });
+    setTab(view);
+  };
 
   const refresh = useCallback(async (silent = true) => {
     // Once the session is known expired, every one of these will just 401 again - retrying
@@ -790,7 +820,7 @@ export default function DeliveryEscalationClient() {
     setExporting(true);
     try {
       const { count } = await downloadCsv(
-        { view: tab, search: debouncedSearch, brand: brandFilter, agent: agentFilter, date: dateFilter, dateField: dateFilterBasis, contactBucket: contactBucketFilter },
+        { view: tab, search: debouncedSearch, brand: brandFilter, agent: agentFilter, contactBucket: contactBucketFilter, ...effectiveDateFilter },
         (soFar) => showToast(`Exporting… ${soFar.toLocaleString('en-IN')} rows so far`),
       );
       showToast(`Downloaded ${count.toLocaleString('en-IN')} rows`);
@@ -938,7 +968,7 @@ export default function DeliveryEscalationClient() {
               {tabsList.map(t => (
                 <button
                   key={t.key}
-                  onClick={() => setTab(t.key)}
+                  onClick={() => { setDateDrill(null); setTab(t.key); }}
                   className={`relative px-4 py-2 rounded-xl text-[13px] font-bold whitespace-nowrap transition-all flex items-center gap-2.5 ${
                     tab === t.key
                       ? 'text-white bg-indigo-600 shadow-md shadow-indigo-950/50 border border-indigo-500/40'
@@ -1057,10 +1087,19 @@ export default function DeliveryEscalationClient() {
                                     <span className="inline-block w-4 text-zinc-500">{monthOpen ? '▾' : '▸'}</span>
                                     {formatDaywiseMonth(month.key)}
                                   </td>
-                                  {daywise.buckets.flatMap((b) => ([
-                                    <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60">{month.counts[b] || 0}</td>,
-                                    <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
-                                  ]))}
+                                  {daywise.buckets.flatMap((b) => {
+                                    const count = month.counts[b] || 0;
+                                    const days = month.weeks.flatMap((w) => w.days);
+                                    return [
+                                      <td
+                                        key={`${b}-n`}
+                                        onClick={count ? (e) => { e.stopPropagation(); drillIntoDaywise(days[0]?.date, days[days.length - 1]?.date, b); } : undefined}
+                                        title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
+                                        className={`py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
+                                      >{count}</td>,
+                                      <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
+                                    ];
+                                  })}
                                   <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
                                 </tr>
                                 {monthOpen && month.weeks.map((week) => {
@@ -1075,19 +1114,35 @@ export default function DeliveryEscalationClient() {
                                           <span className="inline-block w-4 text-zinc-500">{weekOpen ? '▾' : '▸'}</span>
                                           {formatDaywiseWeek(week)}
                                         </td>
-                                        {daywise.buckets.flatMap((b) => ([
-                                          <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">{week.counts[b] || 0}</td>,
-                                          <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{week.pct[b] || 0}%</td>,
-                                        ]))}
+                                        {daywise.buckets.flatMap((b) => {
+                                          const count = week.counts[b] || 0;
+                                          return [
+                                            <td
+                                              key={`${b}-n`}
+                                              onClick={count ? (e) => { e.stopPropagation(); drillIntoDaywise(week.days[0]?.date, week.days[week.days.length - 1]?.date, b); } : undefined}
+                                              title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
+                                              className={`py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
+                                            >{count}</td>,
+                                            <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{week.pct[b] || 0}%</td>,
+                                          ];
+                                        })}
                                         <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{week.total.toLocaleString('en-IN')}</td>
                                       </tr>
                                       {weekOpen && week.days.map((r) => (
                                         <tr key={r.date} className="hover:bg-zinc-800/30 transition-colors">
                                           <td className="py-2 px-3 pl-14 text-zinc-400 whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
-                                          {daywise.buckets.flatMap((b) => ([
-                                            <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-400 tabular-nums border-l border-zinc-800/60">{r.counts[b] || 0}</td>,
-                                            <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-600 tabular-nums text-[12px]">{r.pct[b] || 0}%</td>,
-                                          ]))}
+                                          {daywise.buckets.flatMap((b) => {
+                                            const count = r.counts[b] || 0;
+                                            return [
+                                              <td
+                                                key={`${b}-n`}
+                                                onClick={count ? () => drillIntoDaywise(r.date, r.date, b) : undefined}
+                                                title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
+                                                className={`py-2 px-3 text-right text-zinc-400 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
+                                              >{count}</td>,
+                                              <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-600 tabular-nums text-[12px]">{r.pct[b] || 0}%</td>,
+                                            ];
+                                          })}
                                           <td className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">{r.total.toLocaleString('en-IN')}</td>
                                         </tr>
                                       ))}
@@ -1172,19 +1227,36 @@ export default function DeliveryEscalationClient() {
                       {/* Everyone with access gets this - it is how an agent narrows the shared
                           desk down to their own tickets now that nothing is hidden from them. */}
                       <CustomSelect value={agentFilter} onChange={setAgentFilter} options={agentOptions} placeholder="Agent" />
-                      <input
-                        type="date"
-                        value={dateFilter}
-                        onChange={e => setDateFilter(e.target.value)}
-                        title={`Filter by ${dateFilterBasis === 'order_date' ? 'order' : 'query'} date (${dateFilterBasis})`}
-                        className="h-8 px-3 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                      />
-                      <CustomSelect
-                        value={dateFilterBasis}
-                        onChange={(v) => { setDateFilterBasis(v); safeStorage.setItem('de_date_filter_basis', v); }}
-                        options={[{ value: 'added_date', label: 'Query Date' }, { value: 'order_date', label: 'Order Date' }]}
-                        placeholder="Date"
-                      />
+                      {dateDrill ? (
+                        // Set by clicking a day-wise bucket cell - a range plus a TAT bucket, which
+                        // the plain date+basis inputs below can't represent, so they're swapped for
+                        // one chip summarizing the drill-down until it's cleared.
+                        <span className="h-8 px-3 flex items-center gap-2 text-[13px] bg-indigo-500/10 border border-indigo-500/40 rounded-lg text-indigo-300">
+                          {dateDrill.dateFrom === dateDrill.dateTo
+                            ? formatDaywiseDate(dateDrill.dateFrom)
+                            : `${formatDaywiseDate(dateDrill.dateFrom)} – ${formatDaywiseDate(dateDrill.dateTo)}`}
+                          {' · '}{dateDrill.bucket}
+                          <button onClick={() => setDateDrill(null)} className="text-indigo-400 hover:text-white" title="Clear this drill-down">
+                            <XIcon />
+                          </button>
+                        </span>
+                      ) : (
+                        <>
+                          <input
+                            type="date"
+                            value={dateFilter}
+                            onChange={e => setDateFilter(e.target.value)}
+                            title={`Filter by ${dateFilterBasis === 'order_date' ? 'order' : 'query'} date (${dateFilterBasis})`}
+                            className="h-8 px-3 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                          />
+                          <CustomSelect
+                            value={dateFilterBasis}
+                            onChange={(v) => { setDateFilterBasis(v); safeStorage.setItem('de_date_filter_basis', v); }}
+                            options={[{ value: 'added_date', label: 'Query Date' }, { value: 'order_date', label: 'Order Date' }]}
+                            placeholder="Date"
+                          />
+                        </>
+                      )}
                       <CustomSelect
                         value={contactBucketFilter}
                         onChange={setContactBucketFilter}

@@ -1354,18 +1354,30 @@ const DE_DAYWISE_DATE_FIELDS = { added_date: 'added_date', order_date: 'order_da
 
 // Every user-supplied value here becomes a bound parameter - none is ever concatenated into
 // the SQL text. `agent` is the optional Agent-filter dropdown, a user's own choice of view -
-// there is no forced per-agent scope (see the header comment above). `date` filters on
+// there is no forced per-agent scope (see the header comment above). `date`/`dateTo` filter on
 // dateField's calendar day - 'added_date' (the Query date shown elsewhere on this page, e.g.
 // the day-wise table, and the default when dateField is omitted/unrecognized) or 'order_date'
 // (when the order was placed) - not disposed_at. dateField is whitelisted via
 // DE_DAYWISE_DATE_FIELDS (same map the day-wise table uses) since it's interpolated as a bare
-// column name rather than bound as a value.
-function deFilterSql({ search, brand, agent, date, dateField, contactBucket } = {}) {
+// column name rather than bound as a value. `dateTo` turns the exact-day match into an
+// inclusive range - the day-wise table's own month/week drill-down (see
+// DeliveryEscalationClient.js's drillIntoDaywise) clicking through to a month or week spans more
+// than one day; the plain date picker never sends it, so its single-day behavior is unchanged.
+// `tatBucket` matches DE_TAT_BUCKET_SQL's own per-row label (the day-wise table's bucket
+// columns, minus its Forced-RTO/Fresh special-casing - see DE_DAYWISE_BUCKET_SQL's own comment
+// on why those two are whole views instead) - bound as a value, not interpolated, so it needs no
+// whitelist.
+function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket } = {}) {
   const clauses = [];
   const params = [];
   if (brand) { clauses.push('brand = ?'); params.push(brand); }
   if (agent) { clauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
-  if (date) { clauses.push(`DATE(${DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date'}) = ?`); params.push(date); }
+  if (date) {
+    const col = DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date';
+    if (dateTo) { clauses.push(`DATE(${col}) BETWEEN ? AND ?`); params.push(date, dateTo); }
+    else { clauses.push(`DATE(${col}) = ?`); params.push(date); }
+  }
+  if (tatBucket) { clauses.push(`${DE_TAT_BUCKET_SQL} = ?`); params.push(tatBucket); }
   if (contactBucket && DE_CONTACT_BUCKET_RANGES[contactBucket]) {
     const range = DE_CONTACT_BUCKET_RANGES[contactBucket];
     clauses.push(range.sql);

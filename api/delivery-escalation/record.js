@@ -70,7 +70,9 @@ module.exports = async (req, res) => {
       brand: q.brand && q.brand !== 'ALL' ? q.brand : '',
       agent: q.agent && q.agent !== 'ALL' ? q.agent : '',
       date: q.date || '',
+      dateTo: q.dateTo || '',
       dateField: q.dateField || '',
+      tatBucket: q.tatBucket || '',
       contactBucket: q.contactBucket && q.contactBucket !== 'ALL' ? q.contactBucket : '',
     };
     try {
