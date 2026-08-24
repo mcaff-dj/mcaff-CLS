@@ -1,0 +1,66 @@
+name: Auto-dispose Delivery_escalation tickets the courier says are delivered
+
+# Rule 2 of scripts/auto_dispose_de_categories.py: join Delivery_escalation's blank-outcome
+# (Fresh) rows to mcaff_prod.lmd_courier_tracking on AWB and, where the courier reports
+# uni_Shipping_Package_Status = 'DELIVERED', stamp outcome 'Delivered' with
+# disposed_at = uni_Delivery_Time.
+#
+# Its own workflow rather than another step inside sync-delivery-tickets.yml (which owns rule 1,
+# every 2 hours): the courier table is refreshed by a separate logistics pipeline, so 12 runs a
+# day would find nothing new on 11 of them. Cost of the daily cadence, accepted: a ticket whose
+# parcel is delivered just after a run sits in Fresh for up to 24h before this clears it.
+#
+# No dependency on a deploy of api/: the outcome written is the bare 'Delivered' root, which
+# DE_RESOLVED_WHERE in api/_lib/db.js already matches. Rows move Fresh -> Resolved on the next
+# page load.
+
+on:
+  schedule:
+    - cron: '30 23 * * *'   # 23:30 UTC = 5:00 AM IST, daily
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Count what would be disposed without writing anything"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-dispose-de-delivered
+  cancel-in-progress: false
+
+jobs:
+  dispose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # requirements-report.txt, not requirements.txt: this job needs pymysql and nothing else -
+      # no Sheets client, and none of the psycopg[binary] wheel the parent file pulls in.
+      - name: Install dependencies
+        run: pip install -r requirements-report.txt
+
+      - name: Offline self-check
+        run: python scripts/auto_dispose_de_categories.py --self-check
+
+      - name: Auto-dispose courier-delivered tickets
+        env:
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+        # `!inputs.dry_run && '--apply' || ''`, NOT the other way round: '' is FALSY in GitHub
+        # expressions, so `dry_run && '' || '--apply'` would fall through to --apply on exactly
+        # the run that asked not to write. Also `inputs.` and not `github.event.inputs.`, which
+        # is the string "true"/"false" for a boolean input - both of them truthy.
+        # On the schedule trigger the input is unset, so this resolves to --apply.
+        run: python scripts/auto_dispose_de_categories.py --rule delivered ${{ !inputs.dry_run && '--apply' || '' }}

@@ -1,10 +1,27 @@
 #!/usr/bin/env python3
-"""Auto-disposes Delivery_escalation rows whose query_category has one and only one correct
-outcome, so agents never have to click through 12k tickets whose answer is already known.
+"""Auto-disposes Delivery_escalation rows whose outcome is already known, so agents never have to
+click through thousands of tickets whose answer nobody needs to decide. Two independent rules:
 
-Runs as a step of sync_delivery_tickets_to_sheet.py (every 2 hours, after the upsert) so newly
-mirrored tickets in these categories are disposed on arrival, and standalone with --apply for
-the one-off pass over the history that predates this rule.
+  --rule categories  query_category alone determines the outcome (Fake Order RTO -> new order
+                     placed, Pincode not serviceable -> cancelled and refunded, ...). Runs as a
+                     step of sync_delivery_tickets_to_sheet.py, every 2 hours after the upsert,
+                     so newly mirrored tickets are disposed on arrival.
+  --rule delivered   mcaff_prod.lmd_courier_tracking says the parcel arrived
+                     (uni_Shipping_Package_Status = 'DELIVERED'), joined on AWB -> 'Delivered',
+                     disposed_at = uni_Delivery_Time. Runs daily at 5 AM IST from its own
+                     workflow (.github/workflows/auto-dispose-de-delivered.yml), NOT from the
+                     2-hourly sync: the courier feed is refreshed by a separate pipeline, so
+                     re-checking it 12x a day would find nothing 11 of those times.
+
+Both are idempotent, so either can also be run standalone with --apply over the history that
+predates it. The filename predates the delivered rule; kept as-is because
+sync_delivery_tickets_to_sheet.py imports it by name.
+
+ORDER MATTERS where a ticket qualifies for both: categories runs first (its own 2-hourly slot is
+more frequent), and the blank-outcome guard below means delivered then skips it. That is the
+right precedence for 'Marked Delivered but customer did not receive order' - the category rule
+stamps 'Resolved > POD requested', and courier-says-DELIVERED is precisely the claim that ticket
+disputes, so it must not be allowed to overwrite it with 'Delivered'.
 
 WHICH ROWS: blank outcome only, and never a Forced RTO row. Blank-outcome is what makes this
 safe to re-run and safe to ship - a row an agent (or the sync job's own terminal carry-forward)
@@ -71,11 +88,24 @@ CATEGORY_DISPOSITION = {
 # NOT(NULL) is also NULL and silently matches nothing - the exact bug db.js's comment records
 # dropping Fresh from ~3645 rows to 2. Doubled %% because mysql_lib passes params to pymysql,
 # which %-formats the statement.
-FORCED_RTO_WHERE = (
-    "((tat IS NOT NULL AND tat = 'Forced to be marked as RTO') "
-    "OR (outcome IS NOT NULL AND (outcome = 'RTO' OR outcome LIKE 'RTO > %%')))"
-)
-ELIGIBLE_WHERE = f"(outcome IS NULL OR outcome = '') AND NOT {FORCED_RTO_WHERE}"
+#
+# Functions rather than constants only so the delivered rule's multi-table UPDATE can get a
+# `d.`-qualified copy from this one source. Unqualified would happen to work today
+# (lmd_courier_tracking has no `tat` or `outcome` column, so nothing is ambiguous), but that is
+# luck, not a guarantee: the day that table gains an `outcome` the clause would silently bind to
+# the wrong one, and a silently-wrong WHERE in exactly this spot is what the two db.js comments
+# above record costing an entire tab's worth of rows. Twice.
+def forced_rto_where(prefix=""):
+    return (
+        f"(({prefix}tat IS NOT NULL AND {prefix}tat = 'Forced to be marked as RTO') "
+        f"OR ({prefix}outcome IS NOT NULL AND "
+        f"({prefix}outcome = 'RTO' OR {prefix}outcome LIKE 'RTO > %%')))"
+    )
+
+
+def eligible_where(prefix=""):
+    return (f"({prefix}outcome IS NULL OR {prefix}outcome = '') "
+            f"AND NOT {forced_rto_where(prefix)}")
 
 
 def child_of(outcome):
@@ -108,7 +138,7 @@ def update_sql(categories):
             agent_email = %s,
             agent_remarks = CONCAT('[Auto-disposed: ', query_category, ']')
         WHERE query_category IN ({placeholders})
-          AND {ELIGIBLE_WHERE}
+          AND {eligible_where()}
     """
 
 
@@ -117,7 +147,7 @@ def count_sql(categories):
     return f"""
         SELECT COUNT(*) FROM Delivery_escalation
         WHERE query_category IN ({placeholders})
-          AND {ELIGIBLE_WHERE}
+          AND {eligible_where()}
     """
 
 
@@ -185,6 +215,84 @@ def auto_dispose(dry_run=True):
     return total
 
 
+# ---------------------------------------------------------------------------
+# Rule 2: the courier says it arrived
+# ---------------------------------------------------------------------------
+
+# mcaff_prod.lmd_courier_tracking is the logistics pipeline's own AWB-keyed table (2.86M rows,
+# PRIMARY KEY awb_number), a different schema on the same server - mysql_lib shares one
+# connection and only switches the ACTIVE schema, so the cross-schema reference has to be
+# spelled out in full here rather than relying on database="PEP_CLS".
+#
+# Driving the join from Delivery_escalation (39k rows) means ~9k primary-key lookups, not a scan
+# of 2.86M: uni_Shipping_Package_Status has no index of its own, so filtering from that side
+# would be the wrong direction entirely.
+COURIER_TABLE = "mcaff_prod.lmd_courier_tracking"
+DELIVERED_STATUS = "DELIVERED"
+DELIVERED_OUTCOME = "Delivered"
+DELIVERED_REMARKS = "[Auto-disposed: courier DELIVERED]"
+
+# 'Delivered' is deliberately the BARE existing root, not a new 'Delivered > ...' child:
+#   - DE_RESOLVED_WHERE in api/_lib/db.js already matches `outcome = 'Delivered'`, so these rows
+#     appear in the Resolved tab with no api/ change and therefore no deploy ordering to get
+#     wrong - unlike the categories rule, which needed DE_RESOLVED_WHERE widened first.
+#   - it is already in this process's disposition tree (calling_process_dispositions id 2, root,
+#     no children), shared with 18.5k agent-marked rows, so seed_dispositions has nothing to add.
+# Provenance is carried by agent_email/agent_remarks instead, which is also what makes a bad run
+# reversible: UPDATE ... SET outcome=NULL, disposed_at=NULL WHERE agent_remarks = the constant
+# above.
+#
+# COALESCE(uni_Delivery_Time, NOW()): 1,086 of the 2,079 matching rows have the package marked
+# DELIVERED but no delivery timestamp, and the ticket still needs to leave Fresh. Cost of the
+# fallback, accepted: those rows get today's date, so DE_TAT_BUCKET_SQL
+# (DATEDIFF(disposed_at, added_date)) reports them in 'Greater than 10 days' rather than their
+# true transit time. Rows that DO carry a real uni_Delivery_Time get the honest figure - a few
+# of them negative, where the courier delivered before the ticket was even logged, which lands
+# in 'Within 48 hrs' since that bucket is the `<= 2` arm.
+def delivered_update_sql():
+    return f"""
+        UPDATE Delivery_escalation d
+        JOIN {COURIER_TABLE} t ON t.awb_number = d.awb_code
+        SET d.outcome = %s,
+            d.disposed_at = COALESCE(t.uni_Delivery_Time, NOW()),
+            d.agent_email = %s,
+            d.agent_remarks = %s
+        WHERE t.uni_Shipping_Package_Status = %s
+          AND {eligible_where("d.")}
+    """
+
+
+def delivered_count_sql():
+    return f"""
+        SELECT COUNT(*)
+        FROM Delivery_escalation d
+        JOIN {COURIER_TABLE} t ON t.awb_number = d.awb_code
+        WHERE t.uni_Shipping_Package_Status = %s
+          AND {eligible_where("d.")}
+    """
+
+
+def auto_dispose_delivered(dry_run=True):
+    """Returns rows touched (or, on a dry run, rows that would be)."""
+    if dry_run:
+        got = mysql_lib.query(delivered_count_sql(), params=(DELIVERED_STATUS,),
+                              database="PEP_CLS")
+        if got is None:
+            raise RuntimeError("MYSQL_* credentials not configured - cannot auto-dispose.")
+        n = got[0][0]
+        print(f"  would set '{DELIVERED_OUTCOME}' on {n} row(s) (courier "
+              f"{DELIVERED_STATUS})")
+        return n
+    n = mysql_lib.execute(
+        delivered_update_sql(),
+        params=(DELIVERED_OUTCOME, AUTO_AGENT, DELIVERED_REMARKS, DELIVERED_STATUS),
+        database="PEP_CLS")
+    if n is None:
+        raise RuntimeError("MYSQL_* credentials not configured - cannot auto-dispose.")
+    print(f"  set '{DELIVERED_OUTCOME}' on {n} row(s) (courier {DELIVERED_STATUS})")
+    return n
+
+
 def self_check():
     """Offline check of the mapping and the generated SQL - no DB."""
     assert child_of("Resolved > New order placed") == "New order placed"
@@ -223,6 +331,39 @@ def self_check():
     assert count_sql(["a", "b"]).count("%s") == 2
     # A stray single % anywhere would blow up pymysql's own %-formatting of the statement.
     assert "LIKE 'RTO > %%'" in sql and "%%%" not in sql
+
+    # --- rule 2: the courier-DELIVERED join ---
+    # Both eligibility clauses must come from the one source, qualified vs not. Testing that they
+    # are the SAME string modulo the prefix is the point: a hand-copied `d.`-qualified duplicate
+    # is exactly the drift this refactor exists to prevent.
+    assert eligible_where("d.") == eligible_where().replace("outcome", "d.outcome").replace(
+        "tat", "d.tat")
+    assert "d.outcome IS NULL OR d.outcome = ''" in eligible_where("d.")
+
+    dsql = delivered_update_sql()
+    # Guards, same two as rule 1, but on the aliased table.
+    assert "d.outcome IS NULL OR d.outcome = ''" in dsql
+    assert "d.tat = 'Forced to be marked as RTO'" in dsql
+    # Every unaliased column reference is a latent wrong-table bind in a multi-table UPDATE.
+    for bare in ("SET outcome", "SET disposed_at", " outcome IS NULL", " tat IS NOT NULL"):
+        assert bare not in dsql, bare
+    # The join is AWB-to-AWB and driven from the 39k-row side, not the 2.86M-row side.
+    assert "JOIN mcaff_prod.lmd_courier_tracking t ON t.awb_number = d.awb_code" in dsql
+    assert dsql.index("UPDATE Delivery_escalation d") < dsql.index("JOIN mcaff_prod")
+    # uni_Delivery_Time is the resolved timestamp, NOW() only the fallback for the ~52% of
+    # matching rows that have the package DELIVERED but no delivery time.
+    assert "d.disposed_at = COALESCE(t.uni_Delivery_Time, NOW())" in dsql
+    # Same generated-column trap as rule 1 - error 3105.
+    assert "child_disposition" not in dsql
+    # outcome, agent_email, agent_remarks, package status - and nothing interpolated raw.
+    assert dsql.count("%s") == 4
+    assert delivered_count_sql().count("%s") == 1
+    assert "%%%" not in dsql and "LIKE 'RTO > %%'" in dsql
+    # Bare existing root, so DE_RESOLVED_WHERE already matches it with no api/ change.
+    assert DELIVERED_OUTCOME == "Delivered" and " > " not in DELIVERED_OUTCOME
+    # The count query must select exactly the rows the update would touch, or the dry run lies.
+    assert eligible_where("d.") in delivered_count_sql()
+    assert "t.uni_Shipping_Package_Status = %s" in delivered_count_sql()
     print("self-check ok")
 
 
@@ -231,13 +372,23 @@ def main():
     ap.add_argument("--apply", action="store_true", help="Perform the updates (default is a dry run).")
     ap.add_argument("--skip-seed", action="store_true", help="Don't touch the disposition tree.")
     ap.add_argument("--self-check", action="store_true", help="Run the offline mapping check and exit.")
+    ap.add_argument("--rule", choices=("categories", "delivered", "all"), default="all",
+                    help="Which rule to run (default: all).")
     args = ap.parse_args()
     if args.self_check:
         return self_check()
-    if not args.skip_seed:
-        seed_dispositions(dry_run=not args.apply)
-    total = auto_dispose(dry_run=not args.apply)
-    verb = "would auto-dispose" if not args.apply else "auto-disposed"
+    dry_run = not args.apply
+    total = 0
+    # Only the categories rule writes labels the tree doesn't already have; the delivered rule
+    # reuses the existing bare 'Delivered' root, so --rule delivered never needs the seed and
+    # doesn't have to be told to skip it.
+    if args.rule in ("categories", "all"):
+        if not args.skip_seed:
+            seed_dispositions(dry_run=dry_run)
+        total += auto_dispose(dry_run=dry_run)
+    if args.rule in ("delivered", "all"):
+        total += auto_dispose_delivered(dry_run=dry_run)
+    verb = "would auto-dispose" if dry_run else "auto-disposed"
     print(f"  {verb} {total} row(s) in total")
 
 
