@@ -197,20 +197,21 @@ function formatDaywiseWeek(week) {
   return `Week ${week.weekOfMonth}${range ? ` (${formatDaywiseDate(first).split(' ')[0]} ${range})` : ''}`;
 }
 
-function filterQuery({ view, search, brand, agent, date, contactBucket }) {
+function filterQuery({ view, search, brand, agent, date, dateField, contactBucket }) {
   const p = new URLSearchParams();
   if (view) p.set('view', view);
   if (search) p.set('search', search);
   if (brand && brand !== 'ALL') p.set('brand', brand);
   if (agent && agent !== 'ALL') p.set('agent', agent);
   if (date) p.set('date', date);
+  if (date && dateField) p.set('dateField', dateField);
   if (contactBucket && contactBucket !== 'ALL') p.set('contactBucket', contactBucket);
   return p;
 }
 
 // One page of whichever tab is open, with the current filters applied server-side.
-async function fetchPage({ view, page, perPage, search, brand, agent, date, contactBucket }) {
-  const p = filterQuery({ view, search, brand, agent, date, contactBucket });
+async function fetchPage({ view, page, perPage, search, brand, agent, date, dateField, contactBucket }) {
+  const p = filterQuery({ view, search, brand, agent, date, dateField, contactBucket });
   p.set('page', String(page));
   p.set('perPage', String(perPage));
   const d = await getJson(`/api/delivery-escalation/record?${p}`);
@@ -365,10 +366,10 @@ const EXPORT_COLUMNS = [
 // db.js/record.js); this walks page 1, 2, 3... until a chunk comes back short, then builds one
 // CSV from everything collected. onChunk reports progress for a long export.
 // ﻿ prefix: without a BOM Excel reads a UTF-8 CSV as ANSI and mangles non-ASCII text.
-async function downloadCsv({ view, search, brand, agent, date, contactBucket }, onChunk) {
+async function downloadCsv({ view, search, brand, agent, date, dateField, contactBucket }, onChunk) {
   const rows = [];
   for (let page = 1; ; page++) {
-    const p = filterQuery({ view, search, brand, agent, date, contactBucket });
+    const p = filterQuery({ view, search, brand, agent, date, dateField, contactBucket });
     p.set('op', 'export');
     p.set('page', String(page));
     const d = await getJson(`/api/delivery-escalation/record?${p}`);
@@ -497,6 +498,9 @@ export default function DeliveryEscalationClient() {
   const [daywiseDateBasis, setDaywiseDateBasis] = useState(() => safeStorage.getItem('de_daywise_date_basis') || 'added_date');
   const [agentFilter, setAgentFilter] = useState('ALL');
   const [dateFilter, setDateFilter] = useState('');
+  // Which date column the ticket list's date filter (and its CSV export) matches against -
+  // same 'added_date'/'order_date' choice as the Overview tab's day-wise table.
+  const [dateFilterBasis, setDateFilterBasis] = useState(() => safeStorage.getItem('de_date_filter_basis') || 'added_date');
   const [contactBucketFilter, setContactBucketFilter] = useState('ALL');
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(50);
@@ -550,7 +554,7 @@ export default function DeliveryEscalationClient() {
 
   // Any change to what's being asked for restarts at page 1 - staying on page 12 of a filter
   // that now has 3 pages would just show an empty table.
-  useEffect(() => { setPage(1); }, [tab, debouncedSearch, brandFilter, agentFilter, dateFilter, contactBucketFilter, perPage]);
+  useEffect(() => { setPage(1); }, [tab, debouncedSearch, brandFilter, agentFilter, dateFilter, dateFilterBasis, contactBucketFilter, perPage]);
 
   // Guards against a slow earlier request landing after a faster later one and overwriting the
   // newer rows - only the most recent request is allowed to apply its result.
@@ -564,7 +568,7 @@ export default function DeliveryEscalationClient() {
     try {
       const res = await fetchPage({
         view: tab, page, perPage, search: debouncedSearch, brand: brandFilter, agent: agentFilter,
-        date: dateFilter, contactBucket: contactBucketFilter,
+        date: dateFilter, dateField: dateFilterBasis, contactBucket: contactBucketFilter,
       });
       if (reqId !== reqIdRef.current) return;
       setRows(res.rows);
@@ -581,7 +585,7 @@ export default function DeliveryEscalationClient() {
     } finally {
       if (reqId === reqIdRef.current) setSyncing(false);
     }
-  }, [listTab, tab, page, perPage, debouncedSearch, brandFilter, agentFilter, dateFilter, contactBucketFilter, showToast]);
+  }, [listTab, tab, page, perPage, debouncedSearch, brandFilter, agentFilter, dateFilter, dateFilterBasis, contactBucketFilter, showToast]);
 
   const loadStats = useCallback(async () => {
     try {
@@ -786,7 +790,7 @@ export default function DeliveryEscalationClient() {
     setExporting(true);
     try {
       const { count } = await downloadCsv(
-        { view: tab, search: debouncedSearch, brand: brandFilter, agent: agentFilter, date: dateFilter, contactBucket: contactBucketFilter },
+        { view: tab, search: debouncedSearch, brand: brandFilter, agent: agentFilter, date: dateFilter, dateField: dateFilterBasis, contactBucket: contactBucketFilter },
         (soFar) => showToast(`Exporting… ${soFar.toLocaleString('en-IN')} rows so far`),
       );
       showToast(`Downloaded ${count.toLocaleString('en-IN')} rows`);
@@ -1172,8 +1176,14 @@ export default function DeliveryEscalationClient() {
                         type="date"
                         value={dateFilter}
                         onChange={e => setDateFilter(e.target.value)}
-                        title="Filter by query date (added_date)"
+                        title={`Filter by ${dateFilterBasis === 'order_date' ? 'order' : 'query'} date (${dateFilterBasis})`}
                         className="h-8 px-3 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                      />
+                      <CustomSelect
+                        value={dateFilterBasis}
+                        onChange={(v) => { setDateFilterBasis(v); safeStorage.setItem('de_date_filter_basis', v); }}
+                        options={[{ value: 'added_date', label: 'Query Date' }, { value: 'order_date', label: 'Order Date' }]}
+                        placeholder="Date"
                       />
                       <CustomSelect
                         value={contactBucketFilter}

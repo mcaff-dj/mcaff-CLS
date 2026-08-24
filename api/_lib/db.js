@@ -1346,17 +1346,26 @@ const DE_CONTACT_BUCKET_RANGES = {
   '10+': { sql: 'contact_count >= ?', params: [10] },
 };
 
+// Which date column a query groups/filters rows by - 'added_date' (the Query date shown
+// elsewhere on this page) or 'order_date' (when the underlying order was placed, per
+// sync_delivery_tickets_to_sheet.py). A whitelist, not user-supplied SQL, since callers below
+// interpolate the resolved value as a bare column name rather than binding it as a value.
+const DE_DAYWISE_DATE_FIELDS = { added_date: 'added_date', order_date: 'order_date' };
+
 // Every user-supplied value here becomes a bound parameter - none is ever concatenated into
 // the SQL text. `agent` is the optional Agent-filter dropdown, a user's own choice of view -
 // there is no forced per-agent scope (see the header comment above). `date` filters on
-// added_date's calendar day (the Query date shown elsewhere on this page, e.g. the day-wise
-// table), not disposed_at - a ticket's "date" is when the customer first raised it.
-function deFilterSql({ search, brand, agent, date, contactBucket } = {}) {
+// dateField's calendar day - 'added_date' (the Query date shown elsewhere on this page, e.g.
+// the day-wise table, and the default when dateField is omitted/unrecognized) or 'order_date'
+// (when the order was placed) - not disposed_at. dateField is whitelisted via
+// DE_DAYWISE_DATE_FIELDS (same map the day-wise table uses) since it's interpolated as a bare
+// column name rather than bound as a value.
+function deFilterSql({ search, brand, agent, date, dateField, contactBucket } = {}) {
   const clauses = [];
   const params = [];
   if (brand) { clauses.push('brand = ?'); params.push(brand); }
   if (agent) { clauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
-  if (date) { clauses.push('DATE(added_date) = ?'); params.push(date); }
+  if (date) { clauses.push(`DATE(${DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date'}) = ?`); params.push(date); }
   if (contactBucket && DE_CONTACT_BUCKET_RANGES[contactBucket]) {
     const range = DE_CONTACT_BUCKET_RANGES[contactBucket];
     clauses.push(range.sql);
@@ -1499,14 +1508,10 @@ async function getDeliveryEscalationRepeatStats() {
 // second query (grouped by nothing, since these rows share no date to group by) folds them into
 // the grand total only; they still contribute no per-date row, because there is no date to put
 // one under.
-// dateField picks which column the table's rows are grouped/bucketed under - 'added_date'
-// (the Query date shown elsewhere on this page) or 'order_date' (when the underlying order was
-// placed, per sync_delivery_tickets_to_sheet.py). Whitelisted, not user-supplied SQL, since it's
-// interpolated as a bare column name rather than bound as a value. The TAT bucket itself
-// (DE_DAYWISE_BUCKET_SQL) always measures against added_date regardless of dateField - this only
-// changes which date a row is grouped under, not how its own turnaround is computed.
-const DE_DAYWISE_DATE_FIELDS = { added_date: 'added_date', order_date: 'order_date' };
-
+// dateField (both here and in deFilterSql above) always measures rows against added_date for
+// the day-wise table's own TAT bucket (DE_DAYWISE_BUCKET_SQL) regardless of which column it
+// groups by - it only changes which date a row is grouped/filtered under, not how its own
+// turnaround is computed.
 async function getDeliveryEscalationDaywiseStats(opts = {}) {
   const { brand, agent, dateField } = opts;
   const col = DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date';
