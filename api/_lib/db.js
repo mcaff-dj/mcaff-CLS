@@ -1524,6 +1524,11 @@ async function getDeliveryEscalationRepeatStats() {
 // the day-wise table's own TAT bucket (DE_DAYWISE_BUCKET_SQL) regardless of which column it
 // groups by - it only changes which date a row is grouped/filtered under, not how its own
 // turnaround is computed.
+// Order Date's pre-June-2026 rows are sparse backfill noise (a handful of parcels per month
+// going back to May 2024) that swamp the table with mostly-empty rows above where its real
+// volume starts - Query Date has no such gap, so this only ever trims the order_date grouping.
+const DE_ORDER_DATE_FLOOR = '2026-06-01';
+
 async function getDeliveryEscalationDaywiseStats(opts = {}) {
   const { brand, agent, dateField } = opts;
   const col = DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date';
@@ -1533,6 +1538,11 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
   if (agent) { extraClauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
   const extra = extraClauses.length ? ` AND ${extraClauses.join(' AND ')}` : '';
   const pool = await getPool();
+  // The floor only ever applies to the dated rows query, never to noDateCount below - that one
+  // counts order_date IS NULL rows, which "order_date >= floor" would always contradict and
+  // silently zero out.
+  const floorClause = col === 'order_date' ? ' AND order_date >= ?' : '';
+  const floorParams = col === 'order_date' ? [DE_ORDER_DATE_FLOOR] : [];
   // COUNT(DISTINCT awb_code), not COUNT(*) - same "how many parcels, not how many rows" fix
   // getDeliveryEscalationStats' own Fresh tile already applies (see its comment): a repeat-
   // contact AWB gets a fresh ticket_number per day it's still flagged, so row count double-
@@ -1541,10 +1551,10 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
   const [rows] = await pool.execute(`
     SELECT DATE_FORMAT(${col}, '%Y-%m-%d') AS d, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(DISTINCT awb_code) AS c
     FROM Delivery_escalation
-    WHERE ${col} IS NOT NULL${extra}
+    WHERE ${col} IS NOT NULL${extra}${floorClause}
     GROUP BY d, bucket
     ORDER BY d
-  `, params);
+  `, [...params, ...floorParams]);
   const [[{ noDateCount }]] = await pool.execute(
     `SELECT COUNT(DISTINCT awb_code) AS noDateCount FROM Delivery_escalation WHERE ${col} IS NULL${extra}`, params);
 
