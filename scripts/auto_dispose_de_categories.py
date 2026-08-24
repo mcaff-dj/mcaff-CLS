@@ -79,8 +79,13 @@ ELIGIBLE_WHERE = f"(outcome IS NULL OR outcome = '') AND NOT {FORCED_RTO_WHERE}"
 
 
 def child_of(outcome):
-    """The part after the root, which is what child_disposition stores - matching how existing
-    rows split 'RTO > New AWB# > X' into child 'New AWB# > X'. A bare root has no child."""
+    """The part after the root - the child label for the disposition tree seed. A bare root has
+    no child.
+
+    NOT written to Delivery_escalation.child_disposition: that column is VIRTUAL GENERATED off
+    outcome (`SUBSTR(outcome, LOCATE(' > ', outcome) + 3)`), so MySQL derives exactly this value
+    on its own and rejects any UPDATE naming the column - error 3105, "The value specified for
+    generated column 'child_disposition' ... is not allowed". Setting outcome is sufficient."""
     root, _, rest = outcome.partition(" > ")
     return rest or None
 
@@ -99,7 +104,6 @@ def update_sql(categories):
     return f"""
         UPDATE Delivery_escalation
         SET outcome = %s,
-            child_disposition = %s,
             disposed_at = NOW(),
             agent_email = %s,
             agent_remarks = CONCAT('[Auto-disposed: ', query_category, ']')
@@ -173,7 +177,7 @@ def auto_dispose(dry_run=True):
         else:
             n = mysql_lib.execute(
                 update_sql(categories),
-                params=(outcome, child_of(outcome), AUTO_AGENT, *categories), database="PEP_CLS")
+                params=(outcome, AUTO_AGENT, *categories), database="PEP_CLS")
             if n is None:
                 raise RuntimeError("MYSQL_* credentials not configured - cannot auto-dispose.")
             print(f"  set '{outcome}' on {n} row(s) {categories}")
@@ -211,8 +215,11 @@ def self_check():
     assert "outcome IS NULL OR outcome = ''" in sql
     assert "Forced to be marked as RTO" in sql
     assert "disposed_at = NOW()" in sql
-    # One placeholder per category, plus outcome/child/agent up front.
-    assert update_sql(["a", "b", "c"]).count("%s") == 6
+    # child_disposition is VIRTUAL GENERATED off outcome - naming it in the SET list is MySQL
+    # error 3105, which is what the first --apply run died on. See child_of().
+    assert "child_disposition" not in sql
+    # One placeholder per category, plus outcome/agent up front.
+    assert update_sql(["a", "b", "c"]).count("%s") == 5
     assert count_sql(["a", "b"]).count("%s") == 2
     # A stray single % anywhere would blow up pymysql's own %-formatting of the statement.
     assert "LIKE 'RTO > %%'" in sql and "%%%" not in sql
