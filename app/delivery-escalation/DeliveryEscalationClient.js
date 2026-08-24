@@ -312,7 +312,10 @@ function mergeDayRowsByDate(rows, buckets) {
     buckets.forEach((b) => { entry.counts[b] += r.counts[b] || 0; });
     entry.total += r.total;
   }
-  return [...byDate.values()];
+  return [...byDate.values()].map((entry) => ({
+    ...entry,
+    pct: Object.fromEntries(buckets.map((b) => [b, entry.total ? Math.round((entry.counts[b] / entry.total) * 100) : 0])),
+  }));
 }
 
 // Each date row carries its own partner split (r.partners, from the server) - this re-groups by
