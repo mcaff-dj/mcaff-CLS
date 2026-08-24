@@ -32,11 +32,13 @@ not done here, out of this change's scope.
 """
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mysql_lib
 import delivery_escalation_contact_stats
+from lead_priority import prefix_rule_partner
 
 TAB_TABLE = {
     "HYPHEN": "hyphen_tickets",
@@ -133,36 +135,99 @@ def fill_missing_awb(rows):
 DELIVERY_ESCALATION_INSERT = """
     INSERT INTO Delivery_escalation
         (brand, order_id, awb_code, delivery_partner, query_class, query_category,
-         wh_name, ticket_number, added_date, order_date, order_month, query_date, query_month)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         wh_name, ticket_number, added_date, order_date, order_month, query_date, query_month,
+         outcome, agent_remarks, disposed_at, agent_email)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE
-        order_id = VALUES(order_id), delivery_partner = VALUES(delivery_partner),
+        order_id = VALUES(order_id),
+        awb_code = COALESCE(awb_code, VALUES(awb_code)),
+        delivery_partner = VALUES(delivery_partner),
         query_class = VALUES(query_class), query_category = VALUES(query_category),
         wh_name = VALUES(wh_name), ticket_number = VALUES(ticket_number),
         added_date = VALUES(added_date), order_date = VALUES(order_date),
         order_month = VALUES(order_month), query_date = VALUES(query_date),
         query_month = VALUES(query_month)
+        -- outcome/agent_remarks/disposed_at/agent_email deliberately NOT re-written here: this
+        -- job must never overwrite a ticket an agent (or the carry-forward below) already
+        -- disposed - only a brand-new ticket_number (the INSERT branch) ever gets them set.
 """
 
+# A brand+awb_code pair whose outcome is one of these already has a TERMINAL disposition - the
+# same "resolved" and "RTO" labels DE_RESOLVED_WHERE/DE_FORCED_RTO_WHERE (api/_lib/db.js) use to
+# classify a ticket, duplicated here because this is a standalone script with no access to that
+# JS. Matched on the top-level label so a nested "RTO > New AWB#..." / "Delivered > <reason>"
+# still counts, same convention as those constants.
+TERMINAL_OUTCOME_SQL = "(outcome = 'RTO' OR outcome LIKE 'RTO > %%' OR outcome = 'Delivered' OR outcome LIKE 'Delivered > %%')"
 
-def build_delivery_escalation_row(row, tab):
+
+def fetch_terminal_outcomes(tab_awb_pairs):
+    """{(tab, awb): (outcome, agent_remarks, agent_email)} for every (brand, awb_code) pair
+    that already has a TERMINAL disposition (RTO or Delivered) sitting in Delivery_escalation.
+
+    Why: an AWB already resolved as RTO (and usually reshipped under a NEW awb_code) can keep
+    generating fresh CS tickets against the OLD awb_code - the courier's tracking feed doesn't
+    know the parcel is done, so it keeps reporting "Delayed"/"Misrouted"/etc against it. Each
+    such ticket used to land back in Fresh (or age into Forced RTO) and sit there until someone
+    manually re-applied the SAME resolution by hand. That's stale signal, not a new incident -
+    the parcel already has a known outcome - so a brand-new ticket for an already-terminal AWB
+    is stamped with that same outcome here, at insert time, instead of reopening it.
+
+    Most recent disposed_at wins if more than one terminal row exists for the pair (e.g.
+    resolved, somehow reopened, resolved again)."""
+    if not tab_awb_pairs:
+        return {}
+    pairs = sorted(set(tab_awb_pairs))
+    placeholders = ",".join(["(%s, %s)"] * len(pairs))
+    params = tuple(v for pair in pairs for v in pair)
+    rows = mysql_lib.query(
+        f"""
+        SELECT brand, awb_code, outcome, agent_remarks, agent_email
+        FROM Delivery_escalation
+        WHERE (brand, awb_code) IN ({placeholders}) AND {TERMINAL_OUTCOME_SQL}
+        ORDER BY disposed_at DESC
+        """,
+        params, database="PEP_CLS",
+    )
+    out = {}
+    for brand, awb, outcome, agent_remarks, agent_email in (rows or []):
+        out.setdefault((brand, awb), (outcome, agent_remarks, agent_email))
+    return out
+
+
+def build_delivery_escalation_row(row, tab, terminal_by_awb=None):
     """row is a raw DB tuple from fetch_today_delivery_tickets - real DATE/datetime objects for
     added_date/order_date/query_date, not display strings, since this row needs to stay
-    queryable."""
+    queryable. terminal_by_awb (see fetch_terminal_outcomes) carries an already-resolved AWB's
+    outcome forward onto this brand-new ticket instead of leaving it Fresh."""
     (ticket_number, subcategory, order_name, disposition_order,
      awb, partner, order_date, created_at, resolved_at, warehouse) = row
     parent_order = order_name or disposition_order or ""
+    # disposition_partner_name is often blank on a non-terminal ticket (the CS agent closing
+    # their own ticket has no reason to know who's carrying it) - fall back to the same
+    # AWB-prefix rule assign_leads.py already uses for CLS_RTO_calling rather than leaving this
+    # column permanently blank whenever the AWB itself makes the carrier obvious. Only a
+    # fallback: the source's own value always wins when it has one.
+    partner = partner or prefix_rule_partner(awb) or None
+    terminal = (terminal_by_awb or {}).get((tab, awb)) if awb else None
+    if terminal:
+        outcome, agent_remarks, agent_email = terminal
+        agent_remarks = f"[Auto-carried: AWB already {outcome}] {agent_remarks or ''}".strip()
+        disposed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    else:
+        outcome = agent_remarks = agent_email = disposed_at = None
     return (
-        tab, parent_order, awb or None, partner or None, "Delivery",
+        tab, parent_order, awb or None, partner, "Delivery",
         subcategory or None, warehouse or None, ticket_number,
         resolved_at, order_date, format_month(order_date), created_at, format_month(created_at),
+        outcome, agent_remarks, disposed_at, agent_email,
     )
 
 
-def upsert_delivery_escalation_rows(rows, tab):
+def upsert_delivery_escalation_rows(rows, tab, terminal_by_awb=None):
     for r in rows:
         try:
-            mysql_lib.execute(DELIVERY_ESCALATION_INSERT, build_delivery_escalation_row(r, tab), database="PEP_CLS")
+            mysql_lib.execute(
+                DELIVERY_ESCALATION_INSERT, build_delivery_escalation_row(r, tab, terminal_by_awb), database="PEP_CLS")
         except Exception as e:
             print(f"  WARNING: Delivery_escalation upsert failed for ticket {r[0]}: {e}")
 
@@ -179,15 +244,19 @@ def sync_tab(tab, dry_run, since=None):
     rows = [list(r) for r in db_rows]
     fill_missing_awb(rows)
 
+    terminal_by_awb = fetch_terminal_outcomes([(tab, r[4]) for r in rows if r[4]])
+    if terminal_by_awb:
+        print(f"  {len(terminal_by_awb)} awb(s) already terminal - new tickets for them carry that outcome forward")
+
     if dry_run:
         for r in rows[:5]:
-            print("   ", build_delivery_escalation_row(r, tab))
+            print("   ", build_delivery_escalation_row(r, tab, terminal_by_awb))
         if len(rows) > 5:
             print(f"    ... and {len(rows) - 5} more")
         print(f"  would upsert {len(rows)} row(s) into MySQL Delivery_escalation")
         return
 
-    upsert_delivery_escalation_rows(rows, tab)
+    upsert_delivery_escalation_rows(rows, tab, terminal_by_awb)
     print(f"  upserted {len(rows)} row(s) into MySQL Delivery_escalation")
     # Repeat-contact columns are aggregates over every ticket sharing an AWB, so newly-inserted
     # rows change them for their OLDER siblings too - they have to be recomputed after the
@@ -207,19 +276,27 @@ def self_check():
     assert _awb_lookup_key("HYP37526450") == "HYP37526450"
     # MySQL row: brand = the tab it came from, ticket_number carried straight through,
     # order_month/query_month recomputed from the real date objects.
-    from datetime import date, datetime
+    from datetime import date
     row = ("TCK1", "Wrong Pincode", "", "MCaff123", "AWB1", "BlueDart",
            date(2026, 1, 5), datetime(2026, 1, 6, 10, 0), datetime(2026, 1, 7, 9, 0), "WH1")
     assert build_delivery_escalation_row(row, "mCaffeine") == (
         "mCaffeine", "MCaff123", "AWB1", "BlueDart", "Delivery", "Wrong Pincode", "WH1", "TCK1",
         row[8], row[6], format_month(row[6]), row[7], format_month(row[7]),
+        None, None, None, None,
     )
     # Blank order_name falls back to disposition_order, same as parent_order_of.
     row2 = ("TCK2", None, "", "HYP999", "", "Delhivery", None, None, None, "")
     assert build_delivery_escalation_row(row2, "HYPHEN") == (
         "HYPHEN", "HYP999", None, "Delhivery", "Delivery", None, None, "TCK2",
         None, None, "", None, "",
+        None, None, None, None,
     )
+    # An AWB already terminal carries its outcome forward onto a brand-new ticket for it.
+    terminal = {("mCaffeine", "AWB1"): ("RTO > New AWB# XYZ", "reshipped", "shahid.khan@mcaffeine.com")}
+    built = build_delivery_escalation_row(row, "mCaffeine", terminal)
+    assert built[13] == "RTO > New AWB# XYZ"
+    assert built[14] == "[Auto-carried: AWB already RTO > New AWB# XYZ] reshipped"
+    assert built[15] is not None  # disposed_at stamped now
     assert parent_order_of(row) == "MCaff123"
     assert parent_order_of(row2) == "HYP999"
     print("self-check ok")
