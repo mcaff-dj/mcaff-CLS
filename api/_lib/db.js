@@ -1549,29 +1549,33 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
   // (or triple-, ...) counts it. Ignores NULL/blank awb_code the same way COUNT(DISTINCT) does
   // there too - a ticket with no AWB at all doesn't land in any bucket.
   const [rows] = await pool.execute(`
-    SELECT DATE_FORMAT(${col}, '%Y-%m-%d') AS d, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(DISTINCT awb_code) AS c
+    SELECT DATE_FORMAT(${col}, '%Y-%m-%d') AS d, COALESCE(delivery_partner, 'Unknown') AS partner, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(DISTINCT awb_code) AS c
     FROM Delivery_escalation
     WHERE ${col} IS NOT NULL${extra}${floorClause}
-    GROUP BY d, bucket
+    GROUP BY d, partner, bucket
     ORDER BY d
   `, [...params, ...floorParams]);
   const [[{ noDateCount }]] = await pool.execute(
     `SELECT COUNT(DISTINCT awb_code) AS noDateCount FROM Delivery_escalation WHERE ${col} IS NULL${extra}`, params);
 
+  const zeroCounts = () => Object.fromEntries(DE_DAYWISE_BUCKETS.map((b) => [b, 0]));
+  const pctOf = (counts, total) => Object.fromEntries(DE_DAYWISE_BUCKETS.map((b) => [
+    b, total ? Math.round((counts[b] / total) * 100) : 0,
+  ]));
+
   const byDate = new Map();
-  const grandTotal = {};
-  DE_DAYWISE_BUCKETS.forEach((b) => { grandTotal[b] = 0; });
+  const grandTotal = zeroCounts();
   let grandTotalAll = 0;
   for (const r of rows) {
     const c = Number(r.c) || 0;
-    if (!byDate.has(r.d)) {
-      const counts = {};
-      DE_DAYWISE_BUCKETS.forEach((b) => { counts[b] = 0; });
-      byDate.set(r.d, { date: r.d, counts, total: 0 });
-    }
+    if (!byDate.has(r.d)) byDate.set(r.d, { date: r.d, counts: zeroCounts(), total: 0, partners: new Map() });
     const entry = byDate.get(r.d);
+    if (!entry.partners.has(r.partner)) entry.partners.set(r.partner, { partner: r.partner, counts: zeroCounts(), total: 0 });
+    const partnerEntry = entry.partners.get(r.partner);
     entry.counts[r.bucket] += c;
     entry.total += c;
+    partnerEntry.counts[r.bucket] += c;
+    partnerEntry.total += c;
     grandTotal[r.bucket] += c;
     grandTotalAll += c;
   }
@@ -1582,9 +1586,10 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
     date: entry.date,
     total: entry.total,
     counts: entry.counts,
-    pct: Object.fromEntries(DE_DAYWISE_BUCKETS.map((b) => [
-      b, entry.total ? Math.round((entry.counts[b] / entry.total) * 100) : 0,
-    ])),
+    pct: pctOf(entry.counts, entry.total),
+    partners: [...entry.partners.values()]
+      .sort((a, b) => b.total - a.total)
+      .map((p) => ({ partner: p.partner, total: p.total, counts: p.counts, pct: pctOf(p.counts, p.total) })),
   }));
   return { buckets: DE_DAYWISE_BUCKETS, rows: rowsOut, grandTotal, grandTotalAll, missingDateCount };
 }
