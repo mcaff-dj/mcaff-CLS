@@ -34,7 +34,32 @@ const NDR_DISP_TONE_EMERALD = { card: 'bg-emerald-950/30 border-emerald-500/80 t
 const NDR_DISP_TONE_ROSE = { card: 'bg-rose-950/30 border-rose-500/80 text-rose-200 shadow-lg shadow-rose-950/40 ring-1 ring-rose-500/50', icon: 'text-rose-400' };
 const NDR_DISP_TONE_INDIGO = { card: 'bg-indigo-950/40 border-indigo-500 text-indigo-100 shadow-md shadow-indigo-950/30 ring-1 ring-indigo-500/40', icon: 'text-indigo-400' };
 
-const NDR_ATTEMPT_FILTER_OPTIONS = ['1', '2', '3', 'More than 3'];
+// 'All' is a pseudo-option, never itself saved - picking it is how an agent explicitly asks
+// for "no restriction" (attemptCountFilter: ''), same meaning as leaving every real bucket
+// unchecked. Needed because the sheet's own Attempts column is blank on most leads (never
+// populated for a lead that hasn't been called before) - checking 1/2/3/More than 3 (which
+// looks, to an agent, like "every possible value") actually excludes every blank-Attempts
+// lead, i.e. most of the pool. The old empty-selection state read as "None" in the dropdown
+// button, which looked like a mistake to fix by checking boxes, not like "I already get
+// everything" - this makes the unrestricted state a real, visible choice instead of an
+// implicit one nobody notices. See ndrAttemptFilterOnChange below for the toggle logic.
+const NDR_ATTEMPT_FILTER_OPTIONS = ['All', '1', '2', '3', 'More than 3'];
+
+// Wraps MultiSelectDropdown's plain toggle (add/remove one clicked option from the value it
+// was given) with 'All' semantics: exactly one option differs between `current` (what was
+// shown) and `next` (what plain toggling produced) - whichever one that is is what the agent
+// just clicked, regardless of whether 'All' was on or off going in. Clicking 'All' collapses
+// to unrestricted; clicking a real bucket toggles that bucket within the real-bucket set,
+// dropping 'All' out (a filter and "no filter" can't both be true at once).
+function ndrAttemptFilterOnChange(current, next, onSave) {
+  const clicked = current.length > next.length
+    ? current.find(o => !next.includes(o))
+    : next.find(o => !current.includes(o));
+  if (clicked === 'All') { onSave(''); return; }
+  const real = current.filter(o => o !== 'All');
+  const nextReal = real.includes(clicked) ? real.filter(o => o !== clicked) : [...real, clicked];
+  onSave(nextReal.join(', '));
+}
 
 const NDR_SHEET_ID = '12p3rlXyE0PDx3BMqBpl3CUo5YD3uVzQun1HFPizpSeI';
 const NDR_SHEET_TAB = 'Latest NDR '; // trailing space is part of the real tab name
@@ -646,8 +671,15 @@ export default function NdrCallingClient() {
                     </td>
                     <td className="py-3 px-4">
                       <MultiSelectDropdown
-                        value={(a.attemptCountFilter || '').split(',').map(s => s.trim()).filter(Boolean)}
-                        onChange={(next) => saveProcessAgent(a.email, { attemptCountFilter: next.join(', ') })}
+                        value={(() => {
+                          const real = (a.attemptCountFilter || '').split(',').map(s => s.trim()).filter(Boolean);
+                          return real.length ? real : ['All'];
+                        })()}
+                        onChange={(next) => {
+                          const current = (a.attemptCountFilter || '').split(',').map(s => s.trim()).filter(Boolean);
+                          ndrAttemptFilterOnChange(current.length ? current : ['All'], next,
+                            (filter) => saveProcessAgent(a.email, { attemptCountFilter: filter }));
+                        }}
                         options={NDR_ATTEMPT_FILTER_OPTIONS}
                       />
                     </td>
