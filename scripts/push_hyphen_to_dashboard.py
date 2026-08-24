@@ -153,17 +153,24 @@ def parse_flowcall_date(value):
     return s
 
 
-def main():
+def fetch_source_rows():
+    """Default row source: the live FlowCall-mirrored 'hyphen' tab. A caller
+    with rows from elsewhere (e.g. a one-off xlsx import) can skip this and
+    call push_rows_to_dashboard(headers, rows) directly - same mapping/dedup/
+    formula logic either way."""
     src_last_row = lib.get_last_data_row(SOURCE_SHEET_ID, SOURCE_TAB)
     if src_last_row < 2:
         print("[dashboard] source hyphen tab has no data rows - nothing to push")
-        return
+        return None, None
 
     src_headers = lib.get_sheet_values(SOURCE_SHEET_ID, f"'{SOURCE_TAB}'!A1:ZZ1")[0]
     src_last_col = lib.get_column_letter(len(src_headers) - 1)
     src_rows = lib.get_sheet_rows_chunked(SOURCE_SHEET_ID, SOURCE_TAB, src_last_col, chunk_size=5000, start_row=2)
     print(f"[dashboard] source hyphen has {len(src_rows)} rows, {len(src_headers)} columns")
+    return src_headers, src_rows
 
+
+def push_rows_to_dashboard(src_headers, src_rows):
     src_idx = {name: i for i, name in enumerate(src_headers)}
     idx_ticket_src = src_idx.get("Ticket Number")
     if idx_ticket_src is None:
@@ -224,7 +231,7 @@ def main():
     print(f"[dashboard] {len(new_rows)} new unique tickets to push "
           f"({skipped_excluded} excluded as request/enquiry or awaiting-response)")
     if not new_rows:
-        return
+        return 0
 
     start_row = dash_last_row + 1 if dash_last_row >= 1 else 2
     lib.set_sheet_rows_at_row(DASHBOARD_SHEET_ID, DASHBOARD_TAB, new_rows, start_row)
@@ -261,6 +268,14 @@ def main():
             "values": formulas,
         }])
     print(f"[dashboard] wrote templated formulas for {len(FORMULA_COLUMNS)} columns, rows {start_row}-{dest_row_end}")
+    return len(new_rows)
+
+
+def main():
+    src_headers, src_rows = fetch_source_rows()
+    if src_headers is None:
+        return
+    push_rows_to_dashboard(src_headers, src_rows)
 
 
 if __name__ == "__main__":
