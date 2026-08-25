@@ -10,7 +10,7 @@ const assert = require('assert');
 // duplicate of it. See next-lead.js's own comment next to these exports.
 const {
   isPrepaid, priorityTier, parseRtoInitiatedDate, buildCandidateList, isEligibleNow,
-  computeFillTarget, planFillRound,
+  computeFillTarget, planFillRound, rankBySpecialization,
 } = require('./next-lead.js');
 
 // 1. is_prepaid mirror: explicit COD/Cash is COD, everything else defaults Prepaid - matches
@@ -126,6 +126,58 @@ assert.strictEqual(computeFillTarget(20, 1, 0, 25), 0, 'zero candidates -> zero 
   const { free, taken } = planFillRound(target, []);
   assert.deepStrictEqual(free.map((c) => c.orderId), ['B1']);
   assert.strictEqual(taken.length, 0);
+}
+
+// 8. Specialist first refusal (rankBySpecialization) - lead_priority.py's Pass 1, expressed as
+// a lead ordering because only one agent is in play here. Input is already tier/date sorted.
+{
+  const pool = [
+    { orderId: 'FREE', rtoReason: 'Damaged in transit' },
+    { orderId: 'MINE', rtoReason: 'Consignee unavailable' },
+    { orderId: 'THEIRS', rtoReason: 'ADDRESS NOT TRACEABLE/LOCATED(Pending)' },
+  ];
+  const specialists = [
+    { email: 'me@x.com', reasons: ['consignee unavailable'] },
+    { email: 'other@x.com', reasons: ['address not traceable'] },
+  ];
+  assert.deepStrictEqual(
+    rankBySpecialization(pool, 'ME@x.com', specialists).map((c) => c.orderId),
+    ['MINE', 'FREE', 'THEIRS'],
+    'mine first, unclaimed next, a reason reserved by another online specialist last',
+  );
+
+  // A generalist still gets the unreserved leads first, and still gets the reserved one rather
+  // than nothing - Pass 2/3's fallback, not an exclusion.
+  // Both reserved leads are now somebody else's, so both drop behind FREE and keep their
+  // incoming tier/date order relative to each other.
+  assert.deepStrictEqual(
+    rankBySpecialization(pool, 'nobody@x.com', specialists).map((c) => c.orderId),
+    ['FREE', 'MINE', 'THEIRS'],
+    'no specialization of my own: unclaimed first, reserved ones last but still present',
+  );
+
+  // Tier/date order (the input order) must survive within a rank.
+  const sameRank = [{ orderId: 'A', rtoReason: 'x' }, { orderId: 'B', rtoReason: 'y' }, { orderId: 'C', rtoReason: 'z' }];
+  assert.deepStrictEqual(
+    rankBySpecialization(sameRank, 'me@x.com', specialists).map((c) => c.orderId),
+    ['A', 'B', 'C'],
+    'nothing matches: order untouched',
+  );
+
+  // Lookup failed (null) or nobody specializes: plain tier order, exactly as before this existed.
+  assert.strictEqual(rankBySpecialization(pool, 'me@x.com', null), pool);
+  assert.strictEqual(rankBySpecialization(pool, 'me@x.com', []), pool);
+
+  // A reason on both lists is MINE - matching by email, not by whoever is listed first.
+  const shared = [{ orderId: 'S', rtoReason: 'Consignee unavailable' }, { orderId: 'F', rtoReason: 'nothing' }];
+  assert.deepStrictEqual(
+    rankBySpecialization(shared, 'me@x.com', [
+      { email: 'other@x.com', reasons: ['consignee unavailable'] },
+      { email: 'me@x.com', reasons: ['consignee unavailable'] },
+    ]).map((c) => c.orderId),
+    ['S', 'F'],
+    'shared speciality still ranks as mine',
+  );
 }
 
 console.log('next-lead.test.js: all assertions passed');

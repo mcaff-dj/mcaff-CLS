@@ -38,10 +38,14 @@
 //     note below - so a fill still comfortably finishes inside a normal HTTP request.
 //
 // SCOPE CUT, stated plainly: this endpoint only ever hands out a FRESH lead (Column Q blank or
-// "Unassigned") - it does NOT participate in the Connected=No reassignment queue, agent
-// specializations, or the prepaid-target ratio steering, all of which stay exclusive to
-// scripts/assign_leads.py's periodic sweep (which keeps running as the safety net - see that
-// file, unchanged). And a PREPAID fresh lead is handed out WITHOUT a live GoKwik refund check:
+// "Unassigned") - it does NOT participate in the Connected=No reassignment queue or the
+// prepaid-target ratio steering, both of which stay exclusive to scripts/assign_leads.py's
+// periodic sweep (which keeps running as the safety net - see that file, unchanged). Agent
+// specializations (priority_rto_reasons) WERE in that list and no longer are: leaving them out
+// meant the two assignment paths actively disagreed - the sweep routed a reason to its
+// specialist while a top-up handed the same reason to whoever disposed first, so the faster
+// path quietly undid the roster's configuration. See rankBySpecialization below for how a
+// per-lead agent ordering becomes a per-agent lead ordering. And a PREPAID fresh lead is handed out WITHOUT a live GoKwik refund check:
 // that check needs Item_level_data in the mcaff_prod MySQL schema, which only the Python cron's
 // credentials can reach today - the Node API Lambda has no connection to that database at all,
 // and standing one up just for this endpoint was judged not worth the new credential surface
@@ -52,7 +56,8 @@
 // already existed for that check before this endpoint was added.
 const { getSession } = require('../_lib/session');
 const { JWT } = require('google-auth-library');
-const { claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow } = require('../_lib/db');
+const { claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow,
+  getRtoOnlineSpecializations } = require('../_lib/db');
 const { resolveAgentQuota } = require('../_lib/leadQuota');
 const leadAssignmentRules = require('../_lib/leadAssignmentRules.json');
 
@@ -215,6 +220,47 @@ function buildCandidateList(orderRows, workRows) {
   return candidates;
 }
 
+// Applies scripts/lead_priority.py's Pass 1 (specialist first refusal) to a single-agent pull.
+// The sweep expresses that rule by reordering AGENTS per lead; with only the caller in play here
+// it becomes a reordering of LEADS, in both directions:
+//
+//   rank 0  matches the caller's own priority reasons - the sweep would have handed these to
+//           them ahead of the general pool, so they come first.
+//   rank 1  no online specialist claims this reason - free for anyone.
+//   rank 2  another ONLINE specialist's reason. Last, not excluded: the sweep's Pass 2/3 hand a
+//           reserved lead to a generalist anyway once specialists are at quota or unavailable,
+//           and leaving an eligible agent idle in front of a backlog is the worse failure. This
+//           only stops the instant top-up from OUTRUNNING the sweep on someone else's speciality.
+//
+// Rank is the outermost key; tier and date still order within a rank because the input is
+// already sorted that way and Array.prototype.sort is stable (Node >= 11). A caller with no
+// specialization of their own simply has no rank-0 leads - the rank-1-before-rank-2 half still
+// applies, which is the half that stops the stealing.
+//
+// specialists is the whole online set INCLUDING the caller; matching by email keeps "mine"
+// authoritative when a reason is on both lists. null/[] (lookup failed or nobody specializes)
+// leaves the order exactly as the tier sort produced it.
+function rankBySpecialization(candidates, callerEmail, specialists) {
+  if (!specialists || specialists.length === 0) return candidates;
+  const me = callerEmail.trim().toLowerCase();
+  const mine = specialists.filter((s) => s.email === me).flatMap((s) => s.reasons);
+  const others = specialists.filter((s) => s.email !== me).flatMap((s) => s.reasons);
+  if (mine.length === 0 && others.length === 0) return candidates;
+  const rank = (c) => {
+    const reason = (c.rtoReason || '').toLowerCase();
+    if (mine.some((r) => reason.includes(r))) return 0;
+    if (others.some((r) => reason.includes(r))) return 2;
+    return 1;
+  };
+  return candidates
+    .map((c, i) => ({ c, i, r: rank(c) }))
+    // Explicit index tiebreak rather than relying on sort stability alone - the ordering this
+    // preserves (tier, then date) is the whole point, and it is cheap to make that guarantee
+    // local instead of a footnote about the engine.
+    .sort((a, b) => (a.r !== b.r ? a.r - b.r : a.i - b.i))
+    .map((x) => x.c);
+}
+
 // Splits one round's target candidates into { free, taken } from a Google values:batchGet
 // response verifying their Column Q cells - pure so the response-shape parsing (an easy place
 // to get array indexing or the "Unassigned" convention subtly wrong) is tested directly rather
@@ -330,11 +376,19 @@ async function handler(req, res) {
       return;
     }
 
-    const candidates = buildCandidateList(orderRows, workRows);
-    if (candidates.length === 0) {
+    const candidatesByTier = buildCandidateList(orderRows, workRows);
+    if (candidatesByTier.length === 0) {
       res.status(200).json({ assigned: false, reason: 'no leads available', load, quota });
       return;
     }
+
+    // Specialist first refusal - see rankBySpecialization. Read here rather than alongside the
+    // eligibility lookups above so an at-quota or nothing-available call, both of which return
+    // before this point, don't pay for a query whose answer they'd throw away.
+    const specialists = await getRtoOnlineSpecializations(
+      new Date(Date.now() - STALE_MINUTES * 60 * 1000),
+    );
+    const candidates = rankBySpecialization(candidatesByTier, email, specialists);
 
     // FILLS to quota, not just "replace the one just disposed" - this is the fix for the gap
     // that let this happen at all: Rasika sat at 1/20 all session while every other agent
@@ -443,3 +497,4 @@ module.exports.isPrepaid = isPrepaid;
 module.exports.priorityTier = priorityTier;
 module.exports.parseRtoInitiatedDate = parseRtoInitiatedDate;
 module.exports.buildCandidateList = buildCandidateList;
+module.exports.rankBySpecialization = rankBySpecialization;

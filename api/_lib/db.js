@@ -979,6 +979,52 @@ async function getRtoAgentAvailability(email) {
   }
 }
 
+// Per-agent RTO specializations (calling_agent_process.priority_rto_reasons) for everyone who
+// is genuinely callable RIGHT NOW, so api/rto/next-lead.js can apply the same first-refusal rule
+// scripts/lead_priority.py's build_assignment_queue Pass 1 applies. Without this the two
+// assignment paths disagreed: the sweep routed a reason to its specialist while an instant
+// top-up handed the same reason to whoever happened to dispose first.
+//
+// "Callable now" is the SAME two-part test next-lead's own isEligibleNow makes of its caller -
+// per-process status Online AND a global presence heartbeat newer than freshSince - because a
+// specialist who is Offline, Busy or silently gone must not hold leads back from an agent who
+// is actually working. freshSince is passed in rather than derived here so the caller's
+// STALE_MINUTES stays the one definition of "fresh" (it already mirrors assign_leads.py's).
+//
+// Returns [{ email, reasons }] with reasons already comma-split, trimmed, lowercased and
+// blank-dropped - the same normalization assign_leads.py does when it builds `specializations`.
+// Agents with no reasons set are omitted entirely: they have nothing to reserve.
+//
+// null (not []) on error, and the caller treats that as "cannot tell - do not reorder", which
+// degrades to the plain tier ordering this endpoint used before. Failing OPEN is right here,
+// unlike getRtoAgentAvailability above: this only steers WHICH lead an eligible agent gets, so
+// the bad outcome is a slightly worse-matched lead, not an agent who should not be working.
+async function getRtoOnlineSpecializations(freshSince) {
+  try {
+    await ensureSchema();
+    const { rows } = await sql`
+      SELECT cap.email, cap.priority_rto_reasons AS reasons
+      FROM calling_agent_process cap
+      JOIN agent_presence ap ON LOWER(ap.email) = LOWER(cap.email)
+      WHERE cap.process_key = 'rto'
+        AND cap.status = 'Online'
+        AND cap.priority_rto_reasons IS NOT NULL
+        AND cap.priority_rto_reasons <> ''
+        AND ap.status = 'Online'
+        AND ap.updated_at >= ${freshSince}
+    `;
+    return rows
+      .map((r) => ({
+        email: (r.email || '').toLowerCase(),
+        reasons: String(r.reasons || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
+      }))
+      .filter((r) => r.email && r.reasons.length);
+  } catch (e) {
+    console.error('getRtoOnlineSpecializations: lookup failed:', e.message);
+    return null;
+  }
+}
+
 // { id } for a freshly-created RTO CSV upload job. status starts 'queued' - the worker Lambda
 // (mcaff-cls-csv-upload-worker) hasn't necessarily started yet by the time this returns, since
 // it's invoked fire-and-forget right after this insert (see api/rto/upload-start.js).
@@ -2987,6 +3033,7 @@ module.exports = {
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
   getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow,
+  getRtoOnlineSpecializations,
   createRtoCsvUploadJob, getRtoCsvUploadJob, updateRtoCsvUploadJob,
   createOrderPunchJob, getOrderPunchJob, failOrderPunchJob, setOrderPunchJobStopRequested,
   getOrderPunchJobRowsForExport, getOrderPunchSettings, upsertOrderPunchSetting,
