@@ -2819,6 +2819,7 @@ import CallTrendChart from './CallTrendChart';
         return {
           visibleTableAgentMetrics, visibleHeatmapAgentData, heatmapBucketIndexes, heatmapCellStyle,
           downloadConvertedOrdersCsv, convertedOrdersList,
+          trendAgentOptions, trendDefaultAgents,
           summaryRows, summaryTotals, summaryAvgFrt, summaryAvgLoggedIn, summaryAvgBreak, summaryAvgBusy, downloadAgentSummaryCsv,
           rawLeadDetailsList, downloadRawLeadDetailsCsv,
           totalAssigned, totalDisposed, totalPending, totalRefunded, totalRefundAmt, avgConnectRate, onlineCount, freshUnassignedInScope,
@@ -3014,6 +3015,7 @@ import CallTrendChart from './CallTrendChart';
                   const {
                     visibleTableAgentMetrics, visibleHeatmapAgentData, heatmapBucketIndexes, heatmapCellStyle,
                     downloadConvertedOrdersCsv, convertedOrdersList,
+                    trendAgentOptions, trendDefaultAgents,
                     summaryRows, summaryTotals, summaryAvgFrt, summaryAvgLoggedIn, summaryAvgBreak, summaryAvgBusy, downloadAgentSummaryCsv,
                     rawLeadDetailsList, downloadRawLeadDetailsCsv,
                     totalAssigned, totalDisposed, totalPending, totalRefunded, totalRefundAmt, avgConnectRate, onlineCount, freshUnassignedInScope,
