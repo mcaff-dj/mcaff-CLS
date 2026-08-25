@@ -701,6 +701,16 @@ import CallTrendChart from './CallTrendChart';
       const [receiptTkt, setReceiptTkt] = useState(null);
       const [showUploadModal, setShowUploadModal] = useState(false);
       const [refundProcessing, setRefundProcessing] = useState(false);
+      // In-flight guard for the disposal modal's Save button. It used to be disabled only while
+      // refundProcessing, which covers the refund-gateway call and nothing else - so an ordinary
+      // disposition left the button live through the whole multi-second flow (MySQL write, live
+      // Column-Q map fetch, sheet write-back, next-lead top-up). On a cold Lambda that reads as a
+      // dead button, and every extra click ran submitDisp again from the top: order 9184758 took
+      // 16 duplicate cycles in 6 seconds on 2026-08-25, each also re-writing the sheet row and
+      // pulling ANOTHER top-up lead. A ref, not just the state, because two clicks in one tick
+      // would both see the pre-render state value and both proceed.
+      const dispInFlight = useRef(false);
+      const [dispSubmitting, setDispSubmitting] = useState(false);
 
       // Explicit Claim & Assign Function for Lead (Column Q Sync)
       const claimLeadForAgent = async (tkt) => {
@@ -838,7 +848,7 @@ import CallTrendChart from './CallTrendChart';
         setAttemptType(existing?.attemptType || t.attemptType || '');
       };
 
-      const submitDisp = async ()=>{
+      const runSubmitDisp = async ()=>{
         if(!dispTkt)return;
         const isRef=dispReason==='Refund Requested';
         if(isRef && dispTkt.paymentMethod!=='Prepaid'){
@@ -1038,6 +1048,17 @@ import CallTrendChart from './CallTrendChart';
           showToast(`Disposed ${dispTkt.orderNumber}${nextLeadNote}`);
         }
         setDispTkt(null);
+      };
+
+      // try/finally rather than clearing at the end of runSubmitDisp: that function returns
+      // early on several paths (non-prepaid refund, gateway failure), and any of them leaving
+      // the flag set would lock the agent out of disposing anything until reload.
+      const submitDisp = async ()=>{
+        if (dispInFlight.current) return;
+        dispInFlight.current = true;
+        setDispSubmitting(true);
+        try { await runSubmitDisp(); }
+        finally { dispInFlight.current = false; setDispSubmitting(false); }
       };
 
       const doRefund = (id, rec)=>{
@@ -4349,14 +4370,14 @@ import CallTrendChart from './CallTrendChart';
                   <button
                     type="button"
                     onClick={submitDisp}
-                    disabled={!dispConn || !dispReason || (dispReason==='Refund Requested' && dispTkt.paymentMethod!=='Prepaid') || refundProcessing}
+                    disabled={!dispConn || !dispReason || (dispReason==='Refund Requested' && dispTkt.paymentMethod!=='Prepaid') || refundProcessing || dispSubmitting}
                     className={`px-6 py-2.5 rounded-xl font-bold text-[13px] disabled:opacity-30 transition-all flex items-center gap-2 ${
                       dispReason==='Refund Requested'
                         ?'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-950/50 ring-1 ring-emerald-400/50'
                         :'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-950/50'
                     }`}
                   >
-                    {refundProcessing ? '⏳ Processing Refund…' : dispReason==='Refund Requested' ? '💳 Confirm Refund & Save' : '🚀 Save Disposition & Sync Live Sheet'}
+                    {refundProcessing ? '⏳ Processing Refund…' : dispSubmitting ? '⏳ Saving…' : dispReason==='Refund Requested' ? '💳 Confirm Refund & Save' : '🚀 Save Disposition & Sync Live Sheet'}
                   </button>
                 </div>
               </div>

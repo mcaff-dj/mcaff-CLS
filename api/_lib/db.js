@@ -826,6 +826,33 @@ function resolvePartnerFromAwb(awbCode) {
 // insert, same two-step transaction so a lead is never left with zero live rows): the old row
 // is retired via reassigned_away_at, untouched otherwise, and a FRESH row captures this
 // re-dispose with its own assigned_at/disposed_at = now and the actual disposing agent.
+// How long after a disposal a re-submission by the SAME agent is treated as the same piece of
+// work rather than a new cycle. Sized for a slow round trip, not for an agent's judgement: the
+// disposal modal's Save button ran the whole flow - MySQL write, live Column-Q map fetch, sheet
+// write-back, next-lead top-up - and stayed clickable throughout, so a cold Lambda meant several
+// seconds of an apparently dead button. Order 9184758 collected 16 extra cycles in 6 seconds
+// that way on 2026-08-25, each one retiring the row the click before it created. A minute is
+// far longer than any such burst and far shorter than a real re-open, which is someone finding
+// the lead again in All Leads later in the shift.
+const REDISPOSE_SAME_CYCLE_MS = 60 * 1000;
+
+// Does this disposal deserve its own cycle row, or is it the same work arriving twice?
+//
+// A new cycle exists to record that SOMEONE ELSE, or the same person in a genuinely new
+// session, worked the lead again - it carries its own agent_email and its own assigned_at so
+// FRT stays honest (see recordLeadDisposition's own comment). A double-click has neither
+// property: same agent, same second. Kept pure and exported so this rule is testable without a
+// database - see db.redispose.test.js.
+function shouldOpenNewCycle(liveRow, email, nowMs) {
+  if (!liveRow || liveRow.disposed_at == null) return false; // not disposed yet - plain UPDATE
+  const sameAgent = String(liveRow.agent_email || '').trim().toLowerCase()
+    === String(email || '').trim().toLowerCase();
+  if (!sameAgent) return true;                                // a different agent re-worked it
+  const disposedMs = new Date(liveRow.disposed_at).getTime();
+  if (!Number.isFinite(disposedMs)) return true;              // unreadable timestamp - keep history
+  return nowMs - disposedMs >= REDISPOSE_SAME_CYCLE_MS;       // same agent, later session
+}
+
 async function recordLeadDisposition(orderId, email, awbCode, details) {
   await ensureSchema();
   const { disposition, agentRemarks, connected, attempt, refundAmount, newOrderId, rtoReason, paymentMode } = details || {};
@@ -839,10 +866,13 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
   } catch (e) {
     if (!/live_order_id_key/.test((e && e.message) || '')) throw e;
     const { rows: liveRows } = await sql`
-      SELECT disposed_at FROM CLS_RTO_calling WHERE order_id = ${orderId} AND reassigned_away_at IS NULL
+      SELECT disposed_at, agent_email FROM CLS_RTO_calling WHERE order_id = ${orderId} AND reassigned_away_at IS NULL
     `;
-    const alreadyDisposed = liveRows.length > 0 && liveRows[0].disposed_at != null;
-    if (alreadyDisposed) {
+    // Same agent re-submitting within a minute is one disposal arriving twice, not a re-open:
+    // it updates the row in place, exactly as an undisposed lead would. Everything else - a
+    // different agent, or the same agent finding the lead again later - still opens its own
+    // cycle. See shouldOpenNewCycle above.
+    if (shouldOpenNewCycle(liveRows[0], email, now.getTime())) {
       const p = await getPool();
       const conn = await p.getConnection();
       try {
@@ -3194,6 +3224,7 @@ module.exports = {
   getRtoOnlineSpecializations,
   getCallingCallTrend, getCallingTrendData,
   getCallingTimeOfDay, getCallingTimeOfDayData,
+  shouldOpenNewCycle,
   createRtoCsvUploadJob, getRtoCsvUploadJob, updateRtoCsvUploadJob,
   createOrderPunchJob, getOrderPunchJob, failOrderPunchJob, setOrderPunchJobStopRequested,
   getOrderPunchJobRowsForExport, getOrderPunchSettings, upsertOrderPunchSetting,
