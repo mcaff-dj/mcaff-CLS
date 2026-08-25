@@ -39,3 +39,7 @@ data/hyphen_primary_cache.json
 
 # Build output + deploy_infra.sh scratch files (trust policies, env JSON) - 45MB+ of zips
 lambda/dist/
+
+# Row-level backups written before a destructive cleanup (scripts/collapse_duplicate_dispose_cycles.py).
+# Real order ids, agent emails and dispositions - kept on the machine that ran the cleanup, never pushed.
+data/cleanup-backups/
