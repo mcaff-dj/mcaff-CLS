@@ -1526,7 +1526,7 @@ async function getDeliveryEscalationStats(opts = {}) {
             COUNT(DISTINCT CASE WHEN ${DE_FRESH_WHERE} THEN awb_code END) AS fresh,
             COUNT(DISTINCT CASE WHEN ${DE_FORCED_RTO_WHERE} THEN awb_code END) AS forcedRto
      FROM Delivery_escalation WHERE ${where}`, params);
-  const r = rows[0] || {};
+  const r = { ...(rows[0] || {}), ...(refundRows[0] || {}) };
   return {
     total: Number(r.total) || 0,
     assigned: Number(r.assigned) || 0,
@@ -1850,20 +1850,40 @@ async function getCallingOverviewStats(dateFrom, dateTo) {
   // aggregate-with-a-condition equivalent. `${from} IS NULL OR ...` needs no ::timestamptz
   // cast here (unlike the Postgres version): a bound `?` parameter's type is never ambiguous
   // to MySQL the way an untyped NULL literal could be to Postgres.
+  // COUNT(DISTINCT order_id) everywhere, not COUNT(*)/SUM(1) - see getCallingCallTrend's own
+  // note for the mechanism. Short version: a row is an assignment CYCLE, and re-disposing an
+  // already-disposed lead deliberately creates a fresh cycle carrying the same disposition, so
+  // counting rows counted one lead's 18 re-opens as 18 conversions. This tile read 282 against
+  // the Converted Orders list's 212 on 2026-08-25 for exactly that reason.
+  //
+  // assigned/pending keep their reassigned_away_at IS NULL predicate, which already limits them
+  // to the one live row per order - DISTINCT is a no-op there, kept only so every metric in
+  // this tile row is counted the same way and nobody has to work out which ones needed it.
   const { rows } = await sql`
     SELECT
-      SUM(CASE WHEN reassigned_away_at IS NULL AND (${from} IS NULL OR assigned_at >= ${from}) AND (${to} IS NULL OR assigned_at <= ${to}) THEN 1 ELSE 0 END) AS total_assigned,
-      SUM(CASE WHEN disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN 1 ELSE 0 END) AS total_disposed,
-      SUM(CASE WHEN reassigned_away_at IS NULL AND disposed_at IS NULL AND (${from} IS NULL OR assigned_at >= ${from}) AND (${to} IS NULL OR assigned_at <= ${to}) THEN 1 ELSE 0 END) AS total_pending,
-      SUM(CASE WHEN connected = 'Yes' AND disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN 1 ELSE 0 END) AS total_connected,
-      SUM(CASE WHEN connected = 'No' AND disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN 1 ELSE 0 END) AS total_unreachable,
-      SUM(CASE WHEN (disposition = 'Refund Requested' OR refund_amount IS NOT NULL) AND disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN 1 ELSE 0 END) AS total_refunded,
-      COALESCE(SUM(CASE WHEN disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN refund_amount ELSE 0 END), 0) AS total_refund_amount,
-      SUM(CASE WHEN disposed_at IS NOT NULL
+      COUNT(DISTINCT CASE WHEN reassigned_away_at IS NULL AND (${from} IS NULL OR assigned_at >= ${from}) AND (${to} IS NULL OR assigned_at <= ${to}) THEN order_id END) AS total_assigned,
+      COUNT(DISTINCT CASE WHEN disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN order_id END) AS total_disposed,
+      COUNT(DISTINCT CASE WHEN reassigned_away_at IS NULL AND disposed_at IS NULL AND (${from} IS NULL OR assigned_at >= ${from}) AND (${to} IS NULL OR assigned_at <= ${to}) THEN order_id END) AS total_pending,
+      COUNT(DISTINCT CASE WHEN connected = 'Yes' AND disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN order_id END) AS total_connected,
+      COUNT(DISTINCT CASE WHEN connected = 'No' AND disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN order_id END) AS total_unreachable,
+      COUNT(DISTINCT CASE WHEN (disposition = 'Refund Requested' OR refund_amount IS NOT NULL) AND disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN order_id END) AS total_refunded,
+      COUNT(DISTINCT CASE WHEN disposed_at IS NOT NULL
             AND (disposition IN ('Customer Agreed to Accept', 'Product Issue / Exchange') OR new_order_id IS NOT NULL)
             AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
-          THEN 1 ELSE 0 END) AS total_converted
+          THEN order_id END) AS total_converted
     FROM CLS_RTO_calling
+  `;
+  // Refund AMOUNT cannot ride along above: SUM over cycles adds the same refund once per
+  // re-dispose, and SUM(DISTINCT) would dedupe by AMOUNT - collapsing two different leads that
+  // happen to be refunded the same rupees into one. So it sums one value per order instead.
+  const { rows: refundRows } = await sql`
+    SELECT COALESCE(SUM(amt), 0) AS total_refund_amount FROM (
+      SELECT order_id, MAX(refund_amount) AS amt
+      FROM CLS_RTO_calling
+      WHERE disposed_at IS NOT NULL AND refund_amount IS NOT NULL
+        AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+      GROUP BY order_id
+    ) t
   `;
   const r = rows[0] || {};
   // mysql2 returns SUM()'s result as a decimal STRING, not a JS number (unlike Postgres's
@@ -1947,6 +1967,17 @@ async function getCallingHourlyStats(dateFrom, dateTo) {
 // SQL, one week definition in JS (isoWeekKey, tested), instead of YEARWEEK here and a second
 // boundary rule in the chart. A year of daily rows is ~365, free next to the round trip.
 //
+// COUNT(DISTINCT order_id), not COUNT(*): a row here is an assignment CYCLE, and
+// recordLeadDisposition deliberately retires the live row and inserts a fresh cycle every time
+// an already-disposed lead is disposed again (that is what stops a re-opened lead from
+// overwriting the original agent and inflating FRT - see its own comment). Correct for
+// attribution, wrong for counting: the new row carries the same disposition and new_order_id,
+// so one lead re-opened 18 times reads as 18 conversions. That is not hypothetical - order
+// 9184758 had exactly that on 2026-08-25, and 386 orders desk-wide had more than one disposed
+// row that day, 355 of them by the SAME agent. Counting leads instead of cycles is what makes
+// this agree with the Converted Orders list, which has always been one row per order.
+// Distinct per DAY, so a lead re-dialled on two days counts on each of them.
+//
 // Unlike getCallingHourlyStats this reads EVERY cycle (no reassigned_away_at filter), matching
 // that function's disposed half: a lead a previous agent already worked and lost still cost
 // that agent a dial, and dropping retired cycles would quietly understate call volume.
@@ -1964,9 +1995,9 @@ async function getCallingCallTrend({ dateFrom, dateTo, agents } = {}) {
   const { rows } = await sql`
     SELECT
       DATE(CONVERT_TZ(disposed_at, '+00:00', '+05:30')) AS bucket,
-      COUNT(*) AS dialled,
-      SUM(CASE WHEN connected = 'Yes' THEN 1 ELSE 0 END) AS connected,
-      SUM(CASE WHEN disposition IN ('Customer Agreed to Accept', 'Product Issue / Exchange') OR new_order_id IS NOT NULL THEN 1 ELSE 0 END) AS converted
+      COUNT(DISTINCT order_id) AS dialled,
+      COUNT(DISTINCT CASE WHEN connected = 'Yes' THEN order_id END) AS connected,
+      COUNT(DISTINCT CASE WHEN disposition IN ('Customer Agreed to Accept', 'Product Issue / Exchange') OR new_order_id IS NOT NULL THEN order_id END) AS converted
     FROM CLS_RTO_calling
     WHERE disposed_at IS NOT NULL
       AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
@@ -2001,20 +2032,45 @@ async function getCallingCallTrend({ dateFrom, dateTo, agents } = {}) {
 //
 // Every cycle, no reassigned_away_at filter - same grain as getCallingOverviewStats' disposed/
 // connected/converted, and the whole point of this function.
+//
+// COUNT(DISTINCT order_id), not COUNT(*): a row here is an assignment CYCLE, and
+// recordLeadDisposition deliberately retires the live row and inserts a fresh cycle every time
+// an already-disposed lead is disposed again (that is what stops a re-opened lead from
+// overwriting the original agent and inflating FRT - see its own comment). Correct for
+// attribution, wrong for counting: the new row carries the same disposition and new_order_id,
+// so one lead re-opened 18 times reads as 18 conversions. That is not hypothetical - order
+// 9184758 had exactly that on 2026-08-25, and 386 orders desk-wide had more than one disposed
+// row that day, 355 of them by the SAME agent. Counting leads instead of cycles is what makes
+// this agree with the Converted Orders list, which has always been one row per order.
+// Distinct WITHIN a bucket: a lead genuinely re-dialled hours later counts in both buckets,
+// which is what a time-of-day view is asking about.
 async function getCallingTimeOfDay({ dateFrom, dateTo } = {}) {
   await ensureSchema();
   const { from, to } = dateBounds(dateFrom, dateTo);
+  // Collapsed per (agent, lead, day) FIRST, then bucketed by that lead's earliest disposal.
+  // Deduping inside each bucket instead would leave a lead re-disposed an hour later counted in
+  // two buckets - the column sums would then overshoot the day's real total (217 against 213
+  // when measured on 2026-08-25), and this table's own Team Total is a sum of its columns.
+  // Attributing each lead to where its work STARTED keeps that total honest.
   const { rows } = await sql`
     SELECT
-      LOWER(agent_email) AS agent_email,
-      FLOOR((HOUR(CONVERT_TZ(disposed_at, '+00:00', '+05:30')) * 60
-             + MINUTE(CONVERT_TZ(disposed_at, '+00:00', '+05:30'))) / 15) AS bucket15,
+      agent_email,
+      FLOOR((HOUR(first_at) * 60 + MINUTE(first_at)) / 15) AS bucket15,
       COUNT(*) AS dialled,
-      SUM(CASE WHEN connected = 'Yes' THEN 1 ELSE 0 END) AS connected,
-      SUM(CASE WHEN disposition IN ('Customer Agreed to Accept', 'Product Issue / Exchange') OR new_order_id IS NOT NULL THEN 1 ELSE 0 END) AS converted
-    FROM CLS_RTO_calling
-    WHERE disposed_at IS NOT NULL AND agent_email IS NOT NULL AND agent_email <> ''
-      AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+      SUM(was_connected) AS connected,
+      SUM(was_converted) AS converted
+    FROM (
+      SELECT
+        LOWER(agent_email) AS agent_email,
+        order_id,
+        MIN(CONVERT_TZ(disposed_at, '+00:00', '+05:30')) AS first_at,
+        MAX(connected = 'Yes') AS was_connected,
+        MAX(disposition IN ('Customer Agreed to Accept', 'Product Issue / Exchange') OR new_order_id IS NOT NULL) AS was_converted
+      FROM CLS_RTO_calling
+      WHERE disposed_at IS NOT NULL AND agent_email IS NOT NULL AND agent_email <> ''
+        AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+      GROUP BY 1, 2, DATE(CONVERT_TZ(disposed_at, '+00:00', '+05:30'))
+    ) t
     GROUP BY 1, 2
   `;
   return rows.map((r) => ({
