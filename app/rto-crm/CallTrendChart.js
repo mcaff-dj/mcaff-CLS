@@ -16,9 +16,13 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { MultiSelectDropdown } from '../_calling/ui';
 import { buildSeries, niceMax, axisTicks } from '../../api/_lib/trendChart';
 
+// indigo-500/cyan-600 rather than the lighter 400-shade this card used when it had a near-black
+// background: this app carries one theme only (see globals.css's "One theme, always"), and a
+// pastel 400 shade drawn on white - especially as small bold value-label text - reads as low
+// contrast rather than as an accent color.
 const SERIES = [
-  { key: 'dialled', label: 'Total Dialled', color: '#818cf8', grad: 'ctDialled' },  // indigo-400
-  { key: 'connected', label: 'Total Connects', color: '#22d3ee', grad: 'ctConnect' }, // cyan-400
+  { key: 'dialled', label: 'Total Dialled', color: '#6366f1', grad: 'ctDialled' },  // indigo-500
+  { key: 'connected', label: 'Total Connects', color: '#0891b2', grad: 'ctConnect' }, // cyan-600
 ];
 const CONVERTED_COLOR = '#f59e0b'; // amber-500 - the accent the table above already uses
 const GRAINS = [{ value: 'day', label: 'Daily' }, { value: 'week', label: 'Weekly' }, { value: 'month', label: 'Monthly' }];
@@ -132,7 +136,11 @@ export default function CallTrendChart({ agents = [], defaultAgents = null, canF
   const hoverSide = hoverPct > 78 ? -100 : hoverPct < 22 ? 0 : -50;
 
   return (
-    <div className="relative bg-[#111113] border border-zinc-800/80 rounded-2xl p-5 overflow-hidden">
+    // bg-zinc-900/60 + rounded-xl, not the bg-[#111113]/rounded-2xl this card shipped with - an
+    // arbitrary hex literal is invisible to globals.css's light-theme overrides (they match
+    // .bg-zinc-900/60 etc by class name), so this card was the one surface on the page that
+    // stayed permanently dark. Every sibling card on this tab already uses this exact class.
+    <div className="relative bg-zinc-900/60 border border-zinc-800/80 rounded-xl p-5 overflow-hidden">
       <style>{`
         @keyframes ct-grow { from { transform: scaleY(0); opacity: .35 } to { transform: scaleY(1); opacity: 1 } }
         @keyframes ct-draw { from { stroke-dashoffset: 1 } to { stroke-dashoffset: 0 } }
@@ -153,13 +161,9 @@ export default function CallTrendChart({ agents = [], defaultAgents = null, canF
           .ct-bar, .ct-line, .ct-dot, .ct-area, .ct-tip, .ct-tile, .ct-seg, .ct-num { animation: none !important; transition: none !important }
         }
       `}</style>
-      {/* Ambient wash: the card reads as lit from the series colours rather than a flat panel. */}
-      <div aria-hidden className="pointer-events-none absolute -top-24 -left-16 h-56 w-72 rounded-full bg-indigo-500/10 blur-3xl" />
-      <div aria-hidden className="pointer-events-none absolute -top-28 right-0 h-56 w-72 rounded-full bg-amber-500/[0.07] blur-3xl" />
-
       <div className="relative flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="text-[15px] font-semibold text-zinc-50 tracking-[-0.01em] flex items-center gap-2">
+          <h3 className="text-[15px] font-semibold text-zinc-100 tracking-[-0.01em] flex items-center gap-2">
             <span className="grid place-items-center h-6 w-6 rounded-lg bg-indigo-500/15 text-[12px]">📈</span>
             Call Trend
           </h3>
@@ -172,8 +176,11 @@ export default function CallTrendChart({ agents = [], defaultAgents = null, canF
           {/* Segmented control rather than a dropdown: three fixed options, all worth seeing at
               once, and the sliding pill shows which way the switch moved. */}
           <div className="relative flex items-center h-8 p-0.5 rounded-[10px] bg-zinc-900/80 border border-zinc-800">
+            {/* The sliding pill needs its own light-appropriate color: bg-zinc-700 has no
+                light-theme override anywhere in globals.css (only its :hover variant does), so
+                left as the plain Tailwind class it would stay dark-gray-on-white forever. */}
             <div
-              className="ct-seg absolute top-0.5 bottom-0.5 left-0.5 rounded-lg bg-zinc-700/70 shadow-sm"
+              className="ct-seg absolute top-0.5 bottom-0.5 left-0.5 rounded-lg bg-white shadow-sm ring-1 ring-black/5"
               style={{ width: `calc((100% - 4px) / ${GRAINS.length})`, transform: `translateX(${GRAINS.findIndex((g) => g.value === grain) * 100}%)` }}
             />
             {GRAINS.map((g) => (
@@ -182,7 +189,7 @@ export default function CallTrendChart({ agents = [], defaultAgents = null, canF
                 type="button"
                 onClick={() => changeGrain(g.value)}
                 aria-pressed={grain === g.value}
-                className={`relative z-10 px-3 h-7 rounded-lg text-[12px] font-medium active:scale-[.97] ${grain === g.value ? 'text-zinc-50' : 'text-zinc-400 hover:text-zinc-200'}`}
+                className={`relative z-10 px-3 h-7 rounded-lg text-[12px] font-medium active:scale-[.97] ${grain === g.value ? 'text-zinc-900' : 'text-zinc-400 hover:text-zinc-200'}`}
               >
                 {g.label}
               </button>
@@ -190,13 +197,13 @@ export default function CallTrendChart({ agents = [], defaultAgents = null, canF
           </div>
           <input
             type="date" value={from} max={to} onChange={(e) => setFrom(e.target.value)}
-            style={{ colorScheme: 'dark' }}
+            style={{ colorScheme: 'light' }}
             className="h-8 px-2 bg-zinc-900/80 border border-zinc-800 rounded-[10px] text-[12px] text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
           />
           <span className="text-zinc-600 text-xs">to</span>
           <input
             type="date" value={to} min={from} max={daysAgoKey(0)} onChange={(e) => setTo(e.target.value)}
-            style={{ colorScheme: 'dark' }}
+            style={{ colorScheme: 'light' }}
             className="h-8 px-2 bg-zinc-900/80 border border-zinc-800 rounded-[10px] text-[12px] text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
           />
           {canFilterAgents && (
@@ -215,7 +222,7 @@ export default function CallTrendChart({ agents = [], defaultAgents = null, canF
         <p className="text-[12px] text-rose-400 py-12 text-center">{error}</p>
       ) : loading ? (
         <div className="py-12 grid place-items-center gap-2">
-          <span className="h-5 w-5 rounded-full border-2 border-zinc-700 border-t-indigo-400 animate-spin" />
+          <span className="h-5 w-5 rounded-full border-2 border-zinc-200 border-t-indigo-500 animate-spin" />
           <p className="text-[12px] text-zinc-500">Loading trend…</p>
         </div>
       ) : !hasData ? (
@@ -239,7 +246,7 @@ export default function CallTrendChart({ agents = [], defaultAgents = null, canF
                   <span className="h-1.5 w-1.5 rounded-full" style={{ background: t.color }} />
                   {t.label}
                 </div>
-                <div className="text-[19px] font-semibold text-zinc-50 tracking-[-0.02em] tabular-nums leading-tight mt-0.5">
+                <div className="text-[19px] font-semibold text-zinc-100 tracking-[-0.02em] tabular-nums leading-tight mt-0.5">
                   {t.value.toLocaleString('en-IN')}
                 </div>
                 <div className="text-[10.5px] text-zinc-500 tabular-nums">{t.sub}</div>
@@ -294,9 +301,11 @@ export default function CallTrendChart({ agents = [], defaultAgents = null, canF
 
               {leftTicks.map((t, i) => (
                 <g key={`g${t}`}>
+                  {/* Light-appropriate grid grays - the original #3f3f46/#27272a pair was tuned
+                      for a near-black card and reads as heavy near-black bars on white. */}
                   <line
                     x1={PAD.l} x2={W - PAD.r} y1={yL(t)} y2={yL(t)}
-                    stroke={i === 0 ? '#3f3f46' : '#27272a'} strokeWidth="1"
+                    stroke={i === 0 ? '#cbd5e1' : '#e2e8f0'} strokeWidth="1"
                     strokeDasharray={i === 0 ? undefined : '3 5'}
                   />
                   <text x={PAD.l - 8} y={yL(t) + 3} textAnchor="end" fontSize="9" fill="#71717a" className="tabular-nums">{compact(Math.round(t))}</text>
@@ -306,11 +315,13 @@ export default function CallTrendChart({ agents = [], defaultAgents = null, canF
                 <text key={`r${t}`} x={W - PAD.r + 8} y={yR(t) + 3} fontSize="9" fill={CONVERTED_COLOR} fillOpacity="0.75">{compact(Math.round(t))}</text>
               ))}
 
-              {/* Hover column sits under the marks so it reads as a lit backdrop, not an overlay. */}
+              {/* Hover column sits under the marks so it reads as a lit backdrop, not an overlay.
+                  Dark tint, not the original white-on-near-black wash - on a white card a white
+                  fill/stroke is invisible, so this needs the opposite tone entirely. */}
               {hover !== null && (
                 <>
-                  <rect x={PAD.l + slot * hover} y={PAD.t} width={slot} height={plotH} fill="#ffffff" opacity="0.045" rx="6" />
-                  <line x1={cx(hover)} x2={cx(hover)} y1={PAD.t} y2={base} stroke="#ffffff" strokeOpacity="0.16" strokeWidth="1" strokeDasharray="2 4" />
+                  <rect x={PAD.l + slot * hover} y={PAD.t} width={slot} height={plotH} fill="#0f172a" opacity="0.04" rx="6" />
+                  <line x1={cx(hover)} x2={cx(hover)} y1={PAD.t} y2={base} stroke="#0f172a" strokeOpacity="0.14" strokeWidth="1" strokeDasharray="2 4" />
                 </>
               )}
 
@@ -360,9 +371,12 @@ export default function CallTrendChart({ agents = [], defaultAgents = null, canF
               {series.map((b, i) => (
                 <g key={`d${b.bucket}`} className="ct-dot" style={{ animationDelay: `${420 + Math.min(i * 26, 420)}ms` }}>
                   {hover === i && <circle cx={cx(i)} cy={yR(b.converted)} r="7" fill={CONVERTED_COLOR} opacity="0.2" />}
+                  {/* fill punches a hole matching the CARD's own background so the marker reads
+                      as an open ring - white now that the card is white, not the dark literal
+                      this was tuned against. */}
                   <circle
                     cx={cx(i)} cy={yR(b.converted)} r={hover === i ? 4 : 2.75}
-                    fill="#111113" stroke={CONVERTED_COLOR} strokeWidth="2"
+                    fill="#ffffff" stroke={CONVERTED_COLOR} strokeWidth="2"
                   />
                 </g>
               ))}
@@ -380,7 +394,9 @@ export default function CallTrendChart({ agents = [], defaultAgents = null, canF
                 i % labelStep === 0 ? (
                   <text
                     key={`x${b.bucket}`} x={cx(i)} y={H - 14} textAnchor="middle" fontSize="9.5"
-                    fill={hover === i ? '#e4e4e7' : '#71717a'} fontWeight={hover === i ? 600 : 400}
+                    // The hover-emphasized shade was near-white (#e4e4e7), invisible on a white
+                    // card - emphasis on light now means darker, not lighter.
+                    fill={hover === i ? '#0f172a' : '#71717a'} fontWeight={hover === i ? 600 : 400}
                   >{b.label}</text>
                 ) : null
               ))}
@@ -389,9 +405,15 @@ export default function CallTrendChart({ agents = [], defaultAgents = null, canF
             {h && (
               // Positioned in percent of the plot area rather than pixels, so it tracks the
               // column at any container width - the SVG itself is scaled by its viewBox.
+              //
+              // bg-[#141417] + border-zinc-800/90, the exact floating-panel pair ui.js's
+              // MultiSelectDropdown/Overlay already use - both ARE covered by globals.css's
+              // light overrides (see the file's own "arbitrary bg-[#hex] literals" note), so
+              // this reads as the same white popover every other dropdown/modal in the app
+              // already is, rather than the dark-glass panel border-white/10 assumed.
               <div
                 className="ct-tip absolute pointer-events-none rounded-xl px-3 py-2 text-[11px] shadow-2xl whitespace-nowrap
-                           bg-zinc-900/75 backdrop-blur-xl border border-white/10 ring-1 ring-black/40"
+                           bg-[#141417] border border-zinc-800/90"
                 style={{ left: `${hoverPct}%`, top: '30%', transform: `translate(${hoverSide}%, -100%)` }}
               >
                 <div className="font-semibold text-zinc-100 mb-1 tracking-[-0.01em]">{h.label}</div>
@@ -407,7 +429,7 @@ export default function CallTrendChart({ agents = [], defaultAgents = null, canF
                   Converted
                   <span className="ml-auto pl-3 text-zinc-100 font-semibold tabular-nums">{h.converted.toLocaleString('en-IN')}</span>
                 </div>
-                <div className="mt-1 pt-1 border-t border-white/10 text-[10px] text-zinc-500 tabular-nums">
+                <div className="mt-1 pt-1 border-t border-zinc-800/80 text-[10px] text-zinc-500 tabular-nums">
                   Connect {pct(h.connected, h.dialled)} · Convert {pct(h.converted, h.connected)}
                 </div>
               </div>
