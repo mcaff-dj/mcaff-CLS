@@ -9,7 +9,7 @@ const { JWT } = require('google-auth-library');
 const { getSession } = require('../_lib/session');
 const { parseCSV } = require('../_lib/csv');
 const {
-  buildRowPlan, checkSheetLayout, columnLetterToIndex, normalizeAwb,
+  buildRowPlan, checkSheetLayout, columnLetterToIndex, normalizeAwb, parseAppendedRowRange,
   CSV_TO_COLUMN, LAST_COLUMN_LETTER, REQUIRED_CSV_HEADERS,
 } = require('../_lib/rtoCsvImport');
 const { createRtoCsvUploadJob, updateRtoCsvUploadJob, isCallingProcessAdmin } = require('../_lib/db');
@@ -174,22 +174,33 @@ module.exports = async (req, res) => {
       // own AWB column, not from the map this endpoint is verifying.
       // ponytail: single-column canary, not a full-row round-trip - upgrade if insufficient.
       const updatedRange = (appendResp && appendResp.updates && appendResp.updates.updatedRange) || '';
-      const rangeMatch = updatedRange.match(/!\w+(\d+):\w+(\d+)$/);
+      const rangeMatch = parseAppendedRowRange(updatedRange);
       if (rangeMatch) {
-        const [, firstRow, lastRow] = rangeMatch;
-        const verifyData = await sheetsRequest(
-          client, 'GET',
-          `/values/${encodeURIComponent(`'${SHEET_TAB}'!${AWB_COLUMN}${firstRow}:${AWB_COLUMN}${lastRow}`)}`,
-        );
-        const actualAwbs = (verifyData.values || []).map((r) => normalizeAwb((r && r[0]) || ''));
-        const mismatch = nonPrepaidRows.some((r, i) => actualAwbs[i] !== r.awbCode);
-        if (mismatch) {
-          console.error(
-            `api/rto/upload-start: post-append AWB verification FAILED for rows ${firstRow}-${lastRow} `
-            + '- appended data landed in the wrong columns. Rows are already written and need manual correction.',
+        const [firstRow, lastRow] = rangeMatch;
+        // This whole block is verification only - it must never abort the request. It used to:
+        // a malformed range (the deployed \w+ regex produced 'Data'!G0:G9, Sheets 400) threw
+        // out to the outer catch AFTER the COD rows had already appended, so the prepaid
+        // queueing below never ran at all - COD landed, prepaid silently vanished, and the
+        // only way to retry re-appended the COD half as duplicates.
+        try {
+          const verifyData = await sheetsRequest(
+            client, 'GET',
+            `/values/${encodeURIComponent(`'${SHEET_TAB}'!${AWB_COLUMN}${firstRow}:${AWB_COLUMN}${lastRow}`)}`,
           );
-          mappingWarning = `Appended ${appendedNow} row(s) but a post-write check found them in the wrong `
-            + `columns (rows ${firstRow}-${lastRow}). Do not trust this data - contact an admin.`;
+          const actualAwbs = (verifyData.values || []).map((r) => normalizeAwb((r && r[0]) || ''));
+          const mismatch = nonPrepaidRows.some((r, i) => actualAwbs[i] !== r.awbCode);
+          if (mismatch) {
+            console.error(
+              `api/rto/upload-start: post-append AWB verification FAILED for rows ${firstRow}-${lastRow} `
+              + '- appended data landed in the wrong columns. Rows are already written and need manual correction.',
+            );
+            mappingWarning = `Appended ${appendedNow} row(s) but a post-write check found them in the wrong `
+              + `columns (rows ${firstRow}-${lastRow}). Do not trust this data - contact an admin.`;
+          }
+        } catch (e) {
+          console.error('api/rto/upload-start: post-append AWB verification could not run:', e);
+          mappingWarning = `Appended ${appendedNow} row(s) but the post-write column check could `
+            + `not be completed (${e.message}). The rows are in the sheet but unverified.`;
         }
       }
     }

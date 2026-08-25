@@ -3,7 +3,7 @@
 const assert = require('assert');
 const {
   normalizeHeader, normalizeAwb, columnLetterToIndex, indexToColumnLetter,
-  CSV_TO_COLUMN, checkSheetLayout, buildRowPlan,
+  CSV_TO_COLUMN, checkSheetLayout, buildRowPlan, parseAppendedRowRange,
 } = require('./rtoCsvImport');
 
 // 1. columnLetterToIndex / indexToColumnLetter - bijective base-26, round-trips past Z.
@@ -109,5 +109,16 @@ assert.strictEqual(normalizeAwb(''), '');
   assert.strictEqual(issues.length, 1);
   assert.ok(issues[0].includes('Column G'), 'must name the drifted column');
 }
+
+
+// parseAppendedRowRange - regression guard for the 'Data'!G0:G9 bug. The old /!\w+(\d+):\w+(\d+)$/
+// captured only the trailing digit of each row number, so a real append at rows 7630-7639 asked
+// Sheets to read G0:G9 and got back a 400 that aborted the whole upload mid-flight.
+assert.deepStrictEqual(parseAppendedRowRange('Data!A7630:AD7639'), ['7630', '7639']);
+assert.deepStrictEqual(parseAppendedRowRange("'Data'!A2:AC11"), ['2', '11']);
+assert.deepStrictEqual(parseAppendedRowRange('Data!A7:AC7'), ['7', '7']);
+assert.strictEqual(parseAppendedRowRange(''), null);
+assert.strictEqual(parseAppendedRowRange(undefined), null);
+assert.strictEqual(parseAppendedRowRange('Data!A:AC'), null);
 
 console.log('rtoCsvImport.test.js: all assertions passed');

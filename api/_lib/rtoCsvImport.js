@@ -150,8 +150,21 @@ function buildRowPlan({ csvRows, existingAwbSet }) {
   return { validRows, errors, counts };
 }
 
+// Pulls the first/last row NUMBERS out of a Sheets values:append `updates.updatedRange`
+// (e.g. "Data!A7630:AD7639" -> ['7630', '7639']), so the post-append AWB canary can read back
+// exactly the rows that just landed. Returns null when the range isn't in that shape.
+//
+// [A-Za-z]+, NOT \w+: \w matches digits too, so /!\w+(\d+):\w+(\d+)$/ backtracked its way to
+// capturing only the LAST digit of each row number ("A7630" -> "0"), producing ranges like
+// 'Data'!G0:G9 that Sheets rejects with "Unable to parse range". Lives here, exported and
+// tested, rather than inline at each call site, so that regression can't come back unnoticed.
+function parseAppendedRowRange(updatedRange) {
+  const m = (updatedRange || '').match(/![A-Za-z]+(\d+):[A-Za-z]+(\d+)$/);
+  return m ? [m[1], m[2]] : null;
+}
+
 module.exports = {
   normalizeHeader, normalizeAwb, columnLetterToIndex, indexToColumnLetter,
   CSV_TO_COLUMN, EXPECTED_SHEET_HEADER, LAST_COLUMN_LETTER, REQUIRED_CSV_HEADERS,
-  checkSheetLayout, buildRowPlan,
+  checkSheetLayout, buildRowPlan, parseAppendedRowRange,
 };

@@ -343,16 +343,26 @@ def process_job(job_id):
         # column checked because row["awbCode"] comes straight from the dedup step above,
         # independent of the cellsByColumn map this is verifying.
         # ponytail: single-column canary, not a full-row round-trip - upgrade if insufficient.
-        range_match = re.search(r"!\w+(\d+):\w+(\d+)$", (append_resp.get("updates") or {}).get("updatedRange", ""))
+        # [A-Za-z]+, not \w+ - \w also matches digits, so \w+(\d+) greedily swallowed all but
+        # the last digit of each row number (e.g. "A7634" -> group "4") and made this canary
+        # compare against the wrong 6 rows on every real multi-hundred-row append.
+        range_match = re.search(r"![A-Za-z]+(\d+):[A-Za-z]+(\d+)$", (append_resp.get("updates") or {}).get("updatedRange", ""))
         mapping_failed = False
         if range_match and stamped_rows:
             first_row, last_row = range_match.group(1), range_match.group(2)
-            awb_check = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!{AWB_COLUMN}{first_row}:{AWB_COLUMN}{last_row}")
-            actual_awbs = [(r[0] if r else "").strip().upper() for r in awb_check]
-            mapping_failed = any(
-                i >= len(actual_awbs) or actual_awbs[i] != stamped_rows[i]["awbCode"]
-                for i in range(len(stamped_rows))
-            )
+            # Verification only - never let it decide the job's fate. The rows are already
+            # appended by this point, so a failure to READ them back (a malformed range, a
+            # transient Sheets error) must not fall through to the generic handler below and
+            # stamp an otherwise-successful job 'failed'.
+            try:
+                awb_check = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!{AWB_COLUMN}{first_row}:{AWB_COLUMN}{last_row}")
+                actual_awbs = [(r[0] if r else "").strip().upper() for r in awb_check]
+                mapping_failed = any(
+                    i >= len(actual_awbs) or actual_awbs[i] != stamped_rows[i]["awbCode"]
+                    for i in range(len(stamped_rows))
+                )
+            except Exception as e:
+                print(f"process_job({job_id}): post-append AWB verification could not run: {e}")
         if mapping_failed:
             print(f"process_job({job_id}): post-append AWB verification FAILED for rows "
                   f"{first_row}-{last_row} - appended data landed in the wrong columns")
