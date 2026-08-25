@@ -55,11 +55,16 @@ import RtoUploadModal from './RtoUploadModal';
     const HIGH_PRIORITY_COD_RTO_REASONS = leadAssignmentRules.highPriorityCodRtoReasons;
     const LOW_PRIORITY_COD_RTO_REASONS = leadAssignmentRules.lowPriorityCodRtoReasons;
     const ASSIGNMENT_QUOTA = leadAssignmentRules.assignmentQuota;
-    // Team Roster's "Priority Reasons" picker draws from the same known reason substrings the
-    // tier system already uses - an agent can only ever specialize in a reason the assignment
-    // queue itself recognizes, so there's no free-text drift between what's typed and what
-    // build_assignment_queue actually matches against.
+    // Floor for the Team Roster's "Priority Reasons" picker - the reason substrings the tier
+    // system itself recognizes, kept selectable even on a day no loaded lead carries one. The
+    // picker's real option list is priorityReasonOptions inside App(), which adds every reason
+    // the loaded sheet actually contains; this list alone covered only refusal/OTP reasons, so
+    // the desk's single biggest reason ("Consignee unavailable") could not be picked at all.
     const PRIORITY_REASON_OPTIONS = [...new Set([...HIGH_PRIORITY_COD_RTO_REASONS, ...LOW_PRIORITY_COD_RTO_REASONS])].sort();
+    // Placeholders, not reasons: the sheet writes these when the courier recorded nothing, and
+    // they are ~13% of RTO rows. As a priority keyword each is worse than useless - "n/a" is a
+    // substring matcher that would silently claim any future reason containing those letters.
+    const NO_REASON_PLACEHOLDERS = new Set(['none', 'n/a', 'na', 'unknown', 'others', 'other', '-', '—']);
     // Connected=No reassignment preview - see leadAssignmentRules.json's _reassignNote and
     // assign_leads.py's REASSIGN_BACKLOG_CUTOFF/REASSIGN_RETRY_CAP. This preview can only
     // exclude the CURRENT agent (the one who just failed to connect) - it has no client-side
@@ -618,6 +623,18 @@ import RtoUploadModal from './RtoUploadModal';
 
       // Data
       const [tickets, setTickets] = useState(()=>{try{const s=localStorage.getItem('rto_cache_v4');if(s){const p=JSON.parse(s);if(Array.isArray(p)&&p.length)return p.map(t=>({...t,rowDate:t.rowDate?new Date(t.rowDate):null,rtoInitiatedDate:t.rtoInitiatedDate?new Date(t.rtoInitiatedDate):null}));}}catch{}return[];});
+      // Every RTO reason the loaded sheet actually contains, not just the ~14 substrings
+      // leadAssignmentRules.json happens to list - the rules file only names the reasons that
+      // drive the priority TIERS, so pointing an agent at anything outside it was impossible.
+      // Unioned with PRIORITY_REASON_OPTIONS so a rule keyword stays selectable on a day no
+      // loaded lead carries it, and lowercased because matching is case-insensitive substring
+      // (getPriorityTier here, build_assignment_queue server-side) - otherwise "Consignee
+      // Refused to Accept" and "CONSIGNEE REFUSED TO ACCEPT" would list as two options that
+      // behave identically. Sorted within each category by MultiSelectDropdown's grouping.
+      const priorityReasonOptions = useMemo(() => [...new Set([
+        ...PRIORITY_REASON_OPTIONS,
+        ...tickets.map(t => (t.rtoReason || '').trim().toLowerCase()).filter(Boolean),
+      ])].filter(r => !NO_REASON_PLACEHOLDERS.has(r)).sort(), [tickets]);
       const [overrides, setOverrides] = useState(()=>{try{return JSON.parse(localStorage.getItem('rto_ticket_overrides')||'{}');}catch{return{};}});
       const [stats, setStats] = useState(()=>{try{return JSON.parse(localStorage.getItem('rto_agent_stats')||'{}');}catch{return{};}});
       const [isSyncing, setIsSyncing] = useState(false);
@@ -2163,14 +2180,14 @@ import RtoUploadModal from './RtoUploadModal';
                         />
                       </td>
                       <td className="py-3 px-4">
-                        {/* Options are the same known reason substrings the tier system already
-                            recognizes (PRIORITY_REASON_OPTIONS) - picking from that list rather
-                            than free text means there's no way to type a substring
-                            build_assignment_queue would never actually match against. */}
+                        {/* Options are every reason string present in the loaded sheet, plus
+                            the tier system's own known substrings (priorityReasonOptions above)
+                            - picking from that list rather than free text means there's no way
+                            to type a substring build_assignment_queue would never match. */}
                         <MultiSelectDropdown
                           value={(a.priorityRtoReasons || '').split(',').map(r => r.trim()).filter(Boolean)}
                           onChange={(next) => saveProcessAgent(a.email, { priorityRtoReasons: next.join(', ') })}
-                          options={PRIORITY_REASON_OPTIONS}
+                          options={priorityReasonOptions}
                           groupBy={categorizeRtoReason}
                           groupOrder={RTO_REASON_CATEGORIES}
                         />
