@@ -2524,8 +2524,8 @@ import CallTrendChart from './CallTrendChart';
 
           // Avg Time to Dispose: how long this agent took to reach their NEXT disposal after
           // finishing one, averaged. Not FRT above - that measures one lead's own handle time,
-          // this measures the pace between leads. Gaps never cross a calendar day and anything
-          // over an hour is treated as a break rather than call handling; see disposalGaps.js.
+          // this measures the pace between leads. Gaps never cross a calendar day, but every
+          // same-day gap counts at its real duration, breaks included - see disposalGaps.js.
           const { averageMinutes: disposeGapMinutes } = disposalGaps(disposedByDate.map(t => ({
             key: normalizeOrderKey(t.orderNumber),
             disposedAt: leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt,
@@ -2800,11 +2800,10 @@ import CallTrendChart from './CallTrendChart';
             .filter(t => isMine(t.assignedAgent)
               && (assignedDateInScope(t) || (isWorkedForRaw(t) && disposedDateInScope(t))));
           // Per-lead half of the summary table's Avg Time to Dispose: minutes since THIS
-          // agent's previous disposal. Computed per agent over their whole in-scope set (not
-          // per row) because the predecessor of a lead is whatever they disposed before it,
-          // which the row itself cannot know. Unlike the average, no 60-minute cut applies
-          // here - the export is for reading what actually happened, so a break shows as the
-          // long gap it was rather than vanishing.
+          // agent's previous disposal, same figure the average is built from (no cutoff either
+          // side). Computed per agent over their whole in-scope set (not per row) because the
+          // predecessor of a lead is whatever they disposed before it, which the row itself
+          // cannot know.
           const { gapByKey } = disposalGaps(mine.map(t => ({
             key: normalizeOrderKey(t.orderNumber),
             disposedAt: leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt,
@@ -3247,7 +3246,7 @@ import CallTrendChart from './CallTrendChart';
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Disposed</th>
                                 <th className="py-2 px-3 font-bold" title="Average time-of-day of the first disposition across the range's active days">First Called At</th>
                                 <th className="py-2 px-3 font-bold" title="Average time between a lead's assignment and its disposition (Disposed At - Assigned At), across disposed leads with both timestamps">FRT</th>
-                                <th className="py-2 px-3 font-bold" title="Average time between one disposal and this agent's next one - how long before they picked up the next call. Gaps never cross a day, and a gap over 60 minutes is treated as a break and left out of the average.">Avg Time to Dispose</th>
+                                <th className="py-2 px-3 font-bold" title="Average time between one disposal and this agent's next one - how long before they picked up the next call. Gaps never cross a day; every same-day gap counts at its real duration, breaks included.">Avg Time to Dispose</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Connected</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Total Connected / Total Disposed">Connected %</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Prepaid Assigned</th>

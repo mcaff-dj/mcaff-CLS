@@ -6,13 +6,11 @@
 // Lives here, CJS, for the same reason leadQuota.js and trendChart.js do: the browser bundle
 // imports it while `node` runs its self-check directly - see disposalGaps.test.js.
 //
-// Two rules, both there to stop the number measuring the wrong thing:
-//   * gaps never span a calendar day (IST) - otherwise every agent's first disposal of the
-//     morning would carry the whole night as its gap.
-//   * a same-day gap longer than MAX_GAP_MINUTES is a break, not call handling, and is left
-//     out of the average. It is still reported per lead, since the raw export is for a human
-//     reading what actually happened rather than a summary statistic.
-const MAX_GAP_MINUTES = 60;
+// One rule: gaps never span a calendar day (IST) - otherwise every agent's first disposal of
+// the morning would carry the whole night as its gap. Every same-day gap counts toward the
+// average at its real duration, breaks included - this used to drop anything over an hour as
+// "not call handling", but that quietly hid the actual time an agent took, which is the number
+// asked for here.
 
 // Fixed +05:30, matching istDayKeyClient/istMinutesSinceMidnightClient in app/_calling/util.js
 // and CONVERT_TZ('+00:00','+05:30') server-side. A named zone would need zoneinfo tables RDS
@@ -26,10 +24,10 @@ function istDayKey(ms) {
 // Returns { gapByKey, averageMinutes }:
 //   gapByKey      key -> minutes since that agent's previous disposal the same day, or null
 //                 for the first disposal of a day (nothing to measure from).
-//   averageMinutes mean of the gaps that survive MAX_GAP_MINUTES, rounded; null when an agent
-//                 has no measurable gap at all - null, not 0, because "never got a second
-//                 lead" and "answered instantly" are different facts and 0 reads as the latter.
-function disposalGaps(entries, { maxGapMinutes = MAX_GAP_MINUTES } = {}) {
+//   averageMinutes plain mean of every same-day gap, rounded; null when an agent has no
+//                 measurable gap at all - null, not 0, because "never got a second lead" and
+//                 "answered instantly" are different facts and 0 reads as the latter.
+function disposalGaps(entries) {
   const points = [];
   for (const e of entries || []) {
     if (!e || e.disposedAt == null) continue;
@@ -51,7 +49,7 @@ function disposalGaps(entries, { maxGapMinutes = MAX_GAP_MINUTES } = {}) {
     } else {
       const minutes = (p.ms - prev.ms) / 60000;
       gapByKey.set(p.key, minutes);
-      if (minutes <= maxGapMinutes) kept.push(minutes);
+      kept.push(minutes);
     }
     prev = p;
   }
@@ -61,4 +59,4 @@ function disposalGaps(entries, { maxGapMinutes = MAX_GAP_MINUTES } = {}) {
   return { gapByKey, averageMinutes };
 }
 
-module.exports = { disposalGaps, MAX_GAP_MINUTES };
+module.exports = { disposalGaps };

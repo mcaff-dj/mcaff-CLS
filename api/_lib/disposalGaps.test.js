@@ -33,17 +33,17 @@ const utc = (day, h, m) => `2026-08-${day}T${String(h).padStart(2, '0')}:${Strin
   assert.deepStrictEqual([gapByKey.get('a'), gapByKey.get('b'), gapByKey.get('c')], [null, 14, 7]);
 }
 
-// 3. A break is not call handling: over 60 minutes it stays visible per lead but leaves the
-// average alone. Without this one lunch would double an agent's reported pace.
+// 3. A long same-day gap (a lunch break, a stretch away from the desk) counts at its real
+// duration - no cutoff. The number is the actual time an agent took, breaks included.
 {
   const { gapByKey, averageMinutes } = disposalGaps([
     { key: 'a', disposedAt: utc('25', 4, 35) },
     { key: 'b', disposedAt: utc('25', 4, 49) },  // 14m
-    { key: 'lunch', disposedAt: utc('25', 6, 24) },  // 95m - reported, not averaged
+    { key: 'lunch', disposedAt: utc('25', 6, 24) },  // 95m
     { key: 'd', disposedAt: utc('25', 6, 35) },  // 11m
   ]);
-  assert.strictEqual(gapByKey.get('lunch'), 95, 'still reported per lead');
-  assert.strictEqual(averageMinutes, 13, 'averaged over 14 and 11 only');
+  assert.strictEqual(gapByKey.get('lunch'), 95);
+  assert.strictEqual(averageMinutes, 40, 'mean of 14, 95 and 11, unfiltered');
 }
 
 // 4. Gaps never span a calendar day, or every agent's first call of the morning would carry
