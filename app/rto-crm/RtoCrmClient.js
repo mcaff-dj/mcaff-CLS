@@ -19,6 +19,10 @@ import { checkClaimQuota, countUndisposedLoad, resolveAgentQuota, isTicketUndisp
 // module), so the roster picker's group headings and that table can never name different
 // categories for the same reason string.
 import { categorizeRtoReason, RTO_REASON_CATEGORIES } from '../../api/_lib/rtoReasonCategory';
+// "Avg Time to Dispose" - the gap BETWEEN consecutive disposals, which is a different question
+// from the FRT column's per-lead assigned -> disposed handle time. Shared, tested module for
+// the same reason leadQuota is: see api/_lib/disposalGaps.js.
+import { disposalGaps } from '../../api/_lib/disposalGaps';
 import { safeStorage as localStorage, startOfDay, isDateInScope, scopeToDateBounds, normalizeOrderKey, isLeadDateInScope, istMinutesSinceMidnightClient, istDayKeyClient, formatTimeOfDay, formatBreakMinutes, formatFrt, formatPct, postJsonWithRetry } from '../_calling/util';
 import { useCallingSession, STATUS_OPTIONS, ROSTER_STATUS_OPTIONS, ROLE_OPTIONS } from '../_calling/useCallingSession';
 import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
@@ -2518,6 +2522,15 @@ import CallTrendChart from './CallTrendChart';
             ? Math.round(frtMinutesList.reduce((s, m) => s + m, 0) / frtMinutesList.length)
             : null;
 
+          // Avg Time to Dispose: how long this agent took to reach their NEXT disposal after
+          // finishing one, averaged. Not FRT above - that measures one lead's own handle time,
+          // this measures the pace between leads. Gaps never cross a calendar day and anything
+          // over an hour is treated as a break rather than call handling; see disposalGaps.js.
+          const { averageMinutes: disposeGapMinutes } = disposalGaps(disposedByDate.map(t => ({
+            key: normalizeOrderKey(t.orderNumber),
+            disposedAt: leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt,
+          })));
+
           return {
             ...ag,
             assigned: assignedByDate.length,
@@ -2530,6 +2543,7 @@ import CallTrendChart from './CallTrendChart';
             codConverted: codConverted.length,
             firstCalledAtMinutes,
             frtMinutes,
+            disposeGapMinutes,
           };
         };
         const tableAgentMetrics = effectiveAgentRoster.map(computeTableAgentMetrics);
@@ -2703,6 +2717,12 @@ import CallTrendChart from './CallTrendChart';
         const summaryFrtList = summaryRows.map(am => am.frtMinutes).filter(m => m !== null && m !== undefined);
         const summaryAvgFrt = summaryFrtList.length
           ? Math.round(summaryFrtList.reduce((s, m) => s + m, 0) / summaryFrtList.length) : null;
+        // Mean of the agents' own averages, same shape as summaryAvgFrt above (not a pooled
+        // recount) - the Team Total row answers "what does a typical agent look like", and an
+        // agent who disposed 20 leads should not outweigh one who disposed 200 in that answer.
+        const summaryGapList = summaryRows.map(am => am.disposeGapMinutes).filter(m => m !== null && m !== undefined);
+        const summaryAvgDisposeGap = summaryGapList.length
+          ? Math.round(summaryGapList.reduce((s, m) => s + m, 0) / summaryGapList.length) : null;
 
         // Same Blob/anchor download as downloadConvertedOrdersCsv below - exports
         // exactly what's on screen in the Agent Performance Summary table, one row per
@@ -2716,7 +2736,7 @@ import CallTrendChart from './CallTrendChart';
             return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
           };
           const header = [
-            'Agent Name', 'Total Leads Assigned', 'Total Disposed', 'First Called At', 'FRT',
+            'Agent Name', 'Total Leads Assigned', 'Total Disposed', 'First Called At', 'FRT', 'Avg Time to Dispose',
             'Total Connected', 'Connected %', 'Total Prepaid Assigned', 'Total Prepaid Assigned %',
             'Total Prepaid Connected', 'Total Prepaid Connected %', 'Total COD Assigned', 'Total COD Assigned %',
             'Total Prepaid Converted', 'Total Prepaid Converted %', 'Total COD Converted', 'Total COD Converted %',
@@ -2726,6 +2746,7 @@ import CallTrendChart from './CallTrendChart';
             const presence = serverPresence[am.email.toLowerCase()];
             return [
               am.name, am.assigned, am.disposed, formatTimeOfDay(am.firstCalledAtMinutes), formatFrt(am.frtMinutes),
+              formatFrt(am.disposeGapMinutes),
               am.connected, formatPct(am.connected, am.disposed),
               am.prepaidAssigned, formatPct(am.prepaidAssigned, am.assigned),
               am.prepaidConnected, formatPct(am.prepaidConnected, am.prepaidAssigned),
@@ -2739,7 +2760,7 @@ import CallTrendChart from './CallTrendChart';
           summaryRows.forEach(am => lines.push(rowFor(am).map(escapeCsv).join(',')));
           if (summaryRows.length > 0) {
             lines.push([
-              'Team Total', summaryTotals.assigned, summaryTotals.disposed, '—', formatFrt(summaryAvgFrt),
+              'Team Total', summaryTotals.assigned, summaryTotals.disposed, '—', formatFrt(summaryAvgFrt), formatFrt(summaryAvgDisposeGap),
               summaryTotals.connected, formatPct(summaryTotals.connected, summaryTotals.disposed),
               summaryTotals.prepaidAssigned, formatPct(summaryTotals.prepaidAssigned, summaryTotals.assigned),
               summaryTotals.prepaidConnected, formatPct(summaryTotals.prepaidConnected, summaryTotals.prepaidAssigned),
@@ -2775,9 +2796,20 @@ import CallTrendChart from './CallTrendChart';
         const rawLeadDetailsList = rawLeadDetailsRoster.flatMap(ag => {
           const email = ag.email.toLowerCase();
           const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
-          return allTickets
+          const mine = allTickets
             .filter(t => isMine(t.assignedAgent)
-              && (assignedDateInScope(t) || (isWorkedForRaw(t) && disposedDateInScope(t))))
+              && (assignedDateInScope(t) || (isWorkedForRaw(t) && disposedDateInScope(t))));
+          // Per-lead half of the summary table's Avg Time to Dispose: minutes since THIS
+          // agent's previous disposal. Computed per agent over their whole in-scope set (not
+          // per row) because the predecessor of a lead is whatever they disposed before it,
+          // which the row itself cannot know. Unlike the average, no 60-minute cut applies
+          // here - the export is for reading what actually happened, so a break shows as the
+          // long gap it was rather than vanishing.
+          const { gapByKey } = disposalGaps(mine.map(t => ({
+            key: normalizeOrderKey(t.orderNumber),
+            disposedAt: leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt,
+          })));
+          return mine
             .map(t => {
               const dates = leadDates[normalizeOrderKey(t.orderNumber)] || {};
               const isConverted = !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
@@ -2795,6 +2827,10 @@ import CallTrendChart from './CallTrendChart';
                 assignedAt: dates.assignedAt || '',
                 disposedAt: dates.disposedAt || '',
                 frtMinutes: (frtMinutes !== null && frtMinutes >= 0) ? Math.round(frtMinutes) : null,
+                disposeGapMinutes: (() => {
+                  const g = gapByKey.get(normalizeOrderKey(t.orderNumber));
+                  return (g === null || g === undefined) ? null : Math.round(g);
+                })(),
                 connected: t.connected || '',
                 disposition: t.disposition || (t.newOrderId ? 'Reorder' : ''),
                 converted: isConverted ? 'Yes' : 'No',
@@ -2816,10 +2852,11 @@ import CallTrendChart from './CallTrendChart';
             ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })
             : '';
           const lines = [
-            ['Order ID', 'Agent Name', 'Payment Method', 'Assigned Date', 'Disposed Date', 'FRT', 'Connected', 'Disposition', 'Converted'].join(','),
+            ['Order ID', 'Agent Name', 'Payment Method', 'Assigned Date', 'Disposed Date', 'FRT',
+             'Time Since Prev Disposal', 'Connected', 'Disposition', 'Converted'].join(','),
             ...rawLeadDetailsList.map(r => [
               r.orderNumber, r.agentName, r.paymentMethod, formatCsvDate(r.assignedAt), formatCsvDate(r.disposedAt),
-              formatFrt(r.frtMinutes), r.connected, r.disposition, r.converted,
+              formatFrt(r.frtMinutes), formatFrt(r.disposeGapMinutes), r.connected, r.disposition, r.converted,
             ].map(escapeCsv).join(',')),
           ];
           const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
@@ -2865,7 +2902,7 @@ import CallTrendChart from './CallTrendChart';
           downloadConvertedOrdersCsv, convertedOrdersList,
           trendAgentOptions, trendDefaultAgents,
           timeOfDayState: { loading: timeOfDay.loading, error: timeOfDay.error },
-          summaryRows, summaryTotals, summaryAvgFrt, summaryAvgLoggedIn, summaryAvgBreak, summaryAvgBusy, downloadAgentSummaryCsv,
+          summaryRows, summaryTotals, summaryAvgFrt, summaryAvgDisposeGap, summaryAvgLoggedIn, summaryAvgBreak, summaryAvgBusy, downloadAgentSummaryCsv,
           rawLeadDetailsList, downloadRawLeadDetailsCsv,
           totalAssigned, totalDisposed, totalPending, totalRefunded, totalRefundAmt, avgConnectRate, onlineCount, freshUnassignedInScope,
         };
@@ -3062,7 +3099,7 @@ import CallTrendChart from './CallTrendChart';
                     downloadConvertedOrdersCsv, convertedOrdersList,
                     trendAgentOptions, trendDefaultAgents,
                     timeOfDayState,
-                    summaryRows, summaryTotals, summaryAvgFrt, summaryAvgLoggedIn, summaryAvgBreak, summaryAvgBusy, downloadAgentSummaryCsv,
+                    summaryRows, summaryTotals, summaryAvgFrt, summaryAvgDisposeGap, summaryAvgLoggedIn, summaryAvgBreak, summaryAvgBusy, downloadAgentSummaryCsv,
                     rawLeadDetailsList, downloadRawLeadDetailsCsv,
                     totalAssigned, totalDisposed, totalPending, totalRefunded, totalRefundAmt, avgConnectRate, onlineCount, freshUnassignedInScope,
                   } = overviewMetrics;
@@ -3183,7 +3220,7 @@ import CallTrendChart from './CallTrendChart';
                               type="button"
                               onClick={downloadRawLeadDetailsCsv}
                               disabled={rawLeadDetailsList.length === 0}
-                              title="One row per lead behind this table - Order ID, Agent Name, Payment Method, Assigned Date, Disposed Date, Connected, Disposition, Converted"
+                              title="One row per lead behind this table - Order ID, Agent Name, Payment Method, Assigned Date, Disposed Date, FRT, Time Since Prev Disposal, Connected, Disposition, Converted"
                               className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-[13px] font-medium text-zinc-200 transition-all shadow-xs disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               <DownloadIcon />
@@ -3210,6 +3247,7 @@ import CallTrendChart from './CallTrendChart';
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Disposed</th>
                                 <th className="py-2 px-3 font-bold" title="Average time-of-day of the first disposition across the range's active days">First Called At</th>
                                 <th className="py-2 px-3 font-bold" title="Average time between a lead's assignment and its disposition (Disposed At - Assigned At), across disposed leads with both timestamps">FRT</th>
+                                <th className="py-2 px-3 font-bold" title="Average time between one disposal and this agent's next one - how long before they picked up the next call. Gaps never cross a day, and a gap over 60 minutes is treated as a break and left out of the average.">Avg Time to Dispose</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Connected</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Total Connected / Total Disposed">Connected %</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Prepaid Assigned</th>
@@ -3244,6 +3282,7 @@ import CallTrendChart from './CallTrendChart';
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.disposed}</td>
                                     <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(am.firstCalledAtMinutes)}</td>
                                     <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatFrt(am.frtMinutes)}</td>
+                                    <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatFrt(am.disposeGapMinutes)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{am.connected}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{formatPct(am.connected, am.disposed)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.prepaidAssigned}</td>
@@ -3269,6 +3308,7 @@ import CallTrendChart from './CallTrendChart';
                                   <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.disposed}</td>
                                   <td className="py-2.5 px-3 text-zinc-500">—</td>
                                   <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Average across disposed leads with both timestamps">{formatFrt(summaryAvgFrt)}</td>
+                                  <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Mean of the agents' own averages, not a pooled recount">{formatFrt(summaryAvgDisposeGap)}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{summaryTotals.connected}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{formatPct(summaryTotals.connected, summaryTotals.disposed)}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.prepaidAssigned}</td>
