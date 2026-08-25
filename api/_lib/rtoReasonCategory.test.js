@@ -14,6 +14,19 @@ assert.strictEqual(categorizeRtoReason('Customer not available at address'), 'Ad
 assert.strictEqual(categorizeRtoReason('Consignee not available'), 'Customer Unavailable/Unreachable');
 assert.strictEqual(categorizeRtoReason('Customer asked to reattempt tomorrow'), 'Reattempt/Future Delivery');
 
+// Courier wordings that used to fall through to Unknown/Other. The premises/contact ones are
+// unreachability; a consignee who has left the address is an address problem, not a refusal.
+assert.strictEqual(categorizeRtoReason('Customer Res/Off Closed'), 'Customer Unavailable/Unreachable');
+assert.strictEqual(categorizeRtoReason('Phone number is wrong'), 'Customer Unavailable/Unreachable');
+assert.strictEqual(categorizeRtoReason('NEED DEPT NAME/EXTN.NO; CNEE NOT REACHABLE'), 'Customer Unavailable/Unreachable');
+assert.strictEqual(categorizeRtoReason('NEED DEPARTMENT NAME/EXTENTION NUMBER'), 'Customer Unavailable/Unreachable');
+assert.strictEqual(categorizeRtoReason('CONTACT NAME / DEPT NOT MENTIONED-(CIR)'), 'Customer Unavailable/Unreachable');
+assert.strictEqual(categorizeRtoReason('Consignee moved/shifted'), 'Address Issue');
+assert.strictEqual(categorizeRtoReason('SHIFTED'), 'Address Issue');
+assert.strictEqual(categorizeRtoReason('RESTRICTED ENTRY-(OTR)'), 'Address Issue');
+// ...without dragging the plain refusal wording into Address Issue on the way past.
+assert.strictEqual(categorizeRtoReason('ENTRY REFUSED'), 'Customer Refused/Cancelled');
+
 // Blank/placeholder inputs, and casing, are the two ways the sheet's free text actually varies.
 for (const blank of ['', null, undefined, 'UNKNOWN', 'unknown', 'N/A', 'Others']) {
   assert.strictEqual(categorizeRtoReason(blank), 'Unknown/Other', `blank: ${blank}`);

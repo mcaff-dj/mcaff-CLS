@@ -15,15 +15,24 @@ function categorizeRtoReason(rawReason) {
   const r = (rawReason || '').toUpperCase();
   if (!r || r === 'UNKNOWN' || r === 'N/A' || r === 'OTHERS') return 'Unknown/Other';
   if (r.includes('OTP')) return 'OTP/Verified Cancellation';
-  if (['ADDRESS', 'DELIVERY AREA', 'TRACEABLE', 'LOCATED', 'PINCODE', 'PIN CODE'].some((k) => r.includes(k))) {
+  // SHIFTED/MOVED and RESTRICTED ENTRY are address problems, not refusals: the consignee is no
+  // longer at (or cannot be reached at) the delivery point, which is what a re-address fixes.
+  if (['ADDRESS', 'DELIVERY AREA', 'TRACEABLE', 'LOCATED', 'PINCODE', 'PIN CODE',
+       'SHIFTED', 'MOVED', 'RESTRICTED ENTRY'].some((k) => r.includes(k))) {
     return 'Address Issue';
   }
   if (['REATTEMPT', 'FUTURE DELIVERY', 'RESCHEDULE', 'ANOTHER DATE', 'DELAY DELIVERY'].some((k) => r.includes(k))) {
     return 'Reattempt/Future Delivery';
   }
   if (r.includes('REFUS') || r.includes('CANCEL')) return 'Customer Refused/Cancelled';
+  // The second row is the courier's "nobody I could contact" wording - a closed premises
+  // (RES/OFF CLOSED), a dead number (PHONE NUMBER IS WRONG, NOT REACHABLE) or a delivery that
+  // needs a contact the address never named (DEPT NAME/DEPARTMENT NAME, DEPT NOT MENTIONED).
+  // These used to fall through to Unknown/Other, which hid the desk's real unreachable volume.
   if (['UNAVAILABLE', 'NOT CONTACTABLE', 'NOT AVAILABLE', 'NOT ANSWERING', 'RECEIVER NOT', 'PNA',
-       'OFFICE CLOSED', 'RESIDENCE CLOSED', 'HOUSE LOCKED', 'PERSON NOT MET', 'DOOR LOCK'].some((k) => r.includes(k))) {
+       'OFFICE CLOSED', 'RESIDENCE CLOSED', 'HOUSE LOCKED', 'PERSON NOT MET', 'DOOR LOCK',
+       'RES/OFF CLOSED', 'PHONE NUMBER IS WRONG', 'NOT REACHABLE', 'DEPT NAME', 'DEPARTMENT NAME',
+       'DEPT NOT MENTIONED'].some((k) => r.includes(k))) {
     return 'Customer Unavailable/Unreachable';
   }
   return 'Unknown/Other';

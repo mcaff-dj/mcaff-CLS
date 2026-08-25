@@ -117,6 +117,11 @@ export function MultiSelectDropdown({ value, onChange, options, placeholder = 'N
     const all = opts.every(o => selected.includes(o));
     onChange(all ? selected.filter(o => !opts.includes(o)) : [...selected, ...opts.filter(o => !selected.includes(o))]);
   };
+  // Select-all, grouped mode only. The ungrouped callers are the NDR roster's Attempts picker,
+  // whose own 'All' option already means unrestricted (see ndrAttemptFilterOnChange) - a second
+  // select-all there would be two controls for one idea. toggleGroup over every option, so it
+  // clears only when literally everything is on.
+  const allOptionsSelected = options.length > 0 && options.every(o => selected.includes(o));
 
   return (
     <div className="relative inline-block w-44" ref={ref}>
@@ -132,19 +137,48 @@ export function MultiSelectDropdown({ value, onChange, options, placeholder = 'N
 
       {isOpen && (
         <div className="absolute left-0 mt-1.5 min-w-[240px] bg-[#141417] border border-zinc-800/90 rounded-xl shadow-2xl z-50 overflow-hidden animate-fadeIn py-1 custom-scroll max-h-60 overflow-y-auto">
+          {groups && (
+            <button
+              type="button"
+              onClick={() => toggleGroup(options)}
+              title={allOptionsSelected ? 'Clear every reason' : `Select all ${options.length} reasons, every category`}
+              className="sticky top-0 z-10 w-full text-left px-3 py-2 text-[12px] font-semibold flex items-center justify-between gap-2 bg-[#141417] border-b border-zinc-800/80 hover:bg-zinc-800/70 transition-colors text-zinc-200"
+            >
+              <span className="flex items-center gap-2">
+                <span className={`h-3.5 w-3.5 shrink-0 rounded border flex items-center justify-center ${allOptionsSelected ? 'bg-indigo-600 border-indigo-600' : selected.length ? 'border-indigo-500' : 'border-zinc-600'}`}>
+                  {allOptionsSelected ? <CheckIcon className="text-white" style={{ width: 10, height: 10 }} />
+                    : selected.length ? <span className="h-0.5 w-2 rounded-full bg-indigo-400" /> : null}
+                </span>
+                {allOptionsSelected ? 'Clear all' : 'All categories'}
+              </span>
+              <span className="shrink-0 text-zinc-600 font-normal">{selected.length}/{options.length}</span>
+            </button>
+          )}
           {(groups || [[null, options]]).map(([cat, opts]) => (
             <div key={cat || '_'}>
-              {cat && (
-                <button
-                  type="button"
-                  onClick={() => toggleGroup(opts)}
-                  title={`Select / clear all ${opts.length} reasons in ${cat}`}
-                  className="w-full text-left px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 hover:text-indigo-300 hover:bg-zinc-800/50 transition-colors flex items-center justify-between gap-2"
-                >
-                  <span className="truncate">{cat}</span>
-                  <span className="shrink-0 text-zinc-600">{opts.filter(o => selected.includes(o)).length}/{opts.length}</span>
-                </button>
-              )}
+              {cat && (() => {
+                // Tri-state, like a file-tree parent: ticked when the whole category is on, a
+                // dash when only part of it is, empty otherwise. Without the dash a partly-picked
+                // category is indistinguishable from an untouched one at a glance.
+                const hit = opts.filter(o => selected.includes(o)).length;
+                return (
+                  <button
+                    type="button"
+                    onClick={() => toggleGroup(opts)}
+                    title={`Select / clear all ${opts.length} reasons in ${cat}`}
+                    className="w-full text-left px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 hover:text-indigo-300 hover:bg-zinc-800/50 transition-colors flex items-center justify-between gap-2"
+                  >
+                    <span className="flex items-center gap-2 min-w-0">
+                      <span className={`h-3.5 w-3.5 shrink-0 rounded border flex items-center justify-center ${hit === opts.length ? 'bg-indigo-600 border-indigo-600' : hit > 0 ? 'border-indigo-500' : 'border-zinc-600'}`}>
+                        {hit === opts.length ? <CheckIcon className="text-white" style={{ width: 10, height: 10 }} />
+                          : hit > 0 ? <span className="h-0.5 w-2 rounded-full bg-indigo-400" /> : null}
+                      </span>
+                      <span className="truncate">{cat}</span>
+                    </span>
+                    <span className="shrink-0 text-zinc-600">{hit}/{opts.length}</span>
+                  </button>
+                );
+              })()}
               {opts.map((opt) => {
                 const isSelected = selected.includes(opt);
                 return (
