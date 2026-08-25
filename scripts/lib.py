@@ -171,18 +171,12 @@ def append_sheet_rows(spreadsheet_id, range_, rows):
     from Google for an empty values array."""
     if not rows:
         return {"updates": {"updatedRows": 0}}
-    token = get_write_access_token()
     encoded = urllib.parse.quote(range_, safe="")
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{encoded}"
         f":append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
     )
-    resp = requests.post(url, headers={
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json; charset=utf-8",
-    }, json={"values": rows})
-    resp.raise_for_status()
-    return resp.json()
+    return post_with_cell_reclaim(spreadsheet_id, url, {"values": rows}, timeout=180)
 
 
 def get_sheet_values(spreadsheet_id, range_, timeout_sec=120, value_render_option=None):
@@ -369,7 +363,97 @@ def delete_sheet_rows_multi(spreadsheet_id, sheet_name, row_numbers):
     return resp.json()
 
 
-def ensure_grid_size(spreadsheet_id, sheet_name, min_rows, min_cols):
+def is_cell_limit_error(resp):
+    """True for Google's workbook-wide cell-cap rejection: HTTP 400 with
+    "This action would increase the number of cells in the workbook above the
+    limit of 10000000 cells." Deliberately NOT matched on the number - the cap
+    has been raised before (5M -> 10M) and would raise again."""
+    if resp.status_code != 400:
+        return False
+    body = (resp.text or "").lower()
+    return "above the limit of" in body and "cells" in body
+
+
+def last_used_row(spreadsheet_id, sheet_name, last_col, grid_rows, chunk=2000):
+    """Highest 1-based row holding any value in A..last_col (0 if the tab is
+    empty). Probes UPWARD from the bottom of the allocated grid in chunks, so an
+    over-allocated tab costs only reads of its blank tail plus one chunk - not a
+    full-tab read, which on a workbook near the 10M-cell cap is exactly the read
+    that is too big to afford. Looks at every column, never just column A: a row
+    blank in A but filled in F is data, and deleting it would be data loss."""
+    end = grid_rows
+    while end > 0:
+        start = max(1, end - chunk + 1)
+        window = get_sheet_values(spreadsheet_id, f"'{sheet_name}'!A{start}:{last_col}{end}")
+        for i in range(len(window) - 1, -1, -1):
+            if any(str(c).strip() for c in window[i]):
+                return start + i
+        end = start - 1
+    return 0
+
+
+def trim_empty_grid_rows(spreadsheet_id, keep_buffer=50, min_gain_cells=1000):
+    """Reclaims cells against the 10M-per-workbook cap by structurally deleting
+    each tab's allocated-but-EMPTY trailing rows. Only ever removes rows below
+    the last row that holds data (plus `keep_buffer` spare rows so the next
+    incremental write doesn't immediately resize), so no data is touched -
+    clearing cell contents would free nothing at all, since the cap counts
+    allocated grid, not filled cells. Row 1 always survives. Returns cells freed.
+
+    Skips a tab whose trimmable tail is under min_gain_cells - a batchUpdate plus
+    a tail read is not worth a few hundred cells."""
+    token = get_access_token()
+    resp = requests.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}?fields=sheets.properties",
+        headers={"Authorization": f"Bearer {token}"}, timeout=60)
+    resp.raise_for_status()
+    freed = 0
+    for sheet in resp.json().get("sheets", []):
+        props = sheet["properties"]
+        name = props["title"]
+        grid = props.get("gridProperties", {})
+        rows = grid.get("rowCount", 0)
+        cols = grid.get("columnCount", 0)
+        if not rows or not cols:
+            continue
+        last_col = get_column_letter(cols - 1)
+        first_dead = max(last_used_row(spreadsheet_id, name, last_col, rows) + keep_buffer + 1, 2)
+        gain = (rows - first_dead + 1) * cols
+        if first_dead > rows or gain < min_gain_cells:
+            continue
+        delete_sheet_rows(spreadsheet_id, name, first_dead, rows)
+        freed += gain
+        print(f"  trimmed '{name}': dropped rows {first_dead}-{rows} ({gain:,} cells)")
+    return freed
+
+
+def post_with_cell_reclaim(spreadsheet_id, url, body, timeout=60):
+    """POSTs a Sheets write and, if Google rejects it for the workbook cell cap,
+    trims empty trailing grid rows once and retries. Every write that can grow
+    the grid (values:append with INSERT_ROWS, updateSheetProperties raising
+    rowCount/columnCount) routes through here, so the cap is handled in one place
+    instead of at each call site."""
+    headers = {
+        "Authorization": f"Bearer {get_write_access_token()}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    resp = requests.post(url, headers=headers, json=body, timeout=timeout)
+    if is_cell_limit_error(resp):
+        print("  workbook cell limit hit - trimming empty grid rows")
+        freed = trim_empty_grid_rows(spreadsheet_id)
+        if not freed:
+            print("  nothing empty left to trim - the grid is genuinely full of data")
+        else:
+            print(f"  freed {freed:,} cells; retrying write")
+            resp = requests.post(url, headers=headers, json=body, timeout=timeout)
+    if not resp.ok:
+        print(f"  Sheets write failed: {resp.status_code}")
+        print(f"    response body: {resp.text}")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def ensure_grid_size(spreadsheet_id, sheet_name, min_rows, min_cols, _retried=False):
     """Grows the sheet's underlying grid if needed. A PUT to an explicit range
     fails outright with 'exceeds grid limits' if the target is beyond the
     sheet's current (fixed) row/column count - unlike values:append, which
@@ -402,6 +486,14 @@ def ensure_grid_size(spreadsheet_id, sheet_name, min_rows, min_cols):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }, json=body, timeout=60)
+    if is_cell_limit_error(resp) and not _retried:
+        # Retry through this same function rather than replaying the request:
+        # new_rows/new_cols are absolute, and a trim that shrinks THIS tab would
+        # otherwise be undone by a replay asking for the old (bloated) rowCount.
+        print(f"  '{sheet_name}' -> {new_rows}x{new_cols} hit the workbook cell limit - trimming empty grid rows")
+        if trim_empty_grid_rows(spreadsheet_id):
+            return ensure_grid_size(spreadsheet_id, sheet_name, min_rows, min_cols, _retried=True)
+        print("  nothing empty left to trim - the grid is genuinely full of data")
     if not resp.ok:
         print(f"  ensure_grid_size('{sheet_name}' -> {new_rows}x{new_cols}) failed: {resp.status_code}")
         print(f"    response body: {resp.text}")

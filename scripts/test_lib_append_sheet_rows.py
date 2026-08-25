@@ -13,7 +13,7 @@ import lib
 def test_append_sheet_rows_calls_values_append_with_insert_rows():
     captured = {}
 
-    def fake_post(url, headers=None, json=None):
+    def fake_post(url, headers=None, json=None, timeout=None):
         captured['url'] = url
         captured['headers'] = headers
         captured['json'] = json
