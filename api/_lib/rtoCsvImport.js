@@ -103,12 +103,39 @@ const LAST_COLUMN_LETTER = 'AC';
 // every row.
 const REQUIRED_CSV_HEADERS = Object.keys(CSV_TO_COLUMN);
 
+// Everything below this line is sheet-agnostic: the same parse/dedup/map engine serves any
+// sheet that supplies one of these configs. RTO_IMPORT is the default for every entry point, so
+// existing callers are unaffected; a second sheet passes its own instead of copying the engine
+// (which is how the scientific-notation and text-forcing handling stays in exactly one place).
+const RTO_IMPORT = {
+  label: 'RTO',
+  columnMap: CSV_TO_COLUMN,
+  expectedHeader: EXPECTED_SHEET_HEADER,
+  lastColumn: LAST_COLUMN_LETTER,
+  requiredCsvHeaders: REQUIRED_CSV_HEADERS,
+  awbCsvHeader: 'AWB Code',
+  // Extra CSV columns that join the AWB to form the dedup key. Empty for RTO, where one AWB is
+  // one lead. A sheet that legitimately carries the same AWB on several rows (NDR gets a new row
+  // per failed delivery attempt) lists what distinguishes them here, and its caller must build
+  // its existingKeySet from the same fields in the same order.
+  dedupExtraCsvHeaders: [],
+  // Only the part before the first "_" is written, e.g.
+  // "HYP44089510_SP/G3/2627/984539" -> "HYP44089510". null to write the value verbatim.
+  orderIdCsvHeader: 'Order ID',
+  orderIdColumn: 'E',
+  paymentMethodColumn: 'O',
+  // A blank source value is written as this literal text rather than an empty cell - explicit
+  // business instruction, so a blank in the sheet always means "not yet worked", never "the
+  // source had nothing here". Set to '' to leave blanks genuinely blank.
+  blankPlaceholder: 'NA',
+};
+
 // Compares the live sheet's header row (as read fresh by the caller, e.g. `Data!A1:AD1`)
 // against EXPECTED_SHEET_HEADER. Returns an array of human-readable mismatch descriptions -
 // empty if everything still lines up.
-function checkSheetLayout(fullHeaderRow) {
+function checkSheetLayout(fullHeaderRow, expectedHeader = EXPECTED_SHEET_HEADER) {
   const issues = [];
-  Object.entries(EXPECTED_SHEET_HEADER).forEach(([letter, expected]) => {
+  Object.entries(expectedHeader).forEach(([letter, expected]) => {
     const idx = columnLetterToIndex(letter);
     const actual = (fullHeaderRow[idx] || '').toString();
     if (normalizeHeader(actual) !== normalizeHeader(expected)) {
@@ -118,15 +145,39 @@ function checkSheetLayout(fullHeaderRow) {
   return issues;
 }
 
+// The dedup key for one row: the AWB alone for a sheet where that identifies a lead, or the AWB
+// joined with whatever else distinguishes rows that legitimately share one. Values go through
+// normalizeAwb so the key matches however the caller normalized what it read out of the sheet.
+//
+// Length-prefixed rather than joined on a separator: any separator can also occur inside a sheet
+// cell, so a plain join lets ("AWB1", "2") and ("AWB12", "") produce the same key and silently
+// reject a real lead as a duplicate. Prefixing each part with its own length makes the encoding
+// unambiguous whatever the values contain, using nothing but ASCII.
+function dedupKey(awb, row, extraCsvHeaders) {
+  if (!extraCsvHeaders.length) return awb;
+  const parts = [awb, ...extraCsvHeaders.map((h) => normalizeAwb(row[h]))];
+  return parts.map((v) => `${v.length}:${v}`).join('|');
+}
+
 // The main orchestration: turns parsed CSV row objects (keyed by RAW csv header, exactly
 // parseCSV's output shape) into { validRows, errors, counts }, applying blank-AWB rejection,
 // within-file dedup (first occurrence wins), and against-the-sheet dedup, in that order.
 //
 // Each valid row gets:
 //   - orderId, awbCode, paymentMethod: convenience top-level fields.
-//   - cellsByColumn: { columnLetter: value }, one entry per CSV_TO_COLUMN mapping - the caller
+//   - cellsByColumn: { columnLetter: value }, one entry per config.columnMap mapping - the caller
 //     places these directly into a fixed-width row array by column index, no further lookup.
-function buildRowPlan({ csvRows, existingAwbSet }) {
+function buildRowPlan({ csvRows, existingKeySet, config = RTO_IMPORT }) {
+  const {
+    columnMap, awbCsvHeader, orderIdCsvHeader, orderIdColumn, paymentMethodColumn,
+    blankPlaceholder, dedupExtraCsvHeaders = [],
+  } = config;
+  // Required, not defaulted: a caller that forgets it would otherwise get a silent no-op on the
+  // against-the-sheet dedup and append duplicates with no error anywhere. Caught exactly that way
+  // by this module's own test during the rename that introduced the composite key.
+  if (!(existingKeySet instanceof Set)) {
+    throw new Error('buildRowPlan: existingKeySet (a Set) is required');
+  }
   const validRows = [];
   const errors = [];
   const counts = { missingAwb: 0, duplicateInFile: 0, duplicateInSheet: 0, scientificAwb: 0 };
@@ -134,49 +185,48 @@ function buildRowPlan({ csvRows, existingAwbSet }) {
 
   csvRows.forEach((row, i) => {
     const line = i + 2; // +1 for 1-based, +1 for the header row not being a data row
-    const awb = normalizeAwb(row['AWB Code']);
+    const awb = normalizeAwb(row[awbCsvHeader]);
 
     if (!awb) {
       counts.missingAwb++;
-      errors.push({ line, reason: 'Missing AWB Code' });
+      errors.push({ line, reason: `Missing ${awbCsvHeader}` });
       return;
     }
     if (looksLikeScientificNotation(awb)) {
       counts.scientificAwb++;
       errors.push({
         line,
-        reason: `AWB Code "${awb}" is in scientific notation - its real digits are already lost. `
+        reason: `${awbCsvHeader} "${awb}" is in scientific notation - its real digits are already lost. `
           + 'Re-export the source file and upload it without opening it in Excel/Sheets first.',
       });
       return;
     }
-    if (seenInFile.has(awb)) {
+    const key = dedupKey(awb, row, dedupExtraCsvHeaders);
+    const keyLabel = dedupExtraCsvHeaders.length ? `${awb} + ${dedupExtraCsvHeaders.join(' + ')}` : awb;
+    if (seenInFile.has(key)) {
       counts.duplicateInFile++;
-      errors.push({ line, reason: `Duplicate AWB within file (${awb})` });
+      errors.push({ line, reason: `Duplicate within file (${keyLabel})` });
       return;
     }
-    if (existingAwbSet.has(awb)) {
+    if (existingKeySet.has(key)) {
       counts.duplicateInSheet++;
-      errors.push({ line, reason: `AWB already exists in sheet (${awb})` });
+      errors.push({ line, reason: `Already exists in sheet (${keyLabel})` });
       return;
     }
-    seenInFile.add(awb);
+    seenInFile.add(key);
 
     const cellsByColumn = {};
-    Object.entries(CSV_TO_COLUMN).forEach(([csvHeader, col]) => {
+    Object.entries(columnMap).forEach(([csvHeader, col]) => {
       let value = (row[csvHeader] || '').toString().trim();
-      if (csvHeader === 'Order ID') value = value.split('_')[0];
-      if (csvHeader === 'AWB Code') value = toSheetText(value);
-      // A blank source value is written as the literal text "NA" rather than an empty cell -
-      // explicit business instruction, so a blank in the sheet always means "not yet worked",
-      // never "the source had nothing here".
-      cellsByColumn[col] = value || 'NA';
+      if (orderIdCsvHeader && csvHeader === orderIdCsvHeader) value = value.split('_')[0];
+      if (csvHeader === awbCsvHeader) value = toSheetText(value);
+      cellsByColumn[col] = value || blankPlaceholder;
     });
 
     validRows.push({
-      orderId: cellsByColumn.E,
+      orderId: cellsByColumn[orderIdColumn],
       awbCode: awb,
-      paymentMethod: cellsByColumn.O,
+      paymentMethod: paymentMethodColumn ? cellsByColumn[paymentMethodColumn] : '',
       cellsByColumn,
     });
   });
@@ -187,5 +237,5 @@ function buildRowPlan({ csvRows, existingAwbSet }) {
 module.exports = {
   normalizeHeader, normalizeAwb, columnLetterToIndex, indexToColumnLetter,
   CSV_TO_COLUMN, EXPECTED_SHEET_HEADER, LAST_COLUMN_LETTER, REQUIRED_CSV_HEADERS,
-  checkSheetLayout, buildRowPlan, looksLikeScientificNotation, toSheetText,
+  checkSheetLayout, buildRowPlan, looksLikeScientificNotation, toSheetText, RTO_IMPORT, dedupKey,
 };

@@ -136,7 +136,7 @@ module.exports = async (req, res) => {
       (awbData.values || []).map((r) => ((r && r[0]) || '').toString().trim().toUpperCase()).filter(Boolean),
     );
 
-    const plan = buildRowPlan({ csvRows, existingAwbSet });
+    const plan = buildRowPlan({ csvRows, existingKeySet: existingAwbSet });
 
     // EVERY valid row goes to the worker - not just the prepaid ones. These are two different
     // checks with two different scopes, and gating both on isPrepaid conflated them: the GoKwik

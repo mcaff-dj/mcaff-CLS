@@ -10,24 +10,10 @@
 // scoped to app/escalation and is never loaded on this page, so this reuses RtoCrmClient's own
 // dark-card styling instead of names that would render unstyled here.
 import { useState, useRef, useEffect } from 'react';
-import { Overlay, XIcon } from '../_calling/ui';
+import { Overlay, XIcon, Stat } from '../_calling/ui';
 
 const POLL_INTERVAL_MS = 3000;
 const TERMINAL_STATUSES = new Set(['done', 'failed']);
-
-const STAT_TONE = {
-  ok: 'bg-emerald-950/50 text-emerald-300 border-emerald-800/50',
-  skip: 'bg-amber-950/50 text-amber-300 border-amber-800/50',
-  neutral: 'bg-zinc-800/80 text-zinc-300 border-zinc-700/80',
-};
-
-function Stat({ tone = 'neutral', children }) {
-  return (
-    <span className={`inline-flex items-center px-2.5 py-1 rounded-md text-[12px] font-medium border ${STAT_TONE[tone]}`}>
-      {children}
-    </span>
-  );
-}
 
 export default function RtoUploadModal({ onClose, onDone }) {
   const [file, setFile] = useState(null);

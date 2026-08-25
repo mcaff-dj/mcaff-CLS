@@ -4,7 +4,7 @@ const assert = require('assert');
 const {
   normalizeHeader, normalizeAwb, columnLetterToIndex, indexToColumnLetter,
   CSV_TO_COLUMN, checkSheetLayout, buildRowPlan,
-  looksLikeScientificNotation, toSheetText,
+  looksLikeScientificNotation, toSheetText, RTO_IMPORT, dedupKey,
 } = require('./rtoCsvImport');
 
 // 1. columnLetterToIndex / indexToColumnLetter - bijective base-26, round-trips past Z.
@@ -42,7 +42,7 @@ assert.strictEqual(normalizeAwb(''), '');
     'Pickup Address Name': 'mCaff_Gurgaon3',
     'Courier Company': 'Blitz Intercity NDD',
   }];
-  const plan = buildRowPlan({ csvRows, existingAwbSet: new Set() });
+  const plan = buildRowPlan({ csvRows, existingKeySet: new Set() });
   assert.strictEqual(plan.validRows.length, 1);
   const row = plan.validRows[0];
   assert.strictEqual(row.orderId, 'HYP44089510', 'Order ID must be split on first "_", tail dropped');
@@ -75,8 +75,8 @@ assert.strictEqual(normalizeAwb(''), '');
     base('HYP4_X', 'awb4', 'cod'), // already in sheet
     base('HYP5_X', 'awb5', 'cod'), // valid
   ];
-  const existingAwbSet = new Set(['AWB4']);
-  const plan = buildRowPlan({ csvRows, existingAwbSet });
+  const existingKeySet = new Set(['AWB4']);
+  const plan = buildRowPlan({ csvRows, existingKeySet });
 
   assert.strictEqual(plan.validRows.length, 2, 'only HYP1 and HYP5 survive');
   assert.deepStrictEqual(plan.validRows.map((r) => r.orderId), ['HYP1', 'HYP5']);
@@ -138,7 +138,7 @@ assert.strictEqual(toSheetText(''), '');
   };
   const plan = buildRowPlan({
     csvRows: [csvRow('54012345678901'), csvRow('5.40E+13'), csvRow('54012345678901')],
-    existingAwbSet: new Set(),
+    existingKeySet: new Set(),
   });
   assert.strictEqual(plan.validRows.length, 1);
   assert.strictEqual(plan.counts.scientificAwb, 1);
@@ -146,5 +146,115 @@ assert.strictEqual(toSheetText(''), '');
   assert.strictEqual(plan.validRows[0].awbCode, '54012345678901');
   assert.strictEqual(plan.validRows[0].cellsByColumn.G, "'54012345678901");
 }
+
+// The engine is sheet-agnostic - a second config drives it without a second copy of the parse,
+// dedup, scientific-notation or text-forcing logic. Exercised with a deliberately different
+// shape from RTO's: different AWB header, blanks left genuinely blank, no payment-method column,
+// and no Order ID truncation.
+{
+  const OTHER = {
+    label: 'Other',
+    columnMap: { 'Order Id': 'A', 'Waybill': 'C' },
+    expectedHeader: { A: 'Order Id', C: 'Waybill' },
+    lastColumn: 'C',
+    requiredCsvHeaders: ['Order Id', 'Waybill'],
+    awbCsvHeader: 'Waybill',
+    orderIdCsvHeader: null,      // no "_" truncation for this sheet
+    orderIdColumn: 'A',
+    paymentMethodColumn: null,   // this sheet has no payment column at all
+    blankPlaceholder: '',        // blanks stay blank rather than becoming "NA"
+  };
+
+  const plan = buildRowPlan({
+    csvRows: [
+      { 'Order Id': 'ORD_1/keep', Waybill: '54012345678901' },
+      { 'Order Id': 'ORD_2', Waybill: '' },
+      { 'Order Id': 'ORD_3', Waybill: '5.40E+13' },
+      { 'Order Id': 'ORD_4', Waybill: 'IN_SHEET_ALREADY' },
+    ],
+    existingKeySet: new Set(['IN_SHEET_ALREADY']),
+    config: OTHER,
+  });
+
+  assert.strictEqual(plan.validRows.length, 1);
+  assert.strictEqual(plan.counts.missingAwb, 1);
+  assert.strictEqual(plan.counts.scientificAwb, 1);
+  assert.strictEqual(plan.counts.duplicateInSheet, 1);
+  // orderIdCsvHeader null -> written verbatim, "_" and all
+  assert.strictEqual(plan.validRows[0].cellsByColumn.A, 'ORD_1/keep');
+  // the AWB text escape still applies, keyed off this config's own header name
+  assert.strictEqual(plan.validRows[0].cellsByColumn.C, "'54012345678901");
+  // no payment column configured -> empty, not a crash and not a stray 'NA'
+  assert.strictEqual(plan.validRows[0].paymentMethod, '');
+  // the missing-AWB error names THIS config's header, not RTO's
+  assert.ok(plan.errors.some((e) => e.reason === 'Missing Waybill'));
+
+  // checkSheetLayout takes the same config's expectations
+  assert.deepStrictEqual(checkSheetLayout(['Order Id', '', 'Waybill'], OTHER.expectedHeader), []);
+  assert.ok(checkSheetLayout(['Order Id', '', 'Something Else'], OTHER.expectedHeader).length === 1);
+  // and still defaults to RTO's when not given one
+  assert.ok(checkSheetLayout([]).length > 0);
+  assert.strictEqual(RTO_IMPORT.columnMap, CSV_TO_COLUMN);
+}
+
+// Composite dedup key - for a sheet that legitimately carries one AWB on several rows (NDR gets
+// a new row per failed delivery attempt), so AWB alone would reject every genuine new attempt.
+{
+  const ATTEMPTS = {
+    label: 'Attempts',
+    columnMap: { 'AWB Code': 'E', 'Attempt Count': 'O' },
+    expectedHeader: { E: 'AWB Code', O: 'Attempt Count' },
+    lastColumn: 'O',
+    requiredCsvHeaders: ['AWB Code', 'Attempt Count'],
+    awbCsvHeader: 'AWB Code',
+    dedupExtraCsvHeaders: ['Attempt Count'],
+    orderIdCsvHeader: null,
+    orderIdColumn: 'E',
+    paymentMethodColumn: null,
+    blankPlaceholder: '',
+  };
+  const row = (awb, n) => ({ 'AWB Code': awb, 'Attempt Count': n });
+
+  const plan = buildRowPlan({
+    csvRows: [
+      row('AWBX', '1'),   // attempt 1 - already in the sheet below
+      row('AWBX', '2'),   // attempt 2 of the SAME shipment - a genuinely new lead, must survive
+      row('AWBX', '2'),   // exact repeat within the file
+      row('AWBY', '1'),
+    ],
+    existingKeySet: new Set([dedupKey('AWBX', row('AWBX', '1'), ['Attempt Count'])]),
+    config: ATTEMPTS,
+  });
+
+  assert.strictEqual(plan.validRows.length, 2, 'attempt 2 of AWBX and AWBY must both survive');
+  assert.strictEqual(plan.counts.duplicateInSheet, 1);
+  assert.strictEqual(plan.counts.duplicateInFile, 1);
+  assert.deepStrictEqual(plan.validRows.map((r) => r.cellsByColumn.O), ['2', '1']);
+
+  // Length-prefixed, so no value can forge a collision by containing the separator - and, the
+  // case a plain join gets wrong, by shifting characters across the boundary. An earlier version
+  // of this test compared '1-2'/'A-1', which passes even with an EMPTY separator and so failed
+  // to notice when the separator was accidentally dropped.
+  assert.notStrictEqual(
+    dedupKey('AWB1', { x: '2' }, ['x']),
+    dedupKey('AWB12', { x: '' }, ['x']),
+  );
+  assert.notStrictEqual(
+    dedupKey('A', { x: '1-2' }, ['x']),
+    dedupKey('A-1', { x: '2' }, ['x']),
+  );
+  assert.notStrictEqual(
+    dedupKey('A|B', { x: 'C' }, ['x']),
+    dedupKey('A', { x: 'B|C' }, ['x']),
+  );
+  // With no extra fields the key is the bare AWB - RTO's behaviour, unchanged.
+  assert.strictEqual(dedupKey('AWB1', {}, []), 'AWB1');
+}
+
+// existingKeySet is required - forgetting it must throw, not silently skip sheet dedup.
+assert.throws(
+  () => buildRowPlan({ csvRows: [] }),
+  /existingKeySet \(a Set\) is required/,
+);
 
 console.log('rtoCsvImport.test.js: all assertions passed');

@@ -18,6 +18,7 @@ import {
 import { useCallingSession, STATUS_OPTIONS, ROSTER_STATUS_OPTIONS } from '../_calling/useCallingSession';
 import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
+import NdrUploadModal from './NdrUploadModal';
 import {
   safeStorage, parseDate, isDateInScope, isLeadDateInScope, scopeToDateBounds, normalizeOrderKey,
   istMinutesSinceMidnightClient, istDayKeyClient, formatTimeOfDay, formatBreakMinutes, formatFrt, formatPct,
@@ -255,6 +256,7 @@ export default function NdrCallingClient() {
   // pretending a capped view is the whole picture.
   const [ndrTotalRows, setNdrTotalRows] = useState(0);
   const [ndrSyncing, setNdrSyncing] = useState(false);
+  const [showUploadModal, setShowUploadModal] = useState(false);
   const [ndrLastSync, setNdrLastSync] = useState('—');
   const [ndrSyncError, setNdrSyncError] = useState(null);
   const [ndrTab, setNdrTab] = useState('overview');
@@ -1236,7 +1238,31 @@ export default function NdrCallingClient() {
         syncError={ndrSyncError}
         onSync={() => syncNdr(false)}
         session={session}
+        rightSlot={
+          /* Bulk-add new NDR leads from a CSV (see NdrUploadModal). isProcessAdmin here is
+             already NDR's own - this page serves one process, unlike RtoCrmClient's switcher,
+             so no activeProcess check is needed alongside it. api/ndr/upload.js re-checks the
+             same thing server-side; this is UX only. */
+          (sessionIsAdmin || isProcessAdmin) ? (
+            <button
+              type="button"
+              onClick={() => setShowUploadModal(true)}
+              className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-[13px] font-medium text-zinc-200 transition-all shadow-xs shrink-0"
+            >
+              Upload CSV
+            </button>
+          ) : null
+        }
       />
+
+      {showUploadModal && (
+        <NdrUploadModal
+          onClose={() => setShowUploadModal(false)}
+          /* Silent resync so the new rows appear without a toast on top of the modal's own
+             result pills, which already say how many were added. */
+          onDone={() => syncNdr(true)}
+        />
+      )}
 
       <main className="flex-1 max-w-[1440px] w-full mx-auto px-5 py-5 space-y-5">
         {processPermsLoaded && !hasAccess && (

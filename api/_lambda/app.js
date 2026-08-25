@@ -97,6 +97,7 @@ mount('post', '/api/rto/upload-start', '../rto/upload-start.js');
 mount('get', '/api/rto/upload-status', '../rto/upload-status.js');
 mount('all', '/api/ndr/sheet', '../ndr/sheet.js');
 mount('post', '/api/ndr/lead-assignment', '../ndr/lead-assignment.js');
+mount('post', '/api/ndr/upload', '../ndr/upload.js');
 mount('all', '/api/delivery-escalation/sheet', '../delivery-escalation/sheet.js');
 mount('all', '/api/delivery-escalation/record', '../delivery-escalation/record.js');
 mount('get', '/api/delivery-escalation/fresh-export', '../delivery-escalation/fresh-export.js');

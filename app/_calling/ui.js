@@ -222,3 +222,21 @@ export function EmptyState({ title, sub }) {
     <p className="text-xs text-zinc-500 max-w-xs">{sub}</p>
   </div>);
 }
+
+// Result pill for the CSV-upload modals (app/rto-crm/RtoUploadModal.js,
+// app/ndr-calling/NdrUploadModal.js) - lives here rather than in either one so the two upload
+// flows cannot drift apart visually.
+const STAT_TONE = {
+  ok: 'bg-emerald-950/50 text-emerald-300 border-emerald-800/50',
+  skip: 'bg-amber-950/50 text-amber-300 border-amber-800/50',
+  neutral: 'bg-zinc-800/80 text-zinc-300 border-zinc-700/80',
+};
+
+export function Stat({ tone = 'neutral', children }) {
+  return (
+    <span className={`inline-flex items-center px-2.5 py-1 rounded-md text-[12px] font-medium border ${STAT_TONE[tone]}`}>
+      {children}
+    </span>
+  );
+}
+
