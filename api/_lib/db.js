@@ -1987,6 +1987,50 @@ async function getCallingCallTrend({ dateFrom, dateTo, agents } = {}) {
   }));
 }
 
+// Per-agent, per-15-minute-of-day counts for the RTO CRM Overview's Time-of-Day Distribution
+// table. That table used to be computed in the browser from the sheet, which cannot see the
+// whole picture: the sheet only ever holds a lead's CURRENT cycle (a reassignment wipes Q:U for
+// the new agent), so every retired cycle was invisible to it. On 2026-08-25 that was 70 of 282
+// conversions - the table said 212 while the KPI tile beside it said 282, and the difference
+// was one agent's 45 reassigned-away rows. Reading MySQL directly makes the two agree.
+//
+// 15 minutes because that is the finest bucket the table offers (heatmapIntervalOptions:
+// 15/30/60); the client sums adjacent buckets for the coarser two rather than refetching. All
+// three metrics come back in one row for the same reason - switching the metric dropdown is
+// then free. ~12 agents x 96 buckets is a trivial result set even before the date filter.
+//
+// Every cycle, no reassigned_away_at filter - same grain as getCallingOverviewStats' disposed/
+// connected/converted, and the whole point of this function.
+async function getCallingTimeOfDay({ dateFrom, dateTo } = {}) {
+  await ensureSchema();
+  const { from, to } = dateBounds(dateFrom, dateTo);
+  const { rows } = await sql`
+    SELECT
+      LOWER(agent_email) AS agent_email,
+      FLOOR((HOUR(CONVERT_TZ(disposed_at, '+00:00', '+05:30')) * 60
+             + MINUTE(CONVERT_TZ(disposed_at, '+00:00', '+05:30'))) / 15) AS bucket15,
+      COUNT(*) AS dialled,
+      SUM(CASE WHEN connected = 'Yes' THEN 1 ELSE 0 END) AS connected,
+      SUM(CASE WHEN disposition IN ('Customer Agreed to Accept', 'Product Issue / Exchange') OR new_order_id IS NOT NULL THEN 1 ELSE 0 END) AS converted
+    FROM CLS_RTO_calling
+    WHERE disposed_at IS NOT NULL AND agent_email IS NOT NULL AND agent_email <> ''
+      AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+    GROUP BY 1, 2
+  `;
+  return rows.map((r) => ({
+    agentEmail: r.agent_email,
+    bucket15: Number(r.bucket15) || 0,
+    dialled: Number(r.dialled) || 0,
+    connected: Number(r.connected) || 0,
+    converted: Number(r.converted) || 0,
+  }));
+}
+
+async function getCallingTimeOfDayData(query) {
+  const { dateFrom, dateTo } = query || {};
+  return { buckets: await getCallingTimeOfDay({ dateFrom, dateTo }) };
+}
+
 // The payload api/report/data/[key].js's "calling-trend" route serves. Thin on purpose: the
 // route hands over req.query verbatim, so the coercion of agents (a repeated or comma-joined
 // query param) lives in one place rather than in every caller.
@@ -3093,6 +3137,7 @@ module.exports = {
   claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow,
   getRtoOnlineSpecializations,
   getCallingCallTrend, getCallingTrendData,
+  getCallingTimeOfDay, getCallingTimeOfDayData,
   createRtoCsvUploadJob, getRtoCsvUploadJob, updateRtoCsvUploadJob,
   createOrderPunchJob, getOrderPunchJob, failOrderPunchJob, setOrderPunchJobStopRequested,
   getOrderPunchJobRowsForExport, getOrderPunchSettings, upsertOrderPunchSetting,

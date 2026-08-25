@@ -6,7 +6,7 @@
 // the Vercel Hobby plan's 12-serverless-function cap. req.query.key selects which
 // data source/permission-card this request is for.
 const { getSession } = require('../../_lib/session');
-const { logAccess, getCallingOverviewData, getCallingTrendData } = require('../../_lib/db');
+const { logAccess, getCallingOverviewData, getCallingTrendData, getCallingTimeOfDayData } = require('../../_lib/db');
 const { signedReportUrl } = require('../../_lib/reportUrls');
 
 const DATA_ROUTES = {
@@ -29,6 +29,7 @@ const DATA_ROUTES = {
   // at the Vercel Hobby plan's 12-serverless-function cap, which is the same reason this
   // dynamic route exists at all.
   'calling-trend': { card: 'calling', tab: 'rto', page: '/rto-crm', query: getCallingTrendData },
+  'calling-timeofday': { card: 'calling', tab: 'rto', page: '/rto-crm', query: getCallingTimeOfDayData },
   'trend-digest': { file: 'trend_digest.json', card: 'orgoverview', page: '/orgoverview', redirect: true },
 };
 

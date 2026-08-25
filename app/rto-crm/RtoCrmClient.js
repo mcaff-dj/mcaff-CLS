@@ -656,6 +656,29 @@ import CallTrendChart from './CallTrendChart';
       // in scope: interval width for the time-of-day columns, and which per-lead metric fills
       // the cells (Dialled/Connected/Converted).
       const [heatmapIntervalMinutes, setHeatmapIntervalMinutes] = useState(() => Number(localStorage.getItem('rto_heatmap_interval')) || 30);
+      // Time-of-Day Distribution's own data, from MySQL rather than from allTickets like every
+      // other block on this tab. The sheet only ever holds a lead's CURRENT cycle, so a table
+      // computed from it silently drops every reassigned-away cycle: on 2026-08-25 it read 212
+      // conversions against the KPI tile's 282, and the whole 70-row difference was retired
+      // cycles (45 of them one agent's). Server-side, both numbers now come from the same rows.
+      // Fetched at 15-minute grain with all three metrics per bucket, so changing either of
+      // this table's dropdowns (interval 15/30/60, metric dialled/connected/converted) is a
+      // pure re-render - only the page's date scope refetches.
+      const [timeOfDay, setTimeOfDay] = useState({ buckets: [], loading: true, error: null });
+      useEffect(() => {
+        let cancelled = false;
+        const { dateFrom, dateTo } = scopeToDateBounds(dateScope, customDateFrom, customDateTo);
+        const qs = new URLSearchParams();
+        if (dateFrom) qs.set('dateFrom', dateFrom);
+        if (dateTo) qs.set('dateTo', dateTo);
+        setTimeOfDay(prev => ({ ...prev, loading: true }));
+        fetch(`/api/report/data/calling-timeofday?${qs}`)
+          .then(r => (r.ok ? r.json() : r.json().then(j => Promise.reject(new Error(j.error || `HTTP ${r.status}`)))))
+          .then(d => { if (!cancelled) setTimeOfDay({ buckets: d.buckets || [], loading: false, error: null }); })
+          .catch(e => { if (!cancelled) setTimeOfDay({ buckets: [], loading: false, error: e.message || 'Could not load' }); });
+        return () => { cancelled = true; };
+      }, [dateScope, customDateFrom, customDateTo]);
+
       const [heatmapMetric, setHeatmapMetric] = useState(() => localStorage.getItem('rto_heatmap_metric') || 'dialled');
 
       const [payFilter, setPayFilter] = useState('ALL');
@@ -2501,28 +2524,28 @@ import CallTrendChart from './CallTrendChart';
         // showing one day at a time), just re-sliced by heatmapIntervalMinutes/
         // heatmapMetric instead of by payment type.
         const isConvertedForHeatmap = t => !!(t.newOrderId || t.disposition === 'Customer Agreed to Accept' || t.disposition === 'Product Issue / Exchange');
+
+        // Server buckets (timeOfDay above), NOT allTickets: the sheet cannot see a lead's
+        // retired cycles, so counting it here undercounted every reassigned lead's work - 212
+        // against the KPI tile's 282 on 2026-08-25. The server hands back 15-minute buckets
+        // with all three metrics; this just re-buckets to the chosen interval and picks the
+        // chosen metric, so neither dropdown costs a round trip.
+        //   'dialled' = every disposed lead (connected or not), the same set Total Disposed
+        //   counts. 'connected'/'converted' narrow that same set, matching the Total Connected
+        //   column / the Prepaid+COD Converted columns combined.
+        const bucketsByAgent = new Map();
+        for (const b of timeOfDay.buckets) {
+          if (!bucketsByAgent.has(b.agentEmail)) bucketsByAgent.set(b.agentEmail, []);
+          bucketsByAgent.get(b.agentEmail).push(b);
+        }
         const heatmapAgentData = effectiveAgentRoster.map(ag => {
           const email = ag.email.toLowerCase();
-          const isMine = (agt) => agt && (agt.toLowerCase().includes(email) || agt.toLowerCase().includes(email.split('@')[0]));
-          const isWorked = t => !!(t.disposition || t.agentRemarks || t.status !== 'Pending');
-          const disposedByDate = allTickets.filter(t => isMine(t.assignedAgent) && isWorked(t) && disposedDateInScope(t));
-
-          // 'dialled' = every disposed lead (connected or not) - the same set
-          // Total Disposed already counts, just bucketed by time-of-day here instead
-          // of totaled. 'connected'/'converted' narrow that same set further, matching
-          // the existing Total Connected column / the Prepaid+COD Converted columns
-          // combined (not split by payment type - this table has one Converted option).
-          let metricTickets = disposedByDate;
-          if (heatmapMetric === 'connected') metricTickets = disposedByDate.filter(t => t.connected === 'Yes');
-          else if (heatmapMetric === 'converted') metricTickets = disposedByDate.filter(isConvertedForHeatmap);
-
           const bucketCounts = new Map(); // bucketIndex -> count
-          for (const t of metricTickets) {
-            const disposedAtIso = leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt;
-            if (!disposedAtIso) continue;
-            const mins = istMinutesSinceMidnightClient(new Date(disposedAtIso));
-            const bucketIndex = Math.floor(mins / heatmapIntervalMinutes);
-            bucketCounts.set(bucketIndex, (bucketCounts.get(bucketIndex) || 0) + 1);
+          for (const b of bucketsByAgent.get(email) || []) {
+            const value = b[heatmapMetric] || 0;
+            if (!value) continue;
+            const bucketIndex = Math.floor((b.bucket15 * 15) / heatmapIntervalMinutes);
+            bucketCounts.set(bucketIndex, (bucketCounts.get(bucketIndex) || 0) + value);
           }
           return { ...ag, bucketCounts };
         });
@@ -2820,11 +2843,12 @@ import CallTrendChart from './CallTrendChart';
           visibleTableAgentMetrics, visibleHeatmapAgentData, heatmapBucketIndexes, heatmapCellStyle,
           downloadConvertedOrdersCsv, convertedOrdersList,
           trendAgentOptions, trendDefaultAgents,
+          timeOfDayState: { loading: timeOfDay.loading, error: timeOfDay.error },
           summaryRows, summaryTotals, summaryAvgFrt, summaryAvgLoggedIn, summaryAvgBreak, summaryAvgBusy, downloadAgentSummaryCsv,
           rawLeadDetailsList, downloadRawLeadDetailsCsv,
           totalAssigned, totalDisposed, totalPending, totalRefunded, totalRefundAmt, avgConnectRate, onlineCount, freshUnassignedInScope,
         };
-      }, [allTickets, effectiveAgentRoster, overrides, activityLogs, googleUser, userRole, isProcessAdmin, leadDates, heatmapMetric, heatmapIntervalMinutes, tickets, serverPresence, dateScope, customDateFrom, customDateTo]);
+      }, [allTickets, effectiveAgentRoster, overrides, activityLogs, googleUser, userRole, isProcessAdmin, leadDates, heatmapMetric, heatmapIntervalMinutes, timeOfDay, tickets, serverPresence, dateScope, customDateFrom, customDateTo]);
 
       return(
         <div className="min-h-screen flex flex-col bg-[#09090b]">
@@ -3016,6 +3040,7 @@ import CallTrendChart from './CallTrendChart';
                     visibleTableAgentMetrics, visibleHeatmapAgentData, heatmapBucketIndexes, heatmapCellStyle,
                     downloadConvertedOrdersCsv, convertedOrdersList,
                     trendAgentOptions, trendDefaultAgents,
+                    timeOfDayState,
                     summaryRows, summaryTotals, summaryAvgFrt, summaryAvgLoggedIn, summaryAvgBreak, summaryAvgBusy, downloadAgentSummaryCsv,
                     rawLeadDetailsList, downloadRawLeadDetailsCsv,
                     totalAssigned, totalDisposed, totalPending, totalRefunded, totalRefundAmt, avgConnectRate, onlineCount, freshUnassignedInScope,
@@ -3322,7 +3347,14 @@ import CallTrendChart from './CallTrendChart';
                               {visibleHeatmapAgentData.length === 0 && (
                                 <tr>
                                   <td colSpan={heatmapBucketIndexes.length + 2} className="py-6 text-center text-zinc-500">
-                                    No {heatmapMetricOptions.find(o => o.value === heatmapMetric)?.label.toLowerCase()} activity in this date range.
+                                    {/* Loading and failure are distinct from "nobody worked" now that this
+                                        table is server-backed - showing "no activity" for a failed fetch
+                                        reads as a quiet day rather than a broken card. */}
+                                    {timeOfDayState.loading
+                                      ? 'Loading…'
+                                      : timeOfDayState.error
+                                        ? `Could not load time-of-day data: ${timeOfDayState.error}`
+                                        : `No ${heatmapMetricOptions.find(o => o.value === heatmapMetric)?.label.toLowerCase()} activity in this date range.`}
                                   </td>
                                 </tr>
                               )}
