@@ -3,7 +3,8 @@
 const assert = require('assert');
 const {
   normalizeHeader, normalizeAwb, columnLetterToIndex, indexToColumnLetter,
-  CSV_TO_COLUMN, checkSheetLayout, buildRowPlan, parseAppendedRowRange,
+  CSV_TO_COLUMN, checkSheetLayout, buildRowPlan,
+  looksLikeScientificNotation, toSheetText,
 } = require('./rtoCsvImport');
 
 // 1. columnLetterToIndex / indexToColumnLetter - bijective base-26, round-trips past Z.
@@ -111,14 +112,39 @@ assert.strictEqual(normalizeAwb(''), '');
 }
 
 
-// parseAppendedRowRange - regression guard for the 'Data'!G0:G9 bug. The old /!\w+(\d+):\w+(\d+)$/
-// captured only the trailing digit of each row number, so a real append at rows 7630-7639 asked
-// Sheets to read G0:G9 and got back a 400 that aborted the whole upload mid-flight.
-assert.deepStrictEqual(parseAppendedRowRange('Data!A7630:AD7639'), ['7630', '7639']);
-assert.deepStrictEqual(parseAppendedRowRange("'Data'!A2:AC11"), ['2', '11']);
-assert.deepStrictEqual(parseAppendedRowRange('Data!A7:AC7'), ['7', '7']);
-assert.strictEqual(parseAppendedRowRange(''), null);
-assert.strictEqual(parseAppendedRowRange(undefined), null);
-assert.strictEqual(parseAppendedRowRange('Data!A:AC'), null);
+// looksLikeScientificNotation - an AWB mangled by Excel is unrecoverable, so it must be caught
+// rather than imported. Real AWBs are long digit strings and must never trip this.
+assert.strictEqual(looksLikeScientificNotation('5.40E+13'), true);
+assert.strictEqual(looksLikeScientificNotation('5.4e+13'), true);
+assert.strictEqual(looksLikeScientificNotation('1E13'), true);
+assert.strictEqual(looksLikeScientificNotation('54012345678901'), false);
+assert.strictEqual(looksLikeScientificNotation('SF1234567890E'), false); // trailing letter, not an exponent
+assert.strictEqual(looksLikeScientificNotation(''), false);
+
+// toSheetText - the USER_ENTERED escape that keeps a long AWB from being stored as a number.
+assert.strictEqual(toSheetText('54012345678901'), "'54012345678901");
+assert.strictEqual(toSheetText('GS4593447281'), 'GS4593447281'); // alphanumeric - already text to Sheets
+assert.strictEqual(toSheetText(''), '');
+
+// buildRowPlan end-to-end: a mangled AWB is rejected (not counted as a duplicate), a good one
+// is written text-forced, and the plan's own awbCode stays the bare digits used for dedup.
+{
+  const csvRow = (awb) => {
+    const r = {};
+    Object.keys(CSV_TO_COLUMN).forEach((h) => { r[h] = 'x'; });
+    r['AWB Code'] = awb;
+    r['Payment Method'] = 'COD';
+    return r;
+  };
+  const plan = buildRowPlan({
+    csvRows: [csvRow('54012345678901'), csvRow('5.40E+13'), csvRow('54012345678901')],
+    existingAwbSet: new Set(),
+  });
+  assert.strictEqual(plan.validRows.length, 1);
+  assert.strictEqual(plan.counts.scientificAwb, 1);
+  assert.strictEqual(plan.counts.duplicateInFile, 1);
+  assert.strictEqual(plan.validRows[0].awbCode, '54012345678901');
+  assert.strictEqual(plan.validRows[0].cellsByColumn.G, "'54012345678901");
+}
 
 console.log('rtoCsvImport.test.js: all assertions passed');

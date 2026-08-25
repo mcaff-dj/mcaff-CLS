@@ -85,19 +85,15 @@ export default function RtoUploadModal({ onClose, onDone }) {
       if (!res.ok) throw new Error(data.error || 'Upload failed');
       setStartResult(data);
       if (data.jobId) {
-        setJobStatus({ status: 'queued', checkedCount: 0, prepaidCount: data.queuedForCheck });
+        setJobStatus({ status: 'queued', checkedCount: 0, prepaidCount: data.prepaidQueued });
         pollJob(data.jobId);
       } else if (data.queueError) {
-        // Non-prepaid rows (if any) already landed - only the prepaid batch failed to queue.
-        // Surface it rather than silently calling onDone(), which would read as "all done".
+        // Nothing is written to the sheet by /upload-start any more, so a queueing failure
+        // means the whole upload landed nowhere. Surface it rather than silently calling
+        // onDone(), which would read as "all done".
         setError(data.queueError);
-      } else if (data.mappingWarning) {
-        // The immediate-append rows are already written but failed their post-write AWB
-        // check - same reasoning as queueError above, don't call onDone() and let this read
-        // as a clean success.
-        setError(data.mappingWarning);
       } else {
-        onDone(); // nothing prepaid was queued - everything that was going to append already did
+        onDone(); // every row was a duplicate/reject - there was nothing to queue
       }
     } catch (e) {
       setError(e.message);
@@ -118,9 +114,11 @@ export default function RtoUploadModal({ onClose, onDone }) {
 
         <p className="text-[12px] text-zinc-500 leading-relaxed">
           Upload a CSV of new RTO leads. Rows are matched to the sheet&apos;s own columns by
-          header name, deduplicated by <strong className="text-zinc-300 font-semibold">AWB Code</strong>,
-          and checked for existing GoKwik refunds (prepaid only) and LMD &quot;already
-          punched&quot; status before being added.
+          header name and deduplicated by <strong className="text-zinc-300 font-semibold">AWB Code</strong> —
+          first within the file, then against the sheet. Every surviving row is then checked for
+          LMD &quot;already punched&quot; status, and prepaid rows for an existing GoKwik refund,
+          before being added. Export the CSV straight from the source: an AWB that arrives as
+          <span className="font-mono"> 5.40E+13</span> has already lost its digits and is rejected.
         </p>
 
         <div
@@ -148,11 +146,13 @@ export default function RtoUploadModal({ onClose, onDone }) {
         {startResult && (
           <div className="space-y-2">
             <div className="flex flex-wrap gap-2">
-              <Stat tone="ok">{startResult.appended} appended immediately</Stat>
-              <Stat>{startResult.queuedForCheck} queued for refund/punch check</Stat>
+              <Stat tone="ok">{startResult.queuedForCheck} queued for punch/refund check</Stat>
               <Stat tone="skip">{startResult.duplicateInSheet} duplicate in sheet</Stat>
               <Stat tone="skip">{startResult.duplicateInFile} duplicate in file</Stat>
               <Stat tone="skip">{startResult.missingAwb} missing AWB</Stat>
+              {startResult.scientificAwb > 0 && (
+                <Stat tone="skip">{startResult.scientificAwb} unreadable AWB</Stat>
+              )}
               <Stat>{startResult.total} rows read</Stat>
             </div>
             {startResult.errors?.length > 0 && (

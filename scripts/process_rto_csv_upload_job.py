@@ -6,8 +6,13 @@ Runs the SAME checks scripts/assign_leads.py already runs for its own pool - che
 then resolve_refund_statuses, imported unmodified - against the prepaid rows one CSV upload
 queued, since those checks need mcaff_prod MySQL access this app deliberately keeps Python-only
 (see docs/superpowers/specs/2026-08-20-rto-csv-upload-design.md's "Why Item_level_data is
-required" section). Non-prepaid rows never reach this worker at all - api/rto/upload-start.js
-already appended them immediately, since they need no check.
+required" section). The GoKwik refund check is prepaid-only - COD paid nothing upfront to
+refund - but the LMD punch check is not: a replacement order makes the original RTO pointless
+however it was paid for. COD rows used to be appended by the endpoint and skip this worker
+entirely, so they were never punch-checked at all (found via HYP43652510).
+
+EVERY row from the upload reaches this worker, whatever its payment method - api/rto/upload-start.js
+appends nothing itself. The punch check has to run BEFORE the write, so the write lives here too.
 
 Order of operations, matching assign_leads.py's own main() exactly:
   1. LMD punch-check ALL queued rows (any payment method) - one/few fast batched MySQL queries,
@@ -72,6 +77,23 @@ REFUND_CHECK_ROUND_PAUSE_SEC = 3
 # Overall ceiling on the refund-check phase, comfortably inside the worker Lambda's own
 # 900s (15 min) timeout - leaves room for the punch-check phase and the final append too.
 REFUND_CHECK_PHASE_BUDGET_SEC = 600
+
+
+APPENDED_ROW_RANGE_RE = re.compile(r"![A-Za-z]+(\d+):[A-Za-z]+(\d+)$")
+
+
+def parse_appended_row_range(updated_range):
+    r"""('7630', '7639') from a Sheets values:append updates.updatedRange like
+    "Data!A7630:AD7639", so the post-append AWB canary can read back exactly the rows that just
+    landed. None when the range isn't in that shape.
+
+    [A-Za-z]+, NOT \w+: \w matches digits too, so r"!\w+(\d+):\w+(\d+)$" backtracked into
+    capturing only the LAST digit of each row number ("A7630" -> "0"), producing ranges like
+    'Data'!G0:G9 that Sheets rejects with "Unable to parse range". This is now the only copy of
+    that logic left in the codebase - the JS endpoint no longer appends at all - so it is named
+    and tested here rather than left inline."""
+    m = APPENDED_ROW_RANGE_RE.search(updated_range or "")
+    return (m.group(1), m.group(2)) if m else None
 
 
 def partition_and_stamp(rows, punched_ids, refund_results):
@@ -311,8 +333,13 @@ def process_job(job_id):
         # Re-checking against the sheet as it stands right this moment is what actually closes
         # both gaps - upload-start.js's own dedup only ever protected against what was in the
         # sheet at upload time.
-        awb_data = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!{AWB_COLUMN}2:{AWB_COLUMN}")
-        live_awb_set = {(r[0] if r else "").strip().upper() for r in awb_data}
+        # UNFORMATTED_VALUE for the same reason api/rto/upload-start.js gives on its own copy of
+        # this read: AWBs written before they were forced to text are stored as numbers, whose
+        # FORMATTED value is "5.4E+13" and matches no real AWB. Unformatted gives back the number,
+        # so str() below yields the digits - hence str(), a raw int has no .strip().
+        awb_data = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!{AWB_COLUMN}2:{AWB_COLUMN}",
+                                        value_render_option="UNFORMATTED_VALUE")
+        live_awb_set = {str(r[0] if r else "").strip().upper() for r in awb_data}
         live_awb_set.discard("")
         before_dedup = len(stamped_rows)
         stamped_rows = [r for r in stamped_rows if r["awbCode"] not in live_awb_set]
@@ -343,20 +370,18 @@ def process_job(job_id):
         # column checked because row["awbCode"] comes straight from the dedup step above,
         # independent of the cellsByColumn map this is verifying.
         # ponytail: single-column canary, not a full-row round-trip - upgrade if insufficient.
-        # [A-Za-z]+, not \w+ - \w also matches digits, so \w+(\d+) greedily swallowed all but
-        # the last digit of each row number (e.g. "A7634" -> group "4") and made this canary
-        # compare against the wrong 6 rows on every real multi-hundred-row append.
-        range_match = re.search(r"![A-Za-z]+(\d+):[A-Za-z]+(\d+)$", (append_resp.get("updates") or {}).get("updatedRange", ""))
+        range_match = parse_appended_row_range((append_resp.get("updates") or {}).get("updatedRange", ""))
         mapping_failed = False
         if range_match and stamped_rows:
-            first_row, last_row = range_match.group(1), range_match.group(2)
+            first_row, last_row = range_match
             # Verification only - never let it decide the job's fate. The rows are already
             # appended by this point, so a failure to READ them back (a malformed range, a
             # transient Sheets error) must not fall through to the generic handler below and
             # stamp an otherwise-successful job 'failed'.
             try:
-                awb_check = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!{AWB_COLUMN}{first_row}:{AWB_COLUMN}{last_row}")
-                actual_awbs = [(r[0] if r else "").strip().upper() for r in awb_check]
+                awb_check = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!{AWB_COLUMN}{first_row}:{AWB_COLUMN}{last_row}",
+                                                 value_render_option="UNFORMATTED_VALUE")
+                actual_awbs = [str(r[0] if r else "").strip().upper() for r in awb_check]
                 mapping_failed = any(
                     i >= len(actual_awbs) or actual_awbs[i] != stamped_rows[i]["awbCode"]
                     for i in range(len(stamped_rows))

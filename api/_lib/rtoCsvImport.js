@@ -20,6 +20,30 @@ function normalizeAwb(v) {
   return (v || '').toString().trim().toUpperCase();
 }
 
+// An AWB that reached the CSV as "5.40E+13" has already lost its real digits - the export was
+// opened and re-saved in a spreadsheet program, which rounded a 12-14 digit code to 3
+// significant figures. Those digits are NOT recoverable here, and pretending otherwise is
+// actively harmful: every mangled AWB in a file collapses to the same handful of strings, so
+// the in-file dedup below silently discards genuinely distinct shipments as "duplicates".
+// Rejecting the row and naming the cause is the only honest option.
+function looksLikeScientificNotation(v) {
+  return /^[+-]?\d+(\.\d+)?[Ee][+-]?\d+$/.test((v || '').toString().trim());
+}
+
+// Sheets is written with valueInputOption=USER_ENTERED (both the API endpoint and the Python
+// worker), which type-infers every cell - so a bare AWB lands as a NUMBER and column G then
+// renders it as 5.4E+13. A leading apostrophe is USER_ENTERED's own "treat this as text"
+// escape; Sheets consumes it and stores the digits verbatim. This matters far beyond looks:
+// every AWB read in this feature takes Sheets' default FORMATTED_VALUE, so a numeric AWB reads
+// back as the string "5.4E+13" - which silently broke dedup against the sheet and made the
+// post-append canary compare display text against real digits.
+// Applied ONLY to all-digit AWBs: most couriers use an alphanumeric code (GS4593447281), which
+// Sheets already stores as text, and prefixing those would add an apostrophe for nothing.
+// Coupled to USER_ENTERED: under valueInputOption=RAW the apostrophe would be stored literally.
+function toSheetText(v) {
+  return /^\d+$/.test(v || '') ? `'${v}` : v;
+}
+
 // bijective base-26: A=0, B=1, ..., Z=25, AA=26, AB=27, ...
 function columnLetterToIndex(letter) {
   return letter.split('').reduce((acc, c) => acc * 26 + (c.charCodeAt(0) - 64), 0) - 1;
@@ -105,7 +129,7 @@ function checkSheetLayout(fullHeaderRow) {
 function buildRowPlan({ csvRows, existingAwbSet }) {
   const validRows = [];
   const errors = [];
-  const counts = { missingAwb: 0, duplicateInFile: 0, duplicateInSheet: 0 };
+  const counts = { missingAwb: 0, duplicateInFile: 0, duplicateInSheet: 0, scientificAwb: 0 };
   const seenInFile = new Set();
 
   csvRows.forEach((row, i) => {
@@ -115,6 +139,15 @@ function buildRowPlan({ csvRows, existingAwbSet }) {
     if (!awb) {
       counts.missingAwb++;
       errors.push({ line, reason: 'Missing AWB Code' });
+      return;
+    }
+    if (looksLikeScientificNotation(awb)) {
+      counts.scientificAwb++;
+      errors.push({
+        line,
+        reason: `AWB Code "${awb}" is in scientific notation - its real digits are already lost. `
+          + 'Re-export the source file and upload it without opening it in Excel/Sheets first.',
+      });
       return;
     }
     if (seenInFile.has(awb)) {
@@ -133,6 +166,7 @@ function buildRowPlan({ csvRows, existingAwbSet }) {
     Object.entries(CSV_TO_COLUMN).forEach(([csvHeader, col]) => {
       let value = (row[csvHeader] || '').toString().trim();
       if (csvHeader === 'Order ID') value = value.split('_')[0];
+      if (csvHeader === 'AWB Code') value = toSheetText(value);
       // A blank source value is written as the literal text "NA" rather than an empty cell -
       // explicit business instruction, so a blank in the sheet always means "not yet worked",
       // never "the source had nothing here".
@@ -150,21 +184,8 @@ function buildRowPlan({ csvRows, existingAwbSet }) {
   return { validRows, errors, counts };
 }
 
-// Pulls the first/last row NUMBERS out of a Sheets values:append `updates.updatedRange`
-// (e.g. "Data!A7630:AD7639" -> ['7630', '7639']), so the post-append AWB canary can read back
-// exactly the rows that just landed. Returns null when the range isn't in that shape.
-//
-// [A-Za-z]+, NOT \w+: \w matches digits too, so /!\w+(\d+):\w+(\d+)$/ backtracked its way to
-// capturing only the LAST digit of each row number ("A7630" -> "0"), producing ranges like
-// 'Data'!G0:G9 that Sheets rejects with "Unable to parse range". Lives here, exported and
-// tested, rather than inline at each call site, so that regression can't come back unnoticed.
-function parseAppendedRowRange(updatedRange) {
-  const m = (updatedRange || '').match(/![A-Za-z]+(\d+):[A-Za-z]+(\d+)$/);
-  return m ? [m[1], m[2]] : null;
-}
-
 module.exports = {
   normalizeHeader, normalizeAwb, columnLetterToIndex, indexToColumnLetter,
   CSV_TO_COLUMN, EXPECTED_SHEET_HEADER, LAST_COLUMN_LETTER, REQUIRED_CSV_HEADERS,
-  checkSheetLayout, buildRowPlan, parseAppendedRowRange,
+  checkSheetLayout, buildRowPlan, looksLikeScientificNotation, toSheetText,
 };

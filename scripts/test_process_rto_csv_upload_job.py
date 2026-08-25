@@ -73,6 +73,18 @@ def test_check_sheet_layout_reports_drifted_column():
     assert any("Column G" in issue for issue in issues)
 
 
+def test_parse_appended_row_range():
+    r"""Regression guard for the 'Data'!G0:G9 bug: the original r"!\w+(\d+):\w+(\d+)$" captured
+    only the trailing digit of each row number, so an append at rows 7630-7639 asked Sheets to
+    read G0:G9 and got a 400 back - which used to abort the whole upload mid-flight."""
+    assert worker.parse_appended_row_range("Data!A7630:AD7639") == ("7630", "7639")
+    assert worker.parse_appended_row_range("'Data'!A2:AC11") == ("2", "11")
+    assert worker.parse_appended_row_range("Data!A7:AC7") == ("7", "7")
+    assert worker.parse_appended_row_range("Data!A:AC") is None
+    assert worker.parse_appended_row_range("") is None
+    assert worker.parse_appended_row_range(None) is None
+
+
 if __name__ == "__main__":
     test_partition_and_stamp_marks_punched_rows()
     print("  ok  test_partition_and_stamp_marks_punched_rows")
@@ -86,4 +98,6 @@ if __name__ == "__main__":
     print("  ok  test_check_sheet_layout_clean_on_production_header_row")
     test_check_sheet_layout_reports_drifted_column()
     print("  ok  test_check_sheet_layout_reports_drifted_column")
-    print("6 passed")
+    test_parse_appended_row_range()
+    print("  ok  test_parse_appended_row_range")
+    print("7 passed")
