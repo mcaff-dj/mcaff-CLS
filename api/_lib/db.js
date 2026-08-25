@@ -1556,7 +1556,7 @@ async function getDeliveryEscalationStats(opts = {}) {
             COUNT(DISTINCT CASE WHEN ${DE_FRESH_WHERE} THEN awb_code END) AS fresh,
             COUNT(DISTINCT CASE WHEN ${DE_FORCED_RTO_WHERE} THEN awb_code END) AS forcedRto
      FROM Delivery_escalation WHERE ${where}`, params);
-  const r = { ...(rows[0] || {}), ...(refundRows[0] || {}) };
+  const r = rows[0] || {};
   return {
     total: Number(r.total) || 0,
     assigned: Number(r.assigned) || 0,
