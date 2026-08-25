@@ -2319,31 +2319,11 @@ async function getCallingPartnerBreakdown(dateFrom, dateTo) {
   }));
 }
 
-// Buckets the sheet's free-text RTO reason into a fixed set of categories, for
-// getCallingRtoReasonBreakdown below. rto_reason comes from the courier/system - not a
-// controlled enum - so the same underlying reason shows up under several spellings
-// ("Customer Refused To Accept" / "REFUSED TO ACCEPT" / "Customer refused to
-// accept:Verified"), and new spellings can appear any time the sheet's upstream source
-// changes. Keyword matching (rather than an exact-value map) is what makes this resilient to
-// that drift; check order matters where a string could match more than one bucket (e.g. an
-// OTP-flavoured cancellation must land in OTP, not Customer Refused/Cancelled).
-function categorizeRtoReason(rawReason) {
-  const r = (rawReason || '').toUpperCase();
-  if (!r || r === 'UNKNOWN' || r === 'N/A' || r === 'OTHERS') return 'Unknown/Other';
-  if (r.includes('OTP')) return 'OTP/Verified Cancellation';
-  if (['ADDRESS', 'DELIVERY AREA', 'TRACEABLE', 'LOCATED', 'PINCODE', 'PIN CODE'].some((k) => r.includes(k))) {
-    return 'Address Issue';
-  }
-  if (['REATTEMPT', 'FUTURE DELIVERY', 'RESCHEDULE', 'ANOTHER DATE', 'DELAY DELIVERY'].some((k) => r.includes(k))) {
-    return 'Reattempt/Future Delivery';
-  }
-  if (r.includes('REFUS') || r.includes('CANCEL')) return 'Customer Refused/Cancelled';
-  if (['UNAVAILABLE', 'NOT CONTACTABLE', 'NOT AVAILABLE', 'NOT ANSWERING', 'RECEIVER NOT', 'PNA',
-       'OFFICE CLOSED', 'RESIDENCE CLOSED', 'HOUSE LOCKED', 'PERSON NOT MET', 'DOOR LOCK'].some((k) => r.includes(k))) {
-    return 'Customer Unavailable/Unreachable';
-  }
-  return 'Unknown/Other';
-}
+// Bucketing of the sheet's free-text rto_reason into the fixed category set used by
+// getCallingRtoReasonBreakdown/-Funnel below. Moved to its own module so the RTO CRM's
+// Team Roster picker can group its options under the SAME headings without a second copy
+// of the keyword rules drifting from this one - see that file for why keywords, not a map.
+const { categorizeRtoReason } = require('./rtoReasonCategory');
 
 // Per-RTO-reason-category funnel (rto_reason bucketed via categorizeRtoReason above):
 // assigned -> connected -> converted, each stage's own rate over total assigned. Sorted by

@@ -4,7 +4,7 @@
 // components, and small presentational wrappers. Nothing here reads or writes anything
 // RTO/NDR-specific; each page passes in its own options/labels/content.
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 
 export const SearchIcon = (p) => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>;
 export const XIcon = (p) => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>;
@@ -76,7 +76,15 @@ export function CustomSelect({ value, onChange, options, icon: IconComponent, pl
 // value at once (e.g. RTO's "Priority Reasons" - the stored value is a comma-separated string,
 // matched as independent substrings by the assignment script). value/onChange work in terms of
 // a string[]; the caller owns joining/splitting against whatever's actually persisted.
-export function MultiSelectDropdown({ value, onChange, options, placeholder = 'None' }) {
+// groupBy (optional): opt => category name. When given, options are rendered under clickable
+// category headers instead of one flat list - the RTO roster's Priority Reasons picker uses
+// api/_lib/rtoReasonCategory's categorizeRtoReason so its headings match the Overview tab's
+// RTO-reason breakdown. Clicking a header selects/clears that whole category at once. The
+// VALUE is unchanged either way: still the individual raw reason strings, because that is what
+// build_assignment_queue substring-matches against - a category name would match nothing.
+// groupOrder (optional): category names in display order; any category not listed follows, in
+// first-seen order, so a new keyword bucket can never silently vanish from the list.
+export function MultiSelectDropdown({ value, onChange, options, placeholder = 'None', groupBy, groupOrder }) {
   const [isOpen, setIsOpen] = useState(false);
   const ref = useRef(null);
 
@@ -90,6 +98,24 @@ export function MultiSelectDropdown({ value, onChange, options, placeholder = 'N
   const label = selected.length === 0 ? placeholder : selected.length === 1 ? selected[0] : `${selected.length} reasons`;
   const toggle = (opt) => {
     onChange(selected.includes(opt) ? selected.filter(o => o !== opt) : [...selected, opt]);
+  };
+  // [[category, opts]] preserving groupOrder first, then first-seen order for the rest.
+  // Null (not an empty list) when ungrouped, so the flat render path below stays untouched.
+  const groups = useMemo(() => {
+    if (!groupBy) return null;
+    const byCat = new Map((groupOrder || []).map(c => [c, []]));
+    for (const opt of options) {
+      const cat = groupBy(opt);
+      if (!byCat.has(cat)) byCat.set(cat, []);
+      byCat.get(cat).push(opt);
+    }
+    return [...byCat].filter(([, opts]) => opts.length);
+  }, [options, groupBy, groupOrder]);
+  // Header click: clear the group if every member is already selected, else add the missing
+  // ones. Add (not replace) so selections in other groups survive.
+  const toggleGroup = (opts) => {
+    const all = opts.every(o => selected.includes(o));
+    onChange(all ? selected.filter(o => !opts.includes(o)) : [...selected, ...opts.filter(o => !selected.includes(o))]);
   };
 
   return (
@@ -106,22 +132,37 @@ export function MultiSelectDropdown({ value, onChange, options, placeholder = 'N
 
       {isOpen && (
         <div className="absolute left-0 mt-1.5 min-w-[240px] bg-[#141417] border border-zinc-800/90 rounded-xl shadow-2xl z-50 overflow-hidden animate-fadeIn py-1 custom-scroll max-h-60 overflow-y-auto">
-          {options.map((opt) => {
-            const isSelected = selected.includes(opt);
-            return (
-              <button
-                key={opt}
-                type="button"
-                onClick={() => toggle(opt)}
-                className={`w-full text-left px-3 py-2 text-[12.5px] flex items-center gap-2 hover:bg-zinc-800/70 transition-colors ${isSelected ? 'text-indigo-300 font-semibold' : 'text-zinc-300'}`}
-              >
-                <span className={`h-3.5 w-3.5 shrink-0 rounded border flex items-center justify-center ${isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-zinc-600'}`}>
-                  {isSelected && <CheckIcon className="text-white" style={{ width: 10, height: 10 }} />}
-                </span>
-                <span className="truncate">{opt}</span>
-              </button>
-            );
-          })}
+          {(groups || [[null, options]]).map(([cat, opts]) => (
+            <div key={cat || '_'}>
+              {cat && (
+                <button
+                  type="button"
+                  onClick={() => toggleGroup(opts)}
+                  title={`Select / clear all ${opts.length} reasons in ${cat}`}
+                  className="w-full text-left px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 hover:text-indigo-300 hover:bg-zinc-800/50 transition-colors flex items-center justify-between gap-2"
+                >
+                  <span className="truncate">{cat}</span>
+                  <span className="shrink-0 text-zinc-600">{opts.filter(o => selected.includes(o)).length}/{opts.length}</span>
+                </button>
+              )}
+              {opts.map((opt) => {
+                const isSelected = selected.includes(opt);
+                return (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => toggle(opt)}
+                    className={`w-full text-left ${cat ? 'pl-7 pr-3' : 'px-3'} py-2 text-[12.5px] flex items-center gap-2 hover:bg-zinc-800/70 transition-colors ${isSelected ? 'text-indigo-300 font-semibold' : 'text-zinc-300'}`}
+                  >
+                    <span className={`h-3.5 w-3.5 shrink-0 rounded border flex items-center justify-center ${isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-zinc-600'}`}>
+                      {isSelected && <CheckIcon className="text-white" style={{ width: 10, height: 10 }} />}
+                    </span>
+                    <span className="truncate">{opt}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
     </div>

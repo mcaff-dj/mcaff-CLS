@@ -15,6 +15,10 @@ import CALLING_PROCESSES from '../../api/_lib/callingProcesses.json';
 // The one definition of "is this agent at their claim quota", shared with api/rto/claim.js's
 // server-side gate so the browser and the server can never disagree about the cap.
 import { checkClaimQuota, countUndisposedLoad, resolveAgentQuota, isTicketUndisposed } from '../../api/_lib/leadQuota';
+// Same buckets the Overview tab's RTO-reason breakdown uses (api/_lib/db.js imports this exact
+// module), so the roster picker's group headings and that table can never name different
+// categories for the same reason string.
+import { categorizeRtoReason, RTO_REASON_CATEGORIES } from '../../api/_lib/rtoReasonCategory';
 import { safeStorage as localStorage, startOfDay, isDateInScope, scopeToDateBounds, normalizeOrderKey, isLeadDateInScope, istMinutesSinceMidnightClient, istDayKeyClient, formatTimeOfDay, formatBreakMinutes, formatFrt, formatPct, postJsonWithRetry } from '../_calling/util';
 import { useCallingSession, STATUS_OPTIONS, ROSTER_STATUS_OPTIONS, ROLE_OPTIONS } from '../_calling/useCallingSession';
 import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
@@ -2167,6 +2171,8 @@ import RtoUploadModal from './RtoUploadModal';
                           value={(a.priorityRtoReasons || '').split(',').map(r => r.trim()).filter(Boolean)}
                           onChange={(next) => saveProcessAgent(a.email, { priorityRtoReasons: next.join(', ') })}
                           options={PRIORITY_REASON_OPTIONS}
+                          groupBy={categorizeRtoReason}
+                          groupOrder={RTO_REASON_CATEGORIES}
                         />
                       </td>
                       <td className="py-3 px-4">
