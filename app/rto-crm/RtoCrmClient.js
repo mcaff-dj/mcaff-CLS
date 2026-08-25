@@ -25,6 +25,7 @@ import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDisp
 import { CallingShell } from '../_calling/CallingShell';
 import { SearchIcon, XIcon, CheckIcon, PhoneIcon, WhatsAppIcon, RefreshIcon, DownloadIcon, ChevronDown, UserIcon, CalendarIcon, CreditCardIcon, ChatIcon, ShieldIcon, SparklesIcon, CustomSelect, MultiSelectDropdown, Badge, Overlay, EmptyState } from '../_calling/ui';
 import RtoUploadModal from './RtoUploadModal';
+import CallTrendChart from './CallTrendChart';
 
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1Ij6hWgE8ihHn837cqgrhNKFQHIHWMzaXouco76zUpBI/edit?usp=sharing';
     // A:Z, not the bare tab name. The bare name means "every column", which pulled AA:AD for all
@@ -2560,6 +2561,16 @@ import RtoUploadModal from './RtoUploadModal';
           return { backgroundColor: `rgba(245, 158, 11, ${(t * 0.4).toFixed(2)})` };
         }
 
+        // Call Trend's agent filter. Emails (not display names) because the chart passes them
+        // straight to a WHERE agent_email IN-style match server-side. A plain Agent gets their
+        // own email locked in as the default AND the picker hidden, rather than the picker being
+        // hidden alone - an empty selection means "everyone" to the endpoint, which would have
+        // shown a plain agent the whole team's numbers.
+        const trendAgentOptions = (userRole === 'Agent' && !isProcessAdmin
+          ? effectiveAgentRoster.filter(isMyAgent) : effectiveAgentRoster)
+          .map(a => a.email.toLowerCase()).filter(Boolean).sort();
+        const trendDefaultAgents = userRole === 'Agent' && !isProcessAdmin ? trendAgentOptions : [];
+
         // Converted Orders - a flat, ungrouped list (one row per order, not aggregated
         // the way the two tables above are) for the CSV export below. Same "converted"
         // test as the Time-of-Day table's 'converted' metric option (Prepaid+COD
@@ -3317,6 +3328,18 @@ import RtoUploadModal from './RtoUploadModal';
                           </table>
                         </div>
                       </div>
+
+                      {/* Call Trend - the same three metrics as the table above, over TIME rather
+                          than time-of-day, with its own range/agent filters. Server-backed
+                          (api/report/data/calling-trend -> getCallingCallTrend) rather than
+                          computed from allTickets like every card above it: the sheet only ever
+                          holds the current cycle of rows still in play, so a trend built from it
+                          would lose history the moment a row leaves the sheet or is reassigned. */}
+                      <CallTrendChart
+                        agents={trendAgentOptions}
+                        defaultAgents={trendDefaultAgents}
+                        canFilterAgents={!(userRole === 'Agent' && !isProcessAdmin)}
+                      />
 
                       {/* Converted Orders */}
                       <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">

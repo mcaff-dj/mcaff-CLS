@@ -84,7 +84,7 @@ export function CustomSelect({ value, onChange, options, icon: IconComponent, pl
 // build_assignment_queue substring-matches against - a category name would match nothing.
 // groupOrder (optional): category names in display order; any category not listed follows, in
 // first-seen order, so a new keyword bucket can never silently vanish from the list.
-export function MultiSelectDropdown({ value, onChange, options, placeholder = 'None', groupBy, groupOrder }) {
+export function MultiSelectDropdown({ value, onChange, options, placeholder = 'None', groupBy, groupOrder, itemNoun = 'reasons' }) {
   const [isOpen, setIsOpen] = useState(false);
   const ref = useRef(null);
 
@@ -95,7 +95,7 @@ export function MultiSelectDropdown({ value, onChange, options, placeholder = 'N
   }, []);
 
   const selected = value || [];
-  const label = selected.length === 0 ? placeholder : selected.length === 1 ? selected[0] : `${selected.length} reasons`;
+  const label = selected.length === 0 ? placeholder : selected.length === 1 ? selected[0] : `${selected.length} ${itemNoun}`;
   const toggle = (opt) => {
     onChange(selected.includes(opt) ? selected.filter(o => o !== opt) : [...selected, opt]);
   };

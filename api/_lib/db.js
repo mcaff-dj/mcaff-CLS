@@ -1937,6 +1937,64 @@ async function getCallingHourlyStats(dateFrom, dateTo) {
   return byHour;
 }
 
+// Daily dialled/connected/converted for the RTO CRM Overview's Call Trend chart, optionally
+// narrowed to a set of agents. Same three definitions as getCallingHourlyStats above, quoted
+// rather than re-invented so the chart can never disagree with the Time-of-Day table it sits
+// under; same IST offset conversion too, and for the same reason (named zones need zoneinfo
+// tables RDS does not guarantee).
+//
+// DAILY only - week and month are summed in api/_lib/trendChart.js's rollup(). One grouping in
+// SQL, one week definition in JS (isoWeekKey, tested), instead of YEARWEEK here and a second
+// boundary rule in the chart. A year of daily rows is ~365, free next to the round trip.
+//
+// Unlike getCallingHourlyStats this reads EVERY cycle (no reassigned_away_at filter), matching
+// that function's disposed half: a lead a previous agent already worked and lost still cost
+// that agent a dial, and dropping retired cycles would quietly understate call volume.
+//
+// agents: array of emails, or empty/absent for everyone. Matched with FIND_IN_SET over one
+// comma-joined parameter rather than a built IN (...) list - it keeps this a single prepared
+// statement with a fixed placeholder count (sql`` binds one ? per interpolation and does not
+// expand arrays), and an email cannot contain a comma. The range scan on disposed_at is what
+// bounds this query either way.
+async function getCallingCallTrend({ dateFrom, dateTo, agents } = {}) {
+  await ensureSchema();
+  const { from, to } = dateBounds(dateFrom, dateTo);
+  const agentList = (Array.isArray(agents) ? agents : String(agents || '').split(','))
+    .map((a) => String(a || '').trim().toLowerCase()).filter(Boolean).join(',');
+  const { rows } = await sql`
+    SELECT
+      DATE(CONVERT_TZ(disposed_at, '+00:00', '+05:30')) AS bucket,
+      COUNT(*) AS dialled,
+      SUM(CASE WHEN connected = 'Yes' THEN 1 ELSE 0 END) AS connected,
+      SUM(CASE WHEN disposition IN ('Customer Agreed to Accept', 'Product Issue / Exchange') OR new_order_id IS NOT NULL THEN 1 ELSE 0 END) AS converted
+    FROM CLS_RTO_calling
+    WHERE disposed_at IS NOT NULL
+      AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+      AND (${agentList} = '' OR FIND_IN_SET(LOWER(agent_email), ${agentList}) > 0)
+    GROUP BY 1
+    ORDER BY 1
+  `;
+  // A DATE column comes back as a JS Date from mysql2; the chart keys on 'YYYY-MM-DD' strings.
+  // Formatted from the UTC parts, not toISOString-after-local-parse, which would shift the day
+  // for anyone running this outside UTC.
+  return rows.map((r) => ({
+    bucket: r.bucket instanceof Date
+      ? `${r.bucket.getFullYear()}-${String(r.bucket.getMonth() + 1).padStart(2, '0')}-${String(r.bucket.getDate()).padStart(2, '0')}`
+      : String(r.bucket),
+    dialled: Number(r.dialled) || 0,
+    connected: Number(r.connected) || 0,
+    converted: Number(r.converted) || 0,
+  }));
+}
+
+// The payload api/report/data/[key].js's "calling-trend" route serves. Thin on purpose: the
+// route hands over req.query verbatim, so the coercion of agents (a repeated or comma-joined
+// query param) lives in one place rather than in every caller.
+async function getCallingTrendData(query) {
+  const { dateFrom, dateTo, agents } = query || {};
+  return { daily: await getCallingCallTrend({ dateFrom, dateTo, agents }) };
+}
+
 // ── Calling business hours ────────────────────────────────────────────────────────────
 // Stored per (process, weekday) so a single day can differ from the rest - Friday closing
 // early, Sunday closed entirely - which a single start/end pair per process couldn't express.
@@ -3034,6 +3092,7 @@ module.exports = {
   getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow,
   getRtoOnlineSpecializations,
+  getCallingCallTrend, getCallingTrendData,
   createRtoCsvUploadJob, getRtoCsvUploadJob, updateRtoCsvUploadJob,
   createOrderPunchJob, getOrderPunchJob, failOrderPunchJob, setOrderPunchJobStopRequested,
   getOrderPunchJobRowsForExport, getOrderPunchSettings, upsertOrderPunchSetting,

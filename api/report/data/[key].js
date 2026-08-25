@@ -6,7 +6,7 @@
 // the Vercel Hobby plan's 12-serverless-function cap. req.query.key selects which
 // data source/permission-card this request is for.
 const { getSession } = require('../../_lib/session');
-const { logAccess, getCallingOverviewData } = require('../../_lib/db');
+const { logAccess, getCallingOverviewData, getCallingTrendData } = require('../../_lib/db');
 const { signedReportUrl } = require('../../_lib/reportUrls');
 
 const DATA_ROUTES = {
@@ -24,6 +24,11 @@ const DATA_ROUTES = {
   csat: { file: 'csat_dashboard_data.json', card: 'deepdive', page: '/deepdive', redirect: true },
   'agent-activity': { file: 'agent_activity_data.json', card: 'deepdive', page: '/deepdive', redirect: true },
   'calling-overview': { card: 'calling', tab: 'overview', page: '/calling-overview', query: getCallingOverviewData },
+  // Served to the RTO CRM page itself (tab 'rto'), not a report page - the Call Trend chart
+  // under its Time-of-Day table. Here rather than as api/calling/trend.js because this repo is
+  // at the Vercel Hobby plan's 12-serverless-function cap, which is the same reason this
+  // dynamic route exists at all.
+  'calling-trend': { card: 'calling', tab: 'rto', page: '/rto-crm', query: getCallingTrendData },
   'trend-digest': { file: 'trend_digest.json', card: 'orgoverview', page: '/orgoverview', redirect: true },
 };
 
