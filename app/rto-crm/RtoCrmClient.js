@@ -3246,7 +3246,6 @@ import CallTrendChart from './CallTrendChart';
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Disposed</th>
                                 <th className="py-2 px-3 font-bold" title="Average time-of-day of the first disposition across the range's active days">First Called At</th>
                                 <th className="py-2 px-3 font-bold" title="Average time between a lead's assignment and its disposition (Disposed At - Assigned At), across disposed leads with both timestamps">FRT</th>
-                                <th className="py-2 px-3 font-bold" title="Average time between one disposal and this agent's next one - how long before they picked up the next call. Gaps never cross a day; every same-day gap counts at its real duration, breaks included.">Avg Time to Dispose</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Connected</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Total Connected / Total Disposed">Connected %</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Prepaid Assigned</th>
@@ -3281,7 +3280,6 @@ import CallTrendChart from './CallTrendChart';
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.disposed}</td>
                                     <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(am.firstCalledAtMinutes)}</td>
                                     <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatFrt(am.frtMinutes)}</td>
-                                    <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatFrt(am.disposeGapMinutes)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{am.connected}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{formatPct(am.connected, am.disposed)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.prepaidAssigned}</td>
@@ -3307,7 +3305,6 @@ import CallTrendChart from './CallTrendChart';
                                   <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.disposed}</td>
                                   <td className="py-2.5 px-3 text-zinc-500">—</td>
                                   <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Average across disposed leads with both timestamps">{formatFrt(summaryAvgFrt)}</td>
-                                  <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Mean of the agents' own averages, not a pooled recount">{formatFrt(summaryAvgDisposeGap)}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{summaryTotals.connected}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{formatPct(summaryTotals.connected, summaryTotals.disposed)}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.prepaidAssigned}</td>
