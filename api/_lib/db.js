@@ -1161,18 +1161,38 @@ async function claimNdrLead(awbNumber, email) {
   invalidateCache('calling:ndrLeadDates');
 }
 
-// NDR's own equivalent of the disposal half of recordLeadDisposition above - updates the
-// SAME live row claimNdrLead created, never inserts one: a disposition is only ever recorded
-// for a lead that's already been claimed (see the Call modal's claim-then-dispose sequence),
-// so there's nothing to upsert here unlike RTO's version (which also has to handle a
-// self-claimed lead with no prior assignment row).
-async function disposeNdrLead(awbNumber, disposition, agentRemarks) {
+// NDR's own equivalent of the disposal half of recordLeadDisposition above - updates the live
+// row claimNdrLead (or scripts/assign_ndr_leads.py's record_new_assignments) created.
+//
+// It does NOT assume that row exists. The original version only ever UPDATEd, on the reasoning
+// that a disposition can only follow a claim - true of the sheet, but the claim's MySQL half is
+// a separate best-effort write that can be missing, and then this UPDATE matches zero rows and
+// says nothing. That is how 1,483 disposed NDR leads ended up unrepresented here by 2026-08-25
+// (1,257 with no row at all, 226 with a row still showing open) while the sheet was correct
+// throughout: every reader of this table - getAllNdrLeadDates, the CRM's Agent Performance
+// Summary - was silently behind, with no error anywhere to notice.
+//
+// So a zero-row UPDATE now inserts the cycle already stamped disposed, which makes the mirror
+// self-healing: the assignment half failing no longer loses the disposal too. email is needed
+// for that insert (NOT NULL) and is the disposing agent's own - the same value the claim would
+// have written.
+async function disposeNdrLead(awbNumber, disposition, agentRemarks, email) {
   await ensureSchema();
-  await sql`
+  const { affectedRows } = await sql`
     UPDATE ndr_lead_assignments
     SET disposed_at = NOW(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null}
     WHERE awb_number = ${awbNumber} AND reassigned_away_at IS NULL
   `;
+  if (!affectedRows && email) {
+    // INSERT IGNORE, same as claimNdrLead: if a concurrent claim won the live key between the
+    // UPDATE and here, that row is the real cycle and this disposal is already lost to a race
+    // no worse than before - never an error the agent has to see.
+    await sql`
+      INSERT IGNORE INTO ndr_lead_assignments
+        (awb_number, email, disposed_at, disposition, agent_remarks)
+      VALUES (${awbNumber}, ${email}, NOW(), ${disposition || null}, ${agentRemarks || null})
+    `;
+  }
   invalidateCache('calling:ndrLeadDates');
 }
 

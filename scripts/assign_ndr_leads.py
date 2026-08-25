@@ -22,6 +22,8 @@ already carrying that agent's email in Agent Name) rather than a separate Postgr
 """
 from datetime import datetime, timedelta, timezone
 
+import pymysql
+
 import lib
 import mysql_lib
 
@@ -214,42 +216,78 @@ def record_new_assignments(new_assignments):
     landing the retire without the insert, leaving a lead with no live cycle at all - invisible
     to any reader, even though the sheet says it is assigned.
 
-    Only one unique key is in play here (live_awb_number - see api/_lib/db.js's bootstrapSchema),
-    unlike CLS_RTO_calling's two, so - unlike record_lead_assignments - there's no need to catch
-    an IntegrityError and fall back to an UPDATE: retiring first always leaves the insert's
-    target key open.
+    Retiring first is meant to leave live_awb_number (the table's only unique key - see
+    api/_lib/db.js's bootstrapSchema) free for the insert, but it is not a guarantee, so the
+    insert still runs row-by-row with the same IntegrityError -> UPDATE fallback
+    record_lead_assignments has. Two ways the retire can miss and the insert then collide:
+    the stored awb_number differs from the sheet's string (stray apostrophe/whitespace, or a
+    numeric AWB that came back from Sheets as "5.4E+13" - see api/_lib/rtoCsvImport.js for that
+    exact failure on the RTO side), or the same AWB appears on two sheet rows in ONE batch. The
+    duplicate-within-a-batch case is removed outright by deduping below - the NDR sheet really
+    does carry repeated AWBs (358 of them as of 2026-08-25) - but a batch-wide rollback over one
+    unmatched row is exactly how this write went 4 days recording nothing, so the remaining
+    collision is absorbed per row rather than allowed to discard the whole batch.
 
-    Best-effort: a MySQL write failure here must never undo or block the sheet write that
-    already succeeded - the sheet is what the CRM reads from, this is just history."""
+    database is pinned to PRESENCE_SCHEMA, not inherited from MYSQL_DATABASE - same reason as
+    every mysql_lib.query call in this file, see PRESENCE_SCHEMA's own comment.
+
+    Returns True on success, False if the write failed. Still best-effort in the sense that it
+    never raises here and never undoes the sheet write that already succeeded - but main() DOES
+    fail the run on a False, after printing its summary. Swallowing it entirely is what let this
+    stop writing on 2026-08-21 and go unnoticed until agents complained: the sheet kept being
+    assigned correctly while every reader of this table (the CRM's Agent Performance Summary,
+    /api/auth/leadDates?process=ndr) stayed frozen."""
     if not new_assignments:
-        return
+        return True
     cred = mysql_lib.get_credential()
     if cred is None:
         print("  (MYSQL_* credentials not configured - skipping ndr_lead_assignments write)")
-        return
-    import pymysql
+        return True
     now = datetime.now(timezone.utc).replace(tzinfo=None)  # see fetch_current_assignment_times: stored naive-but-UTC
-    conn = pymysql.connect(
-        host=cred["host"], user=cred["user"], password=cred["password"],
-        database=cred["database"], port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
-    )
+    # Last agent wins for a repeated AWB, matching the sheet: the later row's Agent Name write
+    # is the one an agent sees, and only one live row per AWB can exist anyway.
+    batch = list({awb: email for awb, email in new_assignments}.items())
+    conn = None
     try:
+        # Inside the try, unlike before: a connect failure used to propagate out of here and
+        # kill main() straight after the sheet write, losing even the "Assigned N lead(s)"
+        # summary of what had just been handed out.
+        conn = pymysql.connect(
+            host=cred["host"], user=cred["user"], password=cred["password"],
+            database=PRESENCE_SCHEMA, port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
+        )
         cur = conn.cursor()
         cur.executemany(
             "UPDATE ndr_lead_assignments SET reassigned_away_at = %s "
             "WHERE awb_number = %s AND reassigned_away_at IS NULL",
-            [(now, awb) for awb, _email in new_assignments],
+            [(now, awb) for awb, _email in batch],
         )
-        cur.executemany(
-            "INSERT INTO ndr_lead_assignments (awb_number, email, assigned_at) VALUES (%s, %s, %s)",
-            [(awb, email, now) for awb, email in new_assignments],
-        )
+        for awb, email in batch:
+            try:
+                cur.execute(
+                    "INSERT INTO ndr_lead_assignments (awb_number, email, assigned_at) "
+                    "VALUES (%s, %s, %s)",
+                    (awb, email, now),
+                )
+            except pymysql.err.IntegrityError as e:
+                if "ndr_lead_assignments_live_awb_key" not in str(e):
+                    raise  # not this AWB's own live row - a real error, don't paper over it
+                cur.execute(
+                    "UPDATE ndr_lead_assignments SET email = %s, assigned_at = %s "
+                    "WHERE awb_number = %s AND reassigned_away_at IS NULL",
+                    (email, now, awb),
+                )
         conn.commit()
+        return True
     except Exception as e:
-        conn.rollback()
-        print(f"  (ndr_lead_assignments write failed: {e} - sheet assignment already stands)")
+        if conn is not None:
+            conn.rollback()
+        print(f"  !! ndr_lead_assignments write FAILED for {len(batch)} lead(s): {e}")
+        print("     (the sheet assignment above already stands - this is the history mirror only)")
+        return False
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def main():
@@ -349,7 +387,7 @@ def main():
     for start in range(0, len(value_ranges), 300):
         lib.set_sheet_values_batch(SPREADSHEET_ID, value_ranges[start:start + 300])
 
-    record_new_assignments(new_assignments)
+    mirrored = record_new_assignments(new_assignments)
 
     print(f"Assigned {len(value_ranges)} lead(s):")
     for email, count in sorted(assigned_count.items()):
@@ -360,6 +398,17 @@ def main():
     if no_agent_for_bucket > 0:
         print(f"  ({no_agent_for_bucket} unassigned lead(s) left over - no online agent's "
               f"filters cover them)")
+
+    # Deliberately AFTER the summary above, and deliberately fatal: the sheet write already
+    # stands and the run's real work is reported, but the invocation has to go red so the
+    # failure surfaces (Lambda error metric / a red workflow run) instead of scrolling past in
+    # logs nobody reads. That is exactly how the 2026-08-21 mirror break survived 4 days.
+    if not mirrored:
+        raise RuntimeError(
+            f"{len(value_ranges)} lead(s) were assigned in the sheet but NOT mirrored into "
+            f"ndr_lead_assignments - see the error above. Sheet is correct; NDR reporting "
+            f"(Agent Performance Summary, /api/auth/leadDates?process=ndr) is now behind."
+        )
 
 
 if __name__ == "__main__":

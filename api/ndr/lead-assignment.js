@@ -43,7 +43,9 @@ module.exports = async (req, res) => {
     }
     if (action === 'dispose') {
       const { disposition, agentRemarks } = req.body || {};
-      await disposeNdrLead(awbNumber, disposition, agentRemarks);
+      // email: only used if no live row exists to update, in which case disposeNdrLead inserts
+      // the cycle itself - stamped from the session, never client-supplied, same as 'claim'.
+      await disposeNdrLead(awbNumber, disposition, agentRemarks, session.email);
       res.status(200).json({ ok: true });
       return;
     }

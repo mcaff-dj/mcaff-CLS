@@ -112,6 +112,17 @@ STALE_MINUTES = 10  # must match the CRM's own heartbeat cadence assumptions
 # see lookup_platform_order_ids.
 ITEM_LEVEL_SCHEMA = "mcaff_prod"
 
+# The app's own schema, where CLS_RTO_calling / agent_presence / calling_agent_process /
+# calling_business_hours / gokwik_refund_checks all live. Pinned on record_lead_assignments'
+# raw pymysql connection rather than inherited from MYSQL_DATABASE, which is only PEP_CLS by
+# convention (.env.local points it at mcaff_prod, where an unqualified read of any of these
+# raises 1142 "SELECT command denied"). assign_ndr_leads.py's PRESENCE_SCHEMA comment has the
+# longer version.
+# ponytail: the mysql_lib.query reads in this file still inherit MYSQL_DATABASE - they work in
+# the Lambda and were left alone; pass database=APP_SCHEMA on each if this file ever needs to
+# run somewhere MYSQL_DATABASE isn't PEP_CLS.
+APP_SCHEMA = "PEP_CLS"
+
 GOKWIK_REFUND_STATUS_URL = "https://gkx.gokwik.co/v1/payments/refunds"
 GOKWIK_TIMEOUT_SEC = 8
 
@@ -771,7 +782,7 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
     now = datetime.now(timezone.utc).replace(tzinfo=None)  # see fetch_current_assignment_times: stored naive-but-UTC
     conn = pymysql.connect(
         host=cred["host"], user=cred["user"], password=cred["password"],
-        database=cred["database"], port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
+        database=APP_SCHEMA, port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
     )
     try:
         cur = conn.cursor()
