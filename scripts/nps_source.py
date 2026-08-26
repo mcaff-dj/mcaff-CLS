@@ -43,6 +43,18 @@ import mysql_lib
 
 DWH_DATABASE = "PEP_CLS"
 
+# nps_delivery.top_rated_area stores raw single-choice codes ("1".."4", plus literal "Other"
+# and "NA") for "which area mattered most to your experience" - the labels below are NOT
+# derivable from the table itself (no codebook column, response_metadata is empty on every
+# row checked, and no other column's fill pattern correlates cleanly with a given code), so
+# this mapping is as given by Soumya (2026-08-26), not reverse-engineered from the data.
+TOP_RATED_AREA_LABELS = {
+    "1": "Delivery experience",
+    "2": "Customer support",
+    "3": "Product",
+    "4": "Website / app experience",
+}
+
 
 def _month_label(yr, mo):
     """Matches the sheet's own month-label format (e.g. "7_Jul'26") that
@@ -225,4 +237,52 @@ def fetch_product_wise_nps(mysql_brand):
             "months": months,
         })
     out.sort(key=lambda r: r["responses"], reverse=True)
+    return out
+
+
+def fetch_top_rated_area(mysql_brand):
+    """Top Rated Area: nps_delivery.top_rated_area, one row per response - straight GROUP BY,
+    same shape idea as fetch_delivery_nps but bucketed by area instead of by month.
+
+    Raw values are "1".."4" (mapped via TOP_RATED_AREA_LABELS above), the literal string
+    "Other" (write-in captured separately in other_l1_specify, not read here), the literal
+    string "NA", and NULL (question skipped/not shown to that respondent) - "NA" and NULL are
+    collapsed into one "Not answered" bucket for display since they mean the same thing to a
+    report reader; "Other" is kept as its own row rather than folded into either.
+
+    Returns a list of dicts sorted by count descending, e.g.
+    [{"area": "Product", "code": "3", "count": 78559, "pct": 47.3}, ...]."""
+    rows = mysql_lib.query(
+        """
+        SELECT top_rated_area, COUNT(*) AS c
+        FROM nps_delivery
+        WHERE brand = %s
+        GROUP BY top_rated_area
+        """,
+        params=(mysql_brand,),
+        database=DWH_DATABASE,
+    )
+    if rows is None:
+        raise RuntimeError("MySQL credentials not configured - set MYSQL_HOST/USER/PASSWORD/DATABASE (or .env.local).")
+
+    not_answered = 0
+    by_label = {}
+    total = 0
+    for code, count in rows:
+        count = int(count)
+        total += count
+        if code in TOP_RATED_AREA_LABELS:
+            by_label[TOP_RATED_AREA_LABELS[code]] = by_label.get(TOP_RATED_AREA_LABELS[code], 0) + count
+        elif code == "Other":
+            by_label["Other"] = by_label.get("Other", 0) + count
+        else:  # None or "NA"
+            not_answered += count
+    if not_answered:
+        by_label["Not answered"] = not_answered
+
+    out = [
+        {"area": area, "count": count, "pct": round(count / total * 100, 1) if total else None}
+        for area, count in by_label.items()
+    ]
+    out.sort(key=lambda r: r["count"], reverse=True)
     return out

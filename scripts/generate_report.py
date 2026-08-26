@@ -281,6 +281,14 @@ def main():
             nps_cache["prodwise_nps"] = prodwise_nps
             with open(nps_cache_path, "w", encoding="utf-8") as f:
                 json.dump(nps_cache, f, separators=(",", ":"))
+        # Older caches predate the "Top Rated Area" breakdown - same backfill-in-place idea.
+        top_rated_area = nps_cache.get("top_rated_area")
+        if top_rated_area is None:
+            print(f"[{b['brand']}] no cached top-rated-area breakdown yet, querying...")
+            top_rated_area = nps_source.fetch_top_rated_area(b["nps_mysql_brand"])
+            nps_cache["top_rated_area"] = top_rated_area
+            with open(nps_cache_path, "w", encoding="utf-8") as f:
+                json.dump(nps_cache, f, separators=(",", ":"))
     else:
         reason = "--refresh-nps" if args.refresh_nps else "no cache yet"
         print(f"[{b['brand']}] querying NPS tables ({reason})...")
@@ -292,9 +300,11 @@ def main():
             nps_source.fetch_product_nps(b["nps_mysql_brand"]), sheet_prodnps, NPS_SHEET_OVERRIDE_MONTHS)
         # Product wise NPS (per product name, not per month) - no sheet override, MySQL-only.
         prodwise_nps = nps_source.fetch_product_wise_nps(b["nps_mysql_brand"])
+        # Top Rated Area breakdown (which area mattered most) - also no sheet override, MySQL-only.
+        top_rated_area = nps_source.fetch_top_rated_area(b["nps_mysql_brand"])
         nps_cache_path.parent.mkdir(parents=True, exist_ok=True)
         with open(nps_cache_path, "w", encoding="utf-8") as f:
-            json.dump({"mom": mom, "prodnps": prodnps, "prodwise_nps": prodwise_nps}, f, separators=(",", ":"))
+            json.dump({"mom": mom, "prodnps": prodnps, "prodwise_nps": prodwise_nps, "top_rated_area": top_rated_area}, f, separators=(",", ":"))
 
     rtoconv_cache_path = REPO_ROOT / f"data/{b['brand']}_rtoconv_cache.json"
     if args.quick and rtoconv_cache_path.exists():
@@ -314,7 +324,7 @@ def main():
     agent, ai = agent_hist, ai_hist
 
     ctx.data_rows = data_rows
-    ctx.mom, ctx.prodnps, ctx.prodwise_nps, ctx.agent, ctx.ai = mom, prodnps, prodwise_nps, agent, ai
+    ctx.mom, ctx.prodnps, ctx.prodwise_nps, ctx.top_rated_area, ctx.agent, ctx.ai = mom, prodnps, prodwise_nps, top_rated_area, agent, ai
     ctx.months = b["months"]
     ctx.n = len(ctx.months)
     # ctx.months is a list, and nearly every per-row loop in the panel builders needs the

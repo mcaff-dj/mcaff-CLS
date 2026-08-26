@@ -552,13 +552,49 @@ def build_combo2(rows, title, score_label, score_max):
     return "".join(parts)
 
 
+def build_top_rated_area_panel(ctx):
+    """Top Rated Area: nps_delivery.top_rated_area, "which area mattered most to your
+    experience" (ctx.top_rated_area, see nps_source.fetch_top_rated_area) - a single-choice
+    breakdown, not a monthly trend, so a horizontal bar list rather than build_combo2's
+    line+bar chart. "Not answered" (collapsed NA/NULL) is real signal (a third of responses
+    don't answer this question at all) so it's shown, not dropped."""
+    rows = ctx.top_rated_area or []
+    if not rows:
+        return ""
+    total = sum(r["count"] for r in rows)
+    max_count = max(r["count"] for r in rows)
+    bars = []
+    for r in rows:
+        width = round(r["count"] / max_count * 100, 1) if max_count else 0
+        muted = " style='opacity:.55'" if r["area"] == "Not answered" else ""
+        bars.append(
+            f"<div class='tra-row'{muted}><span class='tra-label'>{h_enc(r['area'])}</span>"
+            f"<span class='tra-bar-wrap'><span class='tra-bar' style='width:{width}%'></span></span>"
+            f"<span class='tra-num'>{n0(r['count'])} <span class='tra-pct'>({fnum(r['pct'])}%)</span></span></div>"
+        )
+    return (
+        "<div class='pivot-wrap'><div class='pivot-title'>Top Rated Area</div>"
+        "<p class='desc'>Which area mattered most to the respondent's experience, out of "
+        f"{n0(total)} total survey responses.</p>"
+        "<style>.tra-row{display:flex;align-items:center;gap:10px;margin:6px 0}"
+        ".tra-label{width:190px;flex:0 0 auto;font-size:13px}"
+        ".tra-bar-wrap{flex:1 1 auto;background:var(--s7,#eee);border-radius:3px;height:14px;overflow:hidden}"
+        ".tra-bar{display:block;height:100%;background:var(--s2,#4a90d9);border-radius:3px}"
+        ".tra-num{width:130px;flex:0 0 auto;text-align:right;font-size:13px}"
+        ".tra-pct{color:var(--muted,#888)}</style>"
+        f"<div>{''.join(bars)}</div></div>"
+    )
+
+
 def build_nps_panel(ctx):
     o = build_combo2(ctx.mom, "NPS - Overall", "NPS%", 100)
     p = build_combo2(ctx.prodnps, "NPS - Product", "NPS", 100)
+    tra = build_top_rated_area_panel(ctx)
     from gen_insights import get_score_insight
     insights = build_insights_card("Insights &mdash; NPS", [get_score_insight(ctx.mom, "Overall NPS", 30, 0), get_score_insight(ctx.prodnps, "Product NPS", 30, 0)])
     return (f'<div class="tab-panel" id="panel-nps"><section><h2>Net Promoter Score</h2>'
-            f'<p class="desc">Monthly survey responses (bars, right axis) against NPS (line, left axis).</p>{o}</section><section>{p}</section>{insights}</div>')
+            f'<p class="desc">Monthly survey responses (bars, right axis) against NPS (line, left axis).</p>{o}</section>'
+            f'<section>{p}</section><section>{tra}</section>{insights}</div>')
 
 
 def build_csat_panel(ctx):
