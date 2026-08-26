@@ -9,19 +9,77 @@
 // escalation.css's BEM classes (modalOverlay/modalCard/importStat/etc.) - escalation.css is
 // scoped to app/escalation and is never loaded on this page, so this reuses RtoCrmClient's own
 // dark-card styling instead of names that would render unstyled here.
+//
+// Large files are split into chunks before any of that: /upload-start takes the whole CSV as a
+// JSON string body, capped at 5mb by api/_lambda/app.js's express.json limit and, harder still,
+// at 10mb by API Gateway itself (not configurable - see that file's own comment on the matching
+// 6mb response ceiling). A file anywhere near either cap came back as a bare "Upload failed",
+// since API Gateway's own rejection body uses `message`, not the `error` field this modal reads.
+// splitCsvIntoChunks keeps every chunk far under both, and chunks upload one at a time, waiting
+// for each job to reach a terminal status before starting the next - so each chunk's own
+// against-sheet AWB dedup (done server-side, per chunk) sees the previous chunk's rows as already
+// appended. A real duplicate AWB that happens to land in two different chunks still gets caught,
+// just as "duplicate in sheet" on the second chunk instead of "duplicate in file" - same end
+// result as uploading it in one request.
 import { useState, useRef, useEffect } from 'react';
 import { Overlay, XIcon, Stat } from '../_calling/ui';
 
 const POLL_INTERVAL_MS = 3000;
 const TERMINAL_STATUSES = new Set(['done', 'failed']);
+const CHUNK_MAX_ROWS = 2000; // well under the server's own 5000-row MAX_ROWS (api/rto/upload-start.js)
+const CHUNK_MAX_BYTES = 3 * 1024 * 1024; // raw CSV text; leaves headroom under the 5mb JSON body limit after quote-escaping overhead
+
+// Quote-aware line scan (CSV fields can contain embedded newlines) - returns raw line substrings,
+// untouched, so re-joining a subset of them back into a chunk is byte-identical to the source file.
+function splitCsvLines(text) {
+  const lines = [];
+  let start = 0;
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      if (inQuotes && text[i + 1] === '"') { i++; continue; }
+      inQuotes = !inQuotes;
+    } else if (c === '\n' && !inQuotes) {
+      let end = i;
+      if (text[end - 1] === '\r') end--;
+      lines.push(text.slice(start, end));
+      start = i + 1;
+    }
+  }
+  if (start < text.length) lines.push(text.slice(start).replace(/\r$/, ''));
+  return lines.filter((l) => l.length > 0);
+}
+
+function splitCsvIntoChunks(text) {
+  const lines = splitCsvLines(text);
+  if (lines.length < 2) return [text]; // header-only/empty - let the server give its usual error
+  const [header, ...dataLines] = lines;
+  const encoder = new TextEncoder();
+  const chunks = [];
+  let current = [];
+  let currentBytes = 0;
+  for (const line of dataLines) {
+    const lineBytes = encoder.encode(line).length + 1;
+    if (current.length && (current.length >= CHUNK_MAX_ROWS || currentBytes + lineBytes > CHUNK_MAX_BYTES)) {
+      chunks.push([header, ...current].join('\n'));
+      current = []; currentBytes = 0;
+    }
+    current.push(line); currentBytes += lineBytes;
+  }
+  if (current.length) chunks.push([header, ...current].join('\n'));
+  return chunks.length ? chunks : [text];
+}
 
 export default function RtoUploadModal({ onClose, onDone }) {
   const [file, setFile] = useState(null);
   const [csvText, setCsvText] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [startResult, setStartResult] = useState(null); // response from /upload-start
-  const [jobStatus, setJobStatus] = useState(null); // latest /upload-status poll
+  const [startResult, setStartResult] = useState(null); // response from /upload-start, for the current chunk
+  const [jobStatus, setJobStatus] = useState(null); // latest /upload-status poll, for the current chunk
+  const [batchInfo, setBatchInfo] = useState(null); // { index, total } while chunks.length > 1
+  const [cumulative, setCumulative] = useState(null); // totals across all chunks processed so far
   const [error, setError] = useState('');
   const inputRef = useRef(null);
   const pollRef = useRef(null);
@@ -35,54 +93,89 @@ export default function RtoUploadModal({ onClose, onDone }) {
       return;
     }
     const reader = new FileReader();
-    reader.onload = () => { setCsvText(String(reader.result || '')); setFile(f); setError(''); setStartResult(null); setJobStatus(null); };
+    reader.onload = () => { setCsvText(String(reader.result || '')); setFile(f); setError(''); setStartResult(null); setJobStatus(null); setBatchInfo(null); setCumulative(null); };
     reader.onerror = () => setError('Could not read file');
     reader.readAsText(f);
   }
 
-  function pollJob(jobId) {
-    pollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/rto/upload-status?jobId=${jobId}`);
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Could not fetch status');
-        setJobStatus(data);
-        if (TERMINAL_STATUSES.has(data.status)) {
+  // Resolves with the final /upload-status payload once the job hits a terminal status, updating
+  // jobStatus on every tick along the way so the existing render block stays live during the wait.
+  function pollJobAsync(jobId) {
+    return new Promise((resolve, reject) => {
+      pollRef.current = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/rto/upload-status?jobId=${jobId}`);
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Could not fetch status');
+          setJobStatus(data);
+          if (TERMINAL_STATUSES.has(data.status)) {
+            clearInterval(pollRef.current);
+            resolve(data);
+          }
+        } catch (e) {
           clearInterval(pollRef.current);
-          if (data.status === 'done') onDone();
+          reject(e);
         }
-      } catch (e) {
-        clearInterval(pollRef.current);
-        setError(e.message);
-      }
-    }, POLL_INTERVAL_MS);
+      }, POLL_INTERVAL_MS);
+    });
+  }
+
+  // Runs one chunk through /upload-start (+ /upload-status if it queued a job) and returns its
+  // stats for the caller to fold into the running cumulative total. Throws on anything that means
+  // this chunk landed nowhere - the caller stops the batch there rather than silently continuing.
+  async function uploadChunk(chunkText) {
+    const res = await fetch('/api/rto/upload-start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ csv: chunkText }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    setStartResult(data);
+    if (data.jobId) {
+      setJobStatus({ status: 'queued', checkedCount: 0, prepaidCount: data.prepaidQueued });
+      const finalJob = await pollJobAsync(data.jobId);
+      if (finalJob.status === 'failed') throw new Error(finalJob.errorMessage || 'Upload failed');
+      return { start: data, finalJob };
+    }
+    if (data.queueError) {
+      // Nothing is written to the sheet by /upload-start any more, so a queueing failure means
+      // this chunk landed nowhere. Surface it rather than silently continuing to the next chunk.
+      throw new Error(data.queueError);
+    }
+    return { start: data, finalJob: null }; // every row in this chunk was a duplicate/reject
   }
 
   async function handleUpload() {
     if (!csvText.trim()) { setError('No CSV content to upload'); return; }
-    setSubmitting(true); setError(''); setStartResult(null); setJobStatus(null);
+    setSubmitting(true); setError(''); setStartResult(null); setJobStatus(null); setBatchInfo(null); setCumulative(null);
+    const chunks = splitCsvIntoChunks(csvText);
+    const isBatch = chunks.length > 1;
+    const cum = {
+      queuedForCheck: 0, duplicateInSheet: 0, duplicateInFile: 0, missingAwb: 0, scientificAwb: 0, total: 0,
+      appendedCount: 0, alreadyRefundedCount: 0, alreadyPunchedCount: 0,
+    };
+    let idx = 0;
     try {
-      const res = await fetch('/api/rto/upload-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ csv: csvText }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Upload failed');
-      setStartResult(data);
-      if (data.jobId) {
-        setJobStatus({ status: 'queued', checkedCount: 0, prepaidCount: data.prepaidQueued });
-        pollJob(data.jobId);
-      } else if (data.queueError) {
-        // Nothing is written to the sheet by /upload-start any more, so a queueing failure
-        // means the whole upload landed nowhere. Surface it rather than silently calling
-        // onDone(), which would read as "all done".
-        setError(data.queueError);
-      } else {
-        onDone(); // every row was a duplicate/reject - there was nothing to queue
+      for (; idx < chunks.length; idx++) {
+        if (isBatch) { setBatchInfo({ index: idx + 1, total: chunks.length }); setStartResult(null); setJobStatus(null); }
+        const { start, finalJob } = await uploadChunk(chunks[idx]);
+        cum.queuedForCheck += start.queuedForCheck || 0;
+        cum.duplicateInSheet += start.duplicateInSheet || 0;
+        cum.duplicateInFile += start.duplicateInFile || 0;
+        cum.missingAwb += start.missingAwb || 0;
+        cum.scientificAwb += start.scientificAwb || 0;
+        cum.total += start.total || 0;
+        if (finalJob) {
+          cum.appendedCount += finalJob.appendedCount || 0;
+          cum.alreadyRefundedCount += finalJob.alreadyRefundedCount || 0;
+          cum.alreadyPunchedCount += finalJob.alreadyPunchedCount || 0;
+        }
+        if (isBatch) setCumulative({ ...cum });
       }
+      onDone();
     } catch (e) {
-      setError(e.message);
+      setError(isBatch ? `Stopped at file ${idx + 1} of ${chunks.length}: ${e.message}` : e.message);
     } finally {
       setSubmitting(false);
     }
@@ -127,6 +220,19 @@ export default function RtoUploadModal({ onClose, onDone }) {
 
         {error && (
           <div className="p-2.5 rounded-lg bg-rose-950/30 border border-rose-900/40 text-[12px] text-rose-300">{error}</div>
+        )}
+
+        {batchInfo && (
+          <div className="text-[12px] text-zinc-400">
+            File too big for one request - split into {batchInfo.total} batches. Uploading batch {batchInfo.index} of {batchInfo.total}…
+          </div>
+        )}
+
+        {cumulative && (
+          <div className="flex flex-wrap gap-2">
+            <Stat tone="ok">{cumulative.appendedCount} appended so far (all batches)</Stat>
+            <Stat>{cumulative.total} rows read so far (all batches)</Stat>
+          </div>
         )}
 
         {startResult && (
