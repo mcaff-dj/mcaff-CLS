@@ -48,7 +48,10 @@ const NDR_EXPECTED_SHEET_HEADER = {
   B: 'Customer Name',
   D: 'Customer Mobile',
   E: 'AWB',
-  F: 'Partner',
+  // 'Partner name', not 'Partner' - verified against the live header row of both NDR sheets
+  // (2026-08-26). The original 'Partner' never matched, so checkSheetLayout failed every NDR
+  // upload with "Sheet column layout has changed unexpectedly" from the day this shipped.
+  F: 'Partner name',
   G: 'Address',
   H: 'Pincode',
   I: 'City',
