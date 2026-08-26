@@ -29,8 +29,23 @@ const TERMINAL_STATUSES = new Set(['done', 'failed']);
 const CHUNK_MAX_ROWS = 2000; // well under the server's own 5000-row MAX_ROWS (api/rto/upload-start.js)
 const CHUNK_MAX_BYTES = 3 * 1024 * 1024; // raw CSV text; leaves headroom under the 5mb JSON body limit after quote-escaping overhead
 
+// A request that's still too big (or a Lambda cold-start timeout) can come back from API
+// Gateway/CloudFront as an HTML or plain-text error page rather than JSON - res.json() on that
+// throws a bare "JSON.parse: unexpected character..." with no indication of what actually failed.
+// Read the body as text first so a non-JSON response becomes a readable error instead of a crash.
+async function readJsonResponse(res) {
+  const text = await res.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(`Server returned a non-JSON response (${res.status}): ${text.slice(0, 200) || res.statusText}`);
+  }
+}
+
 // Quote-aware line scan (CSV fields can contain embedded newlines) - returns raw line substrings,
 // untouched, so re-joining a subset of them back into a chunk is byte-identical to the source file.
+// Splits on \n, \r\n, and a bare \r (old Excel/Mac exports use \r alone) - all only when unquoted,
+// so a real multi-line value inside quotes is never mistaken for a row break.
 function splitCsvLines(text) {
   const lines = [];
   let start = 0;
@@ -40,14 +55,13 @@ function splitCsvLines(text) {
     if (c === '"') {
       if (inQuotes && text[i + 1] === '"') { i++; continue; }
       inQuotes = !inQuotes;
-    } else if (c === '\n' && !inQuotes) {
-      let end = i;
-      if (text[end - 1] === '\r') end--;
-      lines.push(text.slice(start, end));
+    } else if (!inQuotes && (c === '\n' || c === '\r')) {
+      lines.push(text.slice(start, i));
+      if (c === '\r' && text[i + 1] === '\n') i++; // CRLF - consume both as one break
       start = i + 1;
     }
   }
-  if (start < text.length) lines.push(text.slice(start).replace(/\r$/, ''));
+  if (start < text.length) lines.push(text.slice(start));
   return lines.filter((l) => l.length > 0);
 }
 
@@ -105,7 +119,7 @@ export default function RtoUploadModal({ onClose, onDone }) {
       pollRef.current = setInterval(async () => {
         try {
           const res = await fetch(`/api/rto/upload-status?jobId=${jobId}`);
-          const data = await res.json();
+          const data = await readJsonResponse(res);
           if (!res.ok) throw new Error(data.error || 'Could not fetch status');
           setJobStatus(data);
           if (TERMINAL_STATUSES.has(data.status)) {
@@ -129,7 +143,7 @@ export default function RtoUploadModal({ onClose, onDone }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ csv: chunkText }),
     });
-    const data = await res.json();
+    const data = await readJsonResponse(res);
     if (!res.ok) throw new Error(data.error || 'Upload failed');
     setStartResult(data);
     if (data.jobId) {
