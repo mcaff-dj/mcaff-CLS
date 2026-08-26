@@ -43,21 +43,60 @@ const { deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS, bulkDisposeDeliveryE
 // 5. An unknown view is rejected rather than silently matching everything.
 assert.throws(() => deWhere('everything', {}), /Unknown Delivery-Escalation view/);
 
-// 6. Overview's day-wise bucket: a still-open ticket (no disposed_at yet) must bucket by days
-// elapsed AS OF TODAY, not fall into 'unresolved' - that's the exact regression "assume today's
-// date as delivered" was asked to fix. Guards the SQL text itself since there's no DB here to
-// run the CASE against.
+// 6. Overview's day-wise bucket. Guards the SQL text itself since there's no DB here to run the
+// CASE against.
+//
+// This case previously asserted the ORIGINAL rule - that a still-open ticket buckets by age as of
+// today, via COALESCE(disposed_at, CURDATE()). That rule was deliberately replaced in 4485e70
+// (the order-date / query-date toggle), which rewrote both the SQL and its explaining comment:
+// 'unresolved' is now EXACTLY the Fresh tab's own population, so a ticket sitting in Fresh sits
+// in 'unresolved' here too, whole and un-split, instead of being sliced across the age buckets by
+// how long it has been open - that's what makes this table's 'unresolved' line up with the Fresh
+// tile. Everything reaching the DATEDIFF buckets is therefore Delivered and has a real
+// disposed_at, so those buckets measure actual resolution time. The assertions below were never
+// updated to the new contract and failed for two days unnoticed, because nothing in this repo ran
+// the tests until `npm test` was wired up.
 {
-  assert.ok(DE_DAYWISE_BUCKET_SQL.includes('COALESCE(disposed_at, CURDATE())'),
-    'an unresolved dispose date must fall back to today, not stay NULL');
-  assert.ok(DE_DAYWISE_BUCKET_SQL.includes("added_date IS NULL THEN 'unresolved'"),
-    "'unresolved' must be reserved for a missing added_date, not a missing disposed_at");
-  assert.ok(!/disposed_at IS NULL THEN 'unresolved'/.test(DE_DAYWISE_BUCKET_SQL),
-    'a bare disposed_at IS NULL check must not resurrect the old always-unresolved behaviour');
+  const idxForced = DE_DAYWISE_BUCKET_SQL.indexOf("THEN 'Forced to be marked as RTO'");
+  const idxUnresolved = DE_DAYWISE_BUCKET_SQL.indexOf("THEN 'unresolved'");
+  const idxDatediff = DE_DAYWISE_BUCKET_SQL.indexOf('DATEDIFF(');
+  assert.ok(idxForced > -1, 'Forced RTO must have its own bucket');
+  assert.ok(idxUnresolved > -1, "the Fresh population must bucket as 'unresolved'");
+
+  // Branch ORDER is load-bearing, not cosmetic: the Forced-RTO and Fresh predicates overlap
+  // (both admit outcome = 'RTO'), so a Forced-RTO ticket only lands in its own bucket while that
+  // branch is evaluated first. Swap these two and every Forced RTO silently becomes 'unresolved'.
+  assert.ok(idxForced < idxUnresolved, 'Forced RTO must be tested before the Fresh/unresolved branch');
+  assert.ok(idxUnresolved < idxDatediff, 'unresolved must be tested before the age buckets');
+
+  // The age buckets measure real resolution time - disposed_at minus added_date - because every
+  // row that reaches them is Delivered. A COALESCE to CURDATE() here would re-introduce
+  // "age as of today" for rows the unresolved branch above has already claimed.
+  assert.ok(/DATEDIFF\(disposed_at, added_date\)/.test(DE_DAYWISE_BUCKET_SQL),
+    'age buckets must measure disposed_at - added_date, not age as of today');
+  assert.ok(!DE_DAYWISE_BUCKET_SQL.includes('CURDATE()'),
+    'no CURDATE() fallback: every row reaching the age buckets is Delivered with a real disposed_at');
+
+  // Defensive catch-all for a Delivered row somehow missing either date: it can't be dated, so it
+  // can't be aged, and it must not silently fall through to 'Greater than 10 days'.
+  assert.ok(/disposed_at IS NULL OR added_date IS NULL THEN 'unresolved'/.test(DE_DAYWISE_BUCKET_SQL),
+    'a Delivered row missing either date must fall back to unresolved, not into an age bucket');
+
+  // Ascending-severity DISPLAY order, deliberately not alphabetical (see the array's own comment
+  // in db.js) - the order is the table's column order, so it is part of the contract, not an
+  // implementation detail. This previously pinned the old alphabetical order and was not updated
+  // when ee10e50 reordered the buckets.
   assert.deepStrictEqual(DE_DAYWISE_BUCKETS, [
-    '4-8 days', '8-10 days', 'Forced to be marked as RTO', 'Greater than 10 days',
-    'unresolved', 'Within 2-4 days', 'Within 48 hrs',
+    'Within 48 hrs', 'Within 2-4 days', '4-8 days', '8-10 days', 'Greater than 10 days',
+    'Forced to be marked as RTO', 'unresolved',
   ]);
+  // Every bucket the CASE can emit must appear in the display list, or a date whose only tickets
+  // land in the missing bucket renders a row of zeros with the count silently dropped.
+  for (const label of ['Within 48 hrs', 'Within 2-4 days', '4-8 days', '8-10 days',
+    'Greater than 10 days', 'Forced to be marked as RTO', 'unresolved']) {
+    assert.ok(DE_DAYWISE_BUCKET_SQL.includes(`'${label}'`),
+      `bucket ${label} is listed for display but never emitted by the CASE`);
+  }
 }
 
 // 7. Bulk upload's view guard runs BEFORE any query - a bulk upload must be scoped to Fresh or

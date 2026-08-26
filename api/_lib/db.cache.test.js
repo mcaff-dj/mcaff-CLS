@@ -53,7 +53,19 @@ const { cachedRead, invalidateCache, CACHE_TTL_MS } = require('./db');
   assert.strictEqual(calls, 2, 'a rejected read must not be cached');
 
   // 5. The TTL is a real bound, not decorative - a stale entry is re-read once it lapses.
-  assert.ok(CACHE_TTL_MS > 0 && CACHE_TTL_MS <= 120000, 'TTL must be short enough to bound staleness');
+  //
+  // The ceiling is 5 minutes, not the 2 this originally asserted. The TTL was deliberately
+  // widened from 30s to 300000ms in f123568 ("widen Postgres read-cache TTL to cut Supabase
+  // egress"): the NDR/RTO lead-date full-table reads were cached for less time than the client's
+  // own 5-minute poll interval, so nearly every poll re-pulled the whole table and pushed egress
+  // past its 5GB quota. This assertion was never updated to match, so it failed silently -
+  // nothing in this repo ran the tests until `npm test` was wired up.
+  //
+  // The bound itself still matters and is deliberately pinned to the current value rather than
+  // given headroom: readCache is per-warm-container, so this figure is the ONLY thing bounding
+  // how long one container serves data another container has already overwritten. Raising it
+  // again should require editing this line and thinking about that.
+  assert.ok(CACHE_TTL_MS > 0 && CACHE_TTL_MS <= 300000, 'TTL must be a real, finite bound on staleness');
 
   console.log('db.cache.test.js: all cases passed');
 })();
