@@ -5,7 +5,8 @@
   "description": "Next.js frontend (app/) + access-gated report serving API (api/, deployed to Lambda).",
   "scripts": {
     "dev": "next dev",
-    "build": "next build"
+    "build": "next build",
+    "test": "node --test \"api/_lib/**/*.test.js\""
   },
   "dependencies": {
     "@aws-sdk/client-lambda": "^3.1109.0",
