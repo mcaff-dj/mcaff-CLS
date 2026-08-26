@@ -83,6 +83,13 @@ import CallTrendChart from './CallTrendChart';
     // from MySQL's CLS_RTO_calling live cycle - NOT rowDate/Calling Date). Mirrors
     // assign_leads.py's REASSIGN_MIN_HOLD_HOURS/fetch_current_assignment_times exactly.
     const REASSIGN_MIN_HOLD_MS = (leadAssignmentRules.reassignMinHoldHours || 0) * 3600000;
+    // How many of each online agent's open quota slots this preview holds back for
+    // reassignment candidates before fresh claims them - mirrors build_assignment_queue's
+    // reassign_reserve_per_agent in scripts/lead_priority.py exactly (see that function's
+    // docstring for why the plain fresh-then-reassign sort below alone starves reassignment
+    // forever once the fresh backlog stops emptying within a single run, which it routinely
+    // does on RTO).
+    const REASSIGN_RESERVE_PER_AGENT = leadAssignmentRules.reassignReservePerAgent || 0;
 
     function getPriorityTier(t) {
       if (t.paymentMethod === 'Prepaid') return 0;
@@ -1710,35 +1717,63 @@ import CallTrendChart from './CallTrendChart';
         };
 
         if (agentOrder.length > 0) {
-          for (const item of pool) {
-            const isPrepaidLead = item.tier === 0;
-            // Pass 1: a specialist for this lead's RTO reason gets first refusal, still
-            // subject to quota/exclusion/prepaid-target/reassign-payment-mode.
-            let assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent
-              && matchesReassignPaymentMode(email, item, isPrepaidLead)
-              && matchesSpecialist(email, item.ticket) && withinPrepaidTarget(email, isPrepaidLead));
-            // Pass 2: general round-robin, still respecting each agent's soft prepaid target
-            // and hard reassign-payment-mode filter.
-            if (assignedEmail == null) {
-              assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent
-                && matchesReassignPaymentMode(email, item, isPrepaidLead) && withinPrepaidTarget(email, isPrepaidLead));
+          const placed = new Set();
+          const assignPool = (items) => {
+            for (const item of items) {
+              if (placed.has(item)) continue; // already placed by an earlier pass (reserve retry)
+              const isPrepaidLead = item.tier === 0;
+              // Pass 1: a specialist for this lead's RTO reason gets first refusal, still
+              // subject to quota/exclusion/prepaid-target/reassign-payment-mode.
+              let assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent
+                && matchesReassignPaymentMode(email, item, isPrepaidLead)
+                && matchesSpecialist(email, item.ticket) && withinPrepaidTarget(email, isPrepaidLead));
+              // Pass 2: general round-robin, still respecting each agent's soft prepaid target
+              // and hard reassign-payment-mode filter.
+              if (assignedEmail == null) {
+                assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent
+                  && matchesReassignPaymentMode(email, item, isPrepaidLead) && withinPrepaidTarget(email, isPrepaidLead));
+              }
+              // Pass 3: every eligible agent is at/over their prepaid target - assign anyway
+              // rather than leave the lead unassigned purely to protect a soft ratio. The
+              // reassign-payment-mode filter stays hard even here - see its own comment.
+              if (assignedEmail == null) {
+                assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent
+                  && matchesReassignPaymentMode(email, item, isPrepaidLead));
+              }
+              if (assignedEmail) {
+                placed.add(item);
+                needed[assignedEmail] -= 1;
+                totalAssignedThisRun[assignedEmail] += 1;
+                if (isPrepaidLead) prepaidAssignedThisRun[assignedEmail] += 1;
+                rows.push({
+                  ticket: item.ticket, tier: item.tier, predictedAgent: assignedEmail,
+                  isReassignment: !!item.excludedAgent, rank: rows.length + 1,
+                });
+              }
             }
-            // Pass 3: every eligible agent is at/over their prepaid target - assign anyway
-            // rather than leave the lead unassigned purely to protect a soft ratio. The
-            // reassign-payment-mode filter stays hard even here - see its own comment.
-            if (assignedEmail == null) {
-              assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent
-                && matchesReassignPaymentMode(email, item, isPrepaidLead));
-            }
-            if (assignedEmail) {
-              needed[assignedEmail] -= 1;
-              totalAssignedThisRun[assignedEmail] += 1;
-              if (isPrepaidLead) prepaidAssignedThisRun[assignedEmail] += 1;
-              rows.push({
-                ticket: item.ticket, tier: item.tier, predictedAgent: assignedEmail,
-                isReassignment: !!item.excludedAgent, rank: rows.length + 1,
-              });
-            }
+          };
+
+          const freshPool = pool.filter(item => !item.excludedAgent);
+          const reassignPool = pool.filter(item => item.excludedAgent);
+
+          if (reassignPool.length > 0 && REASSIGN_RESERVE_PER_AGENT > 0) {
+            // Hold back up to REASSIGN_RESERVE_PER_AGENT slots per agent so the reassignment
+            // pool gets first crack at them, THEN let fresh claim the rest of that agent's
+            // capacity - mirrors build_assignment_queue's reassign_reserve_per_agent exactly
+            // (see its docstring for why the plain fresh-then-reassign order alone leaves
+            // reassignments stuck forever behind a backlog that never runs dry).
+            const reserved = {};
+            agentOrder.forEach(e => { reserved[e] = Math.min(REASSIGN_RESERVE_PER_AGENT, needed[e]); });
+            agentOrder.forEach(e => { needed[e] -= reserved[e]; });
+            assignPool(freshPool);
+            agentOrder.forEach(e => { needed[e] += reserved[e]; });
+            assignPool(reassignPool);
+            assignPool(freshPool); // give back whatever of the reserve reassignment didn't use
+          } else {
+            // No reassignment candidate this run, or the reserve is off - identical to the
+            // single fresh-then-reassign pass this preview always ran before the reserve existed.
+            assignPool(freshPool);
+            assignPool(reassignPool);
           }
         }
 

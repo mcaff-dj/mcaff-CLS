@@ -108,6 +108,17 @@ STALE_MINUTES = 10  # must match the CRM's own heartbeat cadence assumptions
 # REASSIGN_BACKLOG_CUTOFF, REASSIGN_RETRY_CAP: see leadAssignmentRules.json's _reassignNote -
 # imported from lead_priority so the JS "Next to Assign" preview can't drift from these values.
 
+# Manual one-off lever, NOT used by the 5-minute cron trigger: `python assign_leads.py
+# --reassign-only` drops every fresh/never-touched lead from this run's pool before
+# build_assignment_queue runs, so 100% of online-agent capacity goes to Connected=No
+# reassignment candidates instead of build_assignment_queue's own
+# reassign_reserve_per_agent (a few slots/agent/run - enough to keep reassignment from being
+# starved forever, but not enough to drain an existing backlog fast). Run this once after
+# deploying the reserve fix to clear whatever had already piled up under the old fresh-always-
+# first ordering; every other rule (cutoff/cap/hold/GoKwik/punch checks) still applies exactly
+# as a normal run.
+REASSIGN_ONLY = "--reassign-only" in sys.argv
+
 # Item-level DWH schema the GoKwik refund-status lookup resolves a sheet Order ID against -
 # see lookup_platform_order_ids.
 ITEM_LEVEL_SCHEMA = "mcaff_prod"
@@ -1123,6 +1134,13 @@ def _main():
     if reassign_info_by_row:
         print(f"  {len(reassign_info_by_row)} Connected=No lead(s) eligible for reassignment (under the {REASSIGN_RETRY_CAP}-attempt cap).")
     print(f"  unassigned pool by priority: Prepaid={tier_counts[0]}, COD+high-priority reason={tier_counts[1]}, other COD={tier_counts[2]}, COD+low-priority reason={tier_counts[3]}")
+
+    if REASSIGN_ONLY:
+        before = len(unassigned_pending)
+        unassigned_pending = [e for e in unassigned_pending if e[0] in reassign_info_by_row]
+        print(f"  --reassign-only: dropping {before - len(unassigned_pending)} fresh lead(s) from "
+              f"this run's pool - {len(unassigned_pending)} reassignment candidate(s) get all "
+              f"online capacity this run.")
 
     # ---------------------------------------------------------------------------------------
     # ASSIGNMENT FIRST. Everything below this block - the refund/punch stamps and the GoKwik

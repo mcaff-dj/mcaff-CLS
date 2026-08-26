@@ -135,6 +135,7 @@ from datetime import datetime as _datetime
 REASSIGN_BACKLOG_CUTOFF = _datetime.strptime(_RULES["reassignBacklogCutoff"], "%Y-%m-%d")
 REASSIGN_RETRY_CAP = _RULES["reassignRetryCap"]
 REASSIGN_MIN_HOLD_HOURS = _RULES["reassignMinHoldHours"]
+REASSIGN_RESERVE_PER_AGENT = _RULES["reassignReservePerAgent"]
 
 
 def is_prepaid(payment_raw):
@@ -164,7 +165,8 @@ def priority_tier(payment_raw, rto_reason_raw):
 def build_assignment_queue(unassigned_pending, online_agents, current_load, quota=DEFAULT_QUOTA,
                             excluded_by_row=None, rto_reason_by_row=None,
                             agent_specializations=None, agent_prepaid_target=None,
-                            agent_reassign_payment_mode=None):
+                            agent_reassign_payment_mode=None,
+                            reassign_reserve_per_agent=REASSIGN_RESERVE_PER_AGENT):
     """Round-robins a pool of unassigned pending leads across online agents up to
     `quota` each, based on each agent's current load. Pure/side-effect-free -
     callers decide whether to actually write the result (assign_leads.py) or
@@ -219,6 +221,19 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     reassignment's type, that lead is left unassigned rather than forced onto someone who opted
     out of it. Absent/unset for an agent means no restriction, exactly as before this parameter
     existed.
+    reassign_reserve_per_agent: int, default leadAssignmentRules.json's reassignReservePerAgent -
+    how many of each online agent's open quota slots this run holds back for reassignment
+    candidates (a row_index present in excluded_by_row) before the fresh pool is allowed to
+    claim them. Without this, the fresh-before-reassignment sort above means a fresh backlog
+    that never empties within one run (routine on RTO - see docs/2026-08-18-rto-crm-performance-
+    audit.md) leaves every reassignment permanently behind the cursor: it never gets a slot,
+    however long reassignRetryCap/reassignMinHoldHours say it should be eligible, and the lead
+    just sits attached to its Connected=No agent forever - the bug agents were reporting as
+    "reassignment isn't happening". The reserve is only taken when a reassignment candidate
+    actually exists this run - an empty reassignment pool leaves fresh with full capacity,
+    byte-identical to before this parameter existed - and anything the reserve isn't used for
+    flows back to fresh leads in the same run rather than sitting idle. Fresh still outranks
+    reassignment for the REST of each agent's capacity, unchanged.
 
     Returns {row_index: agent_email}.
     """
@@ -229,6 +244,7 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     agent_specializations = agent_specializations or {}
     agent_prepaid_target = agent_prepaid_target or {}
     agent_reassign_payment_mode = agent_reassign_payment_mode or {}
+    reassign_reserve_per_agent = reassign_reserve_per_agent or 0
 
     # Seconds since epoch via timedelta subtraction (not .timestamp() - that calls into
     # the platform's C time functions and raises on Windows for extreme/pre-epoch values,
@@ -309,35 +325,61 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
                 return email
         return None
 
-    for row_index, _rto_initiated_date, _order_id, tier in sorted_pool:
-        excluded = excluded_by_row.get(row_index) or ()
-        is_prepaid_lead = (tier == 0)
+    def _assign_pool(pool):
+        for row_index, _rto_initiated_date, _order_id, tier in pool:
+            if row_index in assignments:
+                continue  # already placed by an earlier pass over this same lead (reserve retry)
+            excluded = excluded_by_row.get(row_index) or ()
+            is_prepaid_lead = (tier == 0)
 
-        # Pass 1: a specialist for this lead's RTO reason gets first refusal, still subject to
-        # quota/exclusion/prepaid-target/reassign-payment-mode - "first refusal" means ahead of
-        # the general pool, not an unconditional override of everything else.
-        chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0
-                              and _matches_reassign_payment_mode(e, row_index, is_prepaid_lead)
-                              and _matches_specialist(e, row_index) and _within_prepaid_target(e, is_prepaid_lead))
-        # Pass 2: general round-robin, still respecting each agent's soft prepaid target and
-        # hard reassign-payment-mode filter.
-        if chosen is None:
+            # Pass 1: a specialist for this lead's RTO reason gets first refusal, still subject
+            # to quota/exclusion/prepaid-target/reassign-payment-mode - "first refusal" means
+            # ahead of the general pool, not an unconditional override of everything else.
             chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0
                                   and _matches_reassign_payment_mode(e, row_index, is_prepaid_lead)
-                                  and _within_prepaid_target(e, is_prepaid_lead))
-        # Pass 3: every eligible agent is at/over their prepaid target - assign anyway rather
-        # than leave the lead unassigned purely to protect a soft ratio. reassign-payment-mode
-        # stays hard even here - see its own docstring entry.
-        if chosen is None:
-            chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0
-                                  and _matches_reassign_payment_mode(e, row_index, is_prepaid_lead))
+                                  and _matches_specialist(e, row_index) and _within_prepaid_target(e, is_prepaid_lead))
+            # Pass 2: general round-robin, still respecting each agent's soft prepaid target and
+            # hard reassign-payment-mode filter.
+            if chosen is None:
+                chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0
+                                      and _matches_reassign_payment_mode(e, row_index, is_prepaid_lead)
+                                      and _within_prepaid_target(e, is_prepaid_lead))
+            # Pass 3: every eligible agent is at/over their prepaid target - assign anyway rather
+            # than leave the lead unassigned purely to protect a soft ratio. reassign-payment-mode
+            # stays hard even here - see its own docstring entry.
+            if chosen is None:
+                chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0
+                                      and _matches_reassign_payment_mode(e, row_index, is_prepaid_lead))
 
-        if chosen is not None:
-            assignments[row_index] = chosen
-            needed[chosen] -= 1
-            total_assigned_this_run[chosen] += 1
-            if is_prepaid_lead:
-                prepaid_assigned_this_run[chosen] += 1
-        # else (every agent excluded or at capacity): this lead is left unassigned this round,
-        # same as running out of agent capacity did before this parameter existed.
+            if chosen is not None:
+                assignments[row_index] = chosen
+                needed[chosen] -= 1
+                total_assigned_this_run[chosen] += 1
+                if is_prepaid_lead:
+                    prepaid_assigned_this_run[chosen] += 1
+            # else (every agent excluded or at capacity): this lead is left unassigned this
+            # round, same as running out of agent capacity did before this parameter existed.
+
+    fresh_pool = [t for t in sorted_pool if t[0] not in excluded_by_row]
+    reassign_pool = [t for t in sorted_pool if t[0] in excluded_by_row]
+
+    if reassign_pool and reassign_reserve_per_agent > 0:
+        # Hold back up to reassign_reserve_per_agent slots per agent so the reassignment pool
+        # gets first crack at them, THEN let fresh claim the rest of that agent's capacity - see
+        # this parameter's docstring entry for why the plain fresh-then-reassign order above
+        # alone leaves reassignments stuck forever behind a backlog that never runs dry.
+        reserved = {email: min(reassign_reserve_per_agent, needed[email]) for email in agent_order}
+        for email in agent_order:
+            needed[email] -= reserved[email]
+        _assign_pool(fresh_pool)
+        for email in agent_order:
+            needed[email] += reserved[email]
+        _assign_pool(reassign_pool)
+        _assign_pool(fresh_pool)  # give back whatever of the reserve reassignment didn't use
+    else:
+        # No reassignment candidate this run, or the reserve is switched off - identical to the
+        # single fresh-then-reassign pass this function always ran before the reserve existed.
+        _assign_pool(fresh_pool)
+        _assign_pool(reassign_pool)
+
     return assignments
