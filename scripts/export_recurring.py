@@ -266,9 +266,13 @@ def main():
         quarantined = [r for r in mapped_rows if not CREATED_AT_PATTERN.match(str(r[idx_created_at_in_target]).strip())]
         mapped_rows = [r for r in mapped_rows if CREATED_AT_PATTERN.match(str(r[idx_created_at_in_target]).strip())]
         if quarantined:
-            bad_tickets = [str(r[idx_ticket_number_in_target]) if idx_ticket_number_in_target >= 0 else "?" for r in quarantined]
+            bad_samples = [
+                f"{str(r[idx_ticket_number_in_target]) if idx_ticket_number_in_target >= 0 else '?'}="
+                f"{str(r[idx_created_at_in_target])!r}"
+                for r in quarantined
+            ]
             print(f"[{tab_name}] QUARANTINED {before_validate - len(mapped_rows)} row(s) with malformed "
-                  f"'Created At' (likely a column-shift from CSV parsing) - NOT written: {', '.join(bad_tickets)}")
+                  f"'Created At' (likely a column-shift from CSV parsing) - NOT written: {', '.join(bad_samples)}")
 
     if idx_ticket_number_in_target >= 0:
         existing_ids = set()
