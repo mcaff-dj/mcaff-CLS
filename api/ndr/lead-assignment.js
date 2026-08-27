@@ -37,14 +37,18 @@ module.exports = async (req, res) => {
 
   try {
     if (action === 'claim') {
-      await claimNdrLead(awbNumber, (req.body || {}).email || session.email);
+      // Stamped from the session, never from the body: an agent may only ever claim a lead as
+      // THEMSELVES. This previously honoured req.body.email, which let any NDR agent attribute
+      // a claim to any other agent - across teams, once per-team isolation exists.
+      await claimNdrLead(awbNumber, session.email);
       res.status(200).json({ ok: true });
       return;
     }
     if (action === 'dispose') {
       const { disposition, agentRemarks } = req.body || {};
       // email: only used if no live row exists to update, in which case disposeNdrLead inserts
-      // the cycle itself - stamped from the session, never client-supplied, same as 'claim'.
+      // the cycle itself - stamped from the session, never client-supplied, same as 'claim'
+      // above (which was fixed to match this).
       await disposeNdrLead(awbNumber, disposition, agentRemarks, session.email);
       res.status(200).json({ ok: true });
       return;
