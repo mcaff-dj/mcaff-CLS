@@ -1008,7 +1008,15 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
         p = (c / lp_ps) if lp_ps > 0 else 0
         return {"cnt": c, "pct": p}
 
-    MAX_P, MAX_PROD, MAX_CLS, MAX_CAT, MAX_BAT = 60, 10, 5, 15, 20
+    # No top-N truncation at any level, deliberately: the JS below derives EVERY total -
+    # including the collapsed SKU parent row - by rolling up the leaf rows emitted here
+    # (leafCounts skips any ticket whose sku|prod|cls|cat|batch combo has no leaf row), so
+    # dropping a long-tail batch or category also silently subtracted its tickets from the
+    # parent's "complain" figure. That is what made one SKU's July read 472 against 514
+    # real tickets, and made the number move on its own whenever the live month's batch mix
+    # reshuffled which combos made the cut (the cut was ranked by the LAST period). Emitting
+    # every combo keeps the displayed totals equal to the ticket counts; re-introducing a cap
+    # here means teaching leafCounts to aggregate off TICKETS instead of the leaf rows first.
     sku_tree = {}
     for ck in combo_tot:
         c = combo_list[combo_k2i[ck]]
@@ -1040,29 +1048,29 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
     # meaningful within this run's own SKUS/PRODS/etc list, built by first-encounter order
     # while scanning rows - the actual name string is the only value guaranteed to mean the
     # same real-world thing in both this port and the PowerShell original.
-    top_sku = sorted(sku_tree.keys(), key=lambda sk: (lmk(sku_tree[sk]["mc"], int(sk))["cnt"], lmk(sku_tree[sk]["mc"], int(sk))["pct"], SKUS[int(sk)]), reverse=True)[:MAX_P]
+    top_sku = sorted(sku_tree.keys(), key=lambda sk: (lmk(sku_tree[sk]["mc"], int(sk))["cnt"], lmk(sku_tree[sk]["mc"], int(sk))["pct"], SKUS[int(sk)]), reverse=True)
     parents_out, prod_groups, cls_groups, cat_groups, rows_out, row_cat_idx = [], [], [], [], [], []
     for sk in top_sku:
         sn = sku_tree[sk]
         sk_idx = int(sk)
         pidx = len(parents_out)
         parents_out.append({"sku": sn["sku"]})
-        tp = sorted(sn["products"].keys(), key=lambda pk: (lmk(sn["products"][pk]["mc"], sk_idx)["cnt"], lmk(sn["products"][pk]["mc"], sk_idx)["pct"], PRODS[int(pk)]), reverse=True)[:MAX_PROD]
+        tp = sorted(sn["products"].keys(), key=lambda pk: (lmk(sn["products"][pk]["mc"], sk_idx)["cnt"], lmk(sn["products"][pk]["mc"], sk_idx)["pct"], PRODS[int(pk)]), reverse=True)
         for pk in tp:
             pn = sn["products"][pk]
             pgi = len(prod_groups)
             prod_groups.append({"parentIdx": pidx, "prod": pn["prod"], "sku": sk_idx})
-            tc = sorted(pn["classes"].keys(), key=lambda lk: (lmk(pn["classes"][lk]["mc"], sk_idx)["cnt"], lmk(pn["classes"][lk]["mc"], sk_idx)["pct"], CLASSES[int(lk)]), reverse=True)[:MAX_CLS]
+            tc = sorted(pn["classes"].keys(), key=lambda lk: (lmk(pn["classes"][lk]["mc"], sk_idx)["cnt"], lmk(pn["classes"][lk]["mc"], sk_idx)["pct"], CLASSES[int(lk)]), reverse=True)
             for lk in tc:
                 ln = pn["classes"][lk]
                 cgi = len(cls_groups)
                 cls_groups.append({"productGroupIdx": pgi, "cls": ln["cls"], "sku": sk_idx})
-                tcat = sorted(ln["cats"].keys(), key=lambda ck: (lmk(ln["cats"][ck]["mc"], sk_idx)["cnt"], lmk(ln["cats"][ck]["mc"], sk_idx)["pct"], CATS[int(ck)]), reverse=True)[:MAX_CAT]
+                tcat = sorted(ln["cats"].keys(), key=lambda ck: (lmk(ln["cats"][ck]["mc"], sk_idx)["cnt"], lmk(ln["cats"][ck]["mc"], sk_idx)["pct"], CATS[int(ck)]), reverse=True)
                 for catk in tcat:
                     cn = ln["cats"][catk]
                     catgi = len(cat_groups)
                     cat_groups.append({"classGroupIdx": cgi, "cat": cn["cat"], "sku": sk_idx})
-                    tb = sorted(cn["batches"], key=lambda b: (lmk(b["mc"], sk_idx)["cnt"], lmk(b["mc"], sk_idx)["pct"], BATCHES[b["combo"]["batch"]]), reverse=True)[:MAX_BAT]
+                    tb = sorted(cn["batches"], key=lambda b: (lmk(b["mc"], sk_idx)["cnt"], lmk(b["mc"], sk_idx)["pct"], BATCHES[b["combo"]["batch"]]), reverse=True)
                     for b in tb:
                         rows_out.append(b["combo"])
                         row_cat_idx.append(catgi)

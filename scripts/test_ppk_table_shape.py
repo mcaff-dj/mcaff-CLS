@@ -111,6 +111,31 @@ def test_sku_collapses_to_its_most_recent_product_spelling():
     assert ">Guava Tini De-Tan Body Wash<" not in body
 
 
+def test_every_ticket_combo_gets_a_leaf_row():
+    """No level may be truncated to a top-N. The JS rolls every displayed total - including
+    the collapsed SKU parent row - up from the emitted leaf rows, and skips any ticket whose
+    combo has no leaf row, so a dropped long-tail batch/category silently subtracts its
+    tickets from the parent's count (one SKU's July showed 472 against 514 real tickets).
+    Built well past the old caps (60 SKUs / 10 products / 5 classes / 15 categories /
+    20 batches per category) so any reintroduced slice fails here."""
+    ctx = Ctx(BRANDS[0])
+    row = _row_factory(ctx)
+    subset = []
+    for c in range(18):            # 18 categories in one class > old MAX_CAT of 15
+        for bnum in range(25):     # 25 batches in one category  > old MAX_BAT of 20
+            subset.append(row("SKU-A", "Face Wash", "Product", f"Cat{c}", f"B{bnum}", PERIODS[0], "1000"))
+    # A batch that exists only in an EARLIER period: the old caps ranked by the LAST period,
+    # so a combo idle in the final month was exactly what used to get cut.
+    subset.append(row("SKU-A", "Face Wash", "Product", "Cat0", "B-old-only", PERIODS[0], "1000"))
+    core = _build(subset, ctx)
+
+    combos = {tuple(int(x) for x in ck.split("|")) for ck in core["combo_tot"]}
+    emitted = set(re.findall(r"\[(\d+),(\d+),(\d+),(\d+),(\d+)\]", re.search(r"var ROWS=(\[.*?\]),ROW_CATGROUP=", core["js"], re.S).group(1)))
+    emitted = {tuple(int(x) for x in t) for t in emitted}
+    missing = combos - emitted
+    assert not missing, f"{len(missing)} of {len(combos)} ticket combos have no leaf row - their tickets vanish from every total"
+
+
 def test_filters_are_checkbox_multiselect_not_single_value():
     core = _core()
     html = core["filter_html"]
