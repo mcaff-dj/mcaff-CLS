@@ -2,7 +2,8 @@
 // file to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells
 // us which logical route was hit; URLs are unchanged.
 const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
-  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent, isCallingProcessAdmin } = require('../_lib/db');
+  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent, isCallingProcessAdmin, resolveCallerTeam } = require('../_lib/db');
+const { teamScopeFor } = require('../_lib/callingTeams');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
 
@@ -254,8 +255,18 @@ async function handlePresence(req, res) {
       // company-wide, consistent with how /api/admin/business-hours and /calling-agents already
       // scope a process admin to only what they administer, not the full company's presence.
       if (processKey && await isCallingProcessAdmin(session.email, processKey)) {
+        // Scoped to the caller's own team: this branch returns live status plus logged-in,
+        // break and busy minutes for every roster member, which is precisely the "metrics of
+        // another team" the isolation exists to prevent. agent_presence itself stays global and
+        // un-teamed by design (a person has one desk); only WHICH emails may be asked about is
+        // scoped. isAdmin is false here on purpose - this branch is reached only for a PROCESS
+        // admin (see isCallingProcessAdmin above), not a full company-wide admin, so there is no
+        // explicit teamId to honour and teamScopeFor should behave exactly as it does for any
+        // other non-admin caller.
+        const { callerTeamId, activeTeamCount } = await resolveCallerTeam(session.email, processKey);
+        const teamId = teamScopeFor({ callerTeamId, activeTeamCount, isAdmin: false });
         const [roster, allAgents, presenceSummary] = await Promise.all([
-          getCallingProcessAgents(processKey), getAllAgentPresence(), getAgentPresenceLogSummary(dateFrom, dateTo),
+          getCallingProcessAgents(processKey, teamId), getAllAgentPresence(), getAgentPresenceLogSummary(dateFrom, dateTo),
         ]);
         const agents = {};
         for (const member of roster) {
@@ -393,7 +404,22 @@ async function handleLeadDates(req, res) {
   }
   // ============================================================================================
 
-  const leadDates = processKey === 'ndr' ? await getAllNdrLeadDates() : await getAllLeadDates();
+  let leadDates;
+  if (processKey === 'ndr') {
+    // ndr_lead_assignments has no team column (see the design spec's "Deliberately NOT changed"
+    // section), so a lead's team is only knowable from which sheet it came from - not from this
+    // table. Until that changes, the caller's team rides along as the cachedRead SLOT KEY
+    // instead (see getAllNdrLeadDates/teamCacheKey in db.js), so the two teams simply never
+    // share a cached payload - one team's request can no longer warm the cache with an answer
+    // the other team then reads for the rest of the 5-minute TTL. That is row-level isolation's
+    // stand-in until the schema carries team directly.
+    const { callerTeamId } = await resolveCallerTeam(session.email, processKey);
+    leadDates = await getAllNdrLeadDates(session.isAdmin ? 'admin' : `t${callerTeamId ?? 'none'}`);
+  } else {
+    // rto has no team dimension at all (see resolveCallerTeam's activeTeamCount: 0 for a
+    // teamless process), so getAllLeadDates stays exactly as it was before this task.
+    leadDates = await getAllLeadDates();
+  }
   res.status(200).json({ leadDates });
 }
 
@@ -469,7 +495,14 @@ async function handleProcessPresence(req, res) {
       return;
     }
     // Only ever the caller's own row - an agent has no business reading the roster.
-    const mine = (await getCallingProcessAgents(processKey))
+    //
+    // Deliberately UNSCOPED (undefined, not a resolved team): this endpoint returns only the
+    // caller's own row, and it finds that row by searching the roster for its own email. A team
+    // filter here would make an unassigned caller - or a full admin, who holds no state row at
+    // all - vanish from their own lookup and read as "no row", which the client renders as
+    // Offline with a default quota. Self-only is already the narrowest possible scope; there is
+    // nothing left for a team filter to protect.
+    const mine = (await getCallingProcessAgents(processKey, undefined))
       .find((a) => a.email.toLowerCase() === session.email.toLowerCase());
     res.status(200).json({
       statuses: CALLING_STATUSES,

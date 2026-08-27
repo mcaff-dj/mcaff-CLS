@@ -38,10 +38,29 @@ function normalizeTeamName(s) {
 // like today until a second team is deliberately created makes the whole rollout
 // order-independent, and the isolation switches on with a data change rather than a deploy.
 function teamScopeFor({ callerTeamId = null, activeTeamCount = 0, explicitTeamId = null, isAdmin = false } = {}) {
-  if (isAdmin && explicitTeamId != null) return explicitTeamId;
+  // "Teamless processes are always unfiltered" is unconditional - it must be checked BEFORE the
+  // admin explicit-team branch below, not after. An admin's explicit choice only makes sense
+  // once teams exist to choose between; checking it first meant a full admin passing an explicit
+  // teamId against a process with 0 or 1 active teams (rto, escalation, deliveryescalation - see
+  // db.js's resolveCallerTeam) got filterRosterByTeam'd against a team that, for that process,
+  // isn't really scoping anything - producing an empty roster instead of the documented
+  // guarantee. Nothing in the current UI sends an explicitTeamId for a teamless process, so this
+  // was latent, not exploitable - but the contract said "always unfiltered" and the code didn't
+  // honour it.
   if (activeTeamCount < 2) return undefined;
+  if (isAdmin && explicitTeamId != null) return explicitTeamId;
   if (isAdmin) return undefined; // an admin who picked no team sees every team
   return callerTeamId == null ? null : callerTeamId;
+}
+
+// Cache keys for per-team slots. Terminated with ':' because invalidateCache (see db.js) matches
+// on startsWith - an un-terminated 'calling:ndrLeadDates:1' is also a string-prefix of a key
+// tagged for team 10 or 11, so evicting team 1's cache would silently evict theirs too. That
+// shows up as random staleness on someone else's desk, which is close to undebuggable, so the
+// delimiter is enforced here once rather than trusted to every call site that builds a key by
+// hand.
+function teamCacheKey(base, teamId) {
+  return `${base}:${teamId == null ? 'none' : teamId}:`;
 }
 
 // Applied to the joined roster rows AFTER getCallingProcessAgents' two queries are combined in
@@ -57,6 +76,6 @@ function filterRosterByTeam(rows, teamId) {
 }
 
 module.exports = {
-  teamScopeFor, filterRosterByTeam, isValidSheetId, normalizeTeamName,
+  teamScopeFor, filterRosterByTeam, isValidSheetId, normalizeTeamName, teamCacheKey,
   SHEET_ID_MAX, TEAM_NAME_MAX,
 };

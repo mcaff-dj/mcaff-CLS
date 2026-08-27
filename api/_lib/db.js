@@ -2464,7 +2464,7 @@ async function getAdministeredProcesses(email) {
 // ── Per-team registry (calling_teams) ────────────────────────────────────────────────────
 // A team is a dimension inside a process; see the table's own comment in bootstrapSchema.
 
-const { isValidSheetId, normalizeTeamName } = require('./callingTeams');
+const { isValidSheetId, normalizeTeamName, teamCacheKey } = require('./callingTeams');
 
 function mapTeamRow(r) {
   return {
@@ -2518,7 +2518,10 @@ async function createCallingTeam(processKey, { name, sheetId, sheetTab }, byEmai
     INSERT INTO calling_teams (process_key, name, sheet_id, sheet_tab, created_by, updated_by)
     VALUES (${processKey}, ${cleanName}, ${sheetId}, ${cleanTab}, ${byEmail || null}, ${byEmail || null})
   `;
-  invalidateCache(`calling:teams:${processKey}`);
+  // teamCacheKey, not a hand-built template literal: an unterminated 'calling:teams:rto' prefix
+  // would also match a future process key like 'rto2', silently invalidating a sibling process's
+  // cached roster along with this one's (see teamCacheKey's own comment in callingTeams.js).
+  invalidateCache(teamCacheKey('calling:teams', processKey));
   return getCallingTeam(insertId);
 }
 
@@ -2539,7 +2542,7 @@ async function updateCallingTeam(id, { name, sheetId, sheetTab, active }, byEmai
            active = ${nextActive}, updated_at = NOW(), updated_by = ${byEmail || null}
      WHERE id = ${existing.id}
   `;
-  invalidateCache(`calling:teams:${existing.processKey}`);
+  invalidateCache(teamCacheKey('calling:teams', existing.processKey));
   return getCallingTeam(existing.id);
 }
 
@@ -2957,8 +2960,16 @@ async function fetchAllLeadDates() {
 // - see claimNdrLead/disposeNdrLead) rather than order_id. WHERE reassigned_away_at IS NULL for
 // the same reason getAllLeadDates filters to the live cycle: only the current cycle's dates
 // matter to whatever's on screen right now.
-function getAllNdrLeadDates() {
-  return cachedRead('calling:ndrLeadDates', fetchAllNdrLeadDates);
+//
+// cacheTag: a caller-supplied tag (the caller's own team id, or 'admin') so this cachedRead slot
+// is per-team rather than one shared global key. Without it, whichever team's request happens to
+// warm the cache first would serve ITS ENTIRE AWB SET to the other team for the rest of the
+// 5-minute TTL. ndr_lead_assignments has no team column yet (see the design spec's "Deliberately
+// NOT changed" section) - a lead's team is only knowable from which sheet it came from - so
+// carrying the team in the cache key, via teamCacheKey, is the whole scoping mechanism here, not
+// row-level filtering of the result.
+function getAllNdrLeadDates(cacheTag = 'all') {
+  return cachedRead(teamCacheKey('calling:ndrLeadDates', cacheTag), fetchAllNdrLeadDates);
 }
 
 async function fetchAllNdrLeadDates() {
