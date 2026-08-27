@@ -173,3 +173,10 @@ module.exports = async (req, res) => {
     res.status(500).json({ error: 'Sheets proxy error' });
   }
 };
+
+// Exported so api/ndr/upload.js's own zero-active-teams fallback is this exact object, not a
+// second copy of the same two literals - the two endpoints can then provably never disagree
+// about which sheet a team-less caller lands on, instead of relying on two hand-kept copies
+// staying in sync. Attached to the handler export the same way api/rto/upload-start.js attaches
+// its own pure helpers (sheetsRequest, isRateLimited, ...) for its test file.
+module.exports.PRE_SPLIT_TEAM = PRE_SPLIT_TEAM;

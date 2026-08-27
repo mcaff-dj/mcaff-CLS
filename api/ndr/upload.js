@@ -19,6 +19,11 @@ const {
   NDR_IMPORT, NDR_ROW_WIDTH, NDR_LAST_COLUMN_LETTER, NDR_AWB_COLUMN, NDR_ATTEMPT_COLUMN,
 } = require('../_lib/ndrCsvImport');
 const { isCallingProcessAdmin, resolveCallerTeam, listCallingTeams } = require('../_lib/db');
+// PRE_SPLIT_TEAM: the same zero-active-teams fallback api/ndr/sheet.js already falls back to for
+// reads, imported rather than re-declared so the two endpoints share one literal pair
+// (sheetId/sheetTab) instead of two copies that could quietly drift apart. See its own comment in
+// sheet.js for what it is and why it stays reachable.
+const { PRE_SPLIT_TEAM } = require('./sheet');
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'ndr';
@@ -68,38 +73,63 @@ async function checkAccess(session) {
 // list (see the handler below), so this needs no DB round-trip of its own beyond
 // resolveCallerTeam.
 //
-//   TL (passed checkAccess via isCallingProcessAdmin, not session.isAdmin) -> their own team,
-//     derived server-side from their calling_agent_process row. A TL with no team assigned yet,
-//     or whose assigned team has since gone inactive, is refused - never silently reassigned onto
-//     someone else's sheet (same stance api/ndr/sheet.js's resolveSheetFor takes for its
-//     "assigned but paused" terminal case).
+// The ONLY thing this refuses is picking between two or more candidate sheets with nothing to
+// say which one is right - that's a genuine guess, and a guessed destination here writes
+// hundreds of leads into the wrong team's live sheet with no undo beyond deleting rows by hand
+// from a spreadsheet someone else is actively working in. Resolving to the one sheet that could
+// possibly be meant, when there is only one (zero or exactly one active team), is NOT a guess -
+// it is today's already-live behaviour, and this mirrors api/ndr/sheet.js's own resolveSheetFor
+// exactly (down to reusing its PRE_SPLIT_TEAM constant) so the read and write endpoints can never
+// disagree about which sheet a given caller owns.
 //
-//   full admin (session.isAdmin) -> MUST name a team explicitly via body.teamId. There is no
-//     fallback here, not even when exactly one active team exists: unlike the read-only proxy in
-//     api/ndr/sheet.js, which defaults a lone/zero-team admin onto that one sheet (or the
-//     PRE_SPLIT_TEAM legacy constant) because a stale read costs nothing, this is an irreversible
-//     append. The day a second team is created, an admin request that omitted teamId only because
-//     "there was just the one sheet" would - with no code change on the caller's end - silently
-//     start writing into whichever team's row happened to load first. A silent default here
-//     writes hundreds of leads into the wrong team's live sheet, and the only remedy is deleting
-//     rows by hand from a spreadsheet someone else is actively working in. No "first team", no
-//     "the legacy sheet" - a missing or unresolvable team is always a 400.
+//   TL (passed checkAccess via isCallingProcessAdmin, not session.isAdmin):
+//     - assigned to one of the currently-active teams -> that team, unconditionally. A caller
+//       WITH a resolvable team can never fall through to the ambiguous-count logic below.
+//     - not assigned to any currently-active team (no calling_agent_process row, or their team
+//       has since gone inactive) -> falls to the same active-team-count resolution an admin who
+//       named no team gets, below.
+//
+//   full admin (session.isAdmin):
+//     - body.teamId names one of the active teams -> that team, regardless of how many teams
+//       exist. An explicit, valid choice is never second-guessed.
+//     - body.teamId names something that is not an active team (typo, stale id, a paused team's
+//       id) -> 400, always. A bad id must never silently resolve to *some* team.
+//     - body.teamId omitted -> falls to the active-team-count resolution below.
+//
+//   Active-team-count resolution (shared by "TL with no resolvable team" and "admin with no
+//   teamId"):
+//     0 active teams  -> PRE_SPLIT_TEAM. The desk hasn't been split yet; there is nothing else
+//                        this upload could possibly mean, so refusing here would only turn the
+//                        one state every fresh deploy starts in into an outage - regressing the
+//                        exact "NDR upload has never worked" bug this project already fixed once.
+//     1 active team   -> that team. Still not a guess: it is the only candidate.
+//     2+ active teams -> 400. This is the actually dangerous case the whole guard exists for.
 async function resolveUploadTarget(session, body, teams) {
   if (session.isAdmin) {
-    if (body.teamId == null) {
-      return { error: 'Pick which team to upload to.', teams: teams.map((t) => ({ id: t.id, name: t.name })) };
+    if (body.teamId != null) {
+      const picked = teams.find((t) => t.id === parseInt(body.teamId, 10));
+      return picked ? { team: picked } : { error: 'No such active team.' };
     }
-    const picked = teams.find((t) => t.id === parseInt(body.teamId, 10));
-    return picked ? { team: picked } : { error: 'No such active team.' };
+    return byActiveCount(teams, {
+      error: 'Pick which team to upload to.', teams: teams.map((t) => ({ id: t.id, name: t.name })),
+    });
   }
   const { callerTeamId } = await resolveCallerTeam(session.email, TAB_KEY);
   // `teams` is already active-only and scoped to this process (TAB_KEY), so finding nothing here
-  // covers both "never assigned" and "assigned to a team that is now inactive/gone" in one check -
-  // both are refused with the same message rather than distinguished, since either way there is
-  // no live sheet this caller may append to right now.
+  // covers both "never assigned" and "assigned to a team that is now inactive/gone" in one check.
   const mine = callerTeamId != null ? teams.find((t) => t.id === callerTeamId) : null;
-  if (!mine) return { error: 'You are not assigned to an NDR team yet. Ask an admin to assign you.' };
-  return { team: mine };
+  if (mine) return { team: mine };
+  return byActiveCount(teams, { error: 'You are not assigned to an NDR team yet. Ask an admin to assign you.' });
+}
+
+// The shared "no explicit, caller-named team" resolution: unambiguous for 0 or 1 active teams,
+// genuinely ambiguous for 2+, in which case `ambiguousResult` (the caller-appropriate refusal -
+// an admin can be told to pick; a TL has nothing to pick from and is told they're unassigned) is
+// returned instead.
+function byActiveCount(teams, ambiguousResult) {
+  if (teams.length === 0) return { team: PRE_SPLIT_TEAM };
+  if (teams.length === 1) return { team: teams[0] };
+  return ambiguousResult;
 }
 
 // Places one row's { columnLetter: value } map into a fixed-width A..Q array, so a single
