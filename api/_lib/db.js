@@ -2587,24 +2587,31 @@ const { categorizeRtoReason } = require('./rtoReasonCategory');
 // aggregate in the database); categorizing and re-summing into buckets happens in JS after,
 // since a keyword match isn't expressible as a GROUP BY key without a giant, drift-prone
 // CASE WHEN duplicating categorizeRtoReason's logic in SQL.
-async function getCallingRtoReasonBreakdown(dateFrom, dateTo, paymentMode) {
+async function getCallingRtoReasonBreakdown(dateFrom, dateTo, paymentMode, brand) {
   await ensureSchema();
   const { from, to } = dateBounds(dateFrom, dateTo);
   const mode = paymentMode === 'Prepaid' || paymentMode === 'COD' ? paymentMode : null;
+  // Brand has no column of its own - it's derived from Order ID, same rule as brand_of()
+  // in scripts/assign_ndr_leads.py. IF(...) reproduces that derivation in SQL so the filter
+  // can never disagree with what the app calls this order elsewhere.
+  const brandFilter = brand === 'Hyphen' || brand === 'mCaffeine' ? brand : null;
   const { rows } = await sql`
     SELECT
       COALESCE(rto_reason, 'Unknown') AS rto_reason,
       SUM(CASE WHEN reassigned_away_at IS NULL
             AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${brandFilter} IS NULL OR IF(UPPER(order_id) LIKE 'HYP%', 'Hyphen', 'mCaffeine') = ${brandFilter})
             AND (${from} IS NULL OR assigned_at >= ${from}) AND (${to} IS NULL OR assigned_at <= ${to})
           THEN 1 ELSE 0 END) AS total_assigned,
       SUM(CASE WHEN disposed_at IS NOT NULL AND connected = 'Yes'
             AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${brandFilter} IS NULL OR IF(UPPER(order_id) LIKE 'HYP%', 'Hyphen', 'mCaffeine') = ${brandFilter})
             AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
           THEN 1 ELSE 0 END) AS total_connected,
       SUM(CASE WHEN disposed_at IS NOT NULL
             AND (disposition IN ('Customer Agreed to Accept', 'Product Issue / Exchange') OR new_order_id IS NOT NULL)
             AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${brandFilter} IS NULL OR IF(UPPER(order_id) LIKE 'HYP%', 'Hyphen', 'mCaffeine') = ${brandFilter})
             AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
           THEN 1 ELSE 0 END) AS total_converted
     FROM CLS_RTO_calling
@@ -2646,25 +2653,29 @@ async function getCallingRtoReasonBreakdown(dateFrom, dateTo, paymentMode) {
 // rto_reason) together and categorizing/re-summing in JS costs one query, not one per
 // partner - cheap enough to return the whole matrix in the same round trip rather than
 // fetching a partner's reasons lazily on expand.
-async function getCallingPartnerReasonBreakdown(dateFrom, dateTo, paymentMode) {
+async function getCallingPartnerReasonBreakdown(dateFrom, dateTo, paymentMode, brand) {
   await ensureSchema();
   const { from, to } = dateBounds(dateFrom, dateTo);
   const mode = paymentMode === 'Prepaid' || paymentMode === 'COD' ? paymentMode : null;
+  const brandFilter = brand === 'Hyphen' || brand === 'mCaffeine' ? brand : null;
   const { rows } = await sql`
     SELECT
       COALESCE(delivery_partner, 'Unknown') AS partner,
       COALESCE(rto_reason, 'Unknown') AS rto_reason,
       SUM(CASE WHEN reassigned_away_at IS NULL
             AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${brandFilter} IS NULL OR IF(UPPER(order_id) LIKE 'HYP%', 'Hyphen', 'mCaffeine') = ${brandFilter})
             AND (${from} IS NULL OR assigned_at >= ${from}) AND (${to} IS NULL OR assigned_at <= ${to})
           THEN 1 ELSE 0 END) AS total_assigned,
       SUM(CASE WHEN disposed_at IS NOT NULL AND connected = 'Yes'
             AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${brandFilter} IS NULL OR IF(UPPER(order_id) LIKE 'HYP%', 'Hyphen', 'mCaffeine') = ${brandFilter})
             AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
           THEN 1 ELSE 0 END) AS total_connected,
       SUM(CASE WHEN disposed_at IS NOT NULL
             AND (disposition IN ('Customer Agreed to Accept', 'Product Issue / Exchange') OR new_order_id IS NOT NULL)
             AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${brandFilter} IS NULL OR IF(UPPER(order_id) LIKE 'HYP%', 'Hyphen', 'mCaffeine') = ${brandFilter})
             AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
           THEN 1 ELSE 0 END) AS total_converted
     FROM CLS_RTO_calling
@@ -2714,13 +2725,13 @@ async function getCallingPartnerReasonBreakdown(dateFrom, dateTo, paymentMode) {
 // Combines all queries above into the single payload api/report/data/[key].js's
 // "calling-overview" route serves - one round trip for the whole Overview tab.
 async function getCallingOverviewData(query) {
-  const { dateFrom, dateTo, paymentMode } = query || {};
+  const { dateFrom, dateTo, paymentMode, brand } = query || {};
   const [stats, hourly, partnerBreakdown, rtoReasonBreakdown, partnerReasonBreakdown] = await Promise.all([
     getCallingOverviewStats(dateFrom, dateTo),
     getCallingHourlyStats(dateFrom, dateTo),
     getCallingPartnerBreakdown(dateFrom, dateTo),
-    getCallingRtoReasonBreakdown(dateFrom, dateTo, paymentMode),
-    getCallingPartnerReasonBreakdown(dateFrom, dateTo, paymentMode),
+    getCallingRtoReasonBreakdown(dateFrom, dateTo, paymentMode, brand),
+    getCallingPartnerReasonBreakdown(dateFrom, dateTo, paymentMode, brand),
   ]);
   return { stats, hourly, partnerBreakdown, rtoReasonBreakdown, partnerReasonBreakdown };
 }

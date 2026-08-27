@@ -19,6 +19,15 @@ const PAYMENT_MODE_OPTIONS = [
   { value: 'COD', label: 'COD' },
 ];
 
+// Brand has no column of its own on CLS_RTO_calling - it's derived from Order ID, same rule
+// as app/ndr-calling/NdrCallingClient.js's brandOf and scripts/assign_ndr_leads.py's brand_of
+// (an order ID starting with "HYP" is Hyphen, everything else is mCaffeine).
+const BRAND_OPTIONS = [
+  { value: '', label: 'Both' },
+  { value: 'Hyphen', label: 'Hyphen' },
+  { value: 'mCaffeine', label: 'mCaffeine' },
+];
+
 // Shared column shape for every funnel table on this page (Delivery Partner Breakdown, RTO
 // Reason Breakdown, and the per-partner RTO reason sub-table) - only the leftmost label
 // column differs between them.
@@ -117,6 +126,7 @@ export default function CallingOverviewClient() {
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
   const [paymentMode, setPaymentMode] = useState('');
+  const [brand, setBrand] = useState('');
   const [expandedPartners, setExpandedPartners] = useState(() => new Set());
   const [partnerSort, setPartnerSort] = useState(DEFAULT_SORT);
   const [reasonSort, setReasonSort] = useState(DEFAULT_SORT);
@@ -149,6 +159,7 @@ export default function CallingOverviewClient() {
     if (dateFrom) params.set('dateFrom', dateFrom);
     if (dateTo) params.set('dateTo', dateTo);
     if (paymentMode) params.set('paymentMode', paymentMode);
+    if (brand) params.set('brand', brand);
     const qs = params.toString();
     fetch(`/api/report/data/calling-overview${qs ? `?${qs}` : ''}`)
       .then(async (r) => {
@@ -160,7 +171,7 @@ export default function CallingOverviewClient() {
       })
       .then((json) => setData(json))
       .catch((e) => setError(e.message || 'Could not load Calling Team overview.'));
-  }, [authed, dateFrom, dateTo, paymentMode]);
+  }, [authed, dateFrom, dateTo, paymentMode, brand]);
 
   const stats = data && data.stats;
 
@@ -202,6 +213,14 @@ export default function CallingOverviewClient() {
           <label htmlFor="co-payment-mode">Payment mode</label>
           <select id="co-payment-mode" value={paymentMode} onChange={(e) => setPaymentMode(e.target.value)}>
             {PAYMENT_MODE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+        <div className="co-filter-group">
+          <label htmlFor="co-brand">Brand</label>
+          <select id="co-brand" value={brand} onChange={(e) => setBrand(e.target.value)}>
+            {BRAND_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
