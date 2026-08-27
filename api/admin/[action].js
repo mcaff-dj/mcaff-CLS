@@ -256,15 +256,19 @@ async function handleAudit(req, res) {
 // Admin-only by virtue of the gate in this file's own handler below.
 async function handleBusinessHours(req, res, session) {
   const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
+  // Calling hours are per-PROCESS and shared by every team on that process - both NDR team
+  // leads hold process-admin on the single shared 'ndr' process, so letting either one write
+  // here would let them change when the OTHER team's leads are handed out. Reads stay open to
+  // a process admin (their page needs to show the window); every write is full-admin only.
+  if (req.method !== 'GET' && !session.isAdmin) {
+    res.status(403).json({ error: 'Only a full admin can change calling hours' });
+    return;
+  }
   if (req.method === 'POST') {
     const body = parseBody(req);
     const known = CALLING_PROCESSES.processes.map((p) => p.key);
     if (!body.processKey || !known.includes(body.processKey)) {
       res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
-      return;
-    }
-    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, body.processKey))) {
-      res.status(403).json({ error: 'You do not administer that process' });
       return;
     }
     try {
@@ -438,14 +442,21 @@ async function handleDispositions(req, res, session) {
   const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
   const known = CALLING_PROCESSES.processes.map((p) => p.key);
 
+  // The disposition tree is per-PROCESS and shared by every team on that process, and NDR's
+  // calling flow branches on specific literal label strings when it saves a call outcome (see
+  // NdrCallingClient.js's saveNdrDisposition) - so one team's lead renaming or reordering an
+  // option can silently break the OTHER team's metrics, or its agents' ability to dispose a
+  // call at all. Reads stay open below (any agent with calling access to the process, same as
+  // before); every add/edit/reorder/delete here is full-admin only.
+  if (req.method !== 'GET' && !session.isAdmin) {
+    res.status(403).json({ error: 'Only a full admin can change the disposition list' });
+    return;
+  }
+
   if (req.method === 'POST') {
     const body = parseBody(req);
     if (!known.includes(body.processKey)) {
       res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
-      return;
-    }
-    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, body.processKey))) {
-      res.status(403).json({ error: 'You do not administer that process' });
       return;
     }
     try {
@@ -465,10 +476,6 @@ async function handleDispositions(req, res, session) {
       res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
       return;
     }
-    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, body.processKey))) {
-      res.status(403).json({ error: 'You do not administer that process' });
-      return;
-    }
     try {
       const dispositions = Array.isArray(body.orderedIds)
         ? await reorderProcessDispositions(body.processKey, body.parentId, body.orderedIds)
@@ -486,10 +493,6 @@ async function handleDispositions(req, res, session) {
     const body = parseBody(req);
     if (!known.includes(body.processKey)) {
       res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
-      return;
-    }
-    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, body.processKey))) {
-      res.status(403).json({ error: 'You do not administer that process' });
       return;
     }
     const dispositions = await deleteProcessDisposition(body.processKey, body.id);
