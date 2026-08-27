@@ -132,4 +132,17 @@ NDR_IMPORT.dedupExtraCsvHeaders.forEach((h) => {
   assert.ok(NDR_IMPORT.requiredCsvHeaders.includes(h), `dedup field ${h} must be a required CSV column`);
 });
 
+// 9. The real header row of both live NDR sheets, read from the Sheets API on 2026-08-26. Pinned
+// here so a future edit to NDR_EXPECTED_SHEET_HEADER that drifts from the live sheet fails
+// loudly instead of silently 500-ing every upload, which is exactly what shipped in 71a84ea.
+{
+  const LIVE_NDR_HEADER_ROW = [
+    'Order ID', 'Customer Name', 'Customer Email', 'Customer Mobile', 'AWB', 'Partner name',
+    'Address ', 'Pincode', 'City', 'State', 'Order Value', 'Payment Mode', 'Status',
+    'Is Buyer Response Received', 'Attempt Count', 'Latest NDR Date', 'Latest NDR Reason',
+  ];
+  const issues = checkSheetLayout(LIVE_NDR_HEADER_ROW, NDR_IMPORT.expectedHeader);
+  assert.deepStrictEqual(issues, [], `expected no layout drift against the live header, got: ${issues.join('; ')}`);
+}
+
 console.log('ndrCsvImport.test.js: all assertions passed');
