@@ -51,7 +51,7 @@ const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser
   listCallingTeams, createCallingTeam, updateCallingTeam,
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions } = require('../_lib/db');
-const { teamScopeFor } = require('../_lib/callingTeams');
+const { teamScopeFor, coerceTeamId } = require('../_lib/callingTeams');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { CARD_TABS } = require('../_lib/tabs');
 const { getSession } = require('../_lib/session');
@@ -257,16 +257,35 @@ async function handleAudit(req, res) {
 // Admin-only by virtue of the gate in this file's own handler below.
 async function handleBusinessHours(req, res, session) {
   const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
-  // Calling hours are per-PROCESS and shared by every team on that process - both NDR team
-  // leads hold process-admin on the single shared 'ndr' process, so letting either one write
-  // here would let them change when the OTHER team's leads are handed out. Reads stay open to
-  // a process admin (their page needs to show the window); every write is full-admin only.
-  if (req.method !== 'GET' && !session.isAdmin) {
-    res.status(403).json({ error: 'Only a full admin can change calling hours' });
-    return;
+  // Calling hours are per-PROCESS and shared by every team on that process - so on a process that
+  // actually HAS two teams (today, only 'ndr' once both leads exist), letting either team's
+  // process admin write here would let them change when the OTHER team's leads are handed out.
+  // That is what the full-admin-only gate below exists to prevent.
+  //
+  // FINAL-7/F7: the gate used to be unconditional - `!session.isAdmin` alone - which locked RTO
+  // and Escalation process admins out of their OWN calling hours too, desks that have no teams
+  // and no stake in this feature at all. Narrowed to fire only when THIS process actually has 2+
+  // active teams (resolveCallerTeam's activeTeamCount), so a process admin on a teamless desk
+  // keeps exactly the write access they had before this feature shipped, and the lock only
+  // engages for the process it exists to protect, on the same flip as the rest of the isolation
+  // feature (a second ACTIVE calling_teams row). Reads stay open to a process admin either way
+  // (their page needs to show the window).
+  const body = parseBody(req);
+  if (req.method !== 'GET') {
+    const isProcessAdmin = session.isAdmin || (body.processKey && await isCallingProcessAdmin(session.email, body.processKey));
+    if (!isProcessAdmin) {
+      res.status(403).json({ error: 'You do not administer that process' });
+      return;
+    }
+    if (!session.isAdmin) {
+      const { activeTeamCount } = await resolveCallerTeam(session.email, body.processKey);
+      if (activeTeamCount >= 2) {
+        res.status(403).json({ error: 'Only a full admin can change calling hours' });
+        return;
+      }
+    }
   }
   if (req.method === 'POST') {
-    const body = parseBody(req);
     const known = CALLING_PROCESSES.processes.map((p) => p.key);
     if (!body.processKey || !known.includes(body.processKey)) {
       res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
@@ -329,18 +348,26 @@ async function handleBusinessHours(req, res, session) {
 // (unfiltered) regardless of who's asking. Team isolation only ever engages for a process that
 // actually has 2+ active teams.
 //
-// explicitTeamId arrives as a query-string or JSON-body value, i.e. a STRING (or undefined/null).
-// teamScopeFor's contract is number | null | undefined and it does NOT coerce - passing a raw
-// string through would make its downstream `row.teamId === teamId` strict-equality check never
-// match a numeric column, silently returning an empty roster instead of the admin's chosen team.
-// parseInt here is what keeps that comparison meaningful.
+// explicitTeamId arrives as a query-string or JSON-body value, i.e. a STRING (or undefined/null/
+// '' - an <select>'s natural encoding of its "All teams" option). teamScopeFor's contract is
+// number | null | undefined and it does NOT coerce - passing a raw string through would make its
+// downstream `row.teamId === teamId` strict-equality check never match a numeric column, silently
+// returning an empty roster instead of the admin's chosen team.
+//
+// coerceTeamId, not a bare `explicitTeamId == null ? null : parseInt(explicitTeamId, 10)`: that
+// guard only checks the OUTER value for null/undefined, so parseInt('', 10) = NaN still gets
+// through as a "real" team id. NaN is `!= null`, so teamScopeFor's admin branch returns it
+// straight to filterRosterByTeam, whose strict `r.teamId === NaN` can never match (NaN !== NaN in
+// JS) - a full admin picking "All teams" would silently see an EMPTY roster instead of everyone.
+// coerceTeamId folds both the null-check and the NaN-check into one place (see its own comment in
+// callingTeams.js) so no call site has to remember both.
 async function scopeFor(session, processKey, explicitTeamId) {
   const { callerTeamId, activeTeamCount } = await resolveCallerTeam(session.email, processKey);
   return {
     teamId: teamScopeFor({
       callerTeamId,
       activeTeamCount,
-      explicitTeamId: explicitTeamId == null ? null : parseInt(explicitTeamId, 10),
+      explicitTeamId: coerceTeamId(explicitTeamId),
       isAdmin: session.isAdmin,
     }),
     callerTeamId,
@@ -512,6 +539,7 @@ async function handleCallingAgents(req, res, session) {
     return;
   }
   const { teamId, callerTeamId } = await scopeFor(session, processKey, req.query && req.query.teamId);
+  const allTeams = await listCallingTeams(processKey);
   res.status(200).json({
     statuses: CALLING_STATUSES,
     agents: await getCallingProcessAgents(processKey, teamId),
@@ -524,7 +552,12 @@ async function handleCallingAgents(req, res, session) {
     // Both fields are additive - an older client that doesn't read them behaves exactly as before.
     teamId: callerTeamId,
     isProcessAdmin,
-    teams: await listCallingTeams(processKey),
+    // FINAL-5/F5: listCallingTeams' rows carry sheetId/sheetTab - fine for a full admin (who
+    // already administers sheet_id via handleCallingTeams below) but not for a process admin, who
+    // reaches this branch too and whose only documented need is "show a TL its own team name" (see
+    // teamId above). Strip to the display-only shape for anyone who isn't a full admin, so a
+    // process admin's own network tab can't be used to read the OTHER team's live spreadsheet id.
+    teams: session.isAdmin ? allTeams : allTeams.map((t) => ({ id: t.id, name: t.name, active: t.active })),
   });
 }
 
@@ -541,20 +574,36 @@ async function handleCallingAgents(req, res, session) {
 async function handleDispositions(req, res, session) {
   const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
   const known = CALLING_PROCESSES.processes.map((p) => p.key);
+  const body = parseBody(req);
 
   // The disposition tree is per-PROCESS and shared by every team on that process, and NDR's
   // calling flow branches on specific literal label strings when it saves a call outcome (see
-  // NdrCallingClient.js's saveNdrDisposition) - so one team's lead renaming or reordering an
-  // option can silently break the OTHER team's metrics, or its agents' ability to dispose a
-  // call at all. Reads stay open below (any agent with calling access to the process, same as
-  // before); every add/edit/reorder/delete here is full-admin only.
-  if (req.method !== 'GET' && !session.isAdmin) {
-    res.status(403).json({ error: 'Only a full admin can change the disposition list' });
-    return;
+  // NdrCallingClient.js's saveNdrDisposition) - so on a process that actually HAS two teams
+  // (today, only 'ndr' once both leads exist), one team's lead renaming or reordering an option
+  // can silently break the OTHER team's metrics, or its agents' ability to dispose a call at all.
+  // Reads stay open below (any agent with calling access to the process, same as before).
+  //
+  // FINAL-7/F7: same narrowing as handleBusinessHours above, and for the identical reason - an
+  // unconditional `!session.isAdmin` here locked RTO and Escalation process admins out of their
+  // own disposition lists too, desks with no teams and no stake in this feature. Fires only when
+  // THIS process actually has 2+ active teams, so a teamless process's admin keeps the write
+  // access they had before this feature shipped.
+  if (req.method !== 'GET') {
+    const isProcessAdmin = session.isAdmin || (body.processKey && await isCallingProcessAdmin(session.email, body.processKey));
+    if (!isProcessAdmin) {
+      res.status(403).json({ error: 'You do not administer that process' });
+      return;
+    }
+    if (!session.isAdmin) {
+      const { activeTeamCount } = await resolveCallerTeam(session.email, body.processKey);
+      if (activeTeamCount >= 2) {
+        res.status(403).json({ error: 'Only a full admin can change the disposition list' });
+        return;
+      }
+    }
   }
 
   if (req.method === 'POST') {
-    const body = parseBody(req);
     if (!known.includes(body.processKey)) {
       res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
       return;
@@ -571,7 +620,6 @@ async function handleDispositions(req, res, session) {
   }
 
   if (req.method === 'PUT') {
-    const body = parseBody(req);
     if (!known.includes(body.processKey)) {
       res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
       return;
@@ -590,7 +638,6 @@ async function handleDispositions(req, res, session) {
   }
 
   if (req.method === 'DELETE') {
-    const body = parseBody(req);
     if (!known.includes(body.processKey)) {
       res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
       return;
@@ -654,7 +701,14 @@ async function handleCallingTeams(req, res, session) {
     // includeInactive exposes retired teams (e.g. a decommissioned sheet kept for history) -
     // only a full admin gets that view; a process admin only ever needs the live roster.
     const includeInactive = session.isAdmin && !!(req.query && req.query.includeInactive);
-    res.status(200).json({ teams: await listCallingTeams(processKey, { includeInactive }) });
+    const teams = await listCallingTeams(processKey, { includeInactive });
+    // FINAL-5/F5: same strip as handleCallingAgents above - a process admin reaching this GET
+    // branch (see the isCallingProcessAdmin check just above) gets display-only team shapes, not
+    // sheetId/sheetTab. Only the POST/PUT branches below, which are full-admin-only, ever hand
+    // sheet_id back to the caller who's allowed to know it.
+    res.status(200).json({
+      teams: session.isAdmin ? teams : teams.map((t) => ({ id: t.id, name: t.name, active: t.active })),
+    });
     return;
   }
 

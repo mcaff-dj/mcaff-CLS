@@ -2,7 +2,7 @@
 // db.cache.test.js and db.redispose.test.js. Run: node api/_lib/callingTeams.test.js
 const assert = require('assert');
 const {
-  teamScopeFor, filterRosterByTeam, isValidSheetId, normalizeTeamName, teamCacheKey,
+  teamScopeFor, filterRosterByTeam, isValidSheetId, normalizeTeamName, teamCacheKey, coerceTeamId,
   SHEET_ID_MAX, TEAM_NAME_MAX,
 } = require('./callingTeams');
 
@@ -101,5 +101,27 @@ assert.ok(!teamCacheKey('calling:ndrLeadDates', 10).startsWith(teamCacheKey('cal
   'team 1 key must not be a prefix of team 10 key');
 assert.ok(teamCacheKey('calling:ndrLeadDates', 1).startsWith(teamCacheKey('calling:ndrLeadDates', 1)),
   'a key must still match itself');
+
+// ── coerceTeamId: the F8 NaN guard, factored out so every explicit-team-id call site shares it ──
+// The bug this exists to pin: parseInt('', 10) is NaN, and a bare `value == null ? null :
+// parseInt(value, 10)` guard only checks the OUTER value for null/undefined - it still hands back
+// a NaN for '', which is `!= null` and so reaches teamScopeFor as if it were a real (if garbage)
+// choice, silently emptying a full admin's roster instead of showing "All teams".
+assert.strictEqual(coerceTeamId(''), null, "'' - an <select>'s natural encoding of \"All teams\" - must not become NaN");
+assert.strictEqual(coerceTeamId(null), null);
+assert.strictEqual(coerceTeamId(undefined), null);
+assert.strictEqual(coerceTeamId('abc'), null, 'a non-numeric string must not become NaN either');
+assert.strictEqual(coerceTeamId('7'), 7, 'the common case: a query-string digit becomes a real number');
+assert.strictEqual(coerceTeamId(7), 7, 'already-numeric input passes through unchanged');
+// 0 must be honoured as team 0, not coerced away - same falsy-but-real contract teamScopeFor's
+// own explicitTeamId: 0 test pins.
+assert.strictEqual(coerceTeamId('0'), 0);
+assert.strictEqual(coerceTeamId(0), 0);
+// The whole point of factoring this out: feeding coerceTeamId's output straight into
+// teamScopeFor for the '' case must land on "unfiltered", not "empty roster".
+assert.strictEqual(
+  teamScopeFor({ callerTeamId: null, activeTeamCount: 2, explicitTeamId: coerceTeamId(''), isAdmin: true }),
+  undefined,
+);
 
 console.log('ok - callingTeams pure scoping rules');

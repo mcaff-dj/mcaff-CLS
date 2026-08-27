@@ -10,6 +10,7 @@
 const { JWT } = require('google-auth-library');
 const { getSession } = require('../_lib/session');
 const { resolveCallerTeam, getCallingTeam, listCallingTeams } = require('../_lib/db');
+const { coerceTeamId } = require('../_lib/callingTeams');
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'ndr';
@@ -47,14 +48,20 @@ const PRE_SPLIT_TEAM = {
   sheetId: PRE_SPLIT_SHEET_ID, sheetTab: PRE_SPLIT_SHEET_TAB, active: true,
 };
 
-// The sheet this caller is entitled to, resolved from their own team row. The client's `sid` is
-// IGNORED rather than validated, for two reasons. Security: this file's original comment
-// explains the check existed so a permitted-but-malicious request could not repurpose the
-// service account (which holds Editor access) against another spreadsheet - never consulting
-// the client's value is a stronger form of that guarantee than comparing it. Deploy safety:
-// api/ and app/ ship separately, so an api/ newer than app/ still receives the old hardcoded
-// sid; ignoring it keeps that request working instead of 400-ing "Unknown sheet".
-async function resolveSheetFor(session) {
+// The sheet this caller is entitled to, resolved from their own team row. Returns { team } or
+// { error } (mirroring api/ndr/upload.js's resolveUploadTarget) rather than team|null, because
+// FINAL-4/F4 below needs the refusal message to differ for an admin who has teams to pick between
+// versus everyone else who genuinely has none - a single null couldn't carry that distinction.
+//
+// The client's `sid` is IGNORED rather than validated, for two reasons. Security: this file's
+// original comment explains the check existed so a permitted-but-malicious request could not
+// repurpose the service account (which holds Editor access) against another spreadsheet - never
+// consulting the client's value is a stronger form of that guarantee than comparing it. Deploy
+// safety: api/ and app/ ship separately, so an api/ newer than app/ still receives the old
+// hardcoded sid; ignoring it keeps that request working instead of 400-ing "Unknown sheet". The
+// admin `teamId` added below is a DIFFERENT, deliberately-chosen field - never `sid` - so this
+// guarantee is unaffected: `req.query.sid` / `req.body.sid` are still never read anywhere here.
+async function resolveSheetFor(session, req) {
   const { callerTeamId, activeTeamCount } = await resolveCallerTeam(session.email, TAB_KEY);
   if (callerTeamId != null) {
     // A caller with an explicit team assignment is a TERMINAL case - it must never fall through
@@ -62,19 +69,42 @@ async function resolveSheetFor(session) {
     // Team B was the only other active team silently redirected every Team A agent onto Team B's
     // live sheet, for reads AND Editor-scoped batchUpdate writes. A row that's missing or paused
     // gets refused, not quietly reassigned to someone else's desk.
-    const team = await getCallingTeam(callerTeamId);
-    return team && team.active ? team : null;
+    const team = await getCallingTeam(callerTeamId, TAB_KEY);
+    if (team && team.active) return { team };
+    return { error: 'Your NDR team is currently paused. Ask an admin to reactivate it before you can use the sheet.' };
   }
-  // No team row at all: either the desk hasn't been split yet, or the caller is a full admin
-  // (who holds no calling_agent_process row by convention).
-  if (activeTeamCount === 0) return PRE_SPLIT_TEAM;
+  // No team row at all: either the desk hasn't been split yet, or the caller is a full admin (who
+  // holds no calling_agent_process row by convention). FINAL-4/F4: before this, a full admin fell
+  // straight through to the activeTeamCount checks below with no way to name a team, so once two
+  // teams existed they always hit the ambiguous case and were 403'd out of the NDR sheet entirely
+  // - for reads AND writes - leaving Part 2's admin team selector with no backend to call. Mirrors
+  // api/ndr/upload.js's resolveUploadTarget admin branch: an explicit, valid choice is never
+  // second-guessed; a bad one always refuses rather than silently landing on *some* team.
+  if (session.isAdmin) {
+    const explicitTeamId = coerceTeamId((req.query && req.query.teamId) || (req.body && req.body.teamId));
+    if (explicitTeamId != null) {
+      const teams = await listCallingTeams(TAB_KEY);
+      const picked = teams.find((t) => t.id === explicitTeamId);
+      return picked ? { team: picked } : { error: 'No such active team.' };
+    }
+  }
+  if (activeTeamCount === 0) return { team: PRE_SPLIT_TEAM };
   if (activeTeamCount === 1) {
     const teams = await listCallingTeams(TAB_KEY);
-    return teams.length === 1 ? teams[0] : null;
+    return teams.length === 1
+      ? { team: teams[0] }
+      : { error: 'You are not assigned to an NDR team yet. Ask an admin to assign you.' };
   }
   // Two or more active teams exist and this caller belongs to none - genuinely ambiguous;
-  // guessing would serve the wrong team's leads, so refuse instead.
-  return null;
+  // guessing would serve the wrong team's leads, so refuse instead. An admin who reached here
+  // supplied no explicit teamId (the branch above already returned for one that was given), so
+  // the refusal tells them to pick one instead of the "ask an admin to assign you" text that
+  // makes no sense for the person WHO IS the admin.
+  return {
+    error: session.isAdmin
+      ? 'Multiple NDR teams exist - pick one (?teamId=<id>) to read or write its sheet.'
+      : 'You are not assigned to an NDR team yet. Ask an admin to assign you.',
+  };
 }
 
 // Short-TTL read cache for the 'values' GET op below. Without it, every page-load or poll is
@@ -109,11 +139,12 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const team = await resolveSheetFor(session);
-  if (!team) {
-    res.status(403).json({ error: 'You are not assigned to an NDR team yet. Ask an admin to assign you.' });
+  const resolved = await resolveSheetFor(session, req);
+  if (resolved.error) {
+    res.status(403).json({ error: resolved.error });
     return;
   }
+  const { team } = resolved;
 
   let token;
   try {

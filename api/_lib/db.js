@@ -329,6 +329,12 @@ async function bootstrapSchema() {
       ndr_reason_filter TEXT,
       ndr_payment_mode_filter VARCHAR(16),
       ndr_brand_filter VARCHAR(16),
+      -- team_id: which calling_teams row (if any) this agent belongs to within the process. This
+      -- column already exists on the LIVE table via scripts/migrate_ndr_team_id.py, which is
+      -- still the path for prod - IF NOT EXISTS makes this line a no-op there. It is added here so
+      -- a FRESH environment bootstrapped by ensureSchema alone (nothing but this file) comes up
+      -- correct instead of permanently missing the column three other call sites select/insert.
+      team_id INT NULL,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_by VARCHAR(320),
       PRIMARY KEY (email, process_key)
@@ -1264,6 +1270,20 @@ async function getAgentPresenceRow(email) {
   await ensureSchema();
   const { rows } = await sql`SELECT status, updated_at FROM agent_presence WHERE email = ${email}`;
   return rows.length ? { status: rows[0].status, updatedAt: rows[0].updated_at } : null;
+}
+
+// The live cycle's owning email for one AWB, or '' if there is no live row (never claimed, or its
+// cycle already ended). Used by api/ndr/lead-assignment.js's team guard (see its own comment) to
+// decide whether a claim/dispose is touching a lead that already belongs to someone else - and,
+// if so, which team that someone is on. Deliberately returns '' rather than null for "no row" so
+// a caller can treat both "no row" and "row with no email" (email is NOT NULL today, but this
+// stays defensive rather than assuming that forever) the same way with one falsy check.
+async function getLiveNdrLeadEmail(awbNumber) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT email FROM ndr_lead_assignments WHERE awb_number = ${awbNumber} AND reassigned_away_at IS NULL LIMIT 1
+  `;
+  return (rows.length && rows[0].email) || '';
 }
 
 // NDR's own equivalent of the assignment half of record_lead_assignments (scripts/
@@ -2464,7 +2484,7 @@ async function getAdministeredProcesses(email) {
 // ── Per-team registry (calling_teams) ────────────────────────────────────────────────────
 // A team is a dimension inside a process; see the table's own comment in bootstrapSchema.
 
-const { isValidSheetId, normalizeTeamName, teamCacheKey } = require('./callingTeams');
+const { isValidSheetId, normalizeTeamName, SHEET_TAB_MAX } = require('./callingTeams');
 
 function mapTeamRow(r) {
   return {
@@ -2486,11 +2506,22 @@ async function listCallingTeams(processKey, { includeInactive = false } = {}) {
   return rows.map(mapTeamRow);
 }
 
-async function getCallingTeam(id) {
+// processKey is optional and, when given, filters the lookup to that process too - defense in
+// depth so a team id can never resolve to a row belonging to a DIFFERENT process's team. The
+// concrete risk this closes: api/ndr/sheet.js's resolveSheetFor calls this with a
+// calling_agent_process.team_id read straight from the DB, on an Editor-scoped write path (the
+// service account has Editor access on whatever sheetId the resolved row carries) - the admin UI
+// ties team_id to process_key at creation so this should be unreachable in practice, but an
+// admin fat-finger or a future bug in that UI would otherwise let it silently steer NDR traffic
+// at some OTHER process's team's sheet. Left optional (not required) because updateCallingTeam's
+// own initial lookup below has to find the row BEFORE it can know what process it belongs to.
+async function getCallingTeam(id, processKey) {
   await ensureSchema();
   const teamId = parseInt(id, 10);
   if (!Number.isFinite(teamId)) return null;
-  const { rows } = await sql`SELECT * FROM calling_teams WHERE id = ${teamId} LIMIT 1`;
+  const { rows } = processKey
+    ? await sql`SELECT * FROM calling_teams WHERE id = ${teamId} AND process_key = ${processKey} LIMIT 1`
+    : await sql`SELECT * FROM calling_teams WHERE id = ${teamId} LIMIT 1`;
   return rows.length ? mapTeamRow(rows[0]) : null;
 }
 
@@ -2505,8 +2536,15 @@ function assertTeamFields({ name, sheetId, sheetTab }) {
   }
   const cleanTab = (sheetTab == null ? '' : String(sheetTab));
   // NOT trimmed: the live NDR tab is literally named 'Latest NDR ' with a trailing space, and
-  // trimming it would produce a range string Sheets cannot resolve.
+  // trimming it would produce a range string Sheets cannot resolve. Capped (not silently sliced)
+  // at the column's own VARCHAR(120) width instead: MySQL would otherwise truncate an oversized
+  // value on INSERT/UPDATE with no error in non-strict mode, storing a tab name that never
+  // matches the live sheet and produces a Sheets range string that resolves to nothing - a
+  // thrown, readable error here is strictly better than that silent, unresolvable write.
   if (!cleanTab) throw new Error('sheetTab is required');
+  if (cleanTab.length > SHEET_TAB_MAX) {
+    throw new Error(`sheetTab must be ${SHEET_TAB_MAX} characters or fewer (this column is VARCHAR(${SHEET_TAB_MAX}))`);
+  }
   return { cleanName, cleanTab };
 }
 
@@ -2518,11 +2556,7 @@ async function createCallingTeam(processKey, { name, sheetId, sheetTab }, byEmai
     INSERT INTO calling_teams (process_key, name, sheet_id, sheet_tab, created_by, updated_by)
     VALUES (${processKey}, ${cleanName}, ${sheetId}, ${cleanTab}, ${byEmail || null}, ${byEmail || null})
   `;
-  // teamCacheKey, not a hand-built template literal: an unterminated 'calling:teams:rto' prefix
-  // would also match a future process key like 'rto2', silently invalidating a sibling process's
-  // cached roster along with this one's (see teamCacheKey's own comment in callingTeams.js).
-  invalidateCache(teamCacheKey('calling:teams', processKey));
-  return getCallingTeam(insertId);
+  return getCallingTeam(insertId, processKey);
 }
 
 async function updateCallingTeam(id, { name, sheetId, sheetTab, active }, byEmail) {
@@ -2542,8 +2576,12 @@ async function updateCallingTeam(id, { name, sheetId, sheetTab, active }, byEmai
            active = ${nextActive}, updated_at = NOW(), updated_by = ${byEmail || null}
      WHERE id = ${existing.id}
   `;
-  invalidateCache(teamCacheKey('calling:teams', existing.processKey));
-  return getCallingTeam(existing.id);
+  // No invalidateCache call here (there used to be one, keyed by teamCacheKey('calling:teams',
+  // ...)) - listCallingTeams never goes through cachedRead, so that call invalidated nothing. It
+  // read as a working cache-invalidation and wasn't; removed rather than kept as camouflage for a
+  // cache this function doesn't have. Do not re-add it without also making listCallingTeams
+  // actually cached - see F9's own note in the final-review report for why.
+  return getCallingTeam(existing.id, existing.processKey);
 }
 
 // The caller's own team, plus how many ACTIVE teams the process has - both inputs to
@@ -2961,24 +2999,57 @@ async function fetchAllLeadDates() {
 // the same reason getAllLeadDates filters to the live cycle: only the current cycle's dates
 // matter to whatever's on screen right now.
 //
-// cacheTag: a caller-supplied tag (the caller's own team id, or 'admin') so this cachedRead slot
-// is per-team rather than one shared global key. Without it, whichever team's request happens to
-// warm the cache first would serve ITS ENTIRE AWB SET to the other team for the rest of the
-// 5-minute TTL. ndr_lead_assignments has no team column yet (see the design spec's "Deliberately
-// NOT changed" section) - a lead's team is only knowable from which sheet it came from - so
-// carrying the team in the cache key, via teamCacheKey, is the whole scoping mechanism here, not
-// row-level filtering of the result.
-function getAllNdrLeadDates(cacheTag = 'all') {
-  return cachedRead(teamCacheKey('calling:ndrLeadDates', cacheTag), fetchAllNdrLeadDates);
+// CORRECTED COMMENT (this used to claim the per-team isolation here was a cache-slot trick
+// rather than a real filter - it was wrong, and the code matched the wrong claim: the fetcher
+// was never parameterized by team, so every "per-team" cache slot held the IDENTICAL global
+// payload of every live lead's AWB and timestamps. TL-B could read TL-A's whole desk through it.
+//
+// ndr_lead_assignments has no team column (see the design spec's "Deliberately NOT changed"
+// section), but it DOES carry `email` - who currently owns the live cycle - and that email is
+// exactly what THIS caller's team roster (getCallingProcessAgents(processKey, teamId)) already
+// knows how to scope. So the real fix is a row-level filter: keep only rows whose email is in
+// the caller's team roster. `allowedEmails === undefined` means "no filter" - the unfiltered
+// path for a full admin, or for any process with fewer than two active teams (release-1
+// softening, same as everywhere else in this feature) - and still returns the whole table.
+//
+// The underlying table read stays a SINGLE globally-cached query (cachedRead below, one key, no
+// team tag) with the per-team filter applied to the cached result afterward. Per-team cache
+// slots (the old teamCacheKey usage here) bought nothing once the filter is real: they only
+// multiplied memory and query counts by the number of teams for an identical underlying read.
+function getAllNdrLeadDates(allowedEmails) {
+  return cachedRead('calling:ndrLeadDates', fetchAllNdrLeadDates).then((rows) => {
+    // Lowercased on both sides of the membership check, matching the case-insensitive email
+    // comparison every other identity check in this file already uses (resolveCallerTeam,
+    // isCallingProcessAdmin, getCallingProcessAgents' own byEmail join) - not strictly provable
+    // necessary here since both sides trace back to the same users.email column, but relying on
+    // that instead of this file's own established convention is exactly the kind of assumption
+    // that quietly breaks the day someone's email gets re-invited with different casing.
+    const allowed = allowedEmails === undefined
+      ? null
+      : new Set(allowedEmails.map((e) => String(e).toLowerCase()));
+    const out = {};
+    // email is stripped here unconditionally, filtered or not - it exists in the cached rows only
+    // to drive the membership check above, never as part of the response shape this handed back
+    // to a route (api/auth/[action].js's handleLeadDates ships this object straight to the
+    // client as `leadDates`, so leaving email in would newly leak every agent's address into a
+    // response that never carried PII before this feature).
+    for (const awb of Object.keys(rows)) {
+      if (allowed && !allowed.has(String(rows[awb].email).toLowerCase())) continue;
+      out[awb] = { assignedAt: rows[awb].assignedAt, disposedAt: rows[awb].disposedAt };
+    }
+    return out;
+  });
 }
 
 async function fetchAllNdrLeadDates() {
   await ensureSchema();
   const { rows } = await sql`
-    SELECT awb_number, assigned_at, disposed_at FROM ndr_lead_assignments WHERE reassigned_away_at IS NULL
+    SELECT awb_number, email, assigned_at, disposed_at FROM ndr_lead_assignments WHERE reassigned_away_at IS NULL
   `;
   const out = {};
-  for (const r of rows) out[r.awb_number] = { assignedAt: r.assigned_at, disposedAt: r.disposed_at };
+  // email is carried in this cached shape purely so getAllNdrLeadDates can filter by team
+  // membership above - it is never the response shape handed to a route.
+  for (const r of rows) out[r.awb_number] = { assignedAt: r.assigned_at, disposedAt: r.disposed_at, email: r.email };
   return out;
 }
 
@@ -3443,7 +3514,7 @@ module.exports = {
   listCallingTeams, getCallingTeam, createCallingTeam, updateCallingTeam, resolveCallerTeam,
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions,
-  claimNdrLead, disposeNdrLead,
+  claimNdrLead, disposeNdrLead, getLiveNdrLeadEmail,
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,

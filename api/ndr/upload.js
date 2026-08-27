@@ -19,6 +19,7 @@ const {
   NDR_IMPORT, NDR_ROW_WIDTH, NDR_LAST_COLUMN_LETTER, NDR_AWB_COLUMN, NDR_ATTEMPT_COLUMN,
 } = require('../_lib/ndrCsvImport');
 const { isCallingProcessAdmin, resolveCallerTeam, listCallingTeams } = require('../_lib/db');
+const { coerceTeamId } = require('../_lib/callingTeams');
 // PRE_SPLIT_TEAM: the same zero-active-teams fallback api/ndr/sheet.js already falls back to for
 // reads, imported rather than re-declared so the two endpoints share one literal pair
 // (sheetId/sheetTab) instead of two copies that could quietly drift apart. See its own comment in
@@ -112,8 +113,16 @@ async function checkAccess(session) {
 //     2+ active teams -> 400. This is the actually dangerous case the whole guard exists for.
 async function resolveUploadTarget(session, body, teams) {
   if (session.isAdmin) {
-    if (body.teamId != null) {
-      const picked = teams.find((t) => t.id === parseInt(body.teamId, 10));
+    // coerceTeamId, not a bare `body.teamId != null` + parseInt: an empty string (an admin UI's
+    // "no team picked" <select> encoding, or just an omitted-but-present field) must fall through
+    // to byActiveCount below like any other "no explicit choice", not be treated as a real (if
+    // unparseable) selection - parseInt('', 10) is NaN, and a bare `!= null` guard only checks the
+    // OUTER value, so it let NaN through as if it were a genuine choice and produced a confusing
+    // "No such active team" instead of resolving the way "nothing chosen" should. See
+    // coerceTeamId's own comment in callingTeams.js (F8 in the final whole-branch review).
+    const explicitTeamId = coerceTeamId(body.teamId);
+    if (explicitTeamId != null) {
+      const picked = teams.find((t) => t.id === explicitTeamId);
       return picked ? { team: picked } : { error: 'No such active team.' };
     }
     return byActiveCount(teams, {
@@ -153,17 +162,33 @@ function rowToFullArray(cellsByColumn) {
   return arr;
 }
 
-// The dedup key set as ONE sheet stands right now, built from the same two fields and in the same
-// order as NDR_IMPORT.dedupExtraCsvHeaders - otherwise nothing would ever match. Read via
-// batchGet so only the two columns that form the key cross the wire, not the whole row width.
-// Takes sheetId/sheetTab as parameters (rather than the old module-level constants) so the same
-// function reads the target team's sheet AND every other team's sheet for the cross-team check
-// below.
+// The dedup key set as ONE sheet stands right now. Takes sheetId/sheetTab as parameters (rather
+// than the old module-level constants) so the same function reads the target team's sheet AND
+// every other team's sheet for the cross-team check below - but the two calls deliberately use a
+// DIFFERENT key shape, via extraCsvHeaders:
+//
+//   - Reading the TARGET sheet (existingKeySet, below): extraCsvHeaders defaults to
+//     NDR_IMPORT.dedupExtraCsvHeaders (AWB + Attempt Count), matching buildRowPlan's own key
+//     exactly - otherwise nothing would ever match. This sheet legitimately carries many rows for
+//     the same AWB, one per delivery attempt, so AWB alone would reject every genuine follow-up.
+//   - Reading every OTHER team's sheet (readForeignKeySets, below): extraCsvHeaders is passed as
+//     [], so dedupKey collapses to the AWB alone (see its own `if (!extraCsvHeaders.length) return
+//     awb;` short-circuit). This is deliberately narrower than the target-sheet key, not a copy
+//     bug: the invariant this guard protects - ndr_lead_assignments.live_awb_number - is unique on
+//     AWB ALONE, not on (AWB, Attempt). So AWB X sitting at attempt 2 in Team A's sheet and
+//     attempt 3 in Team B's sheet is a real collision even though their (AWB, Attempt) keys
+//     differ - keying the foreign check on the composite would let both attempts of the exact
+//     scenario this guard exists for slip past it silently.
+//
+// Read via batchGet so only the two columns that form the key cross the wire, not the whole row
+// width - the Attempt Count column is still read even for the foreign case (extraCsvHeaders only
+// changes whether dedupKey folds it INTO the key), since fetching both columns unconditionally
+// keeps this one function serving both callers with no extra branch.
 //
 // UNFORMATTED_VALUE, not Sheets' FORMATTED_VALUE default: a numeric AWB stored as a number has a
 // FORMATTED value of "5.4E+13", which matches no real AWB and would silently defeat this dedup
 // entirely - the exact bug fixed on the RTO path (see api/rto/upload-start.js's own note).
-async function readKeySetForSheet(client, sheetId, sheetTab) {
+async function readKeySetForSheet(client, sheetId, sheetTab, extraCsvHeaders = NDR_IMPORT.dedupExtraCsvHeaders) {
   const ranges = [`'${sheetTab}'!${NDR_AWB_COLUMN}2:${NDR_AWB_COLUMN}`, `'${sheetTab}'!${NDR_ATTEMPT_COLUMN}2:${NDR_ATTEMPT_COLUMN}`]
     .map((r) => `ranges=${encodeURIComponent(r)}`).join('&');
   const data = await sheetsRequest(client, sheetId, 'GET', `/values:batchGet?${ranges}&valueRenderOption=UNFORMATTED_VALUE`);
@@ -180,7 +205,7 @@ async function readKeySetForSheet(client, sheetId, sheetTab) {
     if (!awb) return;
     const attemptRow = attemptRows[i];
     const attempt = (attemptRow && attemptRow[0]) !== undefined ? attemptRow[0] : '';
-    keys.add(dedupKey(awb, { 'Attempt Count': attempt }, NDR_IMPORT.dedupExtraCsvHeaders));
+    keys.add(dedupKey(awb, { 'Attempt Count': attempt }, extraCsvHeaders));
   });
   return keys;
 }
@@ -196,7 +221,9 @@ async function readKeySetForSheet(client, sheetId, sheetTab) {
 // excluded - buildRowPlan already deduped against it via existingKeySet.
 async function readForeignKeySets(client, teams, targetTeamId) {
   const others = teams.filter((t) => t.id !== targetTeamId);
-  const sets = await Promise.all(others.map((t) => readKeySetForSheet(client, t.sheetId, t.sheetTab)));
+  // extraCsvHeaders: [] - AWB alone, not the composite (AWB, Attempt) key - see
+  // readKeySetForSheet's own comment for why this asymmetry is deliberate.
+  const sets = await Promise.all(others.map((t) => readKeySetForSheet(client, t.sheetId, t.sheetTab, [])));
   return others.map((t, i) => ({ team: t, keys: sets[i] }));
 }
 
@@ -297,7 +324,11 @@ module.exports = async (req, res) => {
     const foreignHits = [];
     const keep = [];
     plan.validRows.forEach((row) => {
-      const hit = foreignSets.find((f) => f.keys.has(row.dedupKey));
+      // row.awbCode (normalized AWB), NOT row.dedupKey - foreignSets are keyed on AWB alone (see
+      // readForeignKeySets/readKeySetForSheet's own comments for why that's deliberately narrower
+      // than the target sheet's composite key). Comparing dedupKey here would miss the exact
+      // multi-attempt-in-two-teams case this guard exists to catch.
+      const hit = foreignSets.find((f) => f.keys.has(row.awbCode));
       if (hit) foreignHits.push({ line: row.line, reason: `already in ${hit.team.name}'s sheet` });
       else keep.push(row);
     });
@@ -316,6 +347,16 @@ module.exports = async (req, res) => {
     // Every field the frontend (app/ndr-calling/NdrUploadModal.js) already renders stays exactly
     // as it was - team and duplicateInOtherTeam are the only additions, so the current modal
     // keeps working unchanged until it's updated to show them.
+    //
+    // errors: foreignHits listed BEFORE plan.errors, not [...plan.errors, ...foreignHits] - a
+    // messy file can produce hundreds of ordinary parse errors (missing AWB, duplicate-in-file,
+    // duplicate-in-sheet), and a flat concat-then-slice(0, 50) let those crowd out every
+    // cross-team hit before the reader ever saw one. foreignHits is the rarer, more serious
+    // condition (it means this upload was about to corrupt ndr_lead_assignments - see
+    // readForeignKeySets' own comment), so it gets first claim on the 50-item budget; only the
+    // remaining room is filled with ordinary errors. Total counts above are unaffected - this
+    // only caps what's ECHOED back for a human to read, not what's used to decide `keep`/`appended`.
+    const MAX_REPORTED_ERRORS = 50;
     res.status(200).json({
       team: { id: team.id, name: team.name },
       appended,
@@ -325,7 +366,7 @@ module.exports = async (req, res) => {
       missingAwb: plan.counts.missingAwb,
       scientificAwb: plan.counts.scientificAwb,
       total: csvRows.length,
-      errors: [...plan.errors, ...foreignHits].slice(0, 50),
+      errors: [...foreignHits, ...plan.errors].slice(0, MAX_REPORTED_ERRORS),
     });
   } catch (e) {
     console.error('api/ndr/upload error:', e);

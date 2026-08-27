@@ -406,15 +406,22 @@ async function handleLeadDates(req, res) {
 
   let leadDates;
   if (processKey === 'ndr') {
-    // ndr_lead_assignments has no team column (see the design spec's "Deliberately NOT changed"
-    // section), so a lead's team is only knowable from which sheet it came from - not from this
-    // table. Until that changes, the caller's team rides along as the cachedRead SLOT KEY
-    // instead (see getAllNdrLeadDates/teamCacheKey in db.js), so the two teams simply never
-    // share a cached payload - one team's request can no longer warm the cache with an answer
-    // the other team then reads for the rest of the 5-minute TTL. That is row-level isolation's
-    // stand-in until the schema carries team directly.
-    const { callerTeamId } = await resolveCallerTeam(session.email, processKey);
-    leadDates = await getAllNdrLeadDates(session.isAdmin ? 'admin' : `t${callerTeamId ?? 'none'}`);
+    // ndr_lead_assignments has no team column of its own (see the design spec's "Deliberately
+    // NOT changed" section), but it DOES carry `email` - who currently holds the live cycle -
+    // and that is enough for a real row-level filter: intersect it against THIS caller's own
+    // team roster (getCallingProcessAgents(processKey, teamId), which teamScopeFor already
+    // scopes correctly). teamId undefined means no filter - a full admin, or any process with
+    // fewer than two active teams (the same release-1 softening used everywhere else in this
+    // feature) - and getAllNdrLeadDates(undefined) returns the whole table, exactly as before.
+    const { callerTeamId, activeTeamCount } = await resolveCallerTeam(session.email, processKey);
+    const teamId = teamScopeFor({ callerTeamId, activeTeamCount, isAdmin: session.isAdmin });
+    let allowedEmails;
+    if (teamId !== undefined) {
+      // null fails closed to an empty roster (no emails can match), not to "everyone" -
+      // getAllNdrLeadDates([]) then returns {} rather than the whole desk.
+      allowedEmails = teamId === null ? [] : (await getCallingProcessAgents(processKey, teamId)).map((m) => m.email);
+    }
+    leadDates = await getAllNdrLeadDates(allowedEmails);
   } else {
     // rto has no team dimension at all (see resolveCallerTeam's activeTeamCount: 0 for a
     // teamless process), so getAllLeadDates stays exactly as it was before this task.

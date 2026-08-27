@@ -13,6 +13,11 @@
 // (44 chars) with room either side; anything outside it is a paste error, not an id.
 const SHEET_ID_MAX = 128;
 const TEAM_NAME_MAX = 120;
+// calling_teams.sheet_tab is also VARCHAR(120), same width as the name column but a distinct
+// field (a Sheets tab name, not a team name) - kept as its own constant rather than reusing
+// TEAM_NAME_MAX so a future reader isn't left wondering whether the two limits are coincidentally
+// equal or actually the same rule.
+const SHEET_TAB_MAX = 120;
 const SHEET_ID_RE = /^[A-Za-z0-9_-]{20,128}$/;
 
 function isValidSheetId(s) {
@@ -21,6 +26,22 @@ function isValidSheetId(s) {
 
 function normalizeTeamName(s) {
   return (s == null ? '' : String(s)).trim().replace(/\s+/g, ' ').slice(0, TEAM_NAME_MAX);
+}
+
+// Coerces a raw explicit-team-id value - a query-string or JSON-body field, so a string, number,
+// '', null, or undefined - into a real team id or null. Every call site that reads one needs this,
+// not just parseInt: parseInt('', 10) is NaN, and NaN is `!= null`, so a plain `explicitTeamId ==
+// null ? null : parseInt(explicitTeamId, 10)` guard (which only checks the OUTER value for null)
+// still hands teamScopeFor a NaN for an empty string - exactly what an "All teams" <select>
+// option naturally encodes. teamScopeFor then returns that NaN as the chosen team, and
+// filterRosterByTeam's strict `r.teamId === teamId` never matches a NaN (NaN !== NaN in JS), so a
+// full admin's roster comes back silently EMPTY instead of "All teams". parseInt already turns
+// null/undefined into NaN too (via its own string coercion), so one Number.isFinite check after
+// parseInt covers every "no team chosen" spelling in one place, rather than trusting each call
+// site to separately remember the null-check AND the NaN-check.
+function coerceTeamId(value) {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) ? n : null;
 }
 
 // The ONE place the release-1 softening lives, so it is greppable and removable in a single edit.
@@ -76,6 +97,6 @@ function filterRosterByTeam(rows, teamId) {
 }
 
 module.exports = {
-  teamScopeFor, filterRosterByTeam, isValidSheetId, normalizeTeamName, teamCacheKey,
-  SHEET_ID_MAX, TEAM_NAME_MAX,
+  teamScopeFor, filterRosterByTeam, isValidSheetId, normalizeTeamName, teamCacheKey, coerceTeamId,
+  SHEET_ID_MAX, TEAM_NAME_MAX, SHEET_TAB_MAX,
 };
