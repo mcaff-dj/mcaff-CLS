@@ -204,15 +204,21 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     matches the same lead, whichever is next in the round-robin rotation gets it - a lead is
     never handed to more than one agent. Absent/empty means no specialization at all, i.e.
     identical behaviour to before this parameter existed.
-    agent_prepaid_target: optional {email: int 0-100} - a soft cap on what share of THIS RUN's
-    new assignments to that agent may be prepaid. It never leaves a lead unassigned to enforce
-    the ratio: an agent already at/over their target is skipped in favour of another eligible
-    agent for a prepaid lead, but if every eligible agent is at/over target the lead is still
-    assigned (falls back to ignoring the ratio) rather than left in the queue. Steers the mix
-    over time rather than guaranteeing an exact percentage - "soft" is the whole point, since a
-    hard cap could strand prepaid leads unassigned purely because everyone online happened to
-    be tuned low. Absent/unset for an agent means no target, i.e. unrestricted exactly as
-    before this parameter existed.
+    agent_prepaid_target: optional {email: int 0-100} - a soft cap on what share of that
+    agent's OPEN CAPACITY this run (quota minus current_load, snapshotted before anything is
+    handed out) may be filled with prepaid leads. The denominator is deliberately capacity and
+    not the running tally of what they have been given so far: prepaid is tier 0, so the sorted
+    pool places every prepaid lead before the first COD lead exists, and a running-tally ratio
+    therefore reads 100% prepaid at every prepaid decision - which silently locked every agent
+    with a target below 100 out of prepaid entirely and handed the whole prepaid pool to
+    whoever had no target set. It never leaves a lead unassigned to enforce the ratio: an agent
+    already at/over their target is skipped in favour of another eligible agent for a prepaid
+    lead, but if every eligible agent is at/over target the lead is still assigned (falls back
+    to ignoring the ratio) rather than left in the queue. Steers the mix over time rather than
+    guaranteeing an exact percentage - "soft" is the whole point, since a hard cap could strand
+    prepaid leads unassigned purely because everyone online happened to be tuned low. Absent/
+    unset for an agent means no target, i.e. unrestricted exactly as before this parameter
+    existed.
     agent_reassign_payment_mode: optional {email: 'Prepaid' or 'COD'} - unlike
     agent_prepaid_target, a HARD filter that only ever applies to a reassignment (a row_index
     present in excluded_by_row); a fresh/never-touched lead ignores it entirely. An agent with
@@ -285,11 +291,15 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     if not agent_order:
         return assignments
     cursor = 0
-    # This run's own tally, NOT current_load (which has no payment-type breakdown) - a soft
-    # target steers the incoming distribution for this batch, it doesn't need perfect knowledge
-    # of an agent's full historical mix to do that.
+    # This run's own prepaid tally, NOT current_load (which has no payment-type breakdown) - a
+    # soft target steers the incoming distribution for this batch, it doesn't need perfect
+    # knowledge of an agent's full historical mix to do that.
     prepaid_assigned_this_run = {email: 0 for email in agent_order}
-    total_assigned_this_run = {email: 0 for email in agent_order}
+    # Denominator for the prepaid target: this run's TOTAL open capacity per agent, snapshotted
+    # before anything is handed out. Not the running tally - prepaid is tier 0, so every prepaid
+    # lead is placed before the first COD lead exists, which made a running-tally ratio read
+    # 100% prepaid at every prepaid decision and locked out every agent with a target below 100.
+    capacity_this_run = {email: needed[email] for email in agent_order}
 
     def _matches_specialist(email, row_index):
         reasons = agent_specializations.get(email)
@@ -304,9 +314,10 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
         target = agent_prepaid_target.get(email)
         if target is None:
             return True
-        prospective_prepaid = prepaid_assigned_this_run[email] + 1
-        prospective_total = total_assigned_this_run[email] + 1
-        return (prospective_prepaid / prospective_total) * 100 <= target
+        # Integer form of (prepaid + 1) <= capacity * target / 100 - floor semantics, so a
+        # capacity too small to hold even one lead's worth of the target allows no prepaid in
+        # passes 1-2 and falls through to pass 3 like any other at-target agent.
+        return (prepaid_assigned_this_run[email] + 1) * 100 <= capacity_this_run[email] * target
 
     def _matches_reassign_payment_mode(email, row_index, is_prepaid_lead):
         if row_index not in excluded_by_row:
@@ -354,7 +365,6 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
             if chosen is not None:
                 assignments[row_index] = chosen
                 needed[chosen] -= 1
-                total_assigned_this_run[chosen] += 1
                 if is_prepaid_lead:
                     prepaid_assigned_this_run[chosen] += 1
             # else (every agent excluded or at capacity): this lead is left unassigned this

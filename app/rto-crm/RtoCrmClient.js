@@ -1684,11 +1684,15 @@ import CallTrendChart from './CallTrendChart';
         const rows = [];
         const agentOrder = onlineAgents.filter(e => needed[e] > 0);
         let cursor = 0;
-        // This run's own tally, not currentLoad (which has no payment-type breakdown) - same
-        // rationale as lead_priority.py's prepaid_assigned_this_run/total_assigned_this_run.
+        // This run's own prepaid tally, not currentLoad (which has no payment-type breakdown) -
+        // same rationale as lead_priority.py's prepaid_assigned_this_run. capacityThisRun is the
+        // prepaid target's denominator: total open capacity per agent, snapshotted before
+        // anything is handed out, NOT the running tally - prepaid is tier 0, so every prepaid
+        // lead is placed before the first COD lead exists and a running-tally ratio reads 100%
+        // prepaid at every prepaid decision.
         const prepaidAssignedThisRun = {};
-        const totalAssignedThisRun = {};
-        agentOrder.forEach(e => { prepaidAssignedThisRun[e] = 0; totalAssignedThisRun[e] = 0; });
+        const capacityThisRun = {};
+        agentOrder.forEach(e => { prepaidAssignedThisRun[e] = 0; capacityThisRun[e] = needed[e]; });
 
         const matchesSpecialist = (email, ticket) => {
           const reasons = specializations[email];
@@ -1700,9 +1704,9 @@ import CallTrendChart from './CallTrendChart';
           if (!isPrepaidLead) return true;
           const target = prepaidTargets[email];
           if (target == null) return true;
-          const prospectivePrepaid = prepaidAssignedThisRun[email] + 1;
-          const prospectiveTotal = totalAssignedThisRun[email] + 1;
-          return (prospectivePrepaid / prospectiveTotal) * 100 <= target;
+          // Integer form of (prepaid + 1) <= capacity * target / 100, mirroring
+          // lead_priority.py's _within_prepaid_target exactly.
+          return (prepaidAssignedThisRun[email] + 1) * 100 <= capacityThisRun[email] * target;
         };
         // Only gates Connected=No reassignments (item.excludedAgent set) - a fresh/never-
         // touched lead is unaffected by this agent's restriction, same as this setting's
@@ -1750,7 +1754,6 @@ import CallTrendChart from './CallTrendChart';
               if (assignedEmail) {
                 placed.add(item);
                 needed[assignedEmail] -= 1;
-                totalAssignedThisRun[assignedEmail] += 1;
                 if (isPrepaidLead) prepaidAssignedThisRun[assignedEmail] += 1;
                 rows.push({
                   ticket: item.ticket, tier: item.tier, predictedAgent: assignedEmail,

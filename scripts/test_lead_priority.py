@@ -133,6 +133,33 @@ def test_reserve_still_respects_per_lead_exclusion_and_payment_mode():
         "the only non-excluded agent (c) has a COD-only reassign filter, this lead is Prepaid"
 
 
+
+def test_prepaid_target_is_measured_against_capacity_not_the_running_tally():
+    """An agent with a prepaid target still gets their share of prepaid leads.
+
+    Prepaid is tier 0, so the sorted pool hands out EVERY prepaid lead before the first COD
+    lead exists. A target measured against this run's running tally therefore always sees
+    100% prepaid at decision time, and any agent with a target below 100 fails passes 1-2 on
+    every prepaid lead in every run - so an agent with no target at all soaks up the whole
+    prepaid pool and the targeted agents get none (the "we have prepaid in RTO but I never get
+    one" report). The target has to be measured against the agent's capacity for the run.
+    """
+    agents = ["targeted@x.com", "untargeted@x.com"]
+    quota = 10
+    prepaid = [(i, None, f"PRE{i}", 0) for i in range(10)]
+    cod = [(100 + i, None, f"COD{i}", 2) for i in range(10)]
+    current_load = {e: 0 for e in agents}
+
+    assignments = build_assignment_queue(
+        prepaid + cod, agents, current_load, quota=quota,
+        agent_prepaid_target={"targeted@x.com": 50},
+    )
+
+    prepaid_rows = {row_index for row_index, _, _, tier in prepaid}
+    got = sum(1 for r, e in assignments.items() if r in prepaid_rows and e == "targeted@x.com")
+    assert got == 5, f"targeted agent should get 50% of their 10 slots as prepaid, got {got}"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
