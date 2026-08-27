@@ -2236,6 +2236,8 @@ async function setCallingBusinessHours(processKey, week, updatedBy) {
 // gets its own distinct value, 'OnCall', to avoid colliding with the existing one.
 const CALLING_STATUSES = ['Online', 'Busy', 'OnCall', 'Offline'];
 
+const { filterRosterByTeam } = require('./callingTeams');
+
 // Everyone invited to a process, with their per-process status and quota.
 //
 // Membership comes from the invitation rows (MySQL: users + report_tab_permissions), and the
@@ -2246,7 +2248,7 @@ const CALLING_STATUSES = ['Online', 'Busy', 'OnCall', 'Offline'];
 // An agent with no row yet is reported as Offline with a null quota, meaning "fall back to the
 // process default" rather than "zero capacity" - a missing row must never read as a quota of 0,
 // which would quietly make them ineligible for any lead.
-async function getCallingProcessAgents(processKey) {
+async function getCallingProcessAgents(processKey, teamId) {
   await ensureSchema();
   // Membership has to follow the same convention the rest of the app uses: holding the
   // 'calling' card with NO tab rows means unrestricted - every process - so those people
@@ -2277,13 +2279,13 @@ async function getCallingProcessAgents(processKey) {
     sql`
       SELECT email, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons,
              reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter,
-             ndr_brand_filter, updated_at, updated_by
+             ndr_brand_filter, team_id, updated_at, updated_by
       FROM calling_agent_process WHERE process_key = ${processKey}
     `,
   ]);
   const byEmail = {};
   for (const s of state) byEmail[String(s.email).toLowerCase()] = s;
-  return members.map((m) => {
+  const mapped = members.map((m) => {
     const s = byEmail[String(m.email).toLowerCase()];
     return {
       email: m.email,
@@ -2299,15 +2301,29 @@ async function getCallingProcessAgents(processKey) {
       ndrReasonFilter: (s && s.ndr_reason_filter) || '',
       ndrPaymentModeFilter: (s && s.ndr_payment_mode_filter) || '',
       ndrBrandFilter: (s && s.ndr_brand_filter) || '',
+      // null means "no team", which for a team-scoped view means excluded from every real
+      // team's roster - the INVERSE of the report_tab_permissions convention above (membership
+      // query) where absence of a tab row means unrestricted/every-process. Two tables, two
+      // opposite meanings for "no row" - worth spelling out because it's exactly the kind of
+      // thing that looks like a copy-paste bug later. An agent with no calling_agent_process
+      // row at all (s is undefined) must surface null here, not undefined, so
+      // filterRosterByTeam's strict equality check excludes them rather than an `undefined ===
+      // teamId` accidentally matching nothing OR everything depending on caller.
+      teamId: s && s.team_id != null ? s.team_id : null,
       updatedAt: (s && s.updated_at) || null,
       updatedBy: (s && s.updated_by) || null,
     };
   });
+  // teamId === undefined leaves this array reference untouched, which is what keeps
+  // api/escalation/[action].js, api/auth/[action].js and api/admin/[action].js's existing
+  // one-argument calls working with zero behaviour change - see filterRosterByTeam's own
+  // contract comment in callingTeams.js.
+  return filterRosterByTeam(mapped, teamId);
 }
 
 // Upserts one agent's status and/or quota for one process. Either field may be omitted, so an
 // agent flipping their own status can't accidentally reset a quota an admin set.
-async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons, reassignPaymentMode, attemptCountFilter, ndrReasonFilter, ndrPaymentModeFilter, ndrBrandFilter } = {}, updatedBy) {
+async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons, reassignPaymentMode, attemptCountFilter, ndrReasonFilter, ndrPaymentModeFilter, ndrBrandFilter, teamId } = {}, updatedBy) {
   await ensureSchema();
   const key = String(email || '').trim().toLowerCase();
   if (!processKey || !key) throw new Error('processKey and email are required');
@@ -2367,9 +2383,29 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
     throw new Error("ndrBrandFilter must be '', 'Hyphen', or 'mCaffeine'");
   }
   const ndrBrandFilterText = ndrBrandFilter === undefined ? null : String(ndrBrandFilter || '').trim();
+  // team_id needs a THIRD state that COALESCE(new, old) cannot express on its own: undefined =
+  // leave the stored team alone (COALESCE would handle this fine), a number = assign that team
+  // (COALESCE handles this too) - but null = explicitly UNASSIGN, and COALESCE(NULL, team_id)
+  // just keeps the old value, the opposite of an explicit clear. So this uses the same
+  // "sentinel flag + IF()" shape as adminFlag above, but adminFlag's flag (null) doubles as
+  // its own "leave alone" value, which doesn't work here because null is also the value we
+  // need to WRITE for "unassign". touchTeam separates "was teamId supplied at all" from "what
+  // should it be set to", and the ON DUPLICATE KEY UPDATE clause below uses IF(touchTeam, ...)
+  // instead of COALESCE for this one column.
+  //
+  // The revoke path in api/admin/[action].js (DELETE /api/admin/calling-agents) depends on the
+  // null case: without an explicit unassign, a revoked agent keeps their team_id and silently
+  // rejoins that team's roster and metrics the moment anyone re-invites them - the access grant
+  // and the team membership would then disagree about who belongs where.
+  const touchTeam = teamId !== undefined;
+  let teamValue = null;
+  if (touchTeam && teamId !== null) {
+    teamValue = parseInt(teamId, 10);
+    if (!Number.isFinite(teamValue) || teamValue <= 0) throw new Error('teamId must be a positive whole number or null');
+  }
   await sql`
-    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter, ndr_brand_filter, updated_at, updated_by)
-    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, ${reassignModeText || ''}, ${attemptFilterText || ''}, ${ndrReasonFilterText || ''}, ${ndrPaymentModeFilterText || ''}, ${ndrBrandFilterText || ''}, NOW(), ${updatedBy || null})
+    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter, ndr_brand_filter, team_id, updated_at, updated_by)
+    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, ${reassignModeText || ''}, ${attemptFilterText || ''}, ${ndrReasonFilterText || ''}, ${ndrPaymentModeFilterText || ''}, ${ndrBrandFilterText || ''}, ${touchTeam ? teamValue : null}, NOW(), ${updatedBy || null})
     ON DUPLICATE KEY UPDATE
       status = COALESCE(${status || null}, status),
       max_quota = COALESCE(${quota}, max_quota),
@@ -2378,6 +2414,7 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
       priority_rto_reasons = COALESCE(${reasonsText}, priority_rto_reasons),
       reassign_payment_mode = COALESCE(${reassignModeText}, reassign_payment_mode),
       attempt_count_filter = COALESCE(${attemptFilterText}, attempt_count_filter),
+      team_id = IF(${touchTeam}, ${teamValue}, team_id),
       ndr_reason_filter = COALESCE(${ndrReasonFilterText}, ndr_reason_filter),
       ndr_payment_mode_filter = COALESCE(${ndrPaymentModeFilterText}, ndr_payment_mode_filter),
       ndr_brand_filter = COALESCE(${ndrBrandFilterText}, ndr_brand_filter),
