@@ -85,9 +85,15 @@ async function checkAccess(session) {
 //   TL (passed checkAccess via isCallingProcessAdmin, not session.isAdmin):
 //     - assigned to one of the currently-active teams -> that team, unconditionally. A caller
 //       WITH a resolvable team can never fall through to the ambiguous-count logic below.
-//     - not assigned to any currently-active team (no calling_agent_process row, or their team
-//       has since gone inactive) -> falls to the same active-team-count resolution an admin who
-//       named no team gets, below.
+//     - has an EXPLICIT assignment (calling_agent_process.team_id is set) but that team is not
+//       in the active list -> 400, TERMINAL. Never falls through to the active-team-count
+//       resolution below, on purpose: falling through was the exact bug api/ndr/sheet.js's own
+//       resolveSheetFor comment names - deactivate Team A while Team B is the only other active
+//       team, and a Team-A TL's request would silently resolve to "well, there's only one active
+//       team" and land in Team B's live sheet. An explicit assignment always wins or always
+//       refuses; it never quietly becomes someone else's problem.
+//     - no assignment row at all (never put on a team) -> falls to the same active-team-count
+//       resolution an admin who named no team gets, below.
 //
 //   full admin (session.isAdmin):
 //     - body.teamId names one of the active teams -> that team, regardless of how many teams
@@ -115,10 +121,15 @@ async function resolveUploadTarget(session, body, teams) {
     });
   }
   const { callerTeamId } = await resolveCallerTeam(session.email, TAB_KEY);
-  // `teams` is already active-only and scoped to this process (TAB_KEY), so finding nothing here
-  // covers both "never assigned" and "assigned to a team that is now inactive/gone" in one check.
-  const mine = callerTeamId != null ? teams.find((t) => t.id === callerTeamId) : null;
-  if (mine) return { team: mine };
+  if (callerTeamId != null) {
+    // TERMINAL. `teams` is active-only, so an explicit assignment absent from it means the team
+    // is inactive or gone - refuse right here rather than falling through to the "no assignment"
+    // handling below, which would treat "your team is paused" the same as "you were never put on
+    // a team" and could resolve to a DIFFERENT team when exactly one other happens to be active.
+    const mine = teams.find((t) => t.id === callerTeamId);
+    if (mine) return { team: mine };
+    return { error: 'Your NDR team is currently paused. Ask an admin to reactivate it before uploading.' };
+  }
   return byActiveCount(teams, { error: 'You are not assigned to an NDR team yet. Ask an admin to assign you.' });
 }
 
