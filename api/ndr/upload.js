@@ -1,7 +1,6 @@
 // POST /api/ndr/upload - admin or ndr process-admin only. Bulk-adds new NDR leads from a CSV to
-// the uploader's own team's "Latest NDR " sheet: parses, checks the live sheet's layout hasn't
-// drifted, dedupes by AWB + Attempt Count (within the file first, then against the target sheet,
-// then against every OTHER active team's sheet), and appends what survives.
+// the "Latest NDR " sheet: parses, checks the live sheet's layout hasn't drifted, dedupes by
+// AWB + Attempt Count (within the file first, then against the sheet), and appends what survives.
 //
 // Synchronous, unlike the RTO upload's two-stage endpoint+Lambda split (api/rto/upload-start.js).
 // That split exists solely because RTO's rows need GoKwik and mcaff_prod MySQL checks before they
@@ -18,14 +17,14 @@ const { buildRowPlan, checkSheetLayout, columnLetterToIndex, dedupKey, normalize
 const {
   NDR_IMPORT, NDR_ROW_WIDTH, NDR_LAST_COLUMN_LETTER, NDR_AWB_COLUMN, NDR_ATTEMPT_COLUMN,
 } = require('../_lib/ndrCsvImport');
-const { isCallingProcessAdmin, resolveCallerTeam, listCallingTeams } = require('../_lib/db');
-const { coerceTeamId } = require('../_lib/callingTeams');
-// PRE_SPLIT_TEAM: the same zero-active-teams fallback api/ndr/sheet.js already falls back to for
-// reads, imported rather than re-declared so the two endpoints share one literal pair
-// (sheetId/sheetTab) instead of two copies that could quietly drift apart. See its own comment in
-// sheet.js for what it is and why it stays reachable.
-const { PRE_SPLIT_TEAM } = require('./sheet');
+const { isCallingProcessAdmin } = require('../_lib/db');
 
+// Same sheet api/ndr/sheet.js proxies and scripts/assign_ndr_leads.py assigns from. Hardcoded
+// rather than taken from the request for the same reason that file gives: a permitted-but-
+// malicious caller must not be able to point this service account's Editor access at another
+// sheet.
+const NDR_SHEET_ID = '12p3rlXyE0PDx3BMqBpl3CUo5YD3uVzQun1HFPizpSeI';
+const SHEET_TAB = 'Latest NDR '; // trailing space is part of the real tab name - do not trim it
 const CARD_KEY = 'calling';
 const TAB_KEY = 'ndr';
 const MAX_ROWS = 5000;
@@ -41,16 +40,9 @@ function getClient() {
   return _client;
 }
 
-// sheetId is now a parameter, not a module-level constant - which sheet an upload targets is
-// resolved per-request by resolveUploadTarget below. Still never taken from an unvalidated
-// request field directly: every call site passes team.sheetId, and `team` itself only ever comes
-// from resolveUploadTarget's own DB-backed lookup (calling_teams, via listCallingTeams/
-// resolveCallerTeam) - never from req.body.sheetId. That is what stops a permitted-but-malicious
-// caller from pointing this service account's Editor access at an arbitrary spreadsheet, the same
-// property the old hardcoded NDR_SHEET_ID constant gave for free before teams existed.
-async function sheetsRequest(client, sheetId, method, path, body) {
+async function sheetsRequest(client, method, path, body) {
   const res = await client.request({
-    url: `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}${path}`,
+    url: `https://sheets.googleapis.com/v4/spreadsheets/${NDR_SHEET_ID}${path}`,
     method,
     data: body,
   });
@@ -68,90 +60,6 @@ async function checkAccess(session) {
   return null;
 }
 
-// Which sheet an upload lands in is decided by WHO is uploading - never by anything in the CSV
-// (neither live NDR sheet has a column that identifies a team) and never by an unvalidated
-// request field taken at face value. `teams` is the caller's own already-fetched active-team
-// list (see the handler below), so this needs no DB round-trip of its own beyond
-// resolveCallerTeam.
-//
-// The ONLY thing this refuses is picking between two or more candidate sheets with nothing to
-// say which one is right - that's a genuine guess, and a guessed destination here writes
-// hundreds of leads into the wrong team's live sheet with no undo beyond deleting rows by hand
-// from a spreadsheet someone else is actively working in. Resolving to the one sheet that could
-// possibly be meant, when there is only one (zero or exactly one active team), is NOT a guess -
-// it is today's already-live behaviour, and this mirrors api/ndr/sheet.js's own resolveSheetFor
-// exactly (down to reusing its PRE_SPLIT_TEAM constant) so the read and write endpoints can never
-// disagree about which sheet a given caller owns.
-//
-//   TL (passed checkAccess via isCallingProcessAdmin, not session.isAdmin):
-//     - assigned to one of the currently-active teams -> that team, unconditionally. A caller
-//       WITH a resolvable team can never fall through to the ambiguous-count logic below.
-//     - has an EXPLICIT assignment (calling_agent_process.team_id is set) but that team is not
-//       in the active list -> 400, TERMINAL. Never falls through to the active-team-count
-//       resolution below, on purpose: falling through was the exact bug api/ndr/sheet.js's own
-//       resolveSheetFor comment names - deactivate Team A while Team B is the only other active
-//       team, and a Team-A TL's request would silently resolve to "well, there's only one active
-//       team" and land in Team B's live sheet. An explicit assignment always wins or always
-//       refuses; it never quietly becomes someone else's problem.
-//     - no assignment row at all (never put on a team) -> falls to the same active-team-count
-//       resolution an admin who named no team gets, below.
-//
-//   full admin (session.isAdmin):
-//     - body.teamId names one of the active teams -> that team, regardless of how many teams
-//       exist. An explicit, valid choice is never second-guessed.
-//     - body.teamId names something that is not an active team (typo, stale id, a paused team's
-//       id) -> 400, always. A bad id must never silently resolve to *some* team.
-//     - body.teamId omitted -> falls to the active-team-count resolution below.
-//
-//   Active-team-count resolution (shared by "TL with no resolvable team" and "admin with no
-//   teamId"):
-//     0 active teams  -> PRE_SPLIT_TEAM. The desk hasn't been split yet; there is nothing else
-//                        this upload could possibly mean, so refusing here would only turn the
-//                        one state every fresh deploy starts in into an outage - regressing the
-//                        exact "NDR upload has never worked" bug this project already fixed once.
-//     1 active team   -> that team. Still not a guess: it is the only candidate.
-//     2+ active teams -> 400. This is the actually dangerous case the whole guard exists for.
-async function resolveUploadTarget(session, body, teams) {
-  if (session.isAdmin) {
-    // coerceTeamId, not a bare `body.teamId != null` + parseInt: an empty string (an admin UI's
-    // "no team picked" <select> encoding, or just an omitted-but-present field) must fall through
-    // to byActiveCount below like any other "no explicit choice", not be treated as a real (if
-    // unparseable) selection - parseInt('', 10) is NaN, and a bare `!= null` guard only checks the
-    // OUTER value, so it let NaN through as if it were a genuine choice and produced a confusing
-    // "No such active team" instead of resolving the way "nothing chosen" should. See
-    // coerceTeamId's own comment in callingTeams.js (F8 in the final whole-branch review).
-    const explicitTeamId = coerceTeamId(body.teamId);
-    if (explicitTeamId != null) {
-      const picked = teams.find((t) => t.id === explicitTeamId);
-      return picked ? { team: picked } : { error: 'No such active team.' };
-    }
-    return byActiveCount(teams, {
-      error: 'Pick which team to upload to.', teams: teams.map((t) => ({ id: t.id, name: t.name })),
-    });
-  }
-  const { callerTeamId } = await resolveCallerTeam(session.email, TAB_KEY);
-  if (callerTeamId != null) {
-    // TERMINAL. `teams` is active-only, so an explicit assignment absent from it means the team
-    // is inactive or gone - refuse right here rather than falling through to the "no assignment"
-    // handling below, which would treat "your team is paused" the same as "you were never put on
-    // a team" and could resolve to a DIFFERENT team when exactly one other happens to be active.
-    const mine = teams.find((t) => t.id === callerTeamId);
-    if (mine) return { team: mine };
-    return { error: 'Your NDR team is currently paused. Ask an admin to reactivate it before uploading.' };
-  }
-  return byActiveCount(teams, { error: 'You are not assigned to an NDR team yet. Ask an admin to assign you.' });
-}
-
-// The shared "no explicit, caller-named team" resolution: unambiguous for 0 or 1 active teams,
-// genuinely ambiguous for 2+, in which case `ambiguousResult` (the caller-appropriate refusal -
-// an admin can be told to pick; a TL has nothing to pick from and is told they're unassigned) is
-// returned instead.
-function byActiveCount(teams, ambiguousResult) {
-  if (teams.length === 0) return { team: PRE_SPLIT_TEAM };
-  if (teams.length === 1) return { team: teams[0] };
-  return ambiguousResult;
-}
-
 // Places one row's { columnLetter: value } map into a fixed-width A..Q array, so a single
 // contiguous values:append covers every written column. One wide append rather than several
 // narrow ones because Sheets picks each append's target row from that range's own last-used row,
@@ -162,36 +70,17 @@ function rowToFullArray(cellsByColumn) {
   return arr;
 }
 
-// The dedup key set as ONE sheet stands right now. Takes sheetId/sheetTab as parameters (rather
-// than the old module-level constants) so the same function reads the target team's sheet AND
-// every other team's sheet for the cross-team check below - but the two calls deliberately use a
-// DIFFERENT key shape, via extraCsvHeaders:
-//
-//   - Reading the TARGET sheet (existingKeySet, below): extraCsvHeaders defaults to
-//     NDR_IMPORT.dedupExtraCsvHeaders (AWB + Attempt Count), matching buildRowPlan's own key
-//     exactly - otherwise nothing would ever match. This sheet legitimately carries many rows for
-//     the same AWB, one per delivery attempt, so AWB alone would reject every genuine follow-up.
-//   - Reading every OTHER team's sheet (readForeignKeySets, below): extraCsvHeaders is passed as
-//     [], so dedupKey collapses to the AWB alone (see its own `if (!extraCsvHeaders.length) return
-//     awb;` short-circuit). This is deliberately narrower than the target-sheet key, not a copy
-//     bug: the invariant this guard protects - ndr_lead_assignments.live_awb_number - is unique on
-//     AWB ALONE, not on (AWB, Attempt). So AWB X sitting at attempt 2 in Team A's sheet and
-//     attempt 3 in Team B's sheet is a real collision even though their (AWB, Attempt) keys
-//     differ - keying the foreign check on the composite would let both attempts of the exact
-//     scenario this guard exists for slip past it silently.
-//
-// Read via batchGet so only the two columns that form the key cross the wire, not the whole row
-// width - the Attempt Count column is still read even for the foreign case (extraCsvHeaders only
-// changes whether dedupKey folds it INTO the key), since fetching both columns unconditionally
-// keeps this one function serving both callers with no extra branch.
+// The dedup key set as the sheet stands right now, built from the same two fields and in the same
+// order as NDR_IMPORT.dedupExtraCsvHeaders - otherwise nothing would ever match. Read via
+// batchGet so only the two columns that form the key cross the wire, not the whole row width.
 //
 // UNFORMATTED_VALUE, not Sheets' FORMATTED_VALUE default: a numeric AWB stored as a number has a
 // FORMATTED value of "5.4E+13", which matches no real AWB and would silently defeat this dedup
 // entirely - the exact bug fixed on the RTO path (see api/rto/upload-start.js's own note).
-async function readKeySetForSheet(client, sheetId, sheetTab, extraCsvHeaders = NDR_IMPORT.dedupExtraCsvHeaders) {
-  const ranges = [`'${sheetTab}'!${NDR_AWB_COLUMN}2:${NDR_AWB_COLUMN}`, `'${sheetTab}'!${NDR_ATTEMPT_COLUMN}2:${NDR_ATTEMPT_COLUMN}`]
+async function readExistingKeySet(client) {
+  const ranges = [`'${SHEET_TAB}'!${NDR_AWB_COLUMN}2:${NDR_AWB_COLUMN}`, `'${SHEET_TAB}'!${NDR_ATTEMPT_COLUMN}2:${NDR_ATTEMPT_COLUMN}`]
     .map((r) => `ranges=${encodeURIComponent(r)}`).join('&');
-  const data = await sheetsRequest(client, sheetId, 'GET', `/values:batchGet?${ranges}&valueRenderOption=UNFORMATTED_VALUE`);
+  const data = await sheetsRequest(client, 'GET', `/values:batchGet?${ranges}&valueRenderOption=UNFORMATTED_VALUE`);
   const [awbRange, attemptRange] = data.valueRanges || [];
   const awbRows = (awbRange && awbRange.values) || [];
   const attemptRows = (attemptRange && attemptRange.values) || [];
@@ -205,26 +94,9 @@ async function readKeySetForSheet(client, sheetId, sheetTab, extraCsvHeaders = N
     if (!awb) return;
     const attemptRow = attemptRows[i];
     const attempt = (attemptRow && attemptRow[0]) !== undefined ? attemptRow[0] : '';
-    keys.add(dedupKey(awb, { 'Attempt Count': attempt }, extraCsvHeaders));
+    keys.add(dedupKey(awb, { 'Attempt Count': attempt }, NDR_IMPORT.dedupExtraCsvHeaders));
   });
   return keys;
-}
-
-// Why the OTHER active teams' sheets are read too, on every single upload: ndr_lead_assignments
-// has no team column (see db.js's CREATE TABLE) and its only uniqueness is a UNIQUE key on the
-// LIVE awb_number. A lead sitting live in BOTH teams' sheets at once therefore corrupts that
-// shared mirror - the second team's claim silently INSERT IGNOREs to nothing while its disposal
-// overwrites the first team's cycle, and the cron that reassigns unworked leads steals the row
-// outright. Rejecting the duplicate here, at upload time, is the only guard available: fixing
-// ndr_lead_assignments to carry a team column so two teams could legitimately both hold "their
-// own" copy of an AWB is deliberately out of scope for this project. targetTeamId's own sheet is
-// excluded - buildRowPlan already deduped against it via existingKeySet.
-async function readForeignKeySets(client, teams, targetTeamId) {
-  const others = teams.filter((t) => t.id !== targetTeamId);
-  // extraCsvHeaders: [] - AWB alone, not the composite (AWB, Attempt) key - see
-  // readKeySetForSheet's own comment for why this asymmetry is deliberate.
-  const sets = await Promise.all(others.map((t) => readKeySetForSheet(client, t.sheetId, t.sheetTab, [])));
-  return others.map((t, i) => ({ team: t, keys: sets[i] }));
 }
 
 module.exports = async (req, res) => {
@@ -238,18 +110,6 @@ module.exports = async (req, res) => {
     res.status(session ? 403 : 401).json({ error: denied });
     return;
   }
-
-  // Resolved immediately after the access gate, before any CSV work: which sheet this upload may
-  // touch does not depend on the file's contents, and a caller who's about to be refused for
-  // "pick a team" or "you're not on a team" should find that out without first paying for a CSV
-  // parse.
-  const teams = await listCallingTeams(TAB_KEY);
-  const target = await resolveUploadTarget(session, req.body || {}, teams);
-  if (target.error) {
-    res.status(400).json({ error: target.error, teams: target.teams });
-    return;
-  }
-  const { team } = target;
 
   const { csv } = req.body || {};
   if (!csv || typeof csv !== 'string') {
@@ -289,16 +149,13 @@ module.exports = async (req, res) => {
   try {
     const client = getClient();
 
-    // Layout drift check, run against the RESOLVED team's own sheet - not a hardcoded constant.
-    // The column each field goes to is fixed, not derived from this row, so this exists purely to
-    // catch someone inserting or reordering a column in the live sheet before that silently lands
-    // data in the wrong place. Both live NDR sheets share an identical 28-column header today, so
-    // this passes for either team - but a future third team's sheet must still be checked
-    // independently rather than assumed to match. sheetHeader is returned with the failure so the
-    // real text is visible without opening the sheet.
+    // Layout drift check. The column each field goes to is fixed, not derived from this row, so
+    // this exists purely to catch someone inserting or reordering a column in the live sheet
+    // before that silently lands data in the wrong place. sheetHeader is returned with the
+    // failure so the real text is visible without opening the sheet.
     const headerData = await sheetsRequest(
-      client, team.sheetId, 'GET',
-      `/values/${encodeURIComponent(`'${team.sheetTab}'!A1:Q1`)}`,
+      client, 'GET',
+      `/values/${encodeURIComponent(`'${SHEET_TAB}'!A1:Q1`)}`,
     );
     const fullHeaderRow = (headerData.values || [[]])[0] || [];
     const layoutIssues = checkSheetLayout(fullHeaderRow, NDR_IMPORT.expectedHeader);
@@ -311,62 +168,27 @@ module.exports = async (req, res) => {
       return;
     }
 
-    const existingKeySet = await readKeySetForSheet(client, team.sheetId, team.sheetTab);
+    const existingKeySet = await readExistingKeySet(client);
     const plan = buildRowPlan({ csvRows, existingKeySet, config: NDR_IMPORT });
-
-    // Cross-team duplicate check (see readForeignKeySets' own comment for why this exists at
-    // all). Runs AFTER buildRowPlan, not folded into existingKeySet: a row that's already in the
-    // TARGET sheet is "duplicateInSheet" (unremarkable, expected on a re-upload), while a row
-    // that's live in a DIFFERENT team's sheet is a distinct, more serious condition worth its own
-    // count and its own message - conflating the two would hide exactly the case this guard
-    // exists to catch.
-    const foreignSets = await readForeignKeySets(client, teams, team.id);
-    const foreignHits = [];
-    const keep = [];
-    plan.validRows.forEach((row) => {
-      // row.awbCode (normalized AWB), NOT row.dedupKey - foreignSets are keyed on AWB alone (see
-      // readForeignKeySets/readKeySetForSheet's own comments for why that's deliberately narrower
-      // than the target sheet's composite key). Comparing dedupKey here would miss the exact
-      // multi-attempt-in-two-teams case this guard exists to catch.
-      const hit = foreignSets.find((f) => f.keys.has(row.awbCode));
-      if (hit) foreignHits.push({ line: row.line, reason: `already in ${hit.team.name}'s sheet` });
-      else keep.push(row);
-    });
-    plan.validRows = keep;
 
     let appended = 0;
     if (plan.validRows.length) {
       await sheetsRequest(
-        client, team.sheetId, 'POST',
-        `/values/${encodeURIComponent(`'${team.sheetTab}'!A2:${NDR_LAST_COLUMN_LETTER}`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+        client, 'POST',
+        `/values/${encodeURIComponent(`'${SHEET_TAB}'!A2:${NDR_LAST_COLUMN_LETTER}`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
         { values: plan.validRows.map((r) => rowToFullArray(r.cellsByColumn)) },
       );
       appended = plan.validRows.length;
     }
 
-    // Every field the frontend (app/ndr-calling/NdrUploadModal.js) already renders stays exactly
-    // as it was - team and duplicateInOtherTeam are the only additions, so the current modal
-    // keeps working unchanged until it's updated to show them.
-    //
-    // errors: foreignHits listed BEFORE plan.errors, not [...plan.errors, ...foreignHits] - a
-    // messy file can produce hundreds of ordinary parse errors (missing AWB, duplicate-in-file,
-    // duplicate-in-sheet), and a flat concat-then-slice(0, 50) let those crowd out every
-    // cross-team hit before the reader ever saw one. foreignHits is the rarer, more serious
-    // condition (it means this upload was about to corrupt ndr_lead_assignments - see
-    // readForeignKeySets' own comment), so it gets first claim on the 50-item budget; only the
-    // remaining room is filled with ordinary errors. Total counts above are unaffected - this
-    // only caps what's ECHOED back for a human to read, not what's used to decide `keep`/`appended`.
-    const MAX_REPORTED_ERRORS = 50;
     res.status(200).json({
-      team: { id: team.id, name: team.name },
       appended,
       duplicateInSheet: plan.counts.duplicateInSheet,
       duplicateInFile: plan.counts.duplicateInFile,
-      duplicateInOtherTeam: foreignHits.length,
       missingAwb: plan.counts.missingAwb,
       scientificAwb: plan.counts.scientificAwb,
       total: csvRows.length,
-      errors: [...foreignHits, ...plan.errors].slice(0, MAX_REPORTED_ERRORS),
+      errors: plan.errors.slice(0, 50),
     });
   } catch (e) {
     console.error('api/ndr/upload error:', e);

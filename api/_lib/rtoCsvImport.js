@@ -167,15 +167,6 @@ function dedupKey(awb, row, extraCsvHeaders) {
 //   - orderId, awbCode, paymentMethod: convenience top-level fields.
 //   - cellsByColumn: { columnLetter: value }, one entry per config.columnMap mapping - the caller
 //     places these directly into a fixed-width row array by column index, no further lookup.
-//   - dedupKey, line: this row's own dedup identity and 1-based CSV line number, already computed
-//     during the loop below. Purely additive for a caller that needs to correlate a surviving row
-//     back to those without recomputing them - e.g. api/ndr/upload.js's cross-team duplicate
-//     check, which has to test a row's key against ANOTHER team's existingKeySet after this
-//     function has already built the plan. Recomputing the key there would mean teasing the raw
-//     AWB and Attempt Count back out of cellsByColumn (where the AWB has already been
-//     toSheetText'd with a leading apostrophe) - fiddly, and a second definition of "what a key
-//     is" that could drift from this one. No existing caller reads either field, so nothing that
-//     iterates cellsByColumn or treats a row as a fixed 3-field shape is affected.
 function buildRowPlan({ csvRows, existingKeySet, config = RTO_IMPORT }) {
   const {
     columnMap, awbCsvHeader, orderIdCsvHeader, orderIdColumn, paymentMethodColumn,
@@ -237,8 +228,6 @@ function buildRowPlan({ csvRows, existingKeySet, config = RTO_IMPORT }) {
       awbCode: awb,
       paymentMethod: paymentMethodColumn ? cellsByColumn[paymentMethodColumn] : '',
       cellsByColumn,
-      dedupKey: key,
-      line,
     });
   });
 

@@ -2,8 +2,7 @@
 // file to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells
 // us which logical route was hit; URLs are unchanged.
 const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
-  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent, isCallingProcessAdmin, resolveCallerTeam } = require('../_lib/db');
-const { teamScopeFor } = require('../_lib/callingTeams');
+  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent, isCallingProcessAdmin } = require('../_lib/db');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
 
@@ -137,9 +136,6 @@ async function handleCallback(req, res) {
         redirect_uri: redirectUri,
         grant_type: 'authorization_code',
       }),
-      // Bounded so a hung Google call fails fast with a readable error instead of riding the
-      // Lambda's own 20s timeout to a generic, un-debuggable 500 from API Gateway.
-      signal: AbortSignal.timeout(8000),
     });
     if (!tokenResp.ok) {
       const errBody = await tokenResp.text();
@@ -154,9 +150,7 @@ async function handleCallback(req, res) {
     }
     const tokenData = await tokenResp.json();
 
-    const infoResp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(tokenData.id_token)}`, {
-      signal: AbortSignal.timeout(8000),
-    });
+    const infoResp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(tokenData.id_token)}`);
     if (!infoResp.ok) {
       res.status(502).send('Google token verification failed.');
       return;
@@ -260,18 +254,8 @@ async function handlePresence(req, res) {
       // company-wide, consistent with how /api/admin/business-hours and /calling-agents already
       // scope a process admin to only what they administer, not the full company's presence.
       if (processKey && await isCallingProcessAdmin(session.email, processKey)) {
-        // Scoped to the caller's own team: this branch returns live status plus logged-in,
-        // break and busy minutes for every roster member, which is precisely the "metrics of
-        // another team" the isolation exists to prevent. agent_presence itself stays global and
-        // un-teamed by design (a person has one desk); only WHICH emails may be asked about is
-        // scoped. isAdmin is false here on purpose - this branch is reached only for a PROCESS
-        // admin (see isCallingProcessAdmin above), not a full company-wide admin, so there is no
-        // explicit teamId to honour and teamScopeFor should behave exactly as it does for any
-        // other non-admin caller.
-        const { callerTeamId, activeTeamCount } = await resolveCallerTeam(session.email, processKey);
-        const teamId = teamScopeFor({ callerTeamId, activeTeamCount, isAdmin: false });
         const [roster, allAgents, presenceSummary] = await Promise.all([
-          getCallingProcessAgents(processKey, teamId), getAllAgentPresence(), getAgentPresenceLogSummary(dateFrom, dateTo),
+          getCallingProcessAgents(processKey), getAllAgentPresence(), getAgentPresenceLogSummary(dateFrom, dateTo),
         ]);
         const agents = {};
         for (const member of roster) {
@@ -363,14 +347,11 @@ async function handleRecentAssignments(req, res) {
 // Every lead's real {assignedAt, disposedAt}, unbounded (see getAllLeadDates/getAllNdrLeadDates
 // in db.js) - lets an Overview tab's Agent Performance Summary table date-filter each column by
 // the real date its own event happened (assigned_at for the Assigned columns, disposed_at for
-// the Disposed/Connected/Converted ones) instead of the lead's own Calling Date/Order Date.
-// `process=ndr` switches to NDR's own table (keyed by awb, not order ID) - default (no query
-// param) stays RTO's, so RtoCrmClient.js's existing call is unaffected.
-//
-// Gated below behind the 'calling' card + process tab, same as every other calling route
-// (api/ndr/sheet.js, api/rto/sheet.js). This handler used to check only "is signed in" - that
-// handed the WHOLE desk's live lead volume and pacing (every AWB/order's assign+dispose
-// timestamps, unbounded) to any signed-in user of the entire site, not just calling agents.
+// the Disposed/Connected/Converted ones) instead of the lead's own Calling Date/Order Date. Same
+// auth level as handleRecentAssignments above (authenticated, not admin-only): this is a
+// different pair of date fields for rows a signed-in agent can already see in the ticket data
+// itself, not new exposure. `process=ndr` switches to NDR's own table (keyed by awb, not order
+// ID) - default (no query param) stays RTO's, so RtoCrmClient.js's existing call is unaffected.
 async function handleLeadDates(req, res) {
   if (req.method !== 'GET') {
     res.status(405).json({ error: 'Method not allowed' });
@@ -381,57 +362,7 @@ async function handleLeadDates(req, res) {
     res.status(401).json({ error: 'Not signed in' });
     return;
   }
-  const processKey = (req.query && req.query.process) === 'ndr' ? 'ndr' : 'rto';
-
-  // ============================================================================================
-  // PERMISSION GATE - do not remove. A later task (per-team lead scoping) extends this handler
-  // by narrowing WHICH leads come back for a given team; that scoping must be layered on top of
-  // this block, never in place of it. Removing this re-opens the whole-desk enumeration bug
-  // this task exists to close (any signed-in user, any card, could read every lead's timing).
-  //
-  // Mirrors api/ndr/sheet.js's checkAccess (lines 30-35), an already-proven-in-production gate,
-  // exactly - same two checks, same order, same absence semantics:
-  //   - card check: no 'calling' entry in session.perms -> 403, regardless of tabs.
-  //   - tab check: session.tabPerms.calling is the set of tabs report_tab_permissions actually
-  //     restricts this user to. Per that table's own convention, NO ROWS for (user, 'calling')
-  //     means UNRESTRICTED access to every tab of that card, not "no access" - so the check only
-  //     fires when `tabs` is a non-empty array AND it excludes this processKey. Flipping that
-  //     (e.g. treating a missing/empty tabs list as deny-all) would lock out every admin and
-  //     every agent who was never explicitly narrowed to one process.
-  if (!(session.perms || []).includes('calling')) {
-    res.status(403).json({ error: 'You do not have access to Calling.' });
-    return;
-  }
-  const tabs = session.tabPerms && session.tabPerms.calling;
-  if (Array.isArray(tabs) && tabs.length && !tabs.includes(processKey)) {
-    res.status(403).json({ error: 'You do not have access to that process.' });
-    return;
-  }
-  // ============================================================================================
-
-  let leadDates;
-  if (processKey === 'ndr') {
-    // ndr_lead_assignments has no team column of its own (see the design spec's "Deliberately
-    // NOT changed" section), but it DOES carry `email` - who currently holds the live cycle -
-    // and that is enough for a real row-level filter: intersect it against THIS caller's own
-    // team roster (getCallingProcessAgents(processKey, teamId), which teamScopeFor already
-    // scopes correctly). teamId undefined means no filter - a full admin, or any process with
-    // fewer than two active teams (the same release-1 softening used everywhere else in this
-    // feature) - and getAllNdrLeadDates(undefined) returns the whole table, exactly as before.
-    const { callerTeamId, activeTeamCount } = await resolveCallerTeam(session.email, processKey);
-    const teamId = teamScopeFor({ callerTeamId, activeTeamCount, isAdmin: session.isAdmin });
-    let allowedEmails;
-    if (teamId !== undefined) {
-      // null fails closed to an empty roster (no emails can match), not to "everyone" -
-      // getAllNdrLeadDates([]) then returns {} rather than the whole desk.
-      allowedEmails = teamId === null ? [] : (await getCallingProcessAgents(processKey, teamId)).map((m) => m.email);
-    }
-    leadDates = await getAllNdrLeadDates(allowedEmails);
-  } else {
-    // rto has no team dimension at all (see resolveCallerTeam's activeTeamCount: 0 for a
-    // teamless process), so getAllLeadDates stays exactly as it was before this task.
-    leadDates = await getAllLeadDates();
-  }
+  const leadDates = req.query.process === 'ndr' ? await getAllNdrLeadDates() : await getAllLeadDates();
   res.status(200).json({ leadDates });
 }
 
@@ -507,14 +438,7 @@ async function handleProcessPresence(req, res) {
       return;
     }
     // Only ever the caller's own row - an agent has no business reading the roster.
-    //
-    // Deliberately UNSCOPED (undefined, not a resolved team): this endpoint returns only the
-    // caller's own row, and it finds that row by searching the roster for its own email. A team
-    // filter here would make an unassigned caller - or a full admin, who holds no state row at
-    // all - vanish from their own lookup and read as "no row", which the client renders as
-    // Offline with a default quota. Self-only is already the narrowest possible scope; there is
-    // nothing left for a team filter to protect.
-    const mine = (await getCallingProcessAgents(processKey, undefined))
+    const mine = (await getCallingProcessAgents(processKey))
       .find((a) => a.email.toLowerCase() === session.email.toLowerCase());
     res.status(200).json({
       statuses: CALLING_STATUSES,
