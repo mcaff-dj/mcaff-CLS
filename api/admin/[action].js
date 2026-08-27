@@ -35,11 +35,20 @@
 //                                        top-level list, set reorders that parent's children.
 //   DELETE /api/admin/dispositions    -> { processKey, id } (cascades to children if id is a
 //                                        parent with any)
+//   GET    /api/admin/calling-teams?process=<key> -> that process's teams (active only unless
+//                                        ?includeInactive=1, which only a full admin may set).
+//                                        Readable by a process admin so a team lead's own page
+//                                        can show its team name.
+//   POST   /api/admin/calling-teams   -> create: { processKey, name, sheetId, sheetTab }
+//                                        FULL ADMIN ONLY (see handleCallingTeams for why).
+//   PUT    /api/admin/calling-teams   -> update: { id, name?, sheetId?, sheetTab?, active? }
+//                                        FULL ADMIN ONLY (see handleCallingTeams for why).
 const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser,
   getUserByEmail, getUserTabPermissions,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours, logEvent,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
   isCallingProcessAdmin, getAdministeredProcesses,
+  listCallingTeams, createCallingTeam, updateCallingTeam,
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions } = require('../_lib/db');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
@@ -513,6 +522,91 @@ async function handleDispositions(req, res, session) {
   res.status(200).json({ dispositions: await getProcessDispositions(processKey) });
 }
 
+// GET    ?process=<key>       -> that process's teams (active only unless ?includeInactive=1)
+// POST   { processKey, name, sheetId, sheetTab }        -> create   (FULL ADMIN ONLY)
+// PUT    { id, name?, sheetId?, sheetTab?, active? }    -> update   (FULL ADMIN ONLY)
+//
+// Why writes are full-admin only, and never isCallingProcessAdmin: both NDR team leads hold
+// process-admin on the 'ndr' process, so that check alone doesn't tell the two of them apart.
+// sheet_id decides which spreadsheet the Editor-scoped Google service-account credential reads
+// and writes - a process admin who could set it could redirect that credential at any sheet it
+// can reach, or repoint the OTHER team's sheet at their own. Reads stay open to a process admin
+// (checked with the same isCallingProcessAdmin gate every other process-scoped read in this file
+// uses) so a team lead's own admin page can show its team's name - hence the full-admin gate
+// below sits AFTER the GET branch returns, not before it.
+async function handleCallingTeams(req, res, session) {
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
+  const known = CALLING_PROCESSES.processes.map((p) => p.key);
+
+  if (req.method === 'GET') {
+    const processKey = (req.query && req.query.process) || '';
+    if (!known.includes(processKey)) {
+      res.status(400).json({ error: `process must be one of: ${known.join(', ')}` });
+      return;
+    }
+    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, processKey))) {
+      res.status(403).json({ error: 'You do not administer that process' });
+      return;
+    }
+    // includeInactive exposes retired teams (e.g. a decommissioned sheet kept for history) -
+    // only a full admin gets that view; a process admin only ever needs the live roster.
+    const includeInactive = session.isAdmin && !!(req.query && req.query.includeInactive);
+    res.status(200).json({ teams: await listCallingTeams(processKey, { includeInactive }) });
+    return;
+  }
+
+  // Everything past this point mutates a team, which decides where an Editor-scoped credential
+  // points - full-admin only, per the note above the function. isCallingProcessAdmin must NOT
+  // appear anywhere below this line.
+  if (!session.isAdmin) {
+    res.status(403).json({ error: 'Only a full admin can create or change a team' });
+    return;
+  }
+
+  const body = parseBody(req);
+
+  if (req.method === 'POST') {
+    if (!known.includes(body.processKey)) {
+      res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
+      return;
+    }
+    try {
+      // sheetTab is passed through untouched, never trimmed: the live NDR tab is literally
+      // named 'Latest NDR ' with a significant trailing space, and createCallingTeam's own
+      // validation (assertTeamFields) relies on getting that value verbatim.
+      const team = await createCallingTeam(
+        body.processKey,
+        { name: body.name, sheetId: body.sheetId, sheetTab: body.sheetTab },
+        session.email,
+      );
+      await logEvent(session.uid, session.email, 'calling', 'team-create',
+        `${body.processKey}: ${team.name} -> ${team.sheetId}`, ip);
+      res.status(200).json({ team });
+    } catch (e) {
+      res.status(400).json({ error: e.message || 'Could not create team' });
+    }
+    return;
+  }
+
+  if (req.method === 'PUT') {
+    try {
+      const team = await updateCallingTeam(
+        body.id,
+        { name: body.name, sheetId: body.sheetId, sheetTab: body.sheetTab, active: body.active },
+        session.email,
+      );
+      await logEvent(session.uid, session.email, 'calling', 'team-update',
+        `${team.processKey}: ${team.name} active=${team.active} -> ${team.sheetId}`, ip);
+      res.status(200).json({ team });
+    } catch (e) {
+      res.status(400).json({ error: e.message || 'Could not update team' });
+    }
+    return;
+  }
+
+  res.status(405).json({ error: 'Method not allowed' });
+}
+
 module.exports = async (req, res) => {
   const session = await getSession(req);
   if (!session) {
@@ -521,11 +615,13 @@ module.exports = async (req, res) => {
   }
   const action = req.query && req.query.action;
 
-  // A process admin runs one calling process, so they may reach these two routes and nothing
+  // A process admin runs one calling process, so they may reach these routes and nothing
   // else here - users/permissions/audit stay company-wide-admin only, because those can
   // re-grant anyone's access. Each handler then checks they administer the SPECIFIC process
-  // being read or written; passing this gate alone authorises nothing.
-  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'calling-agents', 'dispositions'];
+  // being read or written; passing this gate alone authorises nothing. 'calling-teams' is
+  // listed here only for its GET branch (a team lead reading its own team name) - the handler
+  // itself still turns every POST/PUT away from anyone but a full admin.
+  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'calling-agents', 'dispositions', 'calling-teams'];
   if (!session.isAdmin && !PROCESS_ADMIN_ACTIONS.includes(action)) {
     res.status(403).json({ error: 'Forbidden' });
     return;
@@ -537,6 +633,7 @@ module.exports = async (req, res) => {
   if (action === 'business-hours') return handleBusinessHours(req, res, session);
   if (action === 'calling-agents') return handleCallingAgents(req, res, session);
   if (action === 'dispositions') return handleDispositions(req, res, session);
+  if (action === 'calling-teams') return handleCallingTeams(req, res, session);
 
   res.status(404).json({ error: 'Unknown admin route' });
 };
