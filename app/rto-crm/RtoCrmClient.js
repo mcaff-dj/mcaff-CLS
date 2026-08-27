@@ -170,14 +170,19 @@ import CallTrendChart from './CallTrendChart';
       }
     }
 
-    async function writeToSheetRow(orderNumber, sheetRowIndex, updates) {
+    // knownRow: a sheet row number the caller has ALREADY resolved from live Column E in this
+    // same interaction (submitDisp does, for its assignment check). Passing it skips the
+    // Column E re-read below - same freshness guarantee, one fewer Lambda round trip.
+    async function writeToSheetRow(orderNumber, sheetRowIndex, updates, knownRow) {
       try {
         const sid = extractSheetId(DEFAULT_SHEET_URL);
         if (!sid) return;
 
         let rowNumber = sheetRowIndex + 2; // 1-based index (row 1 is header) - fallback only
         const expected = (orderNumber || '').toString().trim().toUpperCase();
-        if (expected) {
+        if (knownRow) {
+          rowNumber = knownRow;
+        } else if (expected) {
           const rowMap = await fetchLiveOrderRowMap(sid);
           if (rowMap) {
             const liveRow = rowMap.get(expected);
@@ -906,12 +911,13 @@ import CallTrendChart from './CallTrendChart';
           : dispReason === 'Delivered' ? 'Delivered'
           : attemptType || '';
 
-        // MySQL write goes first, before any Sheets round trip: it's what the disposal
-        // actually depends on, and its payload needs none of the live-assignment lookup
-        // below - that lookup only feeds sheetUpdates.assignedAgent/ov, not this call.
-        // Awaited (with one retry, see postJsonWithRetry) so a failure is visible to the
-        // agent instead of vanishing silently.
-        const dbSynced = await postJsonWithRetry('/api/auth/recordDisposition', {
+        // MySQL write and the live-assignment lookup below are started together and awaited
+        // as a pair. The MySQL payload needs nothing from the lookup (that lookup only feeds
+        // sheetUpdates.assignedAgent/ov), so running them back to back just added one Lambda
+        // round trip - on a cold container that was seconds of dead Save button for nothing.
+        // postJsonWithRetry never rejects (it returns false on failure), so Promise.all here
+        // cannot lose the lookup to a failed write, and a failure is still surfaced below.
+        const dbWrite = postJsonWithRetry('/api/auth/recordDisposition', {
           orderId: dispTkt.orderNumber,
           awbCode: dispTkt.awbCode,
           rtoReason: dispTkt.rtoReason,
@@ -923,32 +929,31 @@ import CallTrendChart from './CallTrendChart';
           refundAmount: (isRef || isAlreadyRef) ? dispTkt.orderAmount : null,
           newOrderId: newOrder==='YES'?newOrderId:'',
         });
-        if (!dbSynced) {
-          showToast(`⚠️ Database sync failed for ${dispTkt.orderNumber} — check console. Continuing with sheet write.`);
-        }
 
         // Once a lead has a real assigned agent, that assignment must never change - not to
         // blank, not to a different agent - even if someone else (e.g. a Team Lead helping
         // out) is the one submitting the disposition. Live-check Column Q's current value
         // (same pattern as claimLeadForAgent) so a stale/cached local view can't silently
         // steal someone else's lead; only a genuinely still-unassigned lead gets claimed here.
+        const dispSid = extractSheetId(DEFAULT_SHEET_URL);
+        const liveMapPromise = dispSid
+          ? fetchLiveOrderAndAgentMap(dispSid).catch((e) => { console.error('Live assignment check error:', e); return null; })
+          : Promise.resolve(null);
+
+        const [dbSynced, liveMap] = await Promise.all([dbWrite, liveMapPromise]);
+        if (!dbSynced) {
+          showToast(`⚠️ Database sync failed for ${dispTkt.orderNumber} — check console. Continuing with sheet write.`);
+        }
+
         let finalAssignedAgent = agentAssignedTag;
         let finalAssignedEmail = googleUser.email;
         let claimBlocked = false;
-        try {
-          const sid = extractSheetId(DEFAULT_SHEET_URL);
-          if (sid) {
-            const liveMap = await fetchLiveOrderAndAgentMap(sid);
-            const key = (dispTkt.orderNumber || '').toString().trim().toUpperCase();
-            const live = liveMap ? liveMap.get(key) : null;
-            if (live && live.agent && live.agent.toLowerCase() !== 'unassigned' && !live.agent.toLowerCase().includes(googleUser.email.toLowerCase())) {
-              finalAssignedAgent = live.agent;
-              finalAssignedEmail = live.agent;
-              claimBlocked = true;
-            }
-          }
-        } catch (e) {
-          console.error('Live assignment check error:', e);
+        const liveKey = (dispTkt.orderNumber || '').toString().trim().toUpperCase();
+        const liveRow = liveMap ? liveMap.get(liveKey) : null;
+        if (liveRow && liveRow.agent && liveRow.agent.toLowerCase() !== 'unassigned' && !liveRow.agent.toLowerCase().includes(googleUser.email.toLowerCase())) {
+          finalAssignedAgent = liveRow.agent;
+          finalAssignedEmail = liveRow.agent;
+          claimBlocked = true;
         }
 
         const ov={
@@ -985,7 +990,9 @@ import CallTrendChart from './CallTrendChart';
         if (!claimBlocked) {
           sheetUpdates.assignedAgent = agentAssignedTag;
         }
-        writeToSheetRow(dispTkt.orderNumber, dispTkt.rawIndex, sheetUpdates);
+        // liveRow was just resolved above, so pass it in rather than letting writeToSheetRow
+        // re-read Column E to find the same row again.
+        writeToSheetRow(dispTkt.orderNumber, dispTkt.rawIndex, sheetUpdates, liveRow?.row);
 
         const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
         
@@ -1003,44 +1010,9 @@ import CallTrendChart from './CallTrendChart';
           return u;
         });
         
-        // Real top-up, not just a hopeful toast: request this agent's next lead right now
-        // instead of waiting on the periodic sweep - see api/rto/next-lead.js. The line below
-        // used to unconditionally claim "& refilled fresh lead into box!" with nothing behind
-        // it - disposing never triggered any assignment at all (see that file's own comment on
-        // why). Best-effort and never blocking: this disposal has already fully succeeded
-        // (sheet + MySQL) by this point, so a failure here must not look like the disposal failed.
-        // nextLeadNote: appended straight onto the "Disposed X" toast (non-refund path).
-        // nextLeadStandalone: its own sentence, for the refund path - that flow already shows
-        // its own "₹X refunded successfully" toast (doRefund below), so the top-up gets a
-        // separate one rather than string surgery on nextLeadNote to make it stand alone.
-        let nextLeadNote = '';
-        let nextLeadStandalone = '';
-        try {
-          const nlRes = await fetch('/api/rto/next-lead', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
-          const nlData = await nlRes.json().catch(() => ({}));
-          if (nlRes.ok && nlData.assigned) {
-            // next-lead.js fills toward quota, not strictly one-for-one - count > 1 means this
-            // disposal is what closed a real gap (an agent who started under quota), not just
-            // routine replacement, so say so rather than naming only the first order number.
-            if (nlData.count > 1) {
-              nextLeadNote = ` — ${nlData.count} leads assigned to catch you up (${nlData.load}/${nlData.quota})`;
-              nextLeadStandalone = `${nlData.count} leads assigned to catch you up (${nlData.load}/${nlData.quota})`;
-            } else {
-              nextLeadNote = ` — next lead ${nlData.orderNumber} assigned (${nlData.load}/${nlData.quota})`;
-              nextLeadStandalone = `Next lead ${nlData.orderNumber} assigned (${nlData.load}/${nlData.quota})`;
-            }
-            sync(true); // pull the newly-written row(s) in now rather than waiting for the 60s poll
-          } else if (nlRes.ok && nlData.reason !== 'at quota') {
-            // 'at quota' means this agent still holds enough leads on purpose - not worth a
-            // toast. Anything else (pool empty) is worth saying so the agent isn't left
-            // wondering why nothing showed up.
-            nextLeadNote = ' — no more leads available right now';
-            nextLeadStandalone = 'No more leads available right now';
-          }
-        } catch (e) {
-          console.error('next-lead request failed:', e);
-        }
-
+        // Confirm and close FIRST, then fire the top-up (requestNextLead, below the end of this
+        // function). The disposal is fully committed by this point - MySQL awaited, sheet write
+        // dispatched - so nothing after this needs to hold the modal open.
         if(isRef){
           const gkData=gokwik?.gokwik||{};
           doRefund(dispTkt.id,{
@@ -1054,11 +1026,46 @@ import CallTrendChart from './CallTrendChart';
             notes:refNotes,
             gokwikResponse: gkData
           });
-          if (nextLeadStandalone) showToast(nextLeadStandalone);
         } else {
-          showToast(`Disposed ${dispTkt.orderNumber}${nextLeadNote}`);
+          showToast(`Disposed ${dispTkt.orderNumber}`);
         }
         setDispTkt(null);
+        requestNextLead();
+      };
+
+      // Top-up request, deliberately NOT awaited by submitDisp. It is the single most expensive
+      // thing the disposal used to do - a session derivation, two presence lookups, a 6-range
+      // batchGet over the whole sheet (Q:Z alone is ten columns x ~14k rows), a verify read, a
+      // write and a MySQL insert - and its outcome changes nothing about the disposal, which is
+      // already fully committed (MySQL + sheet) before this runs. Awaiting it meant the modal
+      // stayed open and the Save button stayed dead through all of it, plus the sync(true)
+      // full-sheet refetch and reparse below. That whole tail is what the RTO team feels as
+      // "disposing one lead takes forever"; the toast now arrives on its own when it lands.
+      //
+      // Two of these overlapping (dispose, then immediately dispose again) is safe: next-lead.js
+      // re-verifies every target cell with a batchGet immediately before writing it, so the
+      // loser of a race assigns nothing rather than double-assigning.
+      const requestNextLead = async () => {
+        try {
+          const nlRes = await fetch('/api/rto/next-lead', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+          const nlData = await nlRes.json().catch(() => ({}));
+          if (nlRes.ok && nlData.assigned) {
+            // next-lead.js fills toward quota, not strictly one-for-one - count > 1 means this
+            // disposal is what closed a real gap (an agent who started under quota), not just
+            // routine replacement, so say so rather than naming only the first order number.
+            showToast(nlData.count > 1
+              ? `${nlData.count} leads assigned to catch you up (${nlData.load}/${nlData.quota})`
+              : `Next lead ${nlData.orderNumber} assigned (${nlData.load}/${nlData.quota})`);
+            sync(true); // pull the newly-written row(s) in now rather than waiting for the 60s poll
+          } else if (nlRes.ok && nlData.reason !== 'at quota') {
+            // 'at quota' means this agent still holds enough leads on purpose - not worth a
+            // toast. Anything else (pool empty) is worth saying so the agent isn't left
+            // wondering why nothing showed up.
+            showToast('No more leads available right now');
+          }
+        } catch (e) {
+          console.error('next-lead request failed:', e);
+        }
       };
 
       // try/finally rather than clearing at the end of runSubmitDisp: that function returns

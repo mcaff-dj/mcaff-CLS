@@ -865,8 +865,18 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
     `;
   } catch (e) {
     if (!/live_order_id_key/.test((e && e.message) || '')) throw e;
+    // live_order_id, not order_id: it is the VIRTUAL column `IF(reassigned_away_at IS NULL,
+    // order_id, NULL)` that live_order_id_key is built on (see ensureSchema and
+    // migrate_cls_rto_calling_schema.py), so matching on it is the same set of rows the old
+    // `order_id = ? AND reassigned_away_at IS NULL` pair selected - except the optimizer can
+    // use the unique index instead of scanning. CLS_RTO_calling has no index on order_id (the
+    // old one was dropped), so every one of the three statements in this catch block was a
+    // full table scan, on the hottest write path in the CRM. The redundant
+    // `reassigned_away_at IS NULL` is kept alongside so the intent stays readable and the
+    // predicate is unambiguous on the UPDATE that changes that very column.
     const { rows: liveRows } = await sql`
-      SELECT disposed_at, agent_email FROM CLS_RTO_calling WHERE order_id = ${orderId} AND reassigned_away_at IS NULL
+      SELECT disposed_at, agent_email FROM CLS_RTO_calling
+      WHERE live_order_id = ${orderId} AND reassigned_away_at IS NULL
     `;
     // Same agent re-submitting within a minute is one disposal arriving twice, not a re-open:
     // it updates the row in place, exactly as an undisposed lead would. Everything else - a
@@ -882,7 +892,7 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
         // re-dispose lands first retires the row, and this UPDATE affecting 0 rows a moment
         // later on a genuine race just means the OTHER submission already did it.
         await conn.execute(
-          'UPDATE CLS_RTO_calling SET reassigned_away_at = ? WHERE order_id = ? AND reassigned_away_at IS NULL',
+          'UPDATE CLS_RTO_calling SET reassigned_away_at = ? WHERE live_order_id = ? AND reassigned_away_at IS NULL',
           [now, orderId],
         );
         await conn.execute(
@@ -913,7 +923,7 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
           rto_reason = COALESCE(rto_reason, ${rtoReason || null}),
           payment_mode = COALESCE(payment_mode, ${paymentMode || null}),
           delivery_partner = COALESCE(${deliveryPartner}, delivery_partner)
-        WHERE order_id = ${orderId} AND reassigned_away_at IS NULL
+        WHERE live_order_id = ${orderId} AND reassigned_away_at IS NULL
       `;
     }
   }
