@@ -334,6 +334,39 @@ async function bootstrapSchema() {
       PRIMARY KEY (email, process_key)
     )
   `;
+  // One row per team within a calling process. Teams are a dimension INSIDE a process, not
+  // processes of their own: two NDR teams share the process's disposition tree, calling hours
+  // and permission tab, and differ only in WHO is on them and WHICH sheet they work. See
+  // docs/superpowers/specs/2026-08-26-ndr-per-team-isolation-design.md for why this is not
+  // modelled as two process keys.
+  //
+  // sheet_id / sheet_tab: the team's own Google Sheet. Stored per team rather than hardcoded
+  // because the two live NDR sheets are different files that happen to share a tab name
+  // ('Latest NDR ', trailing space significant) - nothing guarantees a third would. Never trim
+  // sheet_tab anywhere it's read: trimming turns that trailing space into a Sheets API range
+  // string that resolves to nothing.
+  // Writes to sheet_id are full-admin only (never is_process_admin): the service account has
+  // Editor access, so whoever sets this steers it at an arbitrary spreadsheet.
+  //
+  // active: soft-delete. Deactivating a team is the intended way to reverse a rollout, since
+  // isolation switches on at two ACTIVE teams - so this must never be a hard DELETE, which
+  // would orphan the team_id on every calling_agent_process row pointing at it.
+  await sql`
+    CREATE TABLE IF NOT EXISTS calling_teams (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      process_key VARCHAR(64) NOT NULL,
+      name VARCHAR(120) NOT NULL,
+      sheet_id VARCHAR(128) NOT NULL,
+      sheet_tab VARCHAR(120) NOT NULL,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_by VARCHAR(320),
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_by VARCHAR(320),
+      UNIQUE KEY calling_teams_process_name_key (process_key, name),
+      KEY calling_teams_process_active_idx (process_key, active)
+    )
+  `;
   // One row per RTO CSV upload - moved here from Postgres (see
   // migrate_rto_csv_upload_jobs_to_mysql.py). rows_pending holds the validated, deduped rows
   // still awaiting the background worker (scripts/process_rto_csv_upload_job.py) - cleared to
