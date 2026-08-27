@@ -9,11 +9,8 @@
 // Editor access on this external sheet, not just Viewer.
 const { JWT } = require('google-auth-library');
 const { getSession } = require('../_lib/session');
+const { resolveCallerTeam, getCallingTeam, listCallingTeams } = require('../_lib/db');
 
-// The one sheet this proxy is allowed to touch - see scripts/assign_ndr_leads.py's
-// SPREADSHEET_ID. Rejecting any other sid keeps a permitted-but-malicious request from
-// repurposing this service account's access against an unrelated sheet.
-const NDR_SHEET_ID = '12p3rlXyE0PDx3BMqBpl3CUo5YD3uVzQun1HFPizpSeI';
 const CARD_KEY = 'calling';
 const TAB_KEY = 'ndr';
 
@@ -35,6 +32,28 @@ function checkAccess(session) {
   return null;
 }
 
+// The sheet this caller is entitled to, resolved from their own team row. The client's `sid` is
+// IGNORED rather than validated, for two reasons. Security: this file's original comment
+// explains the check existed so a permitted-but-malicious request could not repurpose the
+// service account (which holds Editor access) against another spreadsheet - never consulting
+// the client's value is a stronger form of that guarantee than comparing it. Deploy safety:
+// api/ and app/ ship separately, so an api/ newer than app/ still receives the old hardcoded
+// sid; ignoring it keeps that request working instead of 400-ing "Unknown sheet".
+async function resolveSheetFor(session) {
+  const { callerTeamId, activeTeamCount } = await resolveCallerTeam(session.email, TAB_KEY);
+  if (callerTeamId != null) {
+    const team = await getCallingTeam(callerTeamId);
+    if (team && team.active) return team;
+  }
+  // No team row: either the desk has not been split yet, or the caller is a full admin (who
+  // holds no calling_agent_process row by convention). With one team there is no ambiguity;
+  // with two or more there is, and guessing would serve the wrong team's leads.
+  const teams = await listCallingTeams(TAB_KEY);
+  if (teams.length === 1) return teams[0];
+  if (activeTeamCount >= 2) return null;
+  return null;
+}
+
 // Short-TTL read cache for the 'values' GET op below. Without it, every page-load or poll is
 // a live Sheets API call with nothing in front of it. A 20s staleness window is an acceptable
 // tradeoff for the load this saves (mirrors scripts/assign_leads.py's GOKWIK_CACHE_TTL -
@@ -42,7 +61,7 @@ function checkAccess(session) {
 // external cache: it persists across invocations on the same warm Lambda container, which is
 // all we need - no cross-container invalidation, since a stale-by-20s read is fine either way.
 const READ_CACHE_TTL_MS = 20000;
-const _readCache = new Map(); // key (range) -> { expiresAt, promise }
+const _readCache = new Map(); // key (sheetId + range, see cachedRead's call site) -> { expiresAt, promise }
 
 // Singleflight: a key already in the map - whether its fetch is still in flight or it
 // resolved within the last 20s - is reused instead of firing a duplicate live call, so a
@@ -67,9 +86,9 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const sid = (req.method === 'GET' ? req.query.sid : (req.body || {}).sid) || '';
-  if (sid !== NDR_SHEET_ID) {
-    res.status(400).json({ error: 'Unknown sheet' });
+  const team = await resolveSheetFor(session);
+  if (!team) {
+    res.status(403).json({ error: 'You are not assigned to an NDR team yet. Ask an admin to assign you.' });
     return;
   }
 
@@ -85,9 +104,13 @@ module.exports = async (req, res) => {
   try {
     if (req.method === 'GET' && req.query.op === 'values') {
       const range = req.query.range || '';
-      const { status, data } = await cachedRead(`values:${range}`, async () => {
+      // The spreadsheet id is part of the key, not just the range. Both NDR sheets name their
+      // tab 'Latest NDR ' (trailing space included), so two teams request byte-identical range
+      // strings - keyed on range alone they collide inside a warm Lambda container and one team
+      // is served the other's rows, with a 200 and no audit trail.
+      const { status, data } = await cachedRead(`values:${team.sheetId}:${range}`, async () => {
         const r = await fetch(
-          `https://sheets.googleapis.com/v4/spreadsheets/${NDR_SHEET_ID}/values/${encodeURIComponent(range)}?majorDimension=ROWS`,
+          `https://sheets.googleapis.com/v4/spreadsheets/${team.sheetId}/values/${encodeURIComponent(range)}?majorDimension=ROWS`,
           { headers: { Authorization: `Bearer ${token}` } }
         );
         return { status: r.status, data: await r.json() };
@@ -105,7 +128,7 @@ module.exports = async (req, res) => {
       // locale and displayed back as "8 Jun" instead of the intended 6 Aug. RAW stores exactly
       // the string sent, no locale-dependent guessing.
       const r = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${NDR_SHEET_ID}/values:batchUpdate`,
+        `https://sheets.googleapis.com/v4/spreadsheets/${team.sheetId}/values:batchUpdate`,
         {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
