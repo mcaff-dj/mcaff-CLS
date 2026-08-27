@@ -2424,6 +2424,112 @@ async function getAdministeredProcesses(email) {
   return rows.map((r) => r.process_key);
 }
 
+// ── Per-team registry (calling_teams) ────────────────────────────────────────────────────
+// A team is a dimension inside a process; see the table's own comment in bootstrapSchema.
+
+const { isValidSheetId, normalizeTeamName } = require('./callingTeams');
+
+function mapTeamRow(r) {
+  return {
+    id: r.id,
+    processKey: r.process_key,
+    name: r.name,
+    sheetId: r.sheet_id,
+    sheetTab: r.sheet_tab,
+    active: !!r.active,
+  };
+}
+
+async function listCallingTeams(processKey, { includeInactive = false } = {}) {
+  await ensureSchema();
+  if (!processKey) return [];
+  const { rows } = includeInactive
+    ? await sql`SELECT * FROM calling_teams WHERE process_key = ${processKey} ORDER BY name ASC`
+    : await sql`SELECT * FROM calling_teams WHERE process_key = ${processKey} AND active = true ORDER BY name ASC`;
+  return rows.map(mapTeamRow);
+}
+
+async function getCallingTeam(id) {
+  await ensureSchema();
+  const teamId = parseInt(id, 10);
+  if (!Number.isFinite(teamId)) return null;
+  const { rows } = await sql`SELECT * FROM calling_teams WHERE id = ${teamId} LIMIT 1`;
+  return rows.length ? mapTeamRow(rows[0]) : null;
+}
+
+// sheetId is validated here as well as at the route, because this is the last line before a
+// value an admin typed becomes the URL path of a request made with an Editor-scoped service
+// account credential.
+function assertTeamFields({ name, sheetId, sheetTab }) {
+  const cleanName = normalizeTeamName(name);
+  if (!cleanName) throw new Error('Team name is required');
+  if (!isValidSheetId(sheetId)) {
+    throw new Error('sheetId must be a Google Sheets file id (letters, digits, - and _ only) - not a full URL');
+  }
+  const cleanTab = (sheetTab == null ? '' : String(sheetTab));
+  // NOT trimmed: the live NDR tab is literally named 'Latest NDR ' with a trailing space, and
+  // trimming it would produce a range string Sheets cannot resolve.
+  if (!cleanTab) throw new Error('sheetTab is required');
+  return { cleanName, cleanTab };
+}
+
+async function createCallingTeam(processKey, { name, sheetId, sheetTab }, byEmail) {
+  await ensureSchema();
+  if (!processKey) throw new Error('processKey is required');
+  const { cleanName, cleanTab } = assertTeamFields({ name, sheetId, sheetTab });
+  const { insertId } = await sql`
+    INSERT INTO calling_teams (process_key, name, sheet_id, sheet_tab, created_by, updated_by)
+    VALUES (${processKey}, ${cleanName}, ${sheetId}, ${cleanTab}, ${byEmail || null}, ${byEmail || null})
+  `;
+  invalidateCache(`calling:teams:${processKey}`);
+  return getCallingTeam(insertId);
+}
+
+async function updateCallingTeam(id, { name, sheetId, sheetTab, active }, byEmail) {
+  await ensureSchema();
+  const existing = await getCallingTeam(id);
+  if (!existing) throw new Error('No such team');
+  const next = {
+    name: name === undefined ? existing.name : name,
+    sheetId: sheetId === undefined ? existing.sheetId : sheetId,
+    sheetTab: sheetTab === undefined ? existing.sheetTab : sheetTab,
+  };
+  const { cleanName, cleanTab } = assertTeamFields(next);
+  const nextActive = active === undefined ? existing.active : !!active;
+  await sql`
+    UPDATE calling_teams
+       SET name = ${cleanName}, sheet_id = ${next.sheetId}, sheet_tab = ${cleanTab},
+           active = ${nextActive}, updated_at = NOW(), updated_by = ${byEmail || null}
+     WHERE id = ${existing.id}
+  `;
+  invalidateCache(`calling:teams:${existing.processKey}`);
+  return getCallingTeam(existing.id);
+}
+
+// The caller's own team, plus how many ACTIVE teams the process has - both inputs to
+// teamScopeFor(). Returns callerTeamId null for anyone with no calling_agent_process row, which
+// includes every full admin by convention (see getCallingProcessAgents' own note).
+//
+// Deliberately NOT cached: a stale answer here is a stale ANSWER TO "whose data may I see",
+// and readCache is per-warm-container with a 5-minute TTL, so an agent moved between teams
+// could keep reading the old team for minutes. The two SELECTs are indexed point reads.
+async function resolveCallerTeam(email, processKey) {
+  await ensureSchema();
+  if (!email || !processKey) return { callerTeamId: null, activeTeamCount: 0 };
+  const [{ rows: mine }, { rows: counted }] = await Promise.all([
+    sql`
+      SELECT team_id FROM calling_agent_process
+      WHERE LOWER(email) = ${String(email).toLowerCase()} AND process_key = ${processKey}
+      LIMIT 1
+    `,
+    sql`SELECT COUNT(*) AS n FROM calling_teams WHERE process_key = ${processKey} AND active = true`,
+  ]);
+  return {
+    callerTeamId: mine.length && mine[0].team_id != null ? mine[0].team_id : null,
+    activeTeamCount: Number((counted[0] && counted[0].n) || 0),
+  };
+}
+
 // ── Per-process admin-defined disposition list (see calling_process_dispositions above) ────
 // Arbitrary nesting depth - any option, at any depth, can have its own child sub-options.
 // parent_id is self-referencing with no depth check, and getProcessDispositions' two-pass
@@ -3286,6 +3392,7 @@ module.exports = {
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
   isCallingProcessAdmin, getAdministeredProcesses,
+  listCallingTeams, getCallingTeam, createCallingTeam, updateCallingTeam, resolveCallerTeam,
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions,
   claimNdrLead, disposeNdrLead,
