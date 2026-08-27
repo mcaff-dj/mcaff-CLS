@@ -1,9 +1,10 @@
 'use client';
 
-// Admin-surface pieces shared by every Calling process page: the business-hours editor and the
-// admin-configurable disposition-tree editor. Both are already fully generic (parameterized by
-// processKey, nothing RTO-specific baked in) - RTO itself never renders ProcessDispositionsCard
-// (it keeps its own hardcoded connectedOutcomes/unreachableOutcomes arrays), but CallingHoursCard
+// Admin-surface pieces shared by every Calling process page: the business-hours editor, the
+// admin-configurable disposition-tree editor, and the per-process team registry. All three are
+// already fully generic (parameterized by processKey, nothing RTO/NDR-specific baked in) - RTO
+// itself never renders ProcessDispositionsCard or CallingTeamsCard (it keeps its own hardcoded
+// connectedOutcomes/unreachableOutcomes arrays and has no team concept yet), but CallingHoursCard
 // is shared as-is.
 //
 // Deliberately NOT included here: the team roster table. Unlike hours/dispositions, RTO's
@@ -179,6 +180,256 @@ export function CallingHoursCard({ processKey, processLabel, hours }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// Per-process TEAM registry (see calling_teams) - the self-serve half of NDR's per-team
+// isolation feature (docs/superpowers/specs/2026-08-26-ndr-per-team-isolation-design.md). A
+// team is a dimension INSIDE a process, not a process of its own: two NDR teams share this
+// process's calling hours and disposition tree, and differ only in which agents are on them and
+// which Google Sheet they work.
+//
+// GET is fetched for every process admin (not just full admins) so a team lead's own page can
+// show its team's name - the server already strips sheetId/sheetTab down to {id,name,active}
+// for anyone who isn't a full admin (see api/admin/[action].js's handleCallingTeams), so this
+// hook never even receives another team's sheet id to accidentally expose. Create/update are
+// full-admin-only, enforced server-side; the fields exist here so CallingTeamsCard has
+// something to call, not because this hook grants anything itself.
+export function useCallingTeams(processKey, { googleUser, showToast } = {}) {
+  const [teams, setTeams] = useState(null); // null = not loaded yet
+  const [teamsError, setTeamsError] = useState('');
+  const [savingTeam, setSavingTeam] = useState(false);
+  const [newTeamName, setNewTeamName] = useState('');
+  const [newTeamSheetId, setNewTeamSheetId] = useState('');
+  const [newTeamSheetTab, setNewTeamSheetTab] = useState('');
+
+  const loadTeams = useCallback(async (key) => {
+    if (!key) return;
+    setTeamsError('');
+    try {
+      const r = await fetch(`/api/admin/calling-teams?process=${encodeURIComponent(key)}&includeInactive=1`);
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setTeamsError(d.error || `Could not load teams (${r.status})`); return; }
+      setTeams(d.teams || []);
+    } catch (e) {
+      setTeamsError(e.message || 'Could not load teams');
+    }
+  }, []);
+
+  // Same "fetched for everyone signed in, endpoint decides" shape as processAgents/
+  // processDispositions above - a plain agent's GET here 403s (they don't administer the
+  // process at all), which just leaves teams null and the card renders nothing for them.
+  useEffect(() => {
+    if (googleUser?.email) loadTeams(processKey);
+  }, [googleUser, processKey, loadTeams]);
+
+  const createTeam = async () => {
+    const name = newTeamName.trim();
+    const sheetId = newTeamSheetId.trim();
+    // sheetTab is intentionally NOT trimmed before it leaves this function - the live NDR tab
+    // is literally named 'Latest NDR ' with a significant trailing space, and trimming it here
+    // would silently produce a range string the Sheets API can't resolve. Only the leading/
+    // trailing whitespace a human typed by mistake around the whole field is worth stripping,
+    // and that's exactly what .trim() on the OUTER value below does - never on the value itself.
+    const sheetTab = newTeamSheetTab;
+    if (!name || !sheetId || !sheetTab.trim()) {
+      setTeamsError('Name, Sheet ID and Sheet Tab are all required');
+      return;
+    }
+    setSavingTeam(true);
+    setTeamsError('');
+    try {
+      const r = await fetch('/api/admin/calling-teams', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ processKey, name, sheetId, sheetTab }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const msg = d.error || `Could not create team (${r.status})`;
+        setTeamsError(msg);
+        if (showToast) showToast(`⚠️ ${msg}`);
+        return;
+      }
+      setNewTeamName(''); setNewTeamSheetId(''); setNewTeamSheetTab('');
+      await loadTeams(processKey);
+      if (showToast) showToast(`✅ Team "${d.team?.name || name}" created`);
+    } catch (e) {
+      const msg = e.message || 'Could not create team';
+      setTeamsError(msg);
+      if (showToast) showToast(`⚠️ ${msg}`);
+    } finally {
+      setSavingTeam(false);
+    }
+  };
+
+  // active is the only field this UI ever toggles post-creation - renaming a team or repointing
+  // its sheet mid-flight is a bigger, rarer decision than this card's scope, and the PUT
+  // endpoint already supports it server-side if that's ever needed from a script or a future
+  // edit form.
+  const setTeamActive = async (id, active) => {
+    setSavingTeam(true);
+    setTeamsError('');
+    try {
+      const r = await fetch('/api/admin/calling-teams', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, active }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const msg = d.error || `Could not update team (${r.status})`;
+        setTeamsError(msg);
+        if (showToast) showToast(`⚠️ ${msg}`);
+        return;
+      }
+      await loadTeams(processKey);
+    } catch (e) {
+      const msg = e.message || 'Could not update team';
+      setTeamsError(msg);
+      if (showToast) showToast(`⚠️ ${msg}`);
+    } finally {
+      setSavingTeam(false);
+    }
+  };
+
+  return {
+    teams, teamsError, savingTeam,
+    newTeamName, setNewTeamName, newTeamSheetId, setNewTeamSheetId, newTeamSheetTab, setNewTeamSheetTab,
+    createTeam, setTeamActive,
+  };
+}
+
+export function CallingTeamsCard({ processKey, processLabel, teamsHook, sessionIsAdmin }) {
+  const {
+    teams, teamsError, savingTeam,
+    newTeamName, setNewTeamName, newTeamSheetId, setNewTeamSheetId, newTeamSheetTab, setNewTeamSheetTab,
+    createTeam, setTeamActive,
+  } = teamsHook;
+
+  // Not loaded (still null) or the endpoint 403'd this caller (an agent with no admin role on
+  // this process) - either way, nothing useful to show. A process admin who simply has zero
+  // teams yet still gets an empty array, which DOES render (the create form, if they're also a
+  // full admin), so this only hides the card from someone who was never going to see teams here.
+  if (!teams) return null;
+
+  const activeCount = teams.filter((t) => t.active).length;
+
+  return (
+    <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
+      <div className="flex items-start gap-3 mb-1">
+        <span className="h-9 w-9 shrink-0 rounded-xl bg-indigo-950/60 border border-indigo-800/60 flex items-center justify-center text-indigo-300">👥</span>
+        <div>
+          <h2 className="text-lg font-bold text-zinc-100">
+            Teams &mdash; {processLabel}
+          </h2>
+          <p className="text-[13px] text-zinc-500">
+            {activeCount === 0
+              ? 'No active team yet - everyone below shares one pool and one sheet, exactly as before this feature.'
+              : activeCount === 1
+                ? '1 active team - still one shared pool. Isolation between team leads switches on the moment a second team is active.'
+                : `${activeCount} active teams - roster, metrics and sheet access are isolated between them. Assign each agent a team in the roster table below.`}
+          </p>
+        </div>
+      </div>
+
+      {teamsError && (
+        <p className="mt-3 text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2">
+          {teamsError}
+        </p>
+      )}
+
+      {teams.length > 0 && (
+        <div className="mt-4 space-y-1.5">
+          {teams.map((t) => (
+            <div key={t.id} className="flex items-center justify-between gap-3 rounded-xl bg-zinc-950/40 border border-zinc-800/60 px-4 py-2.5">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-[13px] font-semibold text-zinc-200">{t.name}</span>
+                  {!t.active && (
+                    <span className="text-[10px] font-bold uppercase tracking-wide text-zinc-500 bg-zinc-800/80 border border-zinc-700/60 rounded-md px-1.5 py-0.5">Paused</span>
+                  )}
+                </div>
+                {/* sheetId/sheetTab are only present when the server trusts this caller with them
+                    (a full admin) - a process admin who is not a full admin sees the name only,
+                    matching what the roster's own Team dropdown shows them. */}
+                {sessionIsAdmin && t.sheetId && (
+                  <p className="text-zinc-500 text-[11px] font-mono truncate max-w-md" title={`${t.sheetId} · tab "${t.sheetTab}"`}>
+                    {t.sheetId}
+                  </p>
+                )}
+              </div>
+              {sessionIsAdmin && (
+                <button
+                  onClick={() => setTeamActive(t.id, !t.active)}
+                  disabled={savingTeam}
+                  className={`shrink-0 h-7 px-3 rounded-lg text-[11px] font-semibold transition-colors disabled:opacity-40 ${
+                    t.active
+                      ? 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300'
+                      : 'bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-800/60'
+                  }`}
+                  title={t.active ? 'Pause this team - agents on it can no longer read or upload to its sheet until reactivated' : 'Reactivate this team'}
+                >
+                  {t.active ? 'Pause' : 'Reactivate'}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Creating a team means handing an admin-typed Sheet ID to a service account with Editor
+          access on real spreadsheets - full-admin only, both here and (independently) enforced
+          server-side, so this form simply doesn't render for a process admin who isn't also a
+          full admin rather than rendering a control that would only 403. */}
+      {sessionIsAdmin && (
+        <div className="mt-4 pt-4 border-t border-zinc-800/80">
+          <div className="text-[12px] text-zinc-500 mb-2 font-medium">Add a team</div>
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-zinc-500">Name</span>
+              <input
+                type="text"
+                value={newTeamName}
+                onChange={(e) => setNewTeamName(e.target.value)}
+                placeholder="e.g. Team North"
+                className="w-40 h-8 px-3 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 rounded-lg text-[13px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-zinc-500">Google Sheet ID</span>
+              <input
+                type="text"
+                value={newTeamSheetId}
+                onChange={(e) => setNewTeamSheetId(e.target.value)}
+                placeholder="the id from the sheet's URL, not the full URL"
+                className="w-64 h-8 px-3 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 rounded-lg text-[13px] text-zinc-200 font-mono placeholder:text-zinc-600 placeholder:font-sans focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-zinc-500">Sheet Tab</span>
+              <input
+                type="text"
+                value={newTeamSheetTab}
+                onChange={(e) => setNewTeamSheetTab(e.target.value)}
+                placeholder="e.g. Latest NDR "
+                className="w-40 h-8 px-3 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 rounded-lg text-[13px] text-zinc-200 font-mono placeholder:text-zinc-600 placeholder:font-sans focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+              />
+            </label>
+            <button
+              onClick={createTeam}
+              disabled={savingTeam || !newTeamName.trim() || !newTeamSheetId.trim() || !newTeamSheetTab.trim()}
+              className="h-8 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-40"
+            >
+              {savingTeam ? 'Adding…' : 'Add team'}
+            </button>
+          </div>
+          <p className="mt-2 text-[11px] text-zinc-600">
+            The sheet must already be shared with the app&apos;s service account as Editor, and its header row must match the existing NDR sheet layout exactly - both are checked when someone next uploads to it, not here.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

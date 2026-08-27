@@ -16,7 +16,7 @@ import {
   CalendarIcon, DownloadIcon,
 } from '../_calling/ui';
 import { useCallingSession, STATUS_OPTIONS, ROSTER_STATUS_OPTIONS } from '../_calling/useCallingSession';
-import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
+import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDispositionsCard, useCallingTeams, CallingTeamsCard } from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
 import NdrUploadModal from './NdrUploadModal';
 import {
@@ -237,6 +237,8 @@ export default function NdrCallingClient() {
   const hours = useBusinessHours(PROCESS_KEY, { userRole, isProcessAdmin, showToast });
   const disp = useProcessDispositions(PROCESS_KEY, { googleUser, showToast });
   const { processDispositions } = disp;
+  const teamsHook = useCallingTeams(PROCESS_KEY, { googleUser, showToast });
+  const { teams: ndrTeams } = teamsHook;
 
   // Same theme setup as RtoCrmClient.js's App() - one theme, always. The "zinc-900"/"#09090b"
   // etc. Tailwind classes used throughout this file are NOT actually dark in the shipped app;
@@ -634,6 +636,7 @@ export default function NdrCallingClient() {
             <table className="w-full text-[13px]">
               <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
                 <th className="py-3 px-4 text-left font-medium">Agent</th>
+                <th className="py-3 px-4 text-left font-medium" title="Which NDR team this agent belongs to. With 2+ active teams, an unassigned agent sees no leads and no metrics until an admin assigns one here.">Team</th>
                 <th className="py-3 px-4 text-left font-medium">Status</th>
                 <th className="py-3 px-4 text-left font-medium">Quota</th>
                 <th className="py-3 px-4 text-left font-medium" title="Hard filter: restricts this agent to leads whose delivery-attempt count falls in the selected bucket(s). No selection = unrestricted.">Attempts</th>
@@ -649,6 +652,29 @@ export default function NdrCallingClient() {
                     <td className="py-3 px-4">
                       <p className="font-semibold text-zinc-100">{a.name}</p>
                       <p className="text-zinc-500 text-[11px] font-mono">{a.email}</p>
+                    </td>
+                    <td className="py-3 px-4">
+                      {sessionIsAdmin ? (
+                        // Only a full admin may move an agent between teams (see
+                        // api/admin/[action].js's handleCallingAgents) - a process admin who
+                        // could set this themselves could pull the other team's agents onto
+                        // their own roster, or push their own away to hide them. Options are
+                        // ACTIVE teams only: assigning someone to a paused team would just leave
+                        // them unable to read or upload to any sheet, same as being unassigned,
+                        // but without the roster row saying so plainly.
+                        <CustomSelect
+                          value={a.teamId ?? ''}
+                          onChange={(val) => saveProcessAgent(a.email, { teamId: val === '' ? null : +val })}
+                          options={[
+                            { value: '', label: (ndrTeams || []).some(t => t.active) ? 'Unassigned' : 'No teams yet' },
+                            ...(ndrTeams || []).filter(t => t.active).map(t => ({ value: t.id, label: t.name })),
+                          ]}
+                        />
+                      ) : (
+                        <span className={a.teamId == null ? 'text-zinc-500 text-[12px]' : 'text-zinc-300 text-[12px] font-medium'}>
+                          {a.teamId == null ? 'Unassigned' : ((ndrTeams || []).find(t => t.id === a.teamId)?.name || `Team #${a.teamId}`)}
+                        </span>
+                      )}
                     </td>
                     <td className="py-3 px-4">
                       <CustomSelect
@@ -755,7 +781,7 @@ export default function NdrCallingClient() {
                   </tr>
                 ))}
                 {rows.length === 0 && (
-                  <tr><td colSpan={9} className="py-8 text-center text-zinc-500">No one invited to NDR Calling yet - grant access from Admin → Permissions.</td></tr>
+                  <tr><td colSpan={10} className="py-8 text-center text-zinc-500">No one invited to NDR Calling yet - grant access from Admin → Permissions.</td></tr>
                 )}
               </tbody>
             </table>
@@ -1611,6 +1637,7 @@ export default function NdrCallingClient() {
               {ndrTab === 'predicted' && canPredictedTab && renderNdrPredictedTable()}
               {ndrTab === 'admin' && canAdminTab && (
                 <div className="space-y-6">
+                  <CallingTeamsCard processKey={PROCESS_KEY} processLabel="NDR Calling" teamsHook={teamsHook} sessionIsAdmin={sessionIsAdmin} />
                   {renderNdrRosterTable()}
                   <CallingHoursCard processKey={PROCESS_KEY} processLabel="NDR Calling" hours={hours} />
                   <ProcessDispositionsCard processLabel="NDR Calling" disp={disp} />
