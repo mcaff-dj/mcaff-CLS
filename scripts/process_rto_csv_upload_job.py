@@ -227,6 +227,43 @@ def _connect():
     )
 
 
+# The live-AWB-re-check-then-append sequence below is only safe against a CONCURRENT worker if
+# nothing else can append between the read and the write. Two jobs overlapping is not
+# hypothetical: RtoUploadModal aborts its chunk loop on the first failed chunk but cannot cancel
+# a worker job already queued, so an orphaned job from an aborted upload keeps running (the
+# punch/refund phases take minutes) and appends long after the modal gave up. Re-uploading the
+# same file then races it - both workers read column G before either appends, both conclude the
+# AWB is absent, and both append it. That is the only way a duplicate AWB can reach this sheet,
+# and it produced real duplicates (SF3739213893MCA and a batch of SF36163*MCA rows).
+#
+# A MySQL named lock, not a row lock or a sheet-side marker: this connection already exists, the
+# lock is released automatically if the Lambda dies mid-job (it is connection-scoped), and there
+# is no table to keep clean afterwards.
+APPEND_LOCK_NAME = "rto_csv_append"
+# Longer than a worst-case append (one values:append of a few thousand rows, plus lib.py's own
+# retry budget) but far under the 900s Lambda timeout, so waiting for the lock can never be what
+# kills the job.
+APPEND_LOCK_TIMEOUT_SEC = 180
+
+
+def _acquire_append_lock(conn):
+    """True if this worker now holds the append lock. GET_LOCK returns 1 on success, 0 on
+    timeout, NULL on error - only 1 means we may append."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT GET_LOCK(%s, %s)", (APPEND_LOCK_NAME, APPEND_LOCK_TIMEOUT_SEC))
+        got = cur.fetchone()[0]
+    return got == 1
+
+
+def _release_append_lock(conn):
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT RELEASE_LOCK(%s)", (APPEND_LOCK_NAME,))
+    except Exception as e:
+        # Not fatal: the lock is connection-scoped, so it goes away when this connection does.
+        print(f"  could not release {APPEND_LOCK_NAME} lock (harmless, it is connection-scoped): {e}")
+
+
 def process_job(job_id):
     try:
         conn = _connect()
@@ -305,6 +342,20 @@ def process_job(job_id):
         _update_job(conn, job_id, status="appending")
         stamped_rows = partition_and_stamp(rows, punched_ids, all_refund_results)
 
+        # Everything from here to the append itself must be serialised against other workers -
+        # see APPEND_LOCK_NAME above for the duplicate-AWB race this closes. No explicit release
+        # on the failure paths: the lock is connection-scoped and this function's own
+        # `finally: conn.close()` drops it, whichever way we leave.
+        if not _acquire_append_lock(conn):
+            _update_job(
+                conn, job_id, status="failed",
+                error_message=(
+                    f"Another upload has been appending for over {APPEND_LOCK_TIMEOUT_SEC}s - "
+                    "nothing was written for this batch. Re-upload it once the other one finishes."
+                ),
+            )
+            return
+
         # Fresh live read of the header row, right before writing - this worker runs
         # asynchronously and possibly minutes after api/rto/upload-start.js did its own header
         # read, so that snapshot can no longer be trusted. Same drift check that endpoint
@@ -361,6 +412,9 @@ def process_job(job_id):
                 base_row[STAMP_START_INDEX:STAMP_START_INDEX + 3] = [s, t, u]
             values_to_append.append(base_row)
         append_resp = lib.append_sheet_rows(SPREADSHEET_ID, f"'{SHEET_TAB}'!A2:{LAST_COLUMN_LETTER}", values_to_append)
+        # Released the moment the rows are in: the verification read and status writes below
+        # cannot create a duplicate, so holding another worker off through them buys nothing.
+        _release_append_lock(conn)
 
         # Post-write sanity check - same reasoning as api/rto/upload-start.js's own AWB
         # canary check on its immediate-append path: fixed-column writes assume this worker's
