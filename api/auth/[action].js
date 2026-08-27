@@ -347,11 +347,14 @@ async function handleRecentAssignments(req, res) {
 // Every lead's real {assignedAt, disposedAt}, unbounded (see getAllLeadDates/getAllNdrLeadDates
 // in db.js) - lets an Overview tab's Agent Performance Summary table date-filter each column by
 // the real date its own event happened (assigned_at for the Assigned columns, disposed_at for
-// the Disposed/Connected/Converted ones) instead of the lead's own Calling Date/Order Date. Same
-// auth level as handleRecentAssignments above (authenticated, not admin-only): this is a
-// different pair of date fields for rows a signed-in agent can already see in the ticket data
-// itself, not new exposure. `process=ndr` switches to NDR's own table (keyed by awb, not order
-// ID) - default (no query param) stays RTO's, so RtoCrmClient.js's existing call is unaffected.
+// the Disposed/Connected/Converted ones) instead of the lead's own Calling Date/Order Date.
+// `process=ndr` switches to NDR's own table (keyed by awb, not order ID) - default (no query
+// param) stays RTO's, so RtoCrmClient.js's existing call is unaffected.
+//
+// Gated below behind the 'calling' card + process tab, same as every other calling route
+// (api/ndr/sheet.js, api/rto/sheet.js). This handler used to check only "is signed in" - that
+// handed the WHOLE desk's live lead volume and pacing (every AWB/order's assign+dispose
+// timestamps, unbounded) to any signed-in user of the entire site, not just calling agents.
 async function handleLeadDates(req, res) {
   if (req.method !== 'GET') {
     res.status(405).json({ error: 'Method not allowed' });
@@ -362,7 +365,35 @@ async function handleLeadDates(req, res) {
     res.status(401).json({ error: 'Not signed in' });
     return;
   }
-  const leadDates = req.query.process === 'ndr' ? await getAllNdrLeadDates() : await getAllLeadDates();
+  const processKey = (req.query && req.query.process) === 'ndr' ? 'ndr' : 'rto';
+
+  // ============================================================================================
+  // PERMISSION GATE - do not remove. A later task (per-team lead scoping) extends this handler
+  // by narrowing WHICH leads come back for a given team; that scoping must be layered on top of
+  // this block, never in place of it. Removing this re-opens the whole-desk enumeration bug
+  // this task exists to close (any signed-in user, any card, could read every lead's timing).
+  //
+  // Mirrors api/ndr/sheet.js's checkAccess (lines 30-35), an already-proven-in-production gate,
+  // exactly - same two checks, same order, same absence semantics:
+  //   - card check: no 'calling' entry in session.perms -> 403, regardless of tabs.
+  //   - tab check: session.tabPerms.calling is the set of tabs report_tab_permissions actually
+  //     restricts this user to. Per that table's own convention, NO ROWS for (user, 'calling')
+  //     means UNRESTRICTED access to every tab of that card, not "no access" - so the check only
+  //     fires when `tabs` is a non-empty array AND it excludes this processKey. Flipping that
+  //     (e.g. treating a missing/empty tabs list as deny-all) would lock out every admin and
+  //     every agent who was never explicitly narrowed to one process.
+  if (!(session.perms || []).includes('calling')) {
+    res.status(403).json({ error: 'You do not have access to Calling.' });
+    return;
+  }
+  const tabs = session.tabPerms && session.tabPerms.calling;
+  if (Array.isArray(tabs) && tabs.length && !tabs.includes(processKey)) {
+    res.status(403).json({ error: 'You do not have access to that process.' });
+    return;
+  }
+  // ============================================================================================
+
+  const leadDates = processKey === 'ndr' ? await getAllNdrLeadDates() : await getAllLeadDates();
   res.status(200).json({ leadDates });
 }
 
