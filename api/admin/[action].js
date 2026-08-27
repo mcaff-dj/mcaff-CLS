@@ -47,10 +47,11 @@ const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser
   getUserByEmail, getUserTabPermissions,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours, logEvent,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
-  isCallingProcessAdmin, getAdministeredProcesses,
+  isCallingProcessAdmin, getAdministeredProcesses, resolveCallerTeam,
   listCallingTeams, createCallingTeam, updateCallingTeam,
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions } = require('../_lib/db');
+const { teamScopeFor } = require('../_lib/callingTeams');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { CARD_TABS } = require('../_lib/tabs');
 const { getSession } = require('../_lib/session');
@@ -317,12 +318,46 @@ async function handleBusinessHours(req, res, session) {
   res.status(200).json({ days: BUSINESS_HOUR_DAYS, processes: visible });
 }
 
+// The caller's own team scope, resolved server-side from THEIR OWN calling_agent_process row -
+// never from the request. This matters beyond NDR: /rto-crm?process=ndr and the escalation
+// dashboards reach this same handleCallingAgents via GET with no NDR team context in the request
+// at all, so the only trustworthy source of "which team is this caller on" is a DB lookup keyed
+// by their own session email. A full admin may pass an explicit teamId to view or act on one
+// team; teamScopeFor silently ignores that field for everyone else (see its own contract comment
+// in callingTeams.js). For rto/escalation/deliveryescalation - processes with no teams at all -
+// resolveCallerTeam returns activeTeamCount: 0, so teamScopeFor always yields undefined
+// (unfiltered) regardless of who's asking. Team isolation only ever engages for a process that
+// actually has 2+ active teams.
+//
+// explicitTeamId arrives as a query-string or JSON-body value, i.e. a STRING (or undefined/null).
+// teamScopeFor's contract is number | null | undefined and it does NOT coerce - passing a raw
+// string through would make its downstream `row.teamId === teamId` strict-equality check never
+// match a numeric column, silently returning an empty roster instead of the admin's chosen team.
+// parseInt here is what keeps that comparison meaningful.
+async function scopeFor(session, processKey, explicitTeamId) {
+  const { callerTeamId, activeTeamCount } = await resolveCallerTeam(session.email, processKey);
+  return {
+    teamId: teamScopeFor({
+      callerTeamId,
+      activeTeamCount,
+      explicitTeamId: explicitTeamId == null ? null : parseInt(explicitTeamId, 10),
+      isAdmin: session.isAdmin,
+    }),
+    callerTeamId,
+    activeTeamCount,
+  };
+}
+
 // GET  ?process=<key> -> everyone invited to that process, with their PER-PROCESS status and
 //                        quota (see getCallingProcessAgents). Membership comes from the
 //                        invitation rows, so this is also the answer to "who works this
-//                        process".
+//                        process". Team-scoped: a process admin sees only their own team's
+//                        roster (see scopeFor above); a full admin sees everyone, or one team
+//                        via ?teamId=.
 // POST                -> { processKey, email, status?, maxQuota? } for one agent. Fields are
-//                        independent: omitting maxQuota leaves an admin-set quota alone.
+//                        independent: omitting maxQuota leaves an admin-set quota alone. A
+//                        process admin may only touch an agent already on their own team's
+//                        scoped roster, and only a full admin may move anyone between teams.
 async function handleCallingAgents(req, res, session) {
   const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
   const known = CALLING_PROCESSES.processes.map((p) => p.key);
@@ -344,6 +379,32 @@ async function handleCallingAgents(req, res, session) {
       res.status(403).json({ error: 'Only a full admin can grant or revoke process-admin rights' });
       return;
     }
+    // Only a full admin may move an agent between teams. The same escalation shape as
+    // isProcessAdmin above: a process admin who could set team_id could pull the OTHER team's
+    // agents onto their own roster (drive-by reassignment), or push their own agents off their
+    // team to hide them from metrics/rosters - either way, a scoping bypass dressed up as a
+    // normal edit. Checked before the membership lookup below so a rejected request never
+    // reaches the DB write.
+    if (body.teamId !== undefined && !session.isAdmin) {
+      res.status(403).json({ error: 'Only a full admin can change an agent\'s team' });
+      return;
+    }
+    const { teamId } = await scopeFor(session, body.processKey, body.teamId);
+    // A process admin may only touch an agent that is actually on THEIR OWN scoped roster -
+    // checked by looking the target up within that roster, never by trusting body.email's
+    // membership implicitly. Without this, TL-A could POST an arbitrary status/quota/filter
+    // change for any email on TL-B's team; the isCallingProcessAdmin gate above is process-wide
+    // and both NDR leads hold it, so it does nothing to keep the two teams apart on its own.
+    // Skipped for a full admin, who is allowed to touch anyone (and whose teamId scope above is
+    // already `undefined` unless they explicitly chose one).
+    if (!session.isAdmin) {
+      const scoped = await getCallingProcessAgents(body.processKey, teamId);
+      const target = (body.email || '').trim().toLowerCase();
+      if (!scoped.some((a) => a.email.toLowerCase() === target)) {
+        res.status(403).json({ error: 'That agent is not on your team' });
+        return;
+      }
+    }
     try {
       const agents = await setCallingProcessAgent(
         body.processKey, body.email,
@@ -355,12 +416,18 @@ async function handleCallingAgents(req, res, session) {
           ndrReasonFilter: body.ndrReasonFilter,
           ndrPaymentModeFilter: body.ndrPaymentModeFilter,
           ndrBrandFilter: body.ndrBrandFilter,
+          teamId: body.teamId,
         },
         session.email,
       );
       await logEvent(session.uid, session.email, 'calling', 'process-agent',
         `${body.processKey}: ${body.email} status=${body.status ?? '-'} quota=${body.maxQuota ?? '-'}`, ip);
-      res.status(200).json({ statuses: CALLING_STATUSES, agents });
+      // setCallingProcessAgent itself returns the FULL, unfiltered roster (it has no idea who's
+      // asking) - forwarding that verbatim would mean a write that changed one agent answers
+      // with every agent on the process, including the other team's. Re-scope the response the
+      // same way the GET branch scopes its own read, using the SAME teamId this request was
+      // already authorized against above.
+      res.status(200).json({ statuses: CALLING_STATUSES, agents: await getCallingProcessAgents(body.processKey, teamId) });
     } catch (e) {
       res.status(400).json({ error: e.message || 'Could not update agent' });
     }
@@ -378,6 +445,18 @@ async function handleCallingAgents(req, res, session) {
       return;
     }
     const email = (body.email || '').trim().toLowerCase();
+    // Same cross-team membership guard as the POST branch above, and more important here: a
+    // revoke is the single most destructive thing this endpoint can do to another team's agent
+    // (it removes their access to the whole process, not just one field). A non-admin process
+    // admin may only revoke someone already on their own scoped roster.
+    if (!session.isAdmin) {
+      const { teamId } = await scopeFor(session, body.processKey, undefined);
+      const scoped = await getCallingProcessAgents(body.processKey, teamId);
+      if (!scoped.some((a) => a.email.toLowerCase() === email)) {
+        res.status(403).json({ error: 'That agent is not on your team' });
+        return;
+      }
+    }
     const user = email && await getUserByEmail(email);
     if (!user) {
       res.status(404).json({ error: `No user found for ${body.email || '(blank email)'}` });
@@ -407,9 +486,13 @@ async function handleCallingAgents(req, res, session) {
     // Online/quota row surviving a revoke is harmless on its own (membership no longer comes
     // from this table), but a stale is_process_admin=true would silently hand back
     // process-admin rights the moment anyone re-invites this person - a real privilege
-    // surviving what looks like a full revoke.
+    // surviving what looks like a full revoke. team_id gets the same treatment for the same
+    // reason: teamId: null is the three-state contract's explicit UNASSIGN (undefined would
+    // leave it untouched - see setCallingProcessAgent's own note). Without it a revoked agent
+    // keeps their team_id and silently rejoins that team's roster and metrics the moment
+    // anyone re-invites them, even though the access grant itself was fully revoked.
     try {
-      await setCallingProcessAgent(body.processKey, email, { status: 'Offline', isProcessAdmin: false }, session.email);
+      await setCallingProcessAgent(body.processKey, email, { status: 'Offline', isProcessAdmin: false, teamId: null }, session.email);
     } catch (e) { /* best-effort - the access revocation above is what actually matters */ }
     await logEvent(session.uid, session.email, 'calling', 'process-revoke', `${body.processKey}: revoked for ${email}`, ip);
     res.status(200).json({ ok: true });
@@ -421,11 +504,28 @@ async function handleCallingAgents(req, res, session) {
     res.status(400).json({ error: `process must be one of: ${known.join(', ')}` });
     return;
   }
-  if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, processKey))) {
+  // Captured once and reused for the isProcessAdmin field below rather than called twice - same
+  // email/processKey, same answer, and it's a real DB round trip (see isCallingProcessAdmin).
+  const isProcessAdmin = session.isAdmin || await isCallingProcessAdmin(session.email, processKey);
+  if (!isProcessAdmin) {
     res.status(403).json({ error: 'You do not administer that process' });
     return;
   }
-  res.status(200).json({ statuses: CALLING_STATUSES, agents: await getCallingProcessAgents(processKey) });
+  const { teamId, callerTeamId } = await scopeFor(session, processKey, req.query && req.query.teamId);
+  res.status(200).json({
+    statuses: CALLING_STATUSES,
+    agents: await getCallingProcessAgents(processKey, teamId),
+    // Returned as their own fields rather than left for the client to infer. The frontend
+    // currently learns isProcessAdmin by finding itself inside the roster array - which breaks
+    // the moment the roster is team-filtered and the caller is unassigned (activeTeamCount >= 2,
+    // callerTeamId null): teamScopeFor fails that caller closed, the roster comes back empty,
+    // and a real process admin/TL would silently lose their whole Admin Panel with no error.
+    // Sending isProcessAdmin/teamId/teams explicitly is what lets the client stop inferring.
+    // Both fields are additive - an older client that doesn't read them behaves exactly as before.
+    teamId: callerTeamId,
+    isProcessAdmin,
+    teams: await listCallingTeams(processKey),
+  });
 }
 
 // GET    ?process=<key> -> that process's own disposition list (empty until an admin adds
