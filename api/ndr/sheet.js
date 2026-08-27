@@ -32,6 +32,21 @@ function checkAccess(session) {
   return null;
 }
 
+// Pre-split fallback: the incumbent NDR sheet this whole file used to hardcode, kept alive for
+// exactly one case - zero active `calling_teams` rows exist yet for this process. That is the
+// state the instant this code deploys, before an admin has created the first team row, and it
+// must not 403 every NDR agent (including full admins) in that window. Mirrors the softening
+// teamScopeFor already documents in api/_lib/callingTeams.js: "exactly like today until a second
+// team is deliberately created". The moment ANY active team row exists this constant is
+// unreachable - resolveSheetFor always resolves a real team row instead - and it is never taken
+// from the client: the request's `sid` is still never read anywhere in this file.
+const PRE_SPLIT_SHEET_ID = '12p3rlXyE0PDx3BMqBpl3CUo5YD3uVzQun1HFPizpSeI';
+const PRE_SPLIT_SHEET_TAB = 'Latest NDR '; // trailing space significant - matches the live tab name
+const PRE_SPLIT_TEAM = {
+  id: null, processKey: TAB_KEY, name: 'Pre-split (legacy)',
+  sheetId: PRE_SPLIT_SHEET_ID, sheetTab: PRE_SPLIT_SHEET_TAB, active: true,
+};
+
 // The sheet this caller is entitled to, resolved from their own team row. The client's `sid` is
 // IGNORED rather than validated, for two reasons. Security: this file's original comment
 // explains the check existed so a permitted-but-malicious request could not repurpose the
@@ -42,15 +57,23 @@ function checkAccess(session) {
 async function resolveSheetFor(session) {
   const { callerTeamId, activeTeamCount } = await resolveCallerTeam(session.email, TAB_KEY);
   if (callerTeamId != null) {
+    // A caller with an explicit team assignment is a TERMINAL case - it must never fall through
+    // to the no-team handling below. Falling through was the bug: deactivating Team A while
+    // Team B was the only other active team silently redirected every Team A agent onto Team B's
+    // live sheet, for reads AND Editor-scoped batchUpdate writes. A row that's missing or paused
+    // gets refused, not quietly reassigned to someone else's desk.
     const team = await getCallingTeam(callerTeamId);
-    if (team && team.active) return team;
+    return team && team.active ? team : null;
   }
-  // No team row: either the desk has not been split yet, or the caller is a full admin (who
-  // holds no calling_agent_process row by convention). With one team there is no ambiguity;
-  // with two or more there is, and guessing would serve the wrong team's leads.
-  const teams = await listCallingTeams(TAB_KEY);
-  if (teams.length === 1) return teams[0];
-  if (activeTeamCount >= 2) return null;
+  // No team row at all: either the desk hasn't been split yet, or the caller is a full admin
+  // (who holds no calling_agent_process row by convention).
+  if (activeTeamCount === 0) return PRE_SPLIT_TEAM;
+  if (activeTeamCount === 1) {
+    const teams = await listCallingTeams(TAB_KEY);
+    return teams.length === 1 ? teams[0] : null;
+  }
+  // Two or more active teams exist and this caller belongs to none - genuinely ambiguous;
+  // guessing would serve the wrong team's leads, so refuse instead.
   return null;
 }
 
