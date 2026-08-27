@@ -23,7 +23,7 @@ import { categorizeRtoReason, RTO_REASON_CATEGORIES } from '../../api/_lib/rtoRe
 // from the FRT column's per-lead assigned -> disposed handle time. Shared, tested module for
 // the same reason leadQuota is: see api/_lib/disposalGaps.js.
 import { disposalGaps } from '../../api/_lib/disposalGaps';
-import { safeStorage as localStorage, startOfDay, isDateInScope, scopeToDateBounds, normalizeOrderKey, isLeadDateInScope, istMinutesSinceMidnightClient, istDayKeyClient, formatTimeOfDay, formatBreakMinutes, formatFrt, formatPct, postJsonWithRetry } from '../_calling/util';
+import { safeStorage as localStorage, startOfDay, isDateInScope, scopeToDateBounds, normalizeOrderKey, isLeadDateInScope, formatLeadDate, istMinutesSinceMidnightClient, istDayKeyClient, formatTimeOfDay, formatBreakMinutes, formatFrt, formatPct, postJsonWithRetry } from '../_calling/util';
 import { useCallingSession, STATUS_OPTIONS, ROSTER_STATUS_OPTIONS, ROLE_OPTIONS } from '../_calling/useCallingSession';
 import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
@@ -3919,7 +3919,7 @@ import CallTrendChart from './CallTrendChart';
                           <th className="py-3 px-4 text-left font-medium">Order</th>
                           <th className="py-3 px-4 text-left font-medium">Customer</th>
                           <th className="py-3 px-4 text-left font-medium">Agent Name & Email (Col Q)</th>
-                          <th className="py-3 px-4 text-left font-medium">Calling Date</th>
+                          <th className="py-3 px-4 text-left font-medium">Assigned Date</th>
                           <th className="py-3 px-4 text-left font-medium">RTO Reason & Remarks</th>
                           <th className="py-3 px-4 text-left font-medium">Payment</th>
                           <th className="py-3 px-4 text-right font-medium">Amount</th>
@@ -3965,7 +3965,9 @@ import CallTrendChart from './CallTrendChart';
                                   )}
                                 </td>
 
-                                <td className="py-3 px-4 text-zinc-200 font-semibold font-mono tabular-nums">{t.callingDate}</td>
+                                {/* assigned_at from CLS_RTO_calling's live cycle (leadDates), NOT the sheet's
+                                    Calling Date - when the lead was handed to this agent, not when they called. */}
+                                <td className="py-3 px-4 text-zinc-200 font-semibold font-mono tabular-nums">{formatLeadDate(leadDates[normalizeOrderKey(t.orderNumber)]?.assignedAt)}</td>
 
                                 {/* RTO Reason & Remarks Preview */}
                                 <td className="py-3 px-4 max-w-[220px]">
@@ -4022,7 +4024,7 @@ import CallTrendChart from './CallTrendChart';
                               </div>
                             </div>
 
-                            {/* Agent (Col Q) + Calling Date */}
+                            {/* Agent (Col Q) + Assigned Date */}
                             <div className="flex items-center justify-between gap-3 text-[12px]">
                               {isUnassigned ? (
                                 <button
@@ -4038,7 +4040,7 @@ import CallTrendChart from './CallTrendChart';
                                   {emailDisp && <span className="text-[11px] text-indigo-400 font-mono mt-0.5 truncate">✉️ {emailDisp}</span>}
                                 </div>
                               )}
-                              <span className="text-zinc-400 font-mono shrink-0">{t.callingDate}</span>
+                              <span className="text-zinc-400 font-mono shrink-0">{formatLeadDate(leadDates[normalizeOrderKey(t.orderNumber)]?.assignedAt)}</span>
                             </div>
 
                             {/* RTO Reason & Remarks */}

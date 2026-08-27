@@ -131,6 +131,18 @@ export function isLeadDateInScope(dateIso, scope, customFrom, customTo) {
   return isDateInScope(new Date(dateIso), scope, customFrom, customTo);
 }
 
+// A lead's real assigned_at/disposed_at rendered for a table cell: "26 Aug", in IST. India has
+// no DST, so Asia/Kolkata is exactly the fixed +5:30 the rest of this app assumes. Falls back to
+// the same em dash every other blank cell in these tables uses - a lead assigned before this
+// tracking existed, or worked straight in the sheet, genuinely has no timestamp to show, and an
+// unparseable value is treated the same way rather than rendering "Invalid Date".
+export function formatLeadDate(dateIso) {
+  if (!dateIso) return '—';
+  const d = new Date(dateIso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', timeZone: 'Asia/Kolkata' });
+}
+
 // Same fixed UTC+5:30 offset convention used throughout this app (assign_leads.py's
 // within_business_hours, api/_lib/db.js's istMinutesSinceMidnight/istDayKey) - client-side
 // equivalents, since some time-of-day figures are computed in the browser rather than by the
