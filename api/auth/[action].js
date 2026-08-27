@@ -137,6 +137,9 @@ async function handleCallback(req, res) {
         redirect_uri: redirectUri,
         grant_type: 'authorization_code',
       }),
+      // Bounded so a hung Google call fails fast with a readable error instead of riding the
+      // Lambda's own 20s timeout to a generic, un-debuggable 500 from API Gateway.
+      signal: AbortSignal.timeout(8000),
     });
     if (!tokenResp.ok) {
       const errBody = await tokenResp.text();
@@ -151,7 +154,9 @@ async function handleCallback(req, res) {
     }
     const tokenData = await tokenResp.json();
 
-    const infoResp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(tokenData.id_token)}`);
+    const infoResp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(tokenData.id_token)}`, {
+      signal: AbortSignal.timeout(8000),
+    });
     if (!infoResp.ok) {
       res.status(502).send('Google token verification failed.');
       return;
