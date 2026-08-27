@@ -34,13 +34,46 @@ function getClient() {
   return _client;
 }
 
-async function sheetsRequest(client, method, path, body) {
-  const res = await client.request({
-    url: `https://sheets.googleapis.com/v4/spreadsheets/${RTO_SHEET_ID}${path}`,
-    method,
-    data: body,
-  });
-  return res.data;
+// Retries on 429 with backoff. Every Sheets call in this app authenticates as the SAME service
+// account, so Google's "Read requests per minute per user" limit (60) is shared app-wide - see
+// the 2026-08-20 incident notes in api/rto/next-lead.js. Without this, a single 429 anywhere in
+// a chunked upload (RtoUploadModal.js splits a large CSV into many sequential /upload-start
+// calls, each costing 2 reads here plus 3 more in the worker) aborted the whole remaining file
+// with the raw Google quota string. The quota window is per minute, so a few seconds of waiting
+// clears it; scripts/lib.py's get_sheet_values has retried the same way on the Python side since
+// that incident, and this endpoint was the one path left without it.
+// 3 attempts x a 3s-scaled backoff = at most 9s spent waiting (3s + 6s), deliberately bounded:
+// this endpoint sits behind API Gateway, whose integration timeout (29s) would otherwise fire
+// mid-backoff and replace the real quota message with an opaque gateway error - the same class of
+// failure api/_lambda/app.js already documents for oversized reads. A quota window is a full
+// minute, so this does NOT ride out a sustained outage; it rides out the self-inflicted burst of
+// one chunked upload's own reads, which is what actually broke.
+const SHEETS_MAX_ATTEMPTS = 3;
+const SHEETS_RETRY_BASE_MS = 3000;
+
+function isRateLimited(e) {
+  // google-auth-library wraps gaxios: the status lands on the error itself in newer versions and
+  // on .response.status in older ones. Check both rather than pinning to one shape.
+  return !!e && (e.status === 429 || (e.response && e.response.status) === 429);
+}
+
+// baseDelayMs is a parameter purely so upload-start.test.js can exercise the retry loop without
+// sitting through the real 3s/6s waits - every caller here uses the default.
+async function sheetsRequest(client, method, path, body, baseDelayMs = SHEETS_RETRY_BASE_MS) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const res = await client.request({
+        url: `https://sheets.googleapis.com/v4/spreadsheets/${RTO_SHEET_ID}${path}`,
+        method,
+        data: body,
+      });
+      return res.data;
+    } catch (e) {
+      if (!isRateLimited(e) || attempt >= SHEETS_MAX_ATTEMPTS) throw e;
+      console.warn(`api/rto/upload-start: Sheets 429 on ${method} ${path}, attempt ${attempt}/${SHEETS_MAX_ATTEMPTS} - backing off`);
+      await new Promise((r) => setTimeout(r, baseDelayMs * attempt));
+    }
+  }
 }
 
 async function checkAccess(session) {
@@ -212,3 +245,9 @@ module.exports = async (req, res) => {
     res.status(500).json({ error: e.message || 'Could not process this upload' });
   }
 };
+
+// Attached to the handler export the same way api/rto/next-lead.js attaches its pure helpers, so
+// upload-start.test.js exercises the SAME retry code the request path runs.
+module.exports.sheetsRequest = sheetsRequest;
+module.exports.isRateLimited = isRateLimited;
+module.exports.SHEETS_MAX_ATTEMPTS = SHEETS_MAX_ATTEMPTS;
