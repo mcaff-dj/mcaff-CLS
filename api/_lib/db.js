@@ -983,13 +983,13 @@ async function recordLeadDisposition(orderId, email, awbCode, details) {
 // losing that race just means the other claim won. Any OTHER unique key (live_awb_code_key -
 // two leads sharing one live AWB, a genuine data error) is left to raise, exactly as the cron
 // leaves it.
-async function claimRtoLead(orderId, email, awbCode, rtoReason, paymentMode) {
+async function claimRtoLead(orderId, email, awbCode, rtoReason, paymentMode, addressCity, addressState, addressPincode) {
   await ensureSchema();
   const deliveryPartner = resolvePartnerFromAwb(awbCode);
   try {
     await sql`
-      INSERT INTO CLS_RTO_calling (order_id, agent_email, assigned_at, awb_code, rto_reason, payment_mode, delivery_partner)
-      VALUES (${orderId}, ${email}, ${new Date()}, ${awbCode || null}, ${rtoReason || null}, ${paymentMode || null}, ${deliveryPartner})
+      INSERT INTO CLS_RTO_calling (order_id, agent_email, assigned_at, awb_code, rto_reason, payment_mode, delivery_partner, address_city, address_state, address_pincode)
+      VALUES (${orderId}, ${email}, ${new Date()}, ${awbCode || null}, ${rtoReason || null}, ${paymentMode || null}, ${deliveryPartner}, ${addressCity || null}, ${addressState || null}, ${addressPincode || null})
     `;
   } catch (e) {
     if (!/live_order_id_key/.test((e && e.message) || '')) throw e;

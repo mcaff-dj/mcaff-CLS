@@ -92,7 +92,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 import lib
 import mysql_lib
 from lead_priority import (
-    COL_AGENT, COL_ATTEMPT, COL_AWB_CODE, COL_CALLING_DATE, COL_CONNECTED, COL_DISPOSITION,
+    COL_AGENT, COL_ATTEMPT, COL_AWB_CODE, COL_ADDRESS_CITY, COL_ADDRESS_STATE, COL_ADDRESS_PINCODE,
+    COL_CALLING_DATE, COL_CONNECTED, COL_DISPOSITION,
     COL_ORDER_ID, COL_PAYMENT_METHOD, COL_REMARKS, COL_REMARKS_LEGACY_U,
     COL_RTO_INITIATED_DATE, COL_RTO_REASON,
     DEFAULT_QUOTA, REASSIGN_BACKLOG_CUTOFF, REASSIGN_MIN_HOLD_HOURS, REASSIGN_RETRY_CAP,
@@ -721,7 +722,8 @@ def fetch_online_agents(process_key=None):
 
 
 def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
-                            payment_mode_by_row, reassign_info_by_row):
+                            payment_mode_by_row, reassign_info_by_row,
+                            address_city_by_row, address_state_by_row, address_pincode_by_row):
     """Stamps assigned_at=<now, UTC> for every lead just assigned, keyed by the sheet's own
     Order ID, so rto-crm.html's resetStalePendingLeads() can tell a fresh assignment apart
     from a genuinely stale one (the lead's own Calling Date can't do this - the backlog this
@@ -761,9 +763,12 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
 
     Also stamps awb_code, rto_reason (the sheet's own Column D - see
     lead_priority.COL_RTO_REASON), payment_mode (normalized via lead_priority.is_prepaid
-    from Column O - see add_payment_mode_column.py), and delivery_partner (derived from
+    from Column O - see add_payment_mode_column.py), delivery_partner (derived from
     awb_code via lead_priority.prefix_rule_partner - the same rule api/_lib/db.js's JS
-    mirror uses for leads recorded via the disposal path instead)."""
+    mirror uses for leads recorded via the disposal path instead), and address_city/
+    address_state/address_pincode straight off the sheet's own L/M/N columns (see
+    add_address_columns_to_cls_rto_calling.py) - captured at assignment time, not disposal,
+    since that is when this row is first created."""
     if not assignments:
         return
     cred = mysql_lib.get_credential()
@@ -777,6 +782,9 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
             rto_reason_by_row.get(row_index) or None,
             payment_mode_by_row.get(row_index) or None,
             prefix_rule_partner(awb_code_by_row.get(row_index)) or None,
+            address_city_by_row.get(row_index) or None,
+            address_state_by_row.get(row_index) or None,
+            address_pincode_by_row.get(row_index) or None,
         )
         for row_index, email in assignments.items() if row_index in order_id_by_row
     ]
@@ -802,14 +810,16 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
                 "UPDATE CLS_RTO_calling SET reassigned_away_at = %s WHERE order_id = %s AND reassigned_away_at IS NULL",
                 [(now, order_id) for (order_id,) in retiring],
             )
-        for order_id, email, awb_code, rto_reason, payment_mode, delivery_partner in rows:
+        for (order_id, email, awb_code, rto_reason, payment_mode, delivery_partner,
+             address_city, address_state, address_pincode) in rows:
             try:
                 cur.execute(
                     """
-                    INSERT INTO CLS_RTO_calling (order_id, agent_email, assigned_at, awb_code, rto_reason, payment_mode, delivery_partner)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO CLS_RTO_calling (order_id, agent_email, assigned_at, awb_code, rto_reason, payment_mode, delivery_partner, address_city, address_state, address_pincode)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
-                    (order_id, email, now, awb_code, rto_reason, payment_mode, delivery_partner),
+                    (order_id, email, now, awb_code, rto_reason, payment_mode, delivery_partner,
+                     address_city, address_state, address_pincode),
                 )
             except pymysql.err.IntegrityError as e:
                 if "live_order_id_key" not in str(e):
@@ -821,10 +831,14 @@ def record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rt
                         awb_code = COALESCE(%s, awb_code),
                         rto_reason = COALESCE(%s, rto_reason),
                         payment_mode = COALESCE(%s, payment_mode),
-                        delivery_partner = COALESCE(%s, delivery_partner)
+                        delivery_partner = COALESCE(%s, delivery_partner),
+                        address_city = COALESCE(%s, address_city),
+                        address_state = COALESCE(%s, address_state),
+                        address_pincode = COALESCE(%s, address_pincode)
                     WHERE order_id = %s AND reassigned_away_at IS NULL
                     """,
-                    (email, now, awb_code, rto_reason, payment_mode, delivery_partner, order_id),
+                    (email, now, awb_code, rto_reason, payment_mode, delivery_partner,
+                     address_city, address_state, address_pincode, order_id),
                 )
         conn.commit()
     except Exception:
@@ -959,6 +973,9 @@ def _main():
     awb_code_by_row = {}
     rto_reason_by_row = {}
     payment_mode_by_row = {}
+    address_city_by_row = {}
+    address_state_by_row = {}
+    address_pincode_by_row = {}
     already_refunded_rows = []  # row indices confirmed refunded via GoKwik this run
     already_punched_rows = []  # row indices confirmed already re-punched (LMD, D2C) this run
     excluded_by_row = {}  # row_index -> {emails} who must not receive this lead (see below)
@@ -1041,6 +1058,9 @@ def _main():
                 awb_code_by_row[i] = cell(row, COL_AWB_CODE)
                 rto_reason_by_row[i] = cell(row, COL_RTO_REASON)
                 payment_mode_by_row[i] = "Prepaid" if is_prepaid(payment_method) else "COD"
+                address_city_by_row[i] = cell(row, COL_ADDRESS_CITY)
+                address_state_by_row[i] = cell(row, COL_ADDRESS_STATE)
+                address_pincode_by_row[i] = cell(row, COL_ADDRESS_PINCODE)
                 excluded_by_row[i] = prior_agents
                 reassign_info_by_row[i] = (agent_raw, order_id)
                 continue
@@ -1085,6 +1105,9 @@ def _main():
             awb_code_by_row[i] = cell(row, COL_AWB_CODE)
             rto_reason_by_row[i] = cell(row, COL_RTO_REASON)
             payment_mode_by_row[i] = "Prepaid" if is_prepaid(payment_method) else "COD"
+            address_city_by_row[i] = cell(row, COL_ADDRESS_CITY)
+            address_state_by_row[i] = cell(row, COL_ADDRESS_STATE)
+            address_pincode_by_row[i] = cell(row, COL_ADDRESS_PINCODE)
         elif agent_raw in current_load:
             current_load[agent_raw] += 1
         # else: pending lead already held by someone (eligible or not) - left alone either
@@ -1105,6 +1128,9 @@ def _main():
                 awb_code_by_row.pop(i, None)
                 rto_reason_by_row.pop(i, None)
                 payment_mode_by_row.pop(i, None)
+                address_city_by_row.pop(i, None)
+                address_state_by_row.pop(i, None)
+                address_pincode_by_row.pop(i, None)
                 excluded_by_row.pop(i, None)
                 reassign_info_by_row.pop(i, None)
                 refund_check_by_row.pop(i, None)
@@ -1122,6 +1148,9 @@ def _main():
                 awb_code_by_row.pop(i, None)
                 rto_reason_by_row.pop(i, None)
                 payment_mode_by_row.pop(i, None)
+                address_city_by_row.pop(i, None)
+                address_state_by_row.pop(i, None)
+                address_pincode_by_row.pop(i, None)
                 excluded_by_row.pop(i, None)
                 reassign_info_by_row.pop(i, None)
 
@@ -1198,7 +1227,8 @@ def _main():
         # reassignment (retire the old agent's cycle, record the new one) happen inside this one
         # call, in one transaction - see its docstring for why they can't be separated.
         record_lead_assignments(assignments, unassigned_pending, awb_code_by_row, rto_reason_by_row,
-                                payment_mode_by_row, reassign_info_by_row)
+                                payment_mode_by_row, reassign_info_by_row,
+                                address_city_by_row, address_state_by_row, address_pincode_by_row)
 
         per_agent = {}
         for email in assignments.values():

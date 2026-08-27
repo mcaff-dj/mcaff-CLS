@@ -142,6 +142,9 @@ const COL = {
   RTO_REASON: 'D',
   ORDER_ID: 'E',
   AWB_CODE: 'G',
+  ADDRESS_CITY: 'L',
+  ADDRESS_STATE: 'M',
+  ADDRESS_PINCODE: 'N',
   PAYMENT_METHOD: 'O',
   AGENT: 'Q',
 };
@@ -206,6 +209,9 @@ function buildCandidateList(orderRows, workRows) {
       orderId,
       awbCode: w.awbCode || '',
       rtoReason: w.rtoReason || '',
+      addressCity: w.addressCity || '',
+      addressState: w.addressState || '',
+      addressPincode: w.addressPincode || '',
       tier: priorityTier(w.paymentMethod, w.rtoReason),
       date: parseRtoInitiatedDate(w.rtoInitiatedDate),
     });
@@ -323,21 +329,24 @@ async function handler(req, res) {
       `${SHEET_TAB}!${COL.RTO_INITIATED_DATE}2:${COL.RTO_INITIATED_DATE}`,
       `${SHEET_TAB}!${COL.RTO_REASON}2:${COL.RTO_REASON}`,
       `${SHEET_TAB}!${COL.AWB_CODE}2:${COL.AWB_CODE}`,
+      `${SHEET_TAB}!${COL.ADDRESS_CITY}2:${COL.ADDRESS_PINCODE}`,
       `${SHEET_TAB}!${COL.PAYMENT_METHOD}2:${COL.PAYMENT_METHOD}`,
       `${SHEET_TAB}!Q2:Z`,
     ];
     const qs = ranges.map((r) => `ranges=${encodeURIComponent(r)}`).join('&');
     const data = await sheetsRequest(client, 'GET', `/values:batchGet?${qs}`);
-    const [orderVR, dateVR, reasonVR, awbVR, paymentVR, workVR] = data.valueRanges || [];
+    const [orderVR, dateVR, reasonVR, awbVR, addressVR, paymentVR, workVR] = data.valueRanges || [];
     const orderRows = orderVR?.values || [];
     const dateRows = dateVR?.values || [];
     const reasonRows = reasonVR?.values || [];
     const awbRows = awbVR?.values || [];
+    const addressRows = addressVR?.values || []; // L:N in one read - City, State, Pincode
     const paymentRows = paymentVR?.values || [];
     const workRowsRaw = workVR?.values || [];
 
     const workRows = orderRows.map((_r, i) => {
       const w = workRowsRaw[i] || [];
+      const addr = addressRows[i] || [];
       return {
         agent: w[WORK_OFFSET.AGENT] || '',
         connected: w[WORK_OFFSET.CONNECTED] || '',
@@ -348,6 +357,9 @@ async function handler(req, res) {
         rtoInitiatedDate: (dateRows[i] && dateRows[i][0]) || '',
         rtoReason: (reasonRows[i] && reasonRows[i][0]) || '',
         awbCode: (awbRows[i] && awbRows[i][0]) || '',
+        addressCity: addr[0] || '',
+        addressState: addr[1] || '',
+        addressPincode: addr[2] || '',
         paymentMethod: (paymentRows[i] && paymentRows[i][0]) || '',
       };
     });
@@ -450,7 +462,9 @@ async function handler(req, res) {
         // CLS_RTO_calling inserts are Postgres/MySQL, not Sheets API - they don't count against
         // the quota this rewrite exists for, so they run off to the side, in parallel, rather
         // than serialized into the Sheets round-trip loop above.
-        await Promise.all(free.map((c) => claimRtoLead(c.orderId, email, c.awbCode, c.rtoReason).catch((e) => {
+        await Promise.all(free.map((c) => claimRtoLead(
+          c.orderId, email, c.awbCode, c.rtoReason, undefined, c.addressCity, c.addressState, c.addressPincode,
+        ).catch((e) => {
           // The sheet write already succeeded - the agent holds the lead. Losing the history
           // row is a reporting gap, not a failed assignment, so this must not stop the fill.
           console.error(`api/rto/next-lead: Column Q written for ${c.orderId} but CLS_RTO_calling insert failed:`, e.message);

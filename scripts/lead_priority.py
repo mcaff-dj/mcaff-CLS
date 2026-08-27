@@ -30,6 +30,9 @@ COL_RTO_REASON = 3        # D - the ORIGINAL system/courier RTO reason (not the 
                           # disposition in COL_DISPOSITION below)
 COL_ORDER_ID = 4          # E
 COL_AWB_CODE = 6          # G
+COL_ADDRESS_CITY = 11     # L
+COL_ADDRESS_STATE = 12    # M
+COL_ADDRESS_PINCODE = 13  # N
 COL_PAYMENT_METHOD = 14   # O
 COL_AGENT = 16            # Q
 COL_CONNECTED = 17        # R

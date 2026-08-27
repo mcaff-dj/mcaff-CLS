@@ -804,6 +804,9 @@ import CallTrendChart from './CallTrendChart';
               awbCode: tkt.awbCode,
               rtoReason: tkt.rtoReason,
               paymentMode: tkt.paymentMethod,
+              addressCity: tkt.city,
+              addressState: tkt.state,
+              addressPincode: tkt.pincode,
             }),
           });
           const body = await res.json().catch(() => ({}));
