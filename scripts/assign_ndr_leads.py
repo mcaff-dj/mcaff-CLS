@@ -19,6 +19,26 @@ A lead is "unassigned" iff Agent Name is blank - once a row leaves that state, t
 never touches it again, the same "never take back what's already handed out" contract RTO's
 own assign_leads.py uses. current_load is read straight off the sheet (a count of rows
 already carrying that agent's email in Agent Name) rather than a separate Postgres tally.
+
+PER-TEAM ISOLATION (see docs/superpowers/specs/2026-08-26-ndr-per-team-isolation-design.md):
+NDR can run as one shared desk (0 or 1 active calling_teams row - the state today) or as
+several isolated teams (2+ active rows), each with its own agent pool and its own Google
+Sheet. This module handles both without a separate code path for each: fetch_active_ndr_teams
+decides the shape of the run, main() builds one "run" per active team (or one synthetic
+pre-split run when there are none), and assign_for_run does the actual work against whichever
+sheet/agent-pool that run was given. Below 2 active teams, isolation is deliberately OFF - an
+agent's team_id is ignored entirely and every online agent is eligible, matching the same
+"behaves exactly like before this feature until a second team is deliberately created"
+softening the JS side (api/_lib/callingTeams.js's teamScopeFor) already uses. This is what
+lets the DB migration, this script's deploy, and an admin creating the first team all land in
+any order without a moment where the desk stops assigning.
+
+One roster snapshot (fetch_online_ndr_agents) is read ONCE per run of this script, not once
+per team: mysql_lib's shared connection never commits after a SELECT (autocommit is off and
+query() only reads), so a second query() call inside the same run would still see the exact
+same MVCC snapshot as the first - paying a fresh round trip for stale data. Reading once and
+filtering per team in Python (see main()) sidesteps that entirely instead of trying to force a
+fresh snapshot per team.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -126,27 +146,35 @@ def parse_latest_ndr_date(raw):
 
 def fetch_online_ndr_agents():
     """([email, ...] eligible now, {email: max_quota}, {email: [bucket, ...]}, {email: [reason,
-    ...]}, {email: 'Prepaid'|'COD'}, {email: 'Hyphen'|'mCaffeine'}). Eligibility is the same
-    intersection RTO's own fetch_online_agents uses: heartbeat-fresh in agent_presence AND
-    marked Online for this process_key in calling_agent_process. A process with no
-    per-process rows set yet falls back to global presence, matching the pre-per-process
-    behaviour. attempt_filters is {email: [bucket, ...]} from attempt_count_filter,
-    reason_filters is {email: [reason substring, ...]} (already lowercased) from
-    ndr_reason_filter, payment_mode_filters/brand_filters are {email: value} from
+    ...]}, {email: 'Prepaid'|'COD'}, {email: 'Hyphen'|'mCaffeine'}, {email: team_id or None}).
+    Eligibility is the same intersection RTO's own fetch_online_agents uses: heartbeat-fresh in
+    agent_presence AND marked Online for this process_key in calling_agent_process.
+    attempt_filters is {email: [bucket, ...]} from attempt_count_filter, reason_filters is
+    {email: [reason substring, ...]} (already lowercased) from ndr_reason_filter,
+    payment_mode_filters/brand_filters are {email: value} from
     ndr_payment_mode_filter/ndr_brand_filter - an agent absent from any of these (or with an
     empty value) is unrestricted, same "absent means no restriction" contract as RTO's
-    reassign_payment_mode.
+    reassign_payment_mode. team_ids maps every agent who has a calling_agent_process row for
+    this process to their team_id (None = not yet assigned to a team) - see main() for how
+    that's used to split the eligible list per team.
 
-    Both halves now live in the same MySQL PEP_CLS schema (calling_agent_process moved off
-    Postgres alongside calling_business_hours - see
-    migrate_calling_business_hours_and_agent_process_to_mysql.py) but still fail open
-    INDEPENDENTLY, since agent_presence is the true fail-safe (no idea who's online without
-    it) while a calling_agent_process-specific failure is a smaller blast radius (agents still
-    get leads via global presence, just with no per-process quotas/filters applied)."""
+    FAILS CLOSED on any problem reaching calling_agent_process - a dropped connection, a lock
+    timeout, or genuinely zero rows for this process all return the same empty result, never a
+    fallback to "every agent online for any reason, company-wide". That fallback used to exist
+    here (matching what assign_leads.py's own comment calls "the pre-per-process behaviour",
+    from before NDR tracked its own presence at all) but it was never sound on its own merits -
+    it ignores this process's quotas and filters - and once a team's roster comes ONLY from
+    this same table, falling back to "everyone online" would also erase every team boundary the
+    moment this one query hiccups. An empty return here just means this run assigns nothing,
+    which is safe and already how a real "nobody online" state is reported.
+
+    Only agent_presence's own failure paths are exempt from that reasoning: it is the one true
+    fail-safe (no idea who's at their desk without it), and it was already failing to empty,
+    not to some broader fallback - unchanged here."""
     cred = mysql_lib.get_credential()
     if cred is None:
         print("MYSQL_* credentials not configured - cannot determine online agents.")
-        return [], {}, {}, {}, {}, {}
+        return [], {}, {}, {}, {}, {}, {}
     # Naive-but-UTC, matching every other DATETIME this app stores in MySQL (see
     # CLS_RTO_calling.assigned_at and db.js's own `new Date()` writes) - never SQL NOW(),
     # whose session time_zone this app does not control.
@@ -159,48 +187,77 @@ def fetch_online_ndr_agents():
         )
     except Exception as e:
         print(f"  (agent_presence lookup failed: {e} - treating as no agents online)")
-        return [], {}, {}, {}, {}, {}
+        return [], {}, {}, {}, {}, {}, {}
     present = {row[0].lower() for row in (rows or [])}
 
     try:
         per_process = mysql_lib.query(
             "SELECT email, status, max_quota, attempt_count_filter, ndr_reason_filter, "
-            "ndr_payment_mode_filter, ndr_brand_filter "
+            "ndr_payment_mode_filter, ndr_brand_filter, team_id "
             "FROM calling_agent_process WHERE process_key = %s",
             (PROCESS_KEY,),
             database=PRESENCE_SCHEMA,
         )
     except Exception as e:
-        print(f"  (calling_agent_process unavailable: {e} - using global presence)")
-        return sorted(present), {}, {}, {}, {}, {}
+        print(f"  (calling_agent_process unavailable: {e} - assigning nothing this run)")
+        return [], {}, {}, {}, {}, {}, {}
 
     if not per_process:
-        print(f"  no per-process availability set for '{PROCESS_KEY}' - using global presence")
-        return sorted(present), {}, {}, {}, {}, {}
+        # Normal, not an error, for a brand-new team with no agents assigned yet - and equally
+        # normal for the legacy desk before anyone has ever toggled Online for NDR specifically.
+        print(f"  no per-process availability set for '{PROCESS_KEY}' - nothing to assign")
+        return [], {}, {}, {}, {}, {}, {}
 
-    online_for_process = {e.lower() for e, status, _, _, _, _, _ in per_process if status == "Online"}
-    quotas = {e.lower(): q for e, _, q, _, _, _, _ in per_process if q is not None}
+    online_for_process = {e.lower() for e, status, _, _, _, _, _, _ in per_process if status == "Online"}
+    quotas = {e.lower(): q for e, _, q, _, _, _, _, _ in per_process if q is not None}
     attempt_filters = {}
     reason_filters = {}
     payment_mode_filters = {}
     brand_filters = {}
-    for e, _, _, filt, reason_filt, payment_mode_filt, brand_filt in per_process:
+    team_ids = {}
+    for e, _, _, filt, reason_filt, payment_mode_filt, brand_filt, team_id in per_process:
+        key = e.lower()
         buckets = [b.strip() for b in (filt or "").split(",") if b.strip()]
         if buckets:
-            attempt_filters[e.lower()] = buckets
+            attempt_filters[key] = buckets
         reasons = [r.strip().lower() for r in (reason_filt or "").split(",") if r.strip()]
         if reasons:
-            reason_filters[e.lower()] = reasons
+            reason_filters[key] = reasons
         if payment_mode_filt:
-            payment_mode_filters[e.lower()] = payment_mode_filt.strip()
+            payment_mode_filters[key] = payment_mode_filt.strip()
         if brand_filt:
-            brand_filters[e.lower()] = brand_filt.strip()
+            brand_filters[key] = brand_filt.strip()
+        team_ids[key] = team_id
     eligible = sorted(online_for_process & present)
     if online_for_process and not eligible:
         print(f"  {len(online_for_process)} agent(s) marked Online for '{PROCESS_KEY}', but "
               f"none are heartbeat-fresh (within {STALE_MINUTES}m) - nobody is actually at "
               f"their desk.")
-    return eligible, quotas, attempt_filters, reason_filters, payment_mode_filters, brand_filters
+    return eligible, quotas, attempt_filters, reason_filters, payment_mode_filters, brand_filters, team_ids
+
+
+def fetch_active_ndr_teams():
+    """The process's ACTIVE calling_teams rows as [{"id","name","sheet_id","sheet_tab"}, ...],
+    or None if the query itself could not run. None and [] are deliberately different signals:
+    [] means "asked, and there are genuinely zero active teams right now" - the ordinary
+    pre-split state - while None means "couldn't ask", which main() must never treat as [] or
+    it would silently fall back to the single shared sheet even after teams exist, sending
+    every team's leads to whichever sheet happens to be hardcoded here."""
+    cred = mysql_lib.get_credential()
+    if cred is None:
+        print("MYSQL_* credentials not configured - cannot determine active NDR teams.")
+        return None
+    try:
+        rows = mysql_lib.query(
+            "SELECT id, name, sheet_id, sheet_tab FROM calling_teams "
+            "WHERE process_key = %s AND active = TRUE ORDER BY id",
+            (PROCESS_KEY,),
+            database=PRESENCE_SCHEMA,
+        )
+    except Exception as e:
+        print(f"  (calling_teams lookup failed: {e})")
+        return None
+    return [{"id": r[0], "name": r[1], "sheet_id": r[2], "sheet_tab": r[3]} for r in (rows or [])]
 
 
 def record_new_assignments(new_assignments):
@@ -290,13 +347,20 @@ def record_new_assignments(new_assignments):
             conn.close()
 
 
-def main():
-    online_agents, quotas, attempt_filters, reason_filters, payment_mode_filters, brand_filters = fetch_online_ndr_agents()
-    if not online_agents:
-        print("No agents online for NDR right now - nothing to assign.")
-        return
+def assign_for_run(run, online_agents, quotas, attempt_filters, reason_filters,
+                    payment_mode_filters, brand_filters):
+    """Does the actual round-robin for ONE run - either the whole desk (isolation off, `run`
+    is the synthetic pre-split/single-team entry main() builds) or one isolated team (isolation
+    on). `online_agents` is already filtered to exactly the agents eligible for THIS run before
+    this function ever sees them - it has no team concept of its own, so a caller mistake there
+    would show up here as leads going to the wrong pool with no further check. Raises on a
+    mirror-write failure (see the bottom of this function); main() decides per-run whether that
+    stops the whole invocation or just this one team."""
+    sheet_id = run["sheet_id"]
+    sheet_tab = run["sheet_tab"]
+    label = run["name"]
 
-    sheet_rows = lib.get_sheet_values(SPREADSHEET_ID, f"'{SHEET_TAB}'!A2:{LAST_COL}1000000")
+    sheet_rows = lib.get_sheet_values(sheet_id, f"'{sheet_tab}'!A2:{LAST_COL}1000000")
 
     current_load = {email: 0 for email in online_agents}
     unassigned = []  # (row_number, latest_ndr_date, attempt_bucket, latest_ndr_reason,
@@ -323,7 +387,7 @@ def main():
                 unassigned.append((i + 2, latest_ndr_date, bucket, reason, payment_mode, brand, awb))
 
     if not unassigned:
-        print("No unassigned NDR leads found - nothing to assign.")
+        print(f"[{label}] No unassigned NDR leads found - nothing to assign.")
         return
 
     # Oldest Latest NDR Date first (undated leads sort last) - a lead that's been waiting
@@ -366,7 +430,7 @@ def main():
             continue
         email = remaining_agents[chosen]
         value_ranges.append({
-            "range": f"'{SHEET_TAB}'!{COL_AGENT_LETTER}{row_num}",
+            "range": f"'{sheet_tab}'!{COL_AGENT_LETTER}{row_num}",
             "values": [[email]],
         })
         new_assignments.append((awb, email))
@@ -379,17 +443,20 @@ def main():
             idx = (chosen + 1) % len(remaining_agents)
 
     if not value_ranges:
-        print(f"{len(unassigned)} unassigned lead(s) found, but none could be assigned "
+        print(f"[{label}] {len(unassigned)} unassigned lead(s) found, but none could be assigned "
               f"(quota exhausted, or no online agent's filters cover them). "
               f"Nothing to assign.")
         return
 
     for start in range(0, len(value_ranges), 300):
-        lib.set_sheet_values_batch(SPREADSHEET_ID, value_ranges[start:start + 300])
+        lib.set_sheet_values_batch(sheet_id, value_ranges[start:start + 300])
 
+    # record_new_assignments opens and commits its OWN connection per call (see its own
+    # docstring) - calling it once per run already gives every team's mirror write its own
+    # transaction, with no extra plumbing needed here for that.
     mirrored = record_new_assignments(new_assignments)
 
-    print(f"Assigned {len(value_ranges)} lead(s):")
+    print(f"[{label}] Assigned {len(value_ranges)} lead(s):")
     for email, count in sorted(assigned_count.items()):
         print(f"  {email}: +{count}")
     quota_skipped = len(unassigned) - len(value_ranges) - no_agent_for_bucket
@@ -402,12 +469,72 @@ def main():
     # Deliberately AFTER the summary above, and deliberately fatal: the sheet write already
     # stands and the run's real work is reported, but the invocation has to go red so the
     # failure surfaces (Lambda error metric / a red workflow run) instead of scrolling past in
-    # logs nobody reads. That is exactly how the 2026-08-21 mirror break survived 4 days.
+    # logs nobody reads. That is exactly how the 2026-08-21 mirror break survived 4 days. main()
+    # catches this per run so one team's mirror failure never stops another team's assignment.
     if not mirrored:
         raise RuntimeError(
-            f"{len(value_ranges)} lead(s) were assigned in the sheet but NOT mirrored into "
-            f"ndr_lead_assignments - see the error above. Sheet is correct; NDR reporting "
+            f"[{label}] {len(value_ranges)} lead(s) were assigned in the sheet but NOT mirrored "
+            f"into ndr_lead_assignments - see the error above. Sheet is correct; NDR reporting "
             f"(Agent Performance Summary, /api/auth/leadDates?process=ndr) is now behind."
+        )
+
+
+def main():
+    teams = fetch_active_ndr_teams()
+    if teams is None:
+        # Could not even determine whether the desk is split - see fetch_active_ndr_teams'
+        # own docstring for why this must never be treated as "no teams" and fall back to the
+        # single shared sheet. Raise straight away (nothing has run yet, nothing to summarize).
+        raise RuntimeError(
+            "Could not determine NDR's active teams (calling_teams query failed) - refusing to "
+            "guess whether the desk is split. See the error printed above."
+        )
+
+    online_agents, quotas, attempt_filters, reason_filters, payment_mode_filters, brand_filters, team_ids = \
+        fetch_online_ndr_agents()
+    if not online_agents:
+        print("No agents online for NDR right now - nothing to assign.")
+        return
+
+    isolation_on = len(teams) >= 2
+    if not teams:
+        # Pre-split: the desk hasn't been given a second team yet. Behaves exactly as this
+        # script always has, against the one sheet that predates this feature entirely.
+        runs = [{"id": None, "name": "NDR", "sheet_id": SPREADSHEET_ID, "sheet_tab": SHEET_TAB}]
+    elif len(teams) == 1:
+        # Isolation is still OFF below 2 active teams (same activeTeamCount < 2 rule the JS
+        # side's teamScopeFor uses) - every online agent is still eligible regardless of
+        # team_id. The SHEET, though, is already authoritative from calling_teams rather than
+        # the hardcoded constant, so an admin can repoint the desk's sheet from the UI without
+        # a deploy even before a second team exists.
+        runs = [teams[0]]
+    else:
+        runs = teams
+
+    failures = []
+    for run in runs:
+        if isolation_on:
+            # Only agents EXPLICITLY assigned to this team are eligible - an unassigned agent
+            # (team_id None) gets nothing from any team once there is more than one to choose
+            # between, matching the fail-closed policy the JS side already enforces for the
+            # exact same ambiguity.
+            run_agents = [e for e in online_agents if team_ids.get(e) == run["id"]]
+        else:
+            run_agents = online_agents
+        if not run_agents:
+            print(f"[{run['name']}] No eligible agents online right now.")
+            continue
+        try:
+            assign_for_run(run, run_agents, quotas, attempt_filters, reason_filters,
+                            payment_mode_filters, brand_filters)
+        except Exception as e:
+            print(f"!! [{run['name']}] run failed: {e}")
+            failures.append((run["name"], e))
+
+    if failures:
+        raise RuntimeError(
+            f"{len(failures)}/{len(runs)} NDR run(s) failed: "
+            + "; ".join(f"{name}: {err}" for name, err in failures)
         )
 
 

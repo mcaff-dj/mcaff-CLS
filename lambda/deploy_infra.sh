@@ -137,6 +137,12 @@ aws lambda update-function-configuration --function-name "$FN_NDR" --region "$AW
   --environment file://"$DIST/env-assign-ndr-leads.json" \
   >/dev/null
 rm -f "$DIST/env-assign-ndr-leads.json"
+# Reserved concurrency = 1: same purpose as assign-leads' own (above) - stops a slow run
+# overlapping the next 5-minute tick. Matters more here than it used to: once NDR has 2+
+# active teams, one invocation now loops per team instead of doing one pass, so a run can take
+# several times longer, making an overlap far more likely than it was as a single-team script.
+aws lambda put-function-concurrency --function-name "$FN_NDR" \
+  --reserved-concurrent-executions 1 --region "$AWS_REGION"
 
 # ---- 5b. csv-upload-worker Lambda - the RTO CSV upload feature's background worker. Its own
 #          function (not folded into assign-leads) specifically so its timeout/memory can be
