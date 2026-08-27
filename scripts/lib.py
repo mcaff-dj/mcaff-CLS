@@ -14,14 +14,17 @@ import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
-# Flowcall's "Created At" is always "D/M/YYYY, h:mm:ss am/pm". Shared by every
+# Flowcall's "Created At" was "D/M/YYYY, h:mm:ss am/pm" until it switched to
+# "D-M-YY H:MM:SS" (24h clock, 2-digit year) around 2026-08-25 - both accepted
+# here so rows written under the old format still validate. Shared by every
 # script that writes to or audits the ticket-export tabs (export_recurring.py,
 # backfill_gap_cleaned.py, check_export_integrity.py) as the one signal for a
 # column-shifted row - an unescaped comma/newline inside a free-text field in
 # Flowcall's CSV export pushes every later column over by one, and this is
 # the cheapest column to validate against a fixed, unambiguous format.
 CREATED_AT_PATTERN = re.compile(
-    r"^\d{1,2}/\d{1,2}/\d{4},?\s*\d{1,2}:\d{2}:\d{2}\s*(am|pm)$", re.IGNORECASE
+    r"^(?:\d{1,2}/\d{1,2}/\d{4},?\s*\d{1,2}:\d{2}:\d{2}\s*(?:am|pm)"
+    r"|\d{1,2}-\d{1,2}-\d{2}\s+\d{1,2}:\d{2}:\d{2})$", re.IGNORECASE
 )
 
 

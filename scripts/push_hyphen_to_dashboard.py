@@ -131,10 +131,11 @@ DATE_FIELDS = {
 
 def parse_flowcall_date(value):
     """Parses Flowcall's "D/M/YYYY, h:mm:ss am/pm" datetime strings (day
-    first - values like "15/7" rule out month-first) plus a few other
-    formats seen in Disposition: Order date, into "M/D/YYYY" so Sheets'
-    USER_ENTERED input auto-recognizes it as a real date. Falls back to the
-    raw string untouched if nothing matches."""
+    first - values like "15/7" rule out month-first), its newer "D-M-YY
+    H:MM:SS" 24h form (since 2026-08-25), plus a few other formats seen in
+    Disposition: Order date, into "M/D/YYYY" so Sheets' USER_ENTERED input
+    auto-recognizes it as a real date. Falls back to the raw string
+    untouched if nothing matches."""
     if not value:
         return ""
     s = str(value).strip()
@@ -145,7 +146,7 @@ def parse_flowcall_date(value):
             return datetime(year, month, day).strftime("%m/%d/%Y")
         except ValueError:
             return s
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%d-%b-%y", "%d-%b-%Y"):
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%d-%b-%y", "%d-%b-%Y", "%d-%m-%y %H:%M:%S"):
         try:
             return datetime.strptime(s, fmt).strftime("%m/%d/%Y")
         except ValueError:

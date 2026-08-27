@@ -7,6 +7,7 @@ from push_mcaffeine_to_dashboard import (
     extract_mcaffeine_order_code,
     is_excluded_from_dashboard,
     parse_created_at,
+    parse_flowcall_date,
     pick_awb_before_ticket_date,
 )
 
@@ -23,8 +24,16 @@ def test_parse_created_at():
     assert parse_created_at("10/8/2026, 2:32:59 PM") == datetime(2026, 8, 10, 14, 32, 59)
     assert parse_created_at("9/8/2026, 12:05:00 AM") == datetime(2026, 8, 9, 0, 5, 0)
     assert parse_created_at("9/8/2026, 12:05:00 PM") == datetime(2026, 8, 9, 12, 5, 0)
+    assert parse_created_at("27-08-26 11:14:44") == datetime(2026, 8, 27, 11, 14, 44)  # FlowCall's format since 2026-08-25
     assert parse_created_at("garbage") is None
     assert parse_created_at("") is None
+
+
+def test_parse_flowcall_date():
+    assert parse_flowcall_date("10/8/2026, 2:32:59 PM") == "08/10/2026"
+    assert parse_flowcall_date("27-08-26 11:14:44") == "08/27/2026"  # FlowCall's format since 2026-08-25
+    assert parse_flowcall_date("") == ""
+    assert parse_flowcall_date("garbage") == "garbage"
 
 
 def test_pick_awb_before_ticket_date_picks_latest_prior():
@@ -62,6 +71,7 @@ def test_is_excluded_from_dashboard():
 if __name__ == "__main__":
     test_extract_order_code()
     test_parse_created_at()
+    test_parse_flowcall_date()
     test_pick_awb_before_ticket_date_picks_latest_prior()
     test_pick_awb_before_ticket_date_none_qualify()
     test_pick_awb_before_ticket_date_exact_match_qualifies()

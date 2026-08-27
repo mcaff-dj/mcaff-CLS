@@ -51,20 +51,26 @@ CREATED_AT_PATTERN = re.compile(
 
 
 def parse_created_at(value):
-    """Parses FlowCall's 'Created At' (DD/MM/YYYY, H:MM:SS AM/PM, Asia/Kolkata) into a
-    naive datetime comparable against Item_level_data.Order_Date - both are IST wall-clock
-    values with no timezone info, so no conversion is needed. Returns None on anything that
-    doesn't match (missing/malformed value), and the AWB backfill below treats that as
-    "can't bound the lookup" rather than guessing."""
-    m = CREATED_AT_PATTERN.match(str(value).strip())
-    if not m:
-        return None
-    day, month, year, hour, minute, second, ampm = m.groups()
-    hour = int(hour) % 12
-    if ampm.lower() == "pm":
-        hour += 12
+    """Parses FlowCall's 'Created At' - either DD/MM/YYYY, H:MM:SS AM/PM or,
+    since 2026-08-25, the newer DD-MM-YY H:MM:SS 24h form (Asia/Kolkata) -
+    into a naive datetime comparable against Item_level_data.Order_Date -
+    both are IST wall-clock values with no timezone info, so no conversion
+    is needed. Returns None on anything that doesn't match (missing/
+    malformed value), and the AWB backfill below treats that as "can't
+    bound the lookup" rather than guessing."""
+    s = str(value).strip()
+    m = CREATED_AT_PATTERN.match(s)
+    if m:
+        day, month, year, hour, minute, second, ampm = m.groups()
+        hour = int(hour) % 12
+        if ampm.lower() == "pm":
+            hour += 12
+        try:
+            return datetime(int(year), int(month), int(day), hour, int(minute), int(second))
+        except ValueError:
+            return None
     try:
-        return datetime(int(year), int(month), int(day), hour, int(minute), int(second))
+        return datetime.strptime(s, "%d-%m-%y %H:%M:%S")
     except ValueError:
         return None
 
@@ -239,7 +245,7 @@ def parse_flowcall_date(value):
             return datetime(year, month, day).strftime("%m/%d/%Y")
         except ValueError:
             return s
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%d-%b-%y", "%d-%b-%Y"):
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%d-%b-%y", "%d-%b-%Y", "%d-%m-%y %H:%M:%S"):
         try:
             return datetime.strptime(s, fmt).strftime("%m/%d/%Y")
         except ValueError:
