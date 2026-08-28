@@ -82,7 +82,11 @@ async function fetchNdrSheetValues(range, team) {
     throw new Error(`Sheets API ${r.status}${body ? ': ' + body.slice(0, 300) : ''}`);
   }
   const d = await r.json();
-  if (!d.values) throw new Error('No data'); return d.values;
+  // A missing `values` key is Sheets' answer for a range that resolved but holds nothing - a
+  // brand-new team sheet with only its header row is exactly that, and it is not a failure.
+  // Throwing here painted an empty team as "No data - retrying..." behind the red sync-failed
+  // banner, plus a backoff retry loop against a sheet that was never going to fill itself.
+  return d.values || [];
 }
 
 // This sheet is owned by an existing CS/ops process, not by us, and it keeps growing under that
