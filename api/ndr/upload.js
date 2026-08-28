@@ -210,6 +210,46 @@ async function readKeySetForSheet(client, sheetId, sheetTab, extraCsvHeaders = N
   return keys;
 }
 
+// Column E is written as a real number (NDR_IMPORT.awbAsNumber), and under Sheets' automatic
+// format a 14-digit number RENDERS as "5.4E+13". That is not only ugly: it is what the two
+// readers that take Sheets' FORMATTED_VALUE default would then read - api/ndr/sheet.js's proxy
+// (and through it NdrCallingClient's mapNdrRow, so the agent's card) and
+// scripts/assign_ndr_leads.py, which mirrors the AWB into PEP_CLS.ndr_lead_assignments. Pinning
+// the column to a plain "0" pattern is what keeps those readers seeing digits.
+//
+// Done here, on every upload, rather than left as a one-time manual format on each team's sheet:
+// a team sheet someone forgets to format corrupts that team's leads silently, and there is no
+// signal anywhere that it happened. repeatCell is idempotent - re-applying the identical format
+// is a no-op - so the cost is one extra get + one batchUpdate, both trivial next to the reads
+// this endpoint already makes.
+//
+// Called BEFORE the append and deliberately allowed to throw: appending numbers to an unformatted
+// column is the failure case this exists to prevent, so a format that could not be applied must
+// abort the upload rather than proceed and hope.
+//
+// startRowIndex 1 skips the header row; no endRowIndex/endColumnIndex bound means "to the end of
+// the column", which is what makes rows appended later inherit it.
+async function pinAwbColumnFormat(client, sheetId, sheetTab) {
+  const meta = await sheetsRequest(client, sheetId, 'GET', '?fields=sheets.properties(sheetId,title)');
+  const tab = (meta.sheets || []).find((t) => t.properties && t.properties.title === sheetTab);
+  // Unreachable in practice - checkSheetLayout has already read a range on this tab by the time
+  // this runs, so it exists. Guarded rather than asserted because a missing tab is the layout
+  // check's error to report, not this function's.
+  if (!tab) return;
+  const col = columnLetterToIndex(NDR_AWB_COLUMN);
+  await sheetsRequest(client, sheetId, 'POST', ':batchUpdate', {
+    requests: [{
+      repeatCell: {
+        range: {
+          sheetId: tab.properties.sheetId, startRowIndex: 1, startColumnIndex: col, endColumnIndex: col + 1,
+        },
+        cell: { userEnteredFormat: { numberFormat: { type: 'NUMBER', pattern: '0' } } },
+        fields: 'userEnteredFormat.numberFormat',
+      },
+    }],
+  });
+}
+
 // Why the OTHER active teams' sheets are read too, on every single upload: ndr_lead_assignments
 // has no team column (see db.js's CREATE TABLE) and its only uniqueness is a UNIQUE key on the
 // LIVE awb_number. A lead sitting live in BOTH teams' sheets at once therefore corrupts that
@@ -336,6 +376,7 @@ module.exports = async (req, res) => {
 
     let appended = 0;
     if (plan.validRows.length) {
+      await pinAwbColumnFormat(client, team.sheetId, team.sheetTab);
       await sheetsRequest(
         client, team.sheetId, 'POST',
         // A2:A, NOT A2:Q - values:append writes starting at the FIRST COLUMN OF THE TABLE it
@@ -371,6 +412,11 @@ module.exports = async (req, res) => {
       duplicateInOtherTeam: foreignHits.length,
       missingAwb: plan.counts.missingAwb,
       scientificAwb: plan.counts.scientificAwb,
+      // Rows whose AWB arrived in scientific notation but still carried every digit, so they were
+      // expanded and imported rather than refused. Reported separately from scientificAwb (which
+      // stays "rejected, digits unrecoverable") because a silent rewrite of an identifier is
+      // exactly the kind of thing that should be visible in the upload result.
+      expandedAwb: plan.counts.expandedAwb,
       total: csvRows.length,
       errors: [...foreignHits, ...plan.errors].slice(0, MAX_REPORTED_ERRORS),
     });

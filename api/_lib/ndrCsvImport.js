@@ -97,6 +97,18 @@ const NDR_IMPORT = {
   // shown: Payment Mode (L, matched against an agent's Prepaid/COD filter) and Latest NDR Reason
   // (Q, substring-matched against an agent's reason filter).
   blankPlaceholder: '',
+  // AWB (E) is written as a real NUMBER here, not as apostrophe-escaped text the way RTO's is.
+  // Requested for the "Latest NDR " sheets so column E sorts and matches numerically against the
+  // other AWB lists the desk keeps alongside it. See toSheetNumber in rtoCsvImport.js for the two
+  // AWB shapes that still stay text (leading zero, >15 digits) and, importantly, for the sheet
+  // number-format this depends on.
+  //
+  // Safe for dedup in both directions: api/ndr/upload.js reads the key columns with
+  // valueRenderOption=UNFORMATTED_VALUE, so a numeric cell arrives as a JS number and a legacy
+  // apostrophe-text cell as a string, and normalizeAwb stringifies both to the same key. Rows
+  // appended before this change are text and stay text - the column is mixed on purpose, since
+  // rewriting live history to convert them buys nothing the readers can tell apart.
+  awbAsNumber: true,
 };
 
 module.exports = {

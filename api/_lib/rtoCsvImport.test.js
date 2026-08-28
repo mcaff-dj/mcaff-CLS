@@ -4,7 +4,7 @@ const assert = require('assert');
 const {
   normalizeHeader, normalizeAwb, columnLetterToIndex, indexToColumnLetter,
   CSV_TO_COLUMN, checkSheetLayout, buildRowPlan,
-  looksLikeScientificNotation, toSheetText, RTO_IMPORT, dedupKey,
+  looksLikeScientificNotation, expandScientificNotation, toSheetText, RTO_IMPORT, dedupKey,
 } = require('./rtoCsvImport');
 
 // 1. columnLetterToIndex / indexToColumnLetter - bijective base-26, round-trips past Z.
@@ -259,5 +259,48 @@ assert.throws(
   () => buildRowPlan({ csvRows: [] }),
   /existingKeySet \(a Set\) is required/,
 );
+
+// expandScientificNotation - recover an AWB only when no digit was actually lost. The dividing
+// line is significant digits vs magnitude, NOT "does it parse as a number": every case below
+// parses fine, and half of them would produce an AWB belonging to no shipment.
+assert.strictEqual(expandScientificNotation('5.4012345678901E+13'), '54012345678901', 'full precision - recoverable');
+assert.strictEqual(expandScientificNotation('5.4012345678901e13'), '54012345678901', 'lowercase e, bare exponent');
+assert.strictEqual(expandScientificNotation('5.4012345678900E+13'), '54012345678900', 'a genuine trailing zero is kept');
+assert.strictEqual(expandScientificNotation('1.2E+1'), '12');
+assert.strictEqual(expandScientificNotation('0.54012345678901E+14'), '54012345678901', 'leading zero normalised away');
+assert.strictEqual(expandScientificNotation('5.40E+13'), null, 'rounded to 3 significant digits - would fabricate 54000000000000');
+assert.strictEqual(expandScientificNotation('5E+13'), null, 'no fraction at all - every digit but the first is gone');
+assert.strictEqual(expandScientificNotation('5.4012E+2'), null, 'fraction longer than the exponent - not a whole number');
+assert.strictEqual(expandScientificNotation('-5.4E+13'), null, 'no AWB is negative');
+assert.strictEqual(expandScientificNotation('1.2E-3'), null, 'negative exponent');
+assert.strictEqual(expandScientificNotation('GS4593447281'), null, 'not scientific notation at all');
+// Every value it accepts must be something looksLikeScientificNotation would have refused, and
+// every value it returns must itself be a plain digit string - otherwise the two disagree and a
+// recovered AWB would be re-rejected downstream.
+['5.4012345678901E+13', '1.2E+1'].forEach((v) => {
+  assert.ok(looksLikeScientificNotation(v));
+  assert.ok(/^\d+$/.test(expandScientificNotation(v)));
+  assert.ok(!looksLikeScientificNotation(expandScientificNotation(v)));
+});
+
+// End to end through RTO's own config: a recoverable AWB is imported (text-forced, since RTO does
+// not set awbAsNumber) and an unrecoverable one is still refused.
+{
+  const rtoRow = (awb) => {
+    const row = {};
+    RTO_IMPORT.requiredCsvHeaders.forEach((h) => { row[h] = `v-${h}`; });
+    return { ...row, 'AWB Code': awb };
+  };
+  const plan = buildRowPlan({
+    csvRows: [rtoRow('5.4012345678901E+13'), rtoRow('5.40E+13')],
+    existingKeySet: new Set(),
+    config: RTO_IMPORT,
+  });
+  assert.strictEqual(plan.validRows.length, 1);
+  assert.strictEqual(plan.counts.expandedAwb, 1);
+  assert.strictEqual(plan.counts.scientificAwb, 1);
+  assert.strictEqual(plan.validRows[0].awbCode, '54012345678901', 'dedup key uses the expanded digits');
+  assert.strictEqual(plan.validRows[0].cellsByColumn.G, "'54012345678901", 'the sheet never sees the E+13 form');
+}
 
 console.log('rtoCsvImport.test.js: all assertions passed');

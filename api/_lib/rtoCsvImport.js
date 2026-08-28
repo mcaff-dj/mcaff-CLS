@@ -30,6 +30,30 @@ function looksLikeScientificNotation(v) {
   return /^[+-]?\d+(\.\d+)?[Ee][+-]?\d+$/.test((v || '').toString().trim());
 }
 
+// Not every scientific-notation AWB has actually lost digits, and the ones that haven't are
+// recoverable exactly - so they are expanded and imported rather than refused. Returns the full
+// integer as a string, or null when the value cannot be restored without inventing digits.
+//
+// The test is significant digits against magnitude, done on the STRING - never via parseFloat,
+// whose round-trip is the very rounding this is trying to detect:
+//   "5.4012345678901E+13"  frac has 13 digits, exponent is 13 -> every digit of the 14-digit
+//                          integer is present. Expands to 54012345678901.
+//   "5.40E+13"             frac has 2 digits, exponent is 13 -> the other 11 were rounded away
+//                          when the file was re-saved. Expanding would fabricate 54000000000000,
+//                          a well-formed AWB that belongs to no shipment - far worse than a
+//                          refusal, because it would be written to a live sheet, mirrored into
+//                          PEP_CLS.ndr_lead_assignments, and collide with every other row that
+//                          rounded to the same value. null.
+// A negative exponent, a negative sign, or a fraction longer than the exponent (i.e. not a whole
+// number) is not an AWB at all and returns null too.
+function expandScientificNotation(v) {
+  const m = /^\+?(\d+)(?:\.(\d*))?[Ee]\+?(\d+)$/.exec((v || '').toString().trim());
+  if (!m) return null;
+  const [, intPart, fracPart = '', exp] = m;
+  if (fracPart.length !== Number(exp)) return null;
+  return (intPart + fracPart).replace(/^0+(?=\d)/, '');
+}
+
 // Sheets is written with valueInputOption=USER_ENTERED (both the API endpoint and the Python
 // worker), which type-infers every cell - so a bare AWB lands as a NUMBER and column G then
 // renders it as 5.4E+13. A leading apostrophe is USER_ENTERED's own "treat this as text"
@@ -42,6 +66,30 @@ function looksLikeScientificNotation(v) {
 // Coupled to USER_ENTERED: under valueInputOption=RAW the apostrophe would be stored literally.
 function toSheetText(v) {
   return /^\d+$/.test(v || '') ? `'${v}` : v;
+}
+
+// The opposite choice, selected per import via config.awbAsNumber (NDR only - see
+// ndrCsvImport.js for why that sheet wants it). Leaves an all-digit AWB BARE so USER_ENTERED
+// stores it as a real number instead of text.
+//
+// Two classes of AWB deliberately still go through toSheetText, because turning them into a
+// number would destroy digits rather than just restyle them:
+//   - a leading zero ("0012345678901" as a number is 12345678901 - the zeros never come back);
+//   - more than 15 digits, which exceeds the 2^53 exact-integer range every JSON number in this
+//     path (ours on write, Sheets' on an UNFORMATTED_VALUE read) is carried in. 15 digits is the
+//     widest value guaranteed to survive intact; real AWBs are 12-14.
+// Alphanumeric codes (GS4593447281) fall through unchanged, exactly as they do today.
+//
+// ponytail: correct ONLY while the target sheet's AWB column carries a plain "0" number format.
+// Under Sheets' default automatic format a 14-digit number can render as 5.4E+13, and every
+// FORMATTED_VALUE reader of that column (api/ndr/sheet.js's proxy, and through it
+// NdrCallingClient's mapNdrRow; scripts/assign_ndr_leads.py, which mirrors the AWB into
+// PEP_CLS.ndr_lead_assignments) would then read the mangled string rather than the digits. The
+// upload cannot check that format without resolving the tab's numeric gid first, which costs an
+// extra spreadsheets.get per request - set the format once per team sheet by hand instead, and
+// add the check here if a third team ever ships without it.
+function toSheetNumber(v) {
+  return /^[1-9]\d{0,14}$/.test(v || '') ? v : toSheetText(v);
 }
 
 // bijective base-26: A=0, B=1, ..., Z=25, AA=26, AB=27, ...
@@ -184,7 +232,7 @@ function dedupKey(awb, row, extraCsvHeaders) {
 function buildRowPlan({ csvRows, existingKeySet, config = RTO_IMPORT }) {
   const {
     columnMap, awbCsvHeader, orderIdCsvHeader, orderIdColumn, paymentMethodColumn,
-    blankPlaceholder, dedupExtraCsvHeaders = [],
+    blankPlaceholder, dedupExtraCsvHeaders = [], awbAsNumber = false,
   } = config;
   // Required, not defaulted: a caller that forgets it would otherwise get a silent no-op on the
   // against-the-sheet dedup and append duplicates with no error anywhere. Caught exactly that way
@@ -194,12 +242,17 @@ function buildRowPlan({ csvRows, existingKeySet, config = RTO_IMPORT }) {
   }
   const validRows = [];
   const errors = [];
-  const counts = { missingAwb: 0, duplicateInFile: 0, duplicateInSheet: 0, scientificAwb: 0 };
+  const counts = {
+    missingAwb: 0, duplicateInFile: 0, duplicateInSheet: 0, scientificAwb: 0, expandedAwb: 0,
+  };
   const seenInFile = new Set();
 
   csvRows.forEach((row, i) => {
     const line = i + 2; // +1 for 1-based, +1 for the header row not being a data row
-    const awb = normalizeAwb(row[awbCsvHeader]);
+    let awb = normalizeAwb(row[awbCsvHeader]);
+    // Set only when the CSV carried scientific notation that WAS losslessly recoverable, in which
+    // case it - not the "1.2E+3" the file actually contained - is what gets written to the sheet.
+    let expandedAwb = null;
 
     if (!awb) {
       counts.missingAwb++;
@@ -207,13 +260,21 @@ function buildRowPlan({ csvRows, existingKeySet, config = RTO_IMPORT }) {
       return;
     }
     if (looksLikeScientificNotation(awb)) {
-      counts.scientificAwb++;
-      errors.push({
-        line,
-        reason: `${awbCsvHeader} "${awb}" is in scientific notation - its real digits are already lost. `
-          + 'Re-export the source file and upload it without opening it in Excel/Sheets first.',
-      });
-      return;
+      expandedAwb = expandScientificNotation(awb);
+      if (!expandedAwb) {
+        counts.scientificAwb++;
+        errors.push({
+          line,
+          reason: `${awbCsvHeader} "${awb}" is in scientific notation - its real digits are already lost. `
+            + 'Re-export the source file and upload it without opening it in Excel/Sheets first.',
+        });
+        return;
+      }
+      counts.expandedAwb++;
+      // Reassigned BEFORE dedupKey below, deliberately: the sheet holds the expanded digits, so
+      // keying on the raw "5.4012345678901E+13" would match nothing and re-append a row that is
+      // already there.
+      awb = expandedAwb;
     }
     const key = dedupKey(awb, row, dedupExtraCsvHeaders);
     const keyLabel = dedupExtraCsvHeaders.length ? `${awb} + ${dedupExtraCsvHeaders.join(' + ')}` : awb;
@@ -233,7 +294,10 @@ function buildRowPlan({ csvRows, existingKeySet, config = RTO_IMPORT }) {
     Object.entries(columnMap).forEach(([csvHeader, col]) => {
       let value = (row[csvHeader] || '').toString().trim();
       if (orderIdCsvHeader && csvHeader === orderIdCsvHeader) value = value.split('_')[0];
-      if (csvHeader === awbCsvHeader) value = toSheetText(value);
+      if (csvHeader === awbCsvHeader) {
+        const digits = expandedAwb || value;
+        value = awbAsNumber ? toSheetNumber(digits) : toSheetText(digits);
+      }
       cellsByColumn[col] = value || blankPlaceholder;
     });
 
@@ -253,5 +317,6 @@ function buildRowPlan({ csvRows, existingKeySet, config = RTO_IMPORT }) {
 module.exports = {
   normalizeHeader, normalizeAwb, columnLetterToIndex, indexToColumnLetter,
   CSV_TO_COLUMN, EXPECTED_SHEET_HEADER, LAST_COLUMN_LETTER, REQUIRED_CSV_HEADERS,
-  checkSheetLayout, buildRowPlan, looksLikeScientificNotation, toSheetText, RTO_IMPORT, dedupKey,
+  checkSheetLayout, buildRowPlan, looksLikeScientificNotation, expandScientificNotation,
+  toSheetText, toSheetNumber, RTO_IMPORT, dedupKey,
 };

@@ -86,7 +86,7 @@ assert.deepStrictEqual(
   assert.strictEqual(plan.validRows[0].paymentMethod, '');
 }
 
-// 6. An all-digit AWB is text-forced so Sheets cannot store it as a number and render 5.4E+13,
+// 6. An all-digit AWB is left bare so Sheets stores it as a number (awbAsNumber - see block 10),
 // and one that already arrived mangled is rejected rather than imported.
 {
   const plan = buildRowPlan({
@@ -99,9 +99,25 @@ assert.deepStrictEqual(
     config: NDR_IMPORT,
   });
   assert.strictEqual(plan.validRows.length, 1);
-  assert.strictEqual(plan.validRows[0].cellsByColumn[NDR_AWB_COLUMN], "'54012345678901");
+  assert.strictEqual(plan.validRows[0].cellsByColumn[NDR_AWB_COLUMN], '54012345678901');
   assert.strictEqual(plan.counts.scientificAwb, 1);
   assert.strictEqual(plan.counts.missingAwb, 1);
+}
+
+// 6b. A scientific-notation AWB that still carries every digit is expanded and IMPORTED, as a
+// bare number - the "5.4E+13" form must never reach column E, whether by being written there or
+// by being rendered there (api/ndr/upload.js pins the column's number format for the latter).
+{
+  const plan = buildRowPlan({
+    csvRows: [csvRow({ 'AWB Code': '5.4012345678901E+13', 'Attempt Count': '1' })],
+    existingKeySet: new Set(),
+    config: NDR_IMPORT,
+  });
+  assert.strictEqual(plan.validRows.length, 1);
+  assert.strictEqual(plan.counts.expandedAwb, 1);
+  assert.strictEqual(plan.counts.scientificAwb, 0);
+  assert.strictEqual(plan.validRows[0].cellsByColumn[NDR_AWB_COLUMN], '54012345678901');
+  assert.strictEqual(plan.validRows[0].awbCode, '54012345678901', 'dedup keys on the expanded digits');
 }
 
 // 7. The drift check uses NDR's own expectations, and every mapped column has one - a column in
@@ -143,6 +159,21 @@ NDR_IMPORT.dedupExtraCsvHeaders.forEach((h) => {
   ];
   const issues = checkSheetLayout(LIVE_NDR_HEADER_ROW, NDR_IMPORT.expectedHeader);
   assert.deepStrictEqual(issues, [], `expected no layout drift against the live header, got: ${issues.join('; ')}`);
+}
+
+// 10. AWB (E) is written as a bare number, NOT apostrophe-escaped text like RTO's - awbAsNumber.
+// The two shapes that would LOSE digits as a number keep the apostrophe: a leading zero, and
+// anything past the 15-digit exact-integer ceiling. Alphanumeric AWBs are untouched either way.
+{
+  const plan = (awb) => buildRowPlan({
+    csvRows: [csvRow({ 'AWB Code': awb })], existingKeySet: new Set(), config: NDR_IMPORT,
+  }).validRows[0];
+  assert.strictEqual(plan('54012345678901').cellsByColumn.E, '54012345678901', 'plain AWB stays bare so Sheets stores a number');
+  assert.strictEqual(plan('GS4593447281').cellsByColumn.E, 'GS4593447281', 'alphanumeric AWB is already text to Sheets');
+  assert.strictEqual(plan('0012345678901').cellsByColumn.E, "'0012345678901", 'leading zeros would be destroyed by a number');
+  assert.strictEqual(plan('1234567890123456').cellsByColumn.E, "'1234567890123456", '16 digits exceeds the exact-integer range');
+  // The dedup key never carries the apostrophe, whichever branch wrote the cell.
+  assert.strictEqual(plan('0012345678901').awbCode, '0012345678901');
 }
 
 console.log('ndrCsvImport.test.js: all assertions passed');
