@@ -39,8 +39,9 @@ Order of operations, matching assign_leads.py's own main() exactly:
      REFUND_CHECK_PHASE_BUDGET_SEC wall-clock check on the while loop itself (not just reliance
      on `remaining` shrinking to empty) is what guarantees termination even in the pathological
      case where the same head-of-list orders keep getting cut off round after round.
-  4. One batched append of every row - punched/refunded rows pre-stamped as disposed, the rest
-     as fresh unassigned leads.
+  4. One batched append of only the rows that are NEITHER punched nor refunded - those two are
+     dropped entirely rather than appended, per explicit business instruction: a lead already
+     handled outside this sheet has no reason to occupy a row in it at all.
 
 Never raises out of process_job (network/DB blips are caught and turn the job status into
 'failed' with error_message set, rather than crashing the Lambda invocation silently) - the
@@ -97,11 +98,11 @@ def parse_appended_row_range(updated_range):
 
 
 def partition_and_stamp(rows, punched_ids, refund_results):
-    """Pure - no I/O. Decides each row's `stamp` (a (S, T, U) tuple to write, or None for a
-    plain fresh/unassigned row) from already-computed punch/refund results. Punched wins over
-    refunded if a row were somehow in both (see this file's own test for why that shouldn't
-    actually happen given the calling order in process_job, but the function stays correct
-    either way rather than assuming)."""
+    """Pure - no I/O. Decides each row's `stamp` (truthy = already punched/refunded, so the
+    caller must drop it rather than append it; None for a plain fresh/unassigned row) from
+    already-computed punch/refund results. Punched wins over refunded if a row were somehow in
+    both (see this file's own test for why that shouldn't actually happen given the calling
+    order in process_job, but the function stays correct either way rather than assuming)."""
     out = []
     for row in rows:
         order_id = row["orderId"]
@@ -215,9 +216,6 @@ ROW_WIDTH = _column_letter_to_index(LAST_COLUMN_LETTER) + 1
 # (api/_lib/rtoCsvImport.js's blankPlaceholder = 'NA'), so its block always reaches the true
 # bottom of our data.
 APPEND_ANCHOR_RANGE = "A2:A"
-# Q (Agent Name) blank, R (Connected) blank, then S/T/U carry the punched/refunded stamp -
-# same layout PUNCHED_STAMP/REFUNDED_STAMP above have always targeted.
-STAMP_START_INDEX = _column_letter_to_index("S")
 
 
 def _check_sheet_layout(full_header_row):
@@ -364,6 +362,16 @@ def process_job(job_id):
         _update_job(conn, job_id, status="appending")
         stamped_rows = partition_and_stamp(rows, punched_ids, all_refund_results)
 
+        # Already-punched / already-refunded rows are dropped here, not appended-with-a-stamp -
+        # explicit business instruction: such a lead is already handled outside this sheet, so it
+        # must not occupy a row in it. already_punched_count/already_refunded_count above already
+        # captured these for the UI before this filter runs.
+        before_stamp_drop = len(stamped_rows)
+        stamped_rows = [r for r in stamped_rows if not r["stamp"]]
+        if before_stamp_drop != len(stamped_rows):
+            print(f"process_job({job_id}): {before_stamp_drop - len(stamped_rows)} row(s) already "
+                  "punched/refunded - not appended")
+
         # Everything from here to the append itself must be serialised against other workers -
         # see APPEND_LOCK_NAME above for the duplicate-AWB race this closes. No explicit release
         # on the failure paths: the lock is connection-scoped and this function's own
@@ -423,15 +431,11 @@ def process_job(job_id):
 
         values_to_append = []
         for row in stamped_rows:
+            # Every row reaching this loop already has stamp=None (punched/refunded rows were
+            # dropped above), so S/T/U stay blank - a fresh, unassigned lead.
             base_row = [""] * ROW_WIDTH
             for col, val in row["cellsByColumn"].items():
                 base_row[_column_letter_to_index(col)] = val
-            if row["stamp"]:
-                # S/T/U carry the punched/refunded stamp - Q (Agent Name) and R (Connected)
-                # stay blank, matching how assign_leads.py stamps its own already-
-                # refunded/already-punched rows (see its own value_ranges construction).
-                s, t, u = row["stamp"]
-                base_row[STAMP_START_INDEX:STAMP_START_INDEX + 3] = [s, t, u]
             values_to_append.append(base_row)
         append_resp = lib.append_sheet_rows(SPREADSHEET_ID, f"'{SHEET_TAB}'!{APPEND_ANCHOR_RANGE}", values_to_append)
         # Released the moment the rows are in: the verification read and status writes below
