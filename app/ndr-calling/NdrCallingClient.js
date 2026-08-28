@@ -65,8 +65,14 @@ function ndrAttemptFilterOnChange(current, next, onSave) {
 const NDR_SHEET_ID = '12p3rlXyE0PDx3BMqBpl3CUo5YD3uVzQun1HFPizpSeI';
 const NDR_SHEET_TAB = 'Latest NDR '; // trailing space is part of the real tab name
 
-async function fetchNdrSheetValues(range) {
-  const r = await fetch(`/api/ndr/sheet?op=values&sid=${encodeURIComponent(NDR_SHEET_ID)}&range=${encodeURIComponent(range)}`);
+// `team` is the admin team picker's current selection (ndrSheetTeam below), or null for everyone
+// else - an agent's own team is resolved server-side from their calling_agent_process row and must
+// never be taken from the client. teamId is the only team field the server reads here (see
+// resolveSheetFor's admin branch in api/ndr/sheet.js); the legacy `sid` stays in the query string
+// purely because that route deliberately ignores it, so an older app/ deploy keeps working.
+async function fetchNdrSheetValues(range, team) {
+  const teamQuery = team ? `&teamId=${encodeURIComponent(team.id)}` : '';
+  const r = await fetch(`/api/ndr/sheet?op=values&sid=${encodeURIComponent(NDR_SHEET_ID)}&range=${encodeURIComponent(range)}${teamQuery}`);
   // Include the response body in the thrown message - a bare status code (401 vs 403 vs 500)
   // collapses several very different failure modes (our own session/permission check vs
   // Google's own API rejecting the request vs a Lambda-level error) into one number, which cost
@@ -94,13 +100,20 @@ async function fetchNdrSheetValues(range) {
 // but a properly scalable version needs to fetch by WHO the row belongs to, not by recency.
 const NDR_MAX_ROWS = 12000;
 const NDR_LAST_COL = 'AB'; // Remarks - the last column this UI reads or writes
-async function fetchNdrSheet() {
-  const idCol = await fetchNdrSheetValues(`'${NDR_SHEET_TAB}'!A2:A1000000`);
+// The tab name comes from the picked team's own calling_teams row, NOT from NDR_SHEET_TAB - two
+// teams' sheets are free to name their tabs differently, and the range string is built here, so a
+// hardcoded tab would resolve against the wrong team's sheet and 400 out of the Sheets API.
+// NDR_SHEET_TAB stays the fallback for the no-team (pre-split / plain agent) case, which is the
+// tab api/ndr/sheet.js's own PRE_SPLIT_TEAM points at.
+const ndrTabOf = (team) => (team && team.sheetTab) || NDR_SHEET_TAB;
+async function fetchNdrSheet(team) {
+  const tab = ndrTabOf(team);
+  const idCol = await fetchNdrSheetValues(`'${tab}'!A2:A1000000`, team);
   if (!idCol.length) return { rows: [], startRow: 2, totalRows: 0 };
   const totalRows = idCol.length;
   const lastRow = totalRows + 1;
   const startRow = Math.max(2, lastRow - NDR_MAX_ROWS + 1);
-  const rows = await fetchNdrSheetValues(`'${NDR_SHEET_TAB}'!A${startRow}:${NDR_LAST_COL}${lastRow}`);
+  const rows = await fetchNdrSheetValues(`'${tab}'!A${startRow}:${NDR_LAST_COL}${lastRow}`, team);
   return { rows, startRow, totalRows };
 }
 
@@ -187,13 +200,18 @@ function mapNdrRow(row, rowNum) {
 // Writes one or more cell ranges in a single batchUpdate call - the only writes this UI ever
 // makes are Agent Name (claim on Call) and Calling Date/Connected/Outcome/Remarks (disposition
 // save - see saveNdrDisposition), sometimes both at once (disposing a lead nobody claimed yet).
-async function writeNdrCells(ranges) {
+async function writeNdrCells(ranges, team) {
+  const tab = ndrTabOf(team);
   const r = await fetch('/api/ndr/sheet', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       op: 'batchUpdate', sid: NDR_SHEET_ID,
-      data: ranges.map(({ range, values }) => ({ range: `'${NDR_SHEET_TAB}'!${range}`, values: [values] })),
+      // Same team as the read that produced these rowNums - a write routed to a different
+      // team's sheet would land real disposition text on an unrelated row of someone else's
+      // live spreadsheet, since row numbers only mean anything within one sheet.
+      ...(team ? { teamId: team.id } : {}),
+      data: ranges.map(({ range, values }) => ({ range: `'${tab}'!${range}`, values: [values] })),
     }),
   });
   if (!r.ok) throw new Error(`Sheets write ${r.status}`);
@@ -239,6 +257,47 @@ export default function NdrCallingClient() {
   const { processDispositions } = disp;
   const teamsHook = useCallingTeams(PROCESS_KEY, { googleUser, showToast });
   const { teams: ndrTeams } = teamsHook;
+
+  // Which team's sheet a FULL ADMIN is looking at. A full admin holds no calling_agent_process
+  // row by convention, so api/ndr/sheet.js has nothing to resolve their sheet from once two
+  // teams exist - it answers 403 "pick one (?teamId=<id>)" for reads AND writes, which is what
+  // an admin actually saw on this page. This is the picker that route was already waiting for;
+  // it is the only client-supplied team field the server honours, and only for a full admin
+  // (an agent's team stays server-resolved, unaffected by anything set here).
+  const ndrActiveTeams = useMemo(() => (ndrTeams || []).filter(t => t.active), [ndrTeams]);
+  // Only a full admin's GET on /api/admin/calling-teams comes back with sheetTab (a process
+  // admin gets display-only shapes), and only a full admin's teamId is honoured by the sheet
+  // route - so the picker is full-admin-only. With 0 or 1 active team there is nothing to pick:
+  // the server resolves the single possible sheet on its own, exactly as before teams existed.
+  const ndrShowTeamPicker = !!sessionIsAdmin && ndrActiveTeams.length > 1;
+  const [ndrTeamIdPref, setNdrTeamIdPref] = useState(() => {
+    const v = safeStorage.getItem('ndr_admin_team_id');
+    return v ? Number(v) : null;
+  });
+  // Falls back to the first active team rather than staying null, so an admin lands on real
+  // leads instead of the 403 - and so a remembered team that was since paused or deleted can't
+  // strand the page on a team that no longer resolves.
+  const ndrSheetTeam = useMemo(() => {
+    if (!ndrShowTeamPicker) return null;
+    return ndrActiveTeams.find(t => t.id === ndrTeamIdPref) || ndrActiveTeams[0];
+  }, [ndrShowTeamPicker, ndrActiveTeams, ndrTeamIdPref]);
+  // Read by syncNdr's own in-flight/retry guard below, which needs the team CURRENTLY picked,
+  // not the one its closure captured. Assigned during render on purpose: an effect would update
+  // it a tick late, and a fetch that resolves inside that tick is exactly the case being
+  // guarded against.
+  const ndrSheetTeamRef = useRef(null);
+  ndrSheetTeamRef.current = ndrSheetTeam;
+
+  const pickNdrTeam = (id) => {
+    setNdrTeamIdPref(id);
+    safeStorage.setItem('ndr_admin_team_id', String(id));
+  };
+  // Gates the sync effects below. An admin must not fire a read before the team list has
+  // loaded: with two teams live that request has no teamId to carry and comes back 403, which
+  // is exactly the error banner this fixes. Keyed on sessionIsAdmin, not on `ndrTeams === null`
+  // alone - a plain agent's teams GET legitimately 403s and leaves it null forever, and their
+  // read needs no team at all.
+  const ndrSheetReady = !!googleUser?.email && (!sessionIsAdmin || ndrTeams !== null);
 
   // Same theme setup as RtoCrmClient.js's App() - one theme, always. The "zinc-900"/"#09090b"
   // etc. Tailwind classes used throughout this file are NOT actually dark in the shipped app;
@@ -319,9 +378,17 @@ export default function NdrCallingClient() {
 
   const ndrSyncFailCountRef = useRef(0);
   const syncNdr = useCallback(async (silent = false) => {
+    // Which team THIS run is reading. Both the in-flight result below and the backoff retry are
+    // discarded if the admin has since picked a different team: a row's rowNum only means
+    // something inside one sheet, and writes (openNdrCall/saveNdrDisposition) always target the
+    // currently-picked team - so letting a stale run repopulate the table would aim real
+    // disposition writes at unrelated rows of the other team's live sheet.
+    const team = ndrSheetTeam;
+    const stillCurrent = () => (ndrSheetTeamRef.current?.id ?? null) === (team?.id ?? null);
     setNdrSyncing(true);
     try {
-      const { rows, startRow, totalRows } = await fetchNdrSheet();
+      const { rows, startRow, totalRows } = await fetchNdrSheet(team);
+      if (!stillCurrent()) return;
       const mapped = rows.map((row, idx) => mapNdrRow(row, startRow + idx));
       setNdrTickets(mapped);
       setNdrTotalRows(totalRows);
@@ -330,32 +397,39 @@ export default function NdrCallingClient() {
       ndrSyncFailCountRef.current = 0;
       if (!silent) showToast(`${mapped.length.toLocaleString('en-IN')} NDR leads synced`);
     } catch (e) {
+      if (!stillCurrent()) return;
       console.error('NDR sync failed:', e);
       setNdrSyncError(e.message || 'Sync failed');
       if (!silent) showToast(e.message);
       ndrSyncFailCountRef.current = Math.min(ndrSyncFailCountRef.current + 1, 6);
       const backoffMs = Math.min(15000 * (2 ** (ndrSyncFailCountRef.current - 1)), 300000);
       const jitterMs = Math.random() * 3000;
-      setTimeout(() => syncNdr(true), backoffMs + jitterMs);
+      setTimeout(() => { if (stillCurrent()) syncNdr(true); }, backoffMs + jitterMs);
     } finally {
       setNdrSyncing(false);
     }
-  }, [showToast]);
+  }, [showToast, ndrSheetTeam]);
 
-  useEffect(() => { syncNdr(true); }, [syncNdr]);
+  // Switching teams changes syncNdr's identity, so this same effect is what reloads the table
+  // for the newly-picked team - no separate switch handler. Stale rows are cleared first:
+  // without it the previous team's leads stay on screen (and stay clickable, i.e. writable at
+  // row numbers that mean something different in the new team's sheet) until the fetch returns.
+  useEffect(() => { setNdrTickets([]); setNdrTotalRows(0); }, [ndrSheetTeam]);
+  useEffect(() => { if (ndrSheetReady) syncNdr(true); }, [ndrSheetReady, syncNdr]);
   useEffect(() => {
+    if (!ndrSheetReady) return;
     const t = setInterval(() => {
       if (!document.hidden) syncNdr(true);
     }, 60000);
     return () => clearInterval(t);
-  }, [syncNdr]);
+  }, [ndrSheetReady, syncNdr]);
   // Catches up a long-backgrounded tab immediately on return, instead of waiting up to a full
   // 60s tick for the next poll to happen to fire.
   useEffect(() => {
-    const onVisible = () => { if (!document.hidden) syncNdr(true); };
+    const onVisible = () => { if (!document.hidden && ndrSheetReady) syncNdr(true); };
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [syncNdr]);
+  }, [ndrSheetReady, syncNdr]);
 
   // Opens the Call/disposition modal, claiming the lead first if nobody holds it yet. Same
   // "skip the claim, don't block the modal" behavior while Offline: saveNdrDisposition writes
@@ -366,7 +440,7 @@ export default function NdrCallingClient() {
     let ticket = t;
     if (!t.assignedAgent && agentStatus !== 'Offline' && googleUser?.email) {
       try {
-        await writeNdrCells([{ range: `S${t.rowNum}`, values: [googleUser.email] }]);
+        await writeNdrCells([{ range: `S${t.rowNum}`, values: [googleUser.email] }], ndrSheetTeam);
         ticket = { ...t, assignedAgent: googleUser.email };
         setNdrTickets(prev => prev.map(x => x.id === t.id ? ticket : x));
         recordNdrLeadAssignment({ action: 'claim', awbNumber: t.awb, email: googleUser.email });
@@ -425,7 +499,7 @@ export default function NdrCallingClient() {
       // agent's disposal wait on Sheets before it even reaches the DB is pure added latency.
       if (claimNow) await recordNdrLeadAssignment({ action: 'claim', awbNumber: ndrDetailTkt.awb, email: googleUser.email });
       await recordNdrLeadAssignment({ action: 'dispose', awbNumber: ndrDetailTkt.awb, disposition: ndrDispSelection, agentRemarks: ndrDispRemarks });
-      await writeNdrCells(ranges);
+      await writeNdrCells(ranges, ndrSheetTeam);
       setNdrTickets(prev => prev.map(x => x.id === ndrDetailTkt.id
         ? { ...x, callingDate, connected: connectedValue, outcome: outcomeValue, remarks: remarksValue,
             ...(partnerCallValue ? { deliveryAgentCall: partnerCallValue } : {}),
@@ -1265,7 +1339,18 @@ export default function NdrCallingClient() {
         onSync={() => syncNdr(false)}
         session={session}
         rightSlot={
-          /* Bulk-add new NDR leads from a CSV (see NdrUploadModal). isProcessAdmin here is
+          <>
+          {/* Which team's sheet this admin is reading and writing - see ndrSheetTeam. Rendered
+              only when there is a real choice to make (two or more active teams) and only for a
+              full admin, whose teamId is the only one api/ndr/sheet.js honours. */}
+          {ndrShowTeamPicker && (
+            <CustomSelect
+              value={ndrSheetTeam?.id ?? ''}
+              onChange={(val) => pickNdrTeam(Number(val))}
+              options={ndrActiveTeams.map(t => ({ value: t.id, label: t.name }))}
+            />
+          )}
+          {/* Bulk-add new NDR leads from a CSV (see NdrUploadModal). isProcessAdmin here is
              already NDR's own - this page serves one process, unlike RtoCrmClient's switcher,
              so no activeProcess check is needed alongside it. api/ndr/upload.js re-checks the
              same thing server-side; this is UX only. */
@@ -1277,12 +1362,17 @@ export default function NdrCallingClient() {
             >
               Upload CSV
             </button>
-          ) : null
+          ) : null}
+          </>
         }
       />
 
       {showUploadModal && (
         <NdrUploadModal
+          /* Same team the table is showing, so an upload can never land in the other team's
+             live sheet. api/ndr/upload.js refuses an admin with no teamId once two teams exist
+             ("Pick which team to upload to.") - this is that pick. */
+          teamId={ndrSheetTeam?.id ?? null}
           onClose={() => setShowUploadModal(false)}
           /* Silent resync so the new rows appear without a toast on top of the modal's own
              result pills, which already say how many were added. */

@@ -8,7 +8,7 @@
 import { useState, useRef } from 'react';
 import { Overlay, XIcon, Stat } from '../_calling/ui';
 
-export default function NdrUploadModal({ onClose, onDone }) {
+export default function NdrUploadModal({ onClose, onDone, teamId = null }) {
   const [file, setFile] = useState(null);
   const [csvText, setCsvText] = useState('');
   const [dragOver, setDragOver] = useState(false);
@@ -47,7 +47,9 @@ export default function NdrUploadModal({ onClose, onDone }) {
       const res = await fetch('/api/ndr/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ csv: csvText }),
+        // teamId only matters for a full admin with two or more active teams - see
+        // resolveUploadTarget in api/ndr/upload.js, which ignores it for everyone else.
+        body: JSON.stringify(teamId != null ? { csv: csvText, teamId } : { csv: csvText }),
       });
       const data = await res.json();
       if (!res.ok) {
