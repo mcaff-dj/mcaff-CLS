@@ -439,7 +439,7 @@ export function CallingTeamsCard({ processKey, processLabel, teamsHook, sessionI
 // changes, same reasoning as processAgents in useCallingSession: each process's list is its own.
 // RTO's disposition options stay its hardcoded connectedOutcomes/unreachableOutcomes arrays and
 // never touch this endpoint - this only backs a process (NDR today) with no built-in list.
-export function useProcessDispositions(processKey, { googleUser, showToast } = {}) {
+export function useProcessDispositions(processKey, { googleUser, showToast, teamId = null } = {}) {
   const [processDispositions, setProcessDispositions] = useState(null); // null = not loaded yet
   const [dispositionsError, setDispositionsError] = useState('');
   const [savingDisposition, setSavingDisposition] = useState(false);
@@ -452,12 +452,16 @@ export function useProcessDispositions(processKey, { googleUser, showToast } = {
   // expanded parents never share state or clobber each other.
   const [newChildDrafts, setNewChildDrafts] = useState({});
 
-  const loadDispositions = useCallback(async (key) => {
+  const loadDispositions = useCallback(async (key, team) => {
     if (!key) return;
     setProcessDispositions(null);
     setDispositionsError('');
     try {
-      const r = await fetch(`/api/admin/dispositions?process=${encodeURIComponent(key)}`);
+      // teamId is honoured server-side only for a full admin - an agent or team lead gets their
+      // own team's tree regardless of what is sent here, so this is a UI affordance, not a
+      // permission.
+      const teamQuery = team != null ? `&teamId=${encodeURIComponent(team)}` : '';
+      const r = await fetch(`/api/admin/dispositions?process=${encodeURIComponent(key)}${teamQuery}`);
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { setDispositionsError(d.error || `Could not load dispositions (${r.status})`); return; }
       setProcessDispositions(d.dispositions || []);
@@ -470,8 +474,8 @@ export function useProcessDispositions(processKey, { googleUser, showToast } = {
   // the caller doesn't administer, and this stays a lightweight no-op for a process (RTO) whose
   // disposition list never reads from here, rather than an empty admin-only card.
   useEffect(() => {
-    if (googleUser?.email) loadDispositions(processKey);
-  }, [googleUser, processKey, loadDispositions]);
+    if (googleUser?.email) loadDispositions(processKey, teamId);
+  }, [googleUser, processKey, teamId, loadDispositions]);
 
   const toggleDispExpanded = (id) => {
     setExpandedDispIds((prev) => {
@@ -493,7 +497,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast } = {
       const r = await fetch('/api/admin/dispositions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ processKey, label, description: draft.description.trim(), parentId: parentId || undefined }),
+        body: JSON.stringify({ processKey, label, description: draft.description.trim(), parentId: parentId || undefined, ...(teamId != null ? { teamId } : {}) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -529,7 +533,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast } = {
       const r = await fetch('/api/admin/dispositions', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ processKey, id, ...patch }),
+        body: JSON.stringify({ processKey, id, ...patch, ...(teamId != null ? { teamId } : {}) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -555,7 +559,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast } = {
       const r = await fetch('/api/admin/dispositions', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ processKey, id }),
+        body: JSON.stringify({ processKey, id, ...(teamId != null ? { teamId } : {}) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -592,14 +596,14 @@ export function useProcessDispositions(processKey, { googleUser, showToast } = {
       const r = await fetch('/api/admin/dispositions', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ processKey, orderedIds: next.map((x) => x.id), parentId: parentId || undefined }),
+        body: JSON.stringify({ processKey, orderedIds: next.map((x) => x.id), parentId: parentId || undefined, ...(teamId != null ? { teamId } : {}) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
         const msg = d.error || `Could not reorder (${r.status})`;
         setDispositionsError(msg);
         if (showToast) showToast(`⚠️ ${msg}`);
-        loadDispositions(processKey);
+        loadDispositions(processKey, teamId);
         return;
       }
       setProcessDispositions(d.dispositions || []);
@@ -607,7 +611,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast } = {
       const msg = e.message || 'Could not reorder';
       setDispositionsError(msg);
       if (showToast) showToast(`⚠️ ${msg}`);
-      loadDispositions(processKey);
+      loadDispositions(processKey, teamId);
     } finally {
       setSavingDisposition(false);
     }
@@ -618,6 +622,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast } = {
     newDispLabel, setNewDispLabel, newDispDesc, setNewDispDesc,
     expandedDispIds, toggleDispExpanded, newChildDrafts, setNewChildDrafts,
     addDisposition, saveDispositionEdit, deleteDisposition, moveDisposition,
+    teamId,
   };
 }
 
@@ -768,8 +773,8 @@ function DispNode({ d, list, index, parentId, depth, disp, allowInputTypeControl
 // calling_process_dispositions) - "highly customisable" per the ask: an admin can add, rename,
 // describe, nest (any depth), reorder, and remove options freely, with no seeded default and no
 // fixed count. disp = a useProcessDispositions() return value; processLabel = display name.
-export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeControl = false }) {
-  const { processDispositions, dispositionsError, savingDisposition, newDispLabel, setNewDispLabel, newDispDesc, setNewDispDesc, addDisposition } = disp;
+export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeControl = false, teamName = '' }) {
+  const { processDispositions, dispositionsError, savingDisposition, newDispLabel, setNewDispLabel, newDispDesc, setNewDispDesc, addDisposition, teamId } = disp;
   return (
     <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
       <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
@@ -778,6 +783,11 @@ export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeCont
           <div>
             <h2 className="text-lg font-bold text-zinc-100">
               Disposition List{processLabel ? ` — ${processLabel}` : ''}
+              {/* Which tree this card edits. Without it an admin switching teams cannot tell
+                  whose list they just changed - the one thing per-team trees make possible to
+                  get wrong. */}
+              {teamId != null && <span className="text-zinc-400 font-medium"> · {teamName || `Team #${teamId}`}</span>}
+              {teamId == null && teamName === '' && <span className="text-zinc-500 font-medium"> · Shared (fallback)</span>}
             </h2>
             <p className="text-[13px] text-zinc-500">
               What an agent may select when disposing a lead on this process. Unlike RTO Calling
