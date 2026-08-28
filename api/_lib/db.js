@@ -3622,6 +3622,44 @@ async function saveCellComment(userId, page, cellKey, text) {
   `;
 }
 
+// Which of these AWBs the courier has already delivered, as a Set of AWB strings.
+//
+// mcaff_prod.lmd_courier_tracking is the logistics pipeline's own AWB-keyed table (PRIMARY KEY
+// awb_number, ~2.86M rows) - a DIFFERENT SCHEMA on the same RDS instance as PEP_CLS, which is why
+// the name is spelled out in full: the pool's own `database` stays PEP_CLS and is never switched.
+// scripts/auto_dispose_de_categories.py reads the same table from Python for the same reason.
+//
+// This is a primary-key lookup per AWB, not a scan, and it is a single batched round trip per
+// chunk with no per-row network call of its own - which is what makes it safe to run inside a
+// browser request, unlike the RTO upload's GoKwik check (see api/rto/upload-start.js for why THAT
+// one needed a background worker). A full 5000-row upload costs 5 queries.
+//
+// The comparison is left to MySQL, whose default collation is case-insensitive, so a column
+// holding 'DELIVERED' or 'delivered' matches too - the same tolerance
+// scripts/auto_dispose_de_categories.py relies on for uni_Shipping_Package_Status.
+async function getDeliveredAwbNumbers(awbNumbers) {
+  const unique = [...new Set((awbNumbers || []).filter(Boolean).map(String))];
+  if (!unique.length) return new Set();
+  const p = await getPool();
+  const delivered = new Set();
+  // Chunked, and sequential rather than Promise.all: the pool holds 5 connections total for the
+  // whole container, so firing every chunk at once would starve any other query this same request
+  // still has to make.
+  const CHUNK = 1000;
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const chunk = unique.slice(i, i + CHUNK);
+    // eslint-disable-next-line no-await-in-loop
+    const [rows] = await p.execute(
+      `SELECT awb_number FROM mcaff_prod.lmd_courier_tracking
+        WHERE awb_number IN (${chunk.map(() => '?').join(',')})
+          AND courier_final_status = 'Delivered'`,
+      chunk,
+    );
+    rows.forEach((r) => delivered.add(String(r.awb_number)));
+  }
+  return delivered;
+}
+
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
@@ -3642,7 +3680,7 @@ module.exports = {
   listCallingTeams, getCallingTeam, createCallingTeam, updateCallingTeam, resolveCallerTeam,
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions,
-  claimNdrLead, disposeNdrLead, getLiveNdrLeadEmail,
+  claimNdrLead, disposeNdrLead, getLiveNdrLeadEmail, getDeliveredAwbNumbers,
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,

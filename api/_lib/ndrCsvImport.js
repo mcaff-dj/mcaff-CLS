@@ -9,9 +9,12 @@
 // script only reads out to T because Agent Name/Connected are all it needs).
 //
 // Columns deliberately NOT written by an upload:
-//   C, K, N, W-AA  unknown to this codebase - mapNdrRow skips them, and NdrCallingClient's own
+//   C, W-AA        unknown to this codebase - mapNdrRow skips them, and NdrCallingClient's own
 //                  comment says they belong to a separate downstream CS process whose taxonomy
-//                  we do not understand well enough to touch.
+//                  we do not understand well enough to touch. K and N were in this list until
+//                  the business asked for them explicitly (see NDR_CSV_TO_COLUMN below); nothing
+//                  in this codebase reads either, so they are written for the sheet's own readers
+//                  and for that same downstream process, not for anything here.
 //   R, S, T, U, V, AB  agent/disposition columns (Calling Date, Agent Name, Connected, Outcome,
 //                  "Did you receive any call from the delivery agent?", Remarks) - written by
 //                  assign_ndr_leads.py and the calling UI, never by an import. A fresh lead must
@@ -31,8 +34,15 @@ const NDR_CSV_TO_COLUMN = {
   'Address Pincode': 'H',
   'Address City': 'I',
   'Address State': 'J',
+  // K and N are written on explicit business instruction, unlike the columns above which came
+  // from mapNdrRow. Neither is read anywhere in this codebase - mapNdrRow skips both - so the
+  // only consumers are whoever reads the sheet directly and the downstream CS process. K's live
+  // header is "Address quality", which is what this fills it from; the column previously carried
+  // "Order Value" and was renamed in the sheet before this mapping was asked for.
+  'Address Quality': 'K',
   'Payment Method': 'L',
   'Status': 'M',
+  'Is Buyer Response Received': 'N',
   'Attempt Count': 'O',
   'Latest NDR Date': 'P',
   'Latest NDR Reason': 'Q',
@@ -77,8 +87,12 @@ const NDR_EXPECTED_SHEET_HEADER = {
   H: 'Pincode',
   I: 'City',
   J: 'State',
+  // Compared through normalizeHeader, so the live cell's own casing ("Address quality") matches
+  // this just as well - see checkSheetLayout in rtoCsvImport.js.
+  K: 'Address Quality',
   L: 'Payment Mode',
   M: 'Status',
+  N: 'Is Buyer Response Received',
   O: 'Attempt Count',
   P: 'Latest NDR Date',
   Q: 'Latest NDR Reason',
@@ -108,9 +122,14 @@ const NDR_IMPORT = {
   // 2026-08-25, per scripts/test_assign_ndr_leads.py). Deduping on AWB alone would reject every
   // genuine follow-up attempt, so the attempt count joins the key.
   dedupExtraCsvHeaders: ['Attempt Count'],
-  // NDR's Order ID column is the brand source for brandOf() in NdrCallingClient.js and is read
-  // whole there, so it is written verbatim - no truncation at the first "_" the way RTO's is.
-  orderIdCsvHeader: null,
+  // Truncated at the first "_" like RTO's, on explicit business instruction:
+  // "HYP43558080_SP/G3/2627/924677" is written as "HYP43558080". This column was previously
+  // written verbatim because it is the brand source for brandOf() in NdrCallingClient.js and
+  // brand_of() in scripts/assign_ndr_leads.py - both of which still work, since both test only
+  // the "HYP" PREFIX and the truncation keeps everything before the first "_". Rows appended
+  // before this keep their full Order ID; nothing in this codebase matches the two forms against
+  // each other, so the mixed column is cosmetic.
+  orderIdCsvHeader: 'Order ID',
   orderIdColumn: 'A',
   paymentMethodColumn: 'L',
   // Blanks stay genuinely blank here, unlike RTO's literal "NA". NdrCallingClient renders every

@@ -4,13 +4,16 @@
 // then against every OTHER active team's sheet), and appends what survives.
 //
 // Synchronous, unlike the RTO upload's two-stage endpoint+Lambda split (api/rto/upload-start.js).
-// That split exists solely because RTO's rows need GoKwik and mcaff_prod MySQL checks before they
-// may be written, and neither is reachable from this runtime inside API Gateway's ~29s ceiling.
-// An NDR lead has no such check: nothing was returned to refund and no replacement order exists
-// to have been punched, so there is nothing to wait on and no job/worker/polling to justify.
+// That split exists because RTO's rows need a per-row GoKwik HTTP call before they may be
+// written, and thousands of those cannot finish inside API Gateway's ~29s ceiling.
 //
-// If a check ever IS added here and it needs MySQL, this cannot stay synchronous - it would need
-// the same jobs-table + worker-Lambda shape RTO has. Deliberately not scaffolded for that now.
+// This endpoint now does have a MySQL check of its own - the delivered-AWB filter below - and it
+// still does not need that machinery, because the two checks are not the same shape. GoKwik is
+// one network call PER ROW; the delivered check is a single batched primary-key lookup against
+// mcaff_prod.lmd_courier_tracking, five queries for the largest upload this endpoint accepts (see
+// getDeliveredAwbNumbers in db.js). A job table and a worker Lambda would buy nothing here except
+// polling to maintain. If a genuinely per-row check is ever added, that calculus changes and this
+// would need RTO's shape.
 const { JWT } = require('google-auth-library');
 const { getSession } = require('../_lib/session');
 const { parseCSV } = require('../_lib/csv');
@@ -20,7 +23,9 @@ const {
 const {
   NDR_IMPORT, NDR_ROW_WIDTH, NDR_AWB_COLUMN, NDR_ATTEMPT_COLUMN,
 } = require('../_lib/ndrCsvImport');
-const { isCallingProcessAdmin, resolveCallerTeam, listCallingTeams } = require('../_lib/db');
+const {
+  isCallingProcessAdmin, resolveCallerTeam, listCallingTeams, getDeliveredAwbNumbers,
+} = require('../_lib/db');
 const { coerceTeamId } = require('../_lib/callingTeams');
 // PRE_SPLIT_TEAM: the same zero-active-teams fallback api/ndr/sheet.js already falls back to for
 // reads, imported rather than re-declared so the two endpoints share one literal pair
@@ -384,6 +389,37 @@ module.exports = async (req, res) => {
     });
     plan.validRows = keep;
 
+    // A shipment the courier has already delivered is not a lead - calling that customer about a
+    // failed delivery wastes the attempt and reads as incompetence at the other end. The NDR
+    // export is generated from a snapshot, so by the time a file is uploaded some of its rows have
+    // already resolved themselves.
+    //
+    // FAILS CLOSED, deliberately, unlike the fail-open convention most filters in this codebase
+    // use. If the check cannot run, the honest states are "refuse and retry" or "append leads that
+    // may already be delivered" - and the second is exactly what this rule exists to prevent. A
+    // refusal costs one retry and loses nothing; appending puts dead leads in front of agents and
+    // mirrors them into ndr_lead_assignments, where undoing it means deleting rows by hand from a
+    // sheet someone else is working in. The message names the table so a missing cross-schema
+    // GRANT is diagnosable from the response alone rather than from CloudWatch.
+    let deliveredAwbs;
+    try {
+      deliveredAwbs = await getDeliveredAwbNumbers(plan.validRows.map((r) => r.awbCode));
+    } catch (e) {
+      console.error('api/ndr/upload delivered-check failed:', e);
+      res.status(500).json({
+        error: 'Could not check delivered status against mcaff_prod.lmd_courier_tracking, so this '
+          + 'upload was refused rather than risk appending leads the courier has already '
+          + `delivered. Nothing was written. (${e.message})`,
+      });
+      return;
+    }
+    const deliveredHits = [];
+    plan.validRows = plan.validRows.filter((row) => {
+      if (!deliveredAwbs.has(row.awbCode)) return true;
+      deliveredHits.push({ line: row.line, reason: 'Courier already marked this AWB Delivered' });
+      return false;
+    });
+
     let appended = 0;
     if (plan.validRows.length) {
       await pinAwbColumnFormat(client, team.sheetId, team.sheetTab);
@@ -420,6 +456,9 @@ module.exports = async (req, res) => {
       duplicateInSheet: plan.counts.duplicateInSheet,
       duplicateInFile: plan.counts.duplicateInFile,
       duplicateInOtherTeam: foreignHits.length,
+      // Rows dropped because mcaff_prod.lmd_courier_tracking already has the courier's final
+      // status as Delivered - see the filter above.
+      alreadyDelivered: deliveredHits.length,
       missingAwb: plan.counts.missingAwb,
       scientificAwb: plan.counts.scientificAwb,
       // Rows whose AWB arrived in scientific notation but still carried every digit, so they were
@@ -428,7 +467,10 @@ module.exports = async (req, res) => {
       // exactly the kind of thing that should be visible in the upload result.
       expandedAwb: plan.counts.expandedAwb,
       total: csvRows.length,
-      errors: [...foreignHits, ...plan.errors].slice(0, MAX_REPORTED_ERRORS),
+      // deliveredHits last: on a normal file it is the largest and least surprising group (the
+      // export is a snapshot, so some rows always resolve before the upload), and it must not
+      // crowd out the cross-team hits or the parse errors. Its own exact count is above.
+      errors: [...foreignHits, ...plan.errors, ...deliveredHits].slice(0, MAX_REPORTED_ERRORS),
     });
   } catch (e) {
     console.error('api/ndr/upload error:', e);

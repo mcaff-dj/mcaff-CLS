@@ -30,9 +30,11 @@ Object.values(NDR_CSV_TO_COLUMN).forEach((col) => {
 // would corrupt live data silently, so the set is pinned.
 assert.deepStrictEqual(
   Object.values(NDR_CSV_TO_COLUMN).slice().sort(),
-  ['A', 'B', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'L', 'M', 'O', 'P', 'Q'],
+  ['A', 'B', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q'],
 );
-['C', 'K', 'N', 'R', 'S', 'T', 'U', 'V'].forEach((col) => {
+// C stays off-limits, as do every agent column (R-V) and the CS process's own (W-AA). K and N are
+// deliberately absent from this list - they are written now, on explicit instruction.
+['C', 'R', 'S', 'T', 'U', 'V'].forEach((col) => {
   assert.ok(!Object.values(NDR_CSV_TO_COLUMN).includes(col), `must never write column ${col}`);
 });
 
@@ -61,16 +63,32 @@ assert.deepStrictEqual(
   assert.deepStrictEqual(plan.validRows.map((r) => r.awbCode), ['AWBX', 'AWBZ']);
 }
 
-// 4. NDR keeps the whole Order ID - brandOf() in NdrCallingClient.js reads it entire, unlike
-// RTO which truncates at the first "_".
+// 4. Order ID is truncated at the first "_" before it reaches the sheet, like RTO's.
+// "HYP43558080_SP/G3/2627/924677" is written as "HYP43558080".
 {
   const plan = buildRowPlan({
-    csvRows: [csvRow({ 'Order ID': 'HYP44089510_SP/G3/2627/984539' })],
+    csvRows: [csvRow({ 'Order ID': 'HYP43558080_SP/G3/2627/924677' })],
     existingKeySet: new Set(),
     config: NDR_IMPORT,
   });
-  assert.strictEqual(plan.validRows[0].cellsByColumn.A, 'HYP44089510_SP/G3/2627/984539');
-  assert.strictEqual(plan.validRows[0].orderId, 'HYP44089510_SP/G3/2627/984539');
+  assert.strictEqual(plan.validRows[0].cellsByColumn.A, 'HYP43558080');
+  assert.strictEqual(plan.validRows[0].orderId, 'HYP43558080');
+}
+
+// 4b. The truncation must not break brand detection, which is the reason column A was written
+// verbatim before this. Both brandOf() in NdrCallingClient.js and brand_of() in
+// scripts/assign_ndr_leads.py test the "HYP" PREFIX only, so everything before the first "_"
+// is exactly what they need - but a future truncation that cut anywhere else would silently
+// reclassify every Hyphen lead as mCaffeine, which nothing else would catch.
+{
+  const written = (orderId) => buildRowPlan({
+    csvRows: [csvRow({ 'Order ID': orderId })], existingKeySet: new Set(), config: NDR_IMPORT,
+  }).validRows[0].cellsByColumn.A;
+  const brandOf = (v) => (String(v || '').toUpperCase().startsWith('HYP') ? 'Hyphen' : 'mCaffeine');
+  assert.strictEqual(brandOf(written('HYP43558080_SP/G3/2627/924677')), 'Hyphen');
+  assert.strictEqual(brandOf(written('MC12345678_SP/G3/2627/924677')), 'mCaffeine');
+  // No "_" at all - written through unchanged, not emptied.
+  assert.strictEqual(written('HYP43558080'), 'HYP43558080');
 }
 
 // 5. Blanks stay blank - no literal "NA". Payment Mode (L) and Latest NDR Reason (Q) are matched
@@ -156,7 +174,10 @@ NDR_IMPORT.dedupExtraCsvHeaders.forEach((h) => {
 {
   const LIVE_NDR_HEADER_ROW = [
     'Order ID', 'Customer Name', 'Customer Email', 'Customer Mobile', 'AWB', 'Partner name',
-    'Address ', 'Pincode', 'City', 'State', 'Order Value', 'Payment Mode', 'Status',
+    // K reads "Address quality" in the live sheet - lowercase q, renamed from "Order Value"
+    // before K was mapped. Kept verbatim here precisely because checkSheetLayout must be shown
+    // to tolerate the casing rather than have it quietly normalised away in the fixture.
+    'Address ', 'Pincode', 'City', 'State', 'Address quality', 'Payment Mode', 'Status',
     'Is Buyer Response Received', 'Attempt Count', 'Latest NDR Date', 'Latest NDR Reason',
   ];
   const issues = checkSheetLayout(LIVE_NDR_HEADER_ROW, NDR_IMPORT.expectedHeader);
@@ -255,5 +276,38 @@ Object.values(NDR_CSV_HEADER_ALIASES).forEach((canonical) => {
 Object.keys(NDR_CSV_HEADER_ALIASES).forEach((alias) => {
   assert.ok(!NDR_CSV_TO_COLUMN[alias], `alias "${alias}" is itself a mapped CSV header`);
 });
+
+// 14. K and N, the two columns added by explicit business instruction. K is fed from the CSV's
+// "Address Quality" and N from "Is Buyer Response Received" - both are now REQUIRED columns, so a
+// file without them is refused rather than silently leaving the cells blank.
+{
+  assert.strictEqual(NDR_CSV_TO_COLUMN['Address Quality'], 'K');
+  assert.strictEqual(NDR_CSV_TO_COLUMN['Is Buyer Response Received'], 'N');
+  assert.ok(NDR_IMPORT.requiredCsvHeaders.includes('Address Quality'));
+  assert.ok(NDR_IMPORT.requiredCsvHeaders.includes('Is Buyer Response Received'));
+
+  const plan = buildRowPlan({
+    csvRows: [csvRow({
+      'AWB Code': '54012345678902',
+      'Address Quality': 'Poor',
+      'Is Buyer Response Received': 'Yes',
+    })],
+    existingKeySet: new Set(),
+    config: NDR_IMPORT,
+  });
+  assert.strictEqual(plan.validRows[0].cellsByColumn.K, 'Poor', 'Address Quality -> K');
+  assert.strictEqual(plan.validRows[0].cellsByColumn.N, 'Yes', 'Is Buyer Response Received -> N');
+  // Still inside the A..Q append width - neither column widened what an upload touches.
+  assert.ok(columnLetterToIndex('N') < NDR_ROW_WIDTH);
+}
+
+// 15. The drift check tolerates K1's real casing. Guarding this explicitly because pinning
+// "Address Quality" against a live "Address quality" would otherwise refuse every single upload
+// with "Sheet column layout has changed unexpectedly".
+{
+  assert.deepStrictEqual(checkSheetLayout(['', '', '', '', '', '', '', '', '', '', 'Address quality'], { K: 'Address Quality' }), []);
+  assert.deepStrictEqual(checkSheetLayout(['', '', '', '', '', '', '', '', '', '', 'ADDRESS  QUALITY'], { K: 'Address Quality' }), []);
+  assert.strictEqual(checkSheetLayout(['', '', '', '', '', '', '', '', '', '', 'Order Value'], { K: 'Address Quality' }).length, 1);
+}
 
 console.log('ndrCsvImport.test.js: all assertions passed');

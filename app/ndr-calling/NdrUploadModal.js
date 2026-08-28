@@ -90,7 +90,9 @@ export default function NdrUploadModal({ onClose, onDone, teamId = null }) {
           <strong className="text-zinc-300 font-semibold">AWB Code + Attempt Count</strong> — first
           within the file, then against the sheet. AWB alone is not enough here: one shipment gets
           a new row per failed attempt, so a later attempt is a genuinely new lead. Agent columns
-          are left blank so uploaded rows read as unworked. Either Shiprocket NDR export works —
+          are left blank so uploaded rows read as unworked. Rows whose AWB the courier has already
+          marked delivered are dropped rather than appended, and the Order ID is trimmed at the
+          first underscore. Either Shiprocket NDR export works —
           the alternative column names it uses (Courier, Address 1, Pincode, City, State, Payment
           Mode) are recognised, so there is no need to rename headers by hand. Still export straight from the source: an AWB that arrives as{' '}
           <span className="font-mono">5.40E+13</span> is rounded past recovery and rejected, while
@@ -151,6 +153,9 @@ export default function NdrUploadModal({ onClose, onDone, teamId = null }) {
               )}
               {result.expandedAwb > 0 && (
                 <Stat tone="ok">{result.expandedAwb} AWB expanded</Stat>
+              )}
+              {result.alreadyDelivered > 0 && (
+                <Stat tone="skip">{result.alreadyDelivered} already delivered</Stat>
               )}
               <Stat>{result.total} rows read</Stat>
             </div>
