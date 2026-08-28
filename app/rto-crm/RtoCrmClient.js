@@ -2556,6 +2556,7 @@ import CallTrendChart from './CallTrendChart';
           // Reduces to exactly "the first disposition of that day" for a single-day
           // scope, matching the literal ask this column was added for.
           const firstCallMinutesByDay = new Map(); // dayKey -> earliest minutes-since-midnight that day
+          const lastCallMinutesByDay = new Map(); // dayKey -> latest minutes-since-midnight that day
           for (const t of disposedByDate) {
             const disposedAtIso = leadDates[normalizeOrderKey(t.orderNumber)]?.disposedAt;
             if (!disposedAtIso) continue;
@@ -2565,10 +2566,19 @@ import CallTrendChart from './CallTrendChart';
             if (!firstCallMinutesByDay.has(dayKey) || mins < firstCallMinutesByDay.get(dayKey)) {
               firstCallMinutesByDay.set(dayKey, mins);
             }
+            if (!lastCallMinutesByDay.has(dayKey) || mins > lastCallMinutesByDay.get(dayKey)) {
+              lastCallMinutesByDay.set(dayKey, mins);
+            }
           }
           const firstCallMinutesList = [...firstCallMinutesByDay.values()];
           const firstCalledAtMinutes = firstCallMinutesList.length
             ? Math.round(firstCallMinutesList.reduce((s, m) => s + m, 0) / firstCallMinutesList.length)
+            : null;
+          // Last Called At: same active-day average as First Called At above, just the LATEST
+          // disposition of each day instead of the earliest.
+          const lastCallMinutesList = [...lastCallMinutesByDay.values()];
+          const lastCalledAtMinutes = lastCallMinutesList.length
+            ? Math.round(lastCallMinutesList.reduce((s, m) => s + m, 0) / lastCallMinutesList.length)
             : null;
 
           // FRT (First Response Time): disposedAt - assignedAt, averaged in minutes
@@ -2608,6 +2618,7 @@ import CallTrendChart from './CallTrendChart';
             prepaidConverted: prepaidConverted.length,
             codConverted: codConverted.length,
             firstCalledAtMinutes,
+            lastCalledAtMinutes,
             frtMinutes,
             disposeGapMinutes,
           };
@@ -2802,7 +2813,7 @@ import CallTrendChart from './CallTrendChart';
             return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
           };
           const header = [
-            'Agent Name', 'Total Leads Assigned', 'Total Disposed', 'First Called At', 'FRT', 'Avg Time to Dispose',
+            'Agent Name', 'Total Leads Assigned', 'Total Disposed', 'First Called At', 'Last Called At', 'FRT', 'Avg Time to Dispose',
             'Total Connected', 'Connected %', 'Total Prepaid Assigned', 'Total Prepaid Assigned %',
             'Total Prepaid Connected', 'Total Prepaid Connected %', 'Total COD Assigned', 'Total COD Assigned %',
             'Total Prepaid Converted', 'Total Prepaid Converted %', 'Total COD Converted', 'Total COD Converted %',
@@ -2811,8 +2822,8 @@ import CallTrendChart from './CallTrendChart';
           const rowFor = (am) => {
             const presence = serverPresence[am.email.toLowerCase()];
             return [
-              am.name, am.assigned, am.disposed, formatTimeOfDay(am.firstCalledAtMinutes), formatFrt(am.frtMinutes),
-              formatFrt(am.disposeGapMinutes),
+              am.name, am.assigned, am.disposed, formatTimeOfDay(am.firstCalledAtMinutes), formatTimeOfDay(am.lastCalledAtMinutes),
+              formatFrt(am.frtMinutes), formatFrt(am.disposeGapMinutes),
               am.connected, formatPct(am.connected, am.disposed),
               am.prepaidAssigned, formatPct(am.prepaidAssigned, am.assigned),
               am.prepaidConnected, formatPct(am.prepaidConnected, am.prepaidAssigned),
@@ -2826,7 +2837,7 @@ import CallTrendChart from './CallTrendChart';
           summaryRows.forEach(am => lines.push(rowFor(am).map(escapeCsv).join(',')));
           if (summaryRows.length > 0) {
             lines.push([
-              'Team Total', summaryTotals.assigned, summaryTotals.disposed, '—', formatFrt(summaryAvgFrt), formatFrt(summaryAvgDisposeGap),
+              'Team Total', summaryTotals.assigned, summaryTotals.disposed, '—', '—', formatFrt(summaryAvgFrt), formatFrt(summaryAvgDisposeGap),
               summaryTotals.connected, formatPct(summaryTotals.connected, summaryTotals.disposed),
               summaryTotals.prepaidAssigned, formatPct(summaryTotals.prepaidAssigned, summaryTotals.assigned),
               summaryTotals.prepaidConnected, formatPct(summaryTotals.prepaidConnected, summaryTotals.prepaidAssigned),
@@ -3271,13 +3282,14 @@ import CallTrendChart from './CallTrendChart';
                               assigned yesterday and disposed today counts toward today's Disposed/Connected/Converted numbers
                               even though it doesn't count toward today's Assigned ones. Hover a header for which, and for what
                               each % is of. Logged In At is the average time-of-day of first login across the range's active
-                              days (days with any real status change); First Called At is the same average, but of the first
-                              disposition each active day (days with any resolved lead); Total Break Time is the average break
-                              minutes per active day - all three follow the same filter (an approximate calendar-day window for
-                              7 Days/30 Days, not the exact rolling hours the lead columns use), and reduce to the plain
-                              single-day numbers for Today/Yesterday/a one-day Custom range. FRT is the average time between a
-                              lead's assignment and its disposition, across disposed leads with both timestamps (per-ticket
-                              duration, not an active-day average).
+                              days (days with any real status change); First/Last Called At are the same average, but of the
+                              first/last disposition each active day (days with any resolved lead); Total Break Time is the
+                              average break minutes per active day - all four follow the same filter (an approximate
+                              calendar-day window for 7 Days/30 Days, not the exact rolling hours the lead columns use), and
+                              reduce to the plain single-day numbers for Today/Yesterday/a one-day Custom range. FRT is the
+                              average time between a lead's assignment and its disposition, across disposed leads with both
+                              timestamps (per-ticket duration, not an active-day average). Avg Time to Dispose is the average
+                              gap between one disposition and the agent's next, same-day only.
                             </p>
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
@@ -3311,7 +3323,9 @@ import CallTrendChart from './CallTrendChart';
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Leads Assigned</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Disposed</th>
                                 <th className="py-2 px-3 font-bold" title="Average time-of-day of the first disposition across the range's active days">First Called At</th>
+                                <th className="py-2 px-3 font-bold" title="Average time-of-day of the last disposition across the range's active days">Last Called At</th>
                                 <th className="py-2 px-3 font-bold" title="Average time between a lead's assignment and its disposition (Disposed At - Assigned At), across disposed leads with both timestamps">FRT</th>
+                                <th className="py-2 px-3 font-bold" title="Average gap between one disposition and the agent's next, same-day only, across disposed leads">Avg Time to Dispose</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Connected</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Total Connected / Total Disposed">Connected %</th>
                                 <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Prepaid Assigned</th>
@@ -3345,7 +3359,9 @@ import CallTrendChart from './CallTrendChart';
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.assigned}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.disposed}</td>
                                     <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(am.firstCalledAtMinutes)}</td>
+                                    <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(am.lastCalledAtMinutes)}</td>
                                     <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatFrt(am.frtMinutes)}</td>
+                                    <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatFrt(am.disposeGapMinutes)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{am.connected}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{formatPct(am.connected, am.disposed)}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.prepaidAssigned}</td>
@@ -3370,7 +3386,9 @@ import CallTrendChart from './CallTrendChart';
                                   <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.assigned}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.disposed}</td>
                                   <td className="py-2.5 px-3 text-zinc-500">—</td>
+                                  <td className="py-2.5 px-3 text-zinc-500">—</td>
                                   <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Average across disposed leads with both timestamps">{formatFrt(summaryAvgFrt)}</td>
+                                  <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Mean of each agent's own average gap">{formatFrt(summaryAvgDisposeGap)}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{summaryTotals.connected}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{formatPct(summaryTotals.connected, summaryTotals.disposed)}</td>
                                   <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.prepaidAssigned}</td>
@@ -3389,7 +3407,7 @@ import CallTrendChart from './CallTrendChart';
                                 </tr>
                               )}
                               {visibleTableAgentMetrics.filter(am => am.assigned > 0).length === 0 && (
-                                <tr><td colSpan={20} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
+                                <tr><td colSpan={22} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
                               )}
                             </tbody>
                           </table>
