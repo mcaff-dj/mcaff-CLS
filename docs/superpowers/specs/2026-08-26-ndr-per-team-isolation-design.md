@@ -45,7 +45,8 @@ column, and scoping applied at the points enumerated below.
 | Team B sheet | Supplied and verified: `1lJz9dy0xnqWnmFOxzZGughp04diZrfiVQpSfK1c-xkg`, tab `Latest NDR ` (see Prerequisites) |
 | Isolation reach | Everything on the NDR page — roster, Overview, Total Leads Disposed, Fresh Leads, Next to Assign, lead table, exports |
 | Future teams | Self-serve: a full admin creates/renames teams and sets sheet IDs from the UI |
-| Calling Hours + disposition tree | Stay per-process (shared by both NDR teams), and become **full-admin-only to edit** |
+| Calling Hours | Stays per-process (shared by both NDR teams) |
+| Disposition tree | **Superseded 2026-08-28** — now per-team, and a team lead edits their own. See `2026-08-28-per-team-dispositions-design.md` |
 | Pre-existing security bugs found during design | Fixed as part of this project |
 
 ## Schema
