@@ -144,7 +144,11 @@ export default function RtoUploadModal({ onClose, onDone }) {
       body: JSON.stringify({ csv: chunkText }),
     });
     const data = await readJsonResponse(res);
-    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    // `details` carries the per-column diagnosis behind a generic failure - the layout-drift
+    // check already names every column that moved and what it expected there, and dropping it
+    // left the admin told to "contact an admin" with nothing to act on. Joined with newlines;
+    // the error box renders them (whitespace-pre-line).
+    if (!res.ok) throw new Error([data.error || 'Upload failed', ...(data.details || [])].join('\n'));
     setStartResult(data);
     if (data.jobId) {
       setJobStatus({ status: 'queued', checkedCount: 0, prepaidCount: data.prepaidQueued });
@@ -233,7 +237,7 @@ export default function RtoUploadModal({ onClose, onDone }) {
         </div>
 
         {error && (
-          <div className="p-2.5 rounded-lg bg-rose-950/30 border border-rose-900/40 text-[12px] text-rose-300">{error}</div>
+          <div className="p-2.5 rounded-lg bg-rose-950/30 border border-rose-900/40 text-[12px] text-rose-300 whitespace-pre-line">{error}</div>
         )}
 
         {batchInfo && (
