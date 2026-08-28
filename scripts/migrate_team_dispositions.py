@@ -143,12 +143,14 @@ def main():
 
     conn = pymysql.connect(
         host=cred["host"], user=cred["user"], password=cred["password"],
-        database=SCHEMA, port=int(cred.get("port", 3306)), autocommit=False,
+        database=SCHEMA, port=cred["port"], autocommit=False,
+        ssl={"ssl": {}}, connect_timeout=15,
     )
     try:
         with conn.cursor() as cur:
             # Step 1: the column and its index.
-            if _column_exists(cur, "team_id"):
+            team_id_exists = _column_exists(cur, "team_id")
+            if team_id_exists:
                 print("  column team_id: already present")
             elif args.apply:
                 cur.execute(
@@ -157,10 +159,11 @@ def main():
                     f"REFERENCES {TEAMS_TABLE}(id) ON DELETE CASCADE"
                 )
                 print("  column team_id: added")
+                team_id_exists = True
             else:
                 print("  column team_id: would add (with FK to calling_teams, ON DELETE CASCADE)")
 
-            if _column_exists(cur, "team_id"):
+            if team_id_exists:
                 if _index_exists(cur, INDEX_NAME):
                     print(f"  index {INDEX_NAME}: already present")
                 elif args.apply:
@@ -173,7 +176,7 @@ def main():
 
             # Step 2: clone the shared tree into every active team that has none. Skipped entirely
             # on a dry run before the column exists, since both queries below select team_id.
-            if not _column_exists(cur, "team_id"):
+            if not team_id_exists:
                 print("  clone: skipped on dry run (re-run after --apply to see per-team detail)")
                 conn.rollback()
                 return
