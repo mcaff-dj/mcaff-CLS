@@ -908,4 +908,19 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
    - A Team Lead of Team Aditi can add/rename inside Aditi's tree; a request naming Shahid's `teamId` still lands in Aditi's.
    - RTO and Escalation dispose modals and admin cards unchanged.
 
-Rollback: `ALTER TABLE calling_process_dispositions DROP COLUMN team_id;` restores the shared tree for everyone. Migration-cloned rows are identifiable by `created_by = 'migration'`.
+Rollback: the column carries a named FK (`calling_process_dispositions_team_fk`), so a bare `DROP
+COLUMN` fails while it's still referenced — drop the constraint in the same statement:
+
+```sql
+ALTER TABLE calling_process_dispositions
+  DROP FOREIGN KEY calling_process_dispositions_team_fk,
+  DROP COLUMN team_id;
+```
+
+This restores the shared tree for everyone; dropping the column also implicitly drops
+`calling_process_dispositions_team_idx` (MySQL drops an index automatically once it references
+only the dropped column — no separate `DROP INDEX` needed). Migration-cloned rows are identifiable
+by `created_by = 'migration'`. **Order matters:** revert/redeploy `api/` to the previous version
+*before* running this SQL — the new `api/` code selects `team_id`, so dropping the column while
+it's still live throws `ER_BAD_FIELD_ERROR` on every read of `calling_process_dispositions`,
+breaking NDR's, Escalation's, and Delivery-Escalation's dispose modals at once, not just NDR's.

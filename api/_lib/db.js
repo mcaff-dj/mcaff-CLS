@@ -2626,6 +2626,10 @@ async function createCallingTeam(processKey, { name, sheetId, sheetTab }, byEmai
     }
   } catch (e) {
     console.error('createCallingTeam: disposition clone failed for team', insertId, e);
+    // A mid-loop failure leaves whatever rows already inserted for this team - not an empty
+    // tree - so the getProcessDispositions fallback (which only fires on ZERO rows) would never
+    // kick in and the team would be stuck with a partial tree forever. Wipe it back to zero rows.
+    await sql`DELETE FROM calling_process_dispositions WHERE team_id = ${insertId}`;
   }
   return getCallingTeam(insertId, processKey);
 }
@@ -2705,8 +2709,21 @@ async function getProcessDispositions(processKey, teamId = null) {
         SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
         WHERE process_key = ${processKey} AND team_id = ${team}
         ORDER BY sort_order ASC, id ASC`).rows);
-  let rows = await fetchRows(teamId);
-  if (!rows.length && teamId != null) rows = await fetchRows(null);
+  let rows;
+  try {
+    rows = await fetchRows(teamId);
+    if (!rows.length && teamId != null) rows = await fetchRows(null);
+  } catch (e) {
+    // Unlike the release-1 team-isolation softening (api/_lib/callingTeams.js), this migration
+    // is NOT order-independent: the column can be deployed before the api/ code that selects it
+    // is live. Rather than require a strict deploy order, retry as a plain pre-migration read
+    // (no team_id predicate - the column doesn't exist yet, so there is no team to filter by).
+    if (e.code !== 'ER_BAD_FIELD_ERROR') throw e;
+    rows = (await sql`
+      SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
+      WHERE process_key = ${processKey}
+      ORDER BY sort_order ASC, id ASC`).rows;
+  }
   const byId = {};
   rows.forEach((r) => {
     byId[r.id] = {

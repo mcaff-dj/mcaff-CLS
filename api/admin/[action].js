@@ -577,18 +577,6 @@ async function handleDispositions(req, res, session) {
   const known = CALLING_PROCESSES.processes.map((p) => p.key);
   const body = parseBody(req);
 
-  // The disposition tree is per-PROCESS and shared by every team on that process, and NDR's
-  // calling flow branches on specific literal label strings when it saves a call outcome (see
-  // NdrCallingClient.js's saveNdrDisposition) - so on a process that actually HAS two teams
-  // (today, only 'ndr' once both leads exist), one team's lead renaming or reordering an option
-  // can silently break the OTHER team's metrics, or its agents' ability to dispose a call at all.
-  // Reads stay open below (any agent with calling access to the process, same as before).
-  //
-  // FINAL-7/F7: same narrowing as handleBusinessHours above, and for the identical reason - an
-  // unconditional `!session.isAdmin` here locked RTO and Escalation process admins out of their
-  // own disposition lists too, desks with no teams and no stake in this feature. Fires only when
-  // THIS process actually has 2+ active teams, so a teamless process's admin keeps the write
-  // access they had before this feature shipped.
   // Which tree this request touches. A client-supplied teamId is honoured ONLY for a full admin
   // (same trust model as api/ndr/sheet.js): a Team Lead's team is DERIVED from their own
   // calling_agent_process row, so naming the other team's id in the body changes nothing.

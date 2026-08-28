@@ -158,9 +158,23 @@ idempotent and safe to re-run.
 column that does not exist throws `ER_BAD_FIELD_ERROR` inside `getProcessDispositions`, which
 serves the Escalation desk's dispose modal as well as NDR.
 
-Rollback: `ALTER TABLE calling_process_dispositions DROP COLUMN team_id` drops every team tree
-and restores the shared tree for everyone. Cloned rows carry `created_by = 'migration'` so a
-partial clone can also be removed by that predicate alone.
+Rollback: the column carries a named FK (`calling_process_dispositions_team_fk`), so MySQL
+refuses a bare `DROP COLUMN` while it's still referenced — drop the constraint first:
+
+```sql
+ALTER TABLE calling_process_dispositions
+  DROP FOREIGN KEY calling_process_dispositions_team_fk,
+  DROP COLUMN team_id;
+```
+
+This drops every team tree and restores the shared tree for everyone; dropping the column also
+implicitly drops `calling_process_dispositions_team_idx`, since that index references only this
+column (no separate `DROP INDEX` needed). Cloned rows carry `created_by = 'migration'` so a
+partial clone can also be removed by that predicate alone. **Run order matters here too:**
+revert/redeploy `api/` to the pre-this-branch version *before* running this SQL — the live `api/`
+code selects `team_id`, so dropping the column while it's still deployed throws
+`ER_BAD_FIELD_ERROR` on every read of `calling_process_dispositions`, breaking NDR's, Escalation's,
+and Delivery-Escalation's dispose modals at once, not just NDR's.
 
 ## Testing
 

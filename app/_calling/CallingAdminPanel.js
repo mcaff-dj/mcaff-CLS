@@ -787,7 +787,6 @@ export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeCont
                   whose list they just changed - the one thing per-team trees make possible to
                   get wrong. */}
               {teamId != null && <span className="text-zinc-400 font-medium"> · {teamName || `Team #${teamId}`}</span>}
-              {teamId == null && teamName === '' && <span className="text-zinc-500 font-medium"> · Shared (fallback)</span>}
             </h2>
             <p className="text-[13px] text-zinc-500">
               What an agent may select when disposing a lead on this process. Unlike RTO Calling
