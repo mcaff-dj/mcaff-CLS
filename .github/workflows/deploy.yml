@@ -64,5 +64,35 @@ jobs:
           role-to-assume: arn:aws:iam::157320387454:role/github-actions-mcaff-cls-deploy
           aws-region: ap-south-1
 
+      # --query restricts the printed output to non-secret fields only. The full response
+      # includes Environment.Variables in PLAINTEXT (MYSQL_*, DB_SECRET_NAME, every OAuth
+      # secret this Lambda holds) - GitHub only auto-masks a value if it's referenced via
+      # secrets.X in THIS workflow, which none of these are, so the unrestricted response
+      # this workflow was printing until now put every one of those secrets straight into a
+      # log the whole team can read. Same class of leak as deploy-cron-lambdas.yml's 2026-08-14
+      # incident (see lambda/README.md) - that workflow got the fix, this one was missed.
       - name: Update Lambda function code
-        run: aws lambda update-function-code --function-name mcaff-cls-api --zip-file fileb://lambda.zip
+        run: |
+          aws lambda update-function-code --function-name mcaff-cls-api --zip-file fileb://lambda.zip \
+            --query "{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus,CodeSha256:CodeSha256}"
+          aws lambda wait function-updated --function-name mcaff-cls-api
+
+      # Safety margin, not a fix for the real cause (see db.js's schemaLooksComplete() -
+      # 2026-08-28 timeout incident): a concurrent cold-start bootstrap burst right after a
+      # redeploy can still legitimately take longer than 20s on a slow connection. 45s gives
+      # a genuinely slow cold start room to finish instead of dying mid-request; reserved
+      # concurrency is unrelated here (this Lambda serves live user traffic, unlike the cron
+      # workers), so no change to that.
+      #
+      # Non-fatal: if the deploy role lacks lambda:UpdateFunctionConfiguration this prints
+      # what to grant rather than turning a working code deploy red.
+      - name: Ensure API Lambda timeout
+        run: |
+          if aws lambda update-function-configuration --function-name mcaff-cls-api \
+               --timeout 45 \
+               --query "{FunctionName:FunctionName,Timeout:Timeout}"; then
+            aws lambda wait function-updated-v2 --function-name mcaff-cls-api \
+              || aws lambda wait function-updated --function-name mcaff-cls-api || true
+          else
+            echo "::warning::Could not set timeout on mcaff-cls-api - grant lambda:UpdateFunctionConfiguration to the deploy role, or set 45s in the console."
+          fi

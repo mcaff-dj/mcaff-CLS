@@ -95,10 +95,46 @@ async function ensureSchema() {
   return schemaPromise;
 }
 
+// Every table CREATE-d below - kept in sync by hand (add a table above, add its name here).
+// schemaLooksComplete() uses this list to short-circuit the whole bootstrap with one query
+// once every table already exists, which is every cold start in production but for a very
+// long time cost 20 full round-trips (19 CREATE TABLE IF NOT EXISTS + the 3 rename UPDATEs
+// + the settings INSERT, each individually a no-op) to find that out. Diagnosed 2026-08-28:
+// a redeploy zeroes schemaReady on every warm container simultaneously, so a burst of
+// concurrent cold-start requests each pay the full 20-round-trip bootstrap AND contend for
+// the same tables' DDL metadata locks at once - on a slow connection that stacked past the
+// API Lambda's timeout and every request in the window got a bare "Internal server error".
+const BOOTSTRAP_TABLES = [
+  'users', 'permissions', 'audit_log', 'report_tab_permissions',
+  'mom_boards', 'mom_board_members', 'mom_statuses', 'mom_columns', 'mom_tasks', 'mom_task_field_values',
+  'report_cell_comments', 'ndr_lead_assignments', 'calling_process_dispositions', 'calling_business_hours',
+  'calling_agent_process', 'calling_teams', 'rto_csv_upload_jobs', 'order_punch_jobs',
+  'order_punch_job_rows', 'order_punch_settings',
+];
+
+// Fails open (false) on any error - a broken existence check must never be the reason schema
+// creation gets silently skipped on a genuinely fresh database. Only ever SKIPS work that
+// bootstrapSchema() would have found to be a no-op anyway (every statement below is IF NOT
+// EXISTS / ON DUPLICATE KEY UPDATE), so this changes wall-clock cost, never end-state.
+async function schemaLooksComplete() {
+  try {
+    const p = await getPool();
+    const placeholders = BOOTSTRAP_TABLES.map(() => '?').join(',');
+    const [rows] = await p.execute(
+      `SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN (${placeholders})`,
+      BOOTSTRAP_TABLES,
+    );
+    return rows[0].n === BOOTSTRAP_TABLES.length;
+  } catch {
+    return false;
+  }
+}
+
 // Idempotent - safe to call on every cold start. Only runs the DDL once per warm instance.
 // This is a fresh schema (PEP_CLS), so unlike the Postgres version, there's no historical
 // ALTER/rename migrations to carry forward - just the final desired shape.
 async function bootstrapSchema() {
+  if (await schemaLooksComplete()) { schemaReady = true; return; }
   await sql`
     CREATE TABLE IF NOT EXISTS users (
       id INT AUTO_INCREMENT PRIMARY KEY,
