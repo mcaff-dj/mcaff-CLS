@@ -52,6 +52,7 @@ const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions } = require('../_lib/db');
 const { teamScopeFor, coerceTeamId } = require('../_lib/callingTeams');
+const { dispositionTeamFor } = require('../_lib/dispositionTrees');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { CARD_TABS } = require('../_lib/tabs');
 const { getSession } = require('../_lib/session');
@@ -588,18 +589,34 @@ async function handleDispositions(req, res, session) {
   // own disposition lists too, desks with no teams and no stake in this feature. Fires only when
   // THIS process actually has 2+ active teams, so a teamless process's admin keeps the write
   // access they had before this feature shipped.
+  // Which tree this request touches. A client-supplied teamId is honoured ONLY for a full admin
+  // (same trust model as api/ndr/sheet.js): a Team Lead's team is DERIVED from their own
+  // calling_agent_process row, so naming the other team's id in the body changes nothing.
+  const dispProcessKey = req.method === 'GET' ? ((req.query && req.query.process) || '') : body.processKey;
+  const { callerTeamId, activeTeamCount } = dispProcessKey
+    ? await resolveCallerTeam(session.email, dispProcessKey)
+    : { callerTeamId: null, activeTeamCount: 0 };
+  const dispTeamId = dispositionTeamFor({
+    callerTeamId,
+    activeTeamCount,
+    explicitTeamId: coerceTeamId(req.method === 'GET' ? (req.query && req.query.teamId) : body.teamId),
+    isAdmin: !!session.isAdmin,
+  });
+
   if (req.method !== 'GET') {
     const isProcessAdmin = session.isAdmin || (body.processKey && await isCallingProcessAdmin(session.email, body.processKey));
     if (!isProcessAdmin) {
       res.status(403).json({ error: 'You do not administer that process' });
       return;
     }
-    if (!session.isAdmin) {
-      const { activeTeamCount } = await resolveCallerTeam(session.email, body.processKey);
-      if (activeTeamCount >= 2) {
-        res.status(403).json({ error: 'Only a full admin can change the disposition list' });
-        return;
-      }
+    // The old rule here was full-admin-only whenever a process had 2+ active teams, because the
+    // tree was shared and one lead's rename could break the other team's agents mid-call. Trees
+    // are per-team now, so a lead editing their OWN tree is safe - but a process admin with no
+    // team of their own on a split desk has no tree that is theirs, and must not fall through to
+    // editing the shared one that both teams still fall back to.
+    if (!session.isAdmin && activeTeamCount >= 2 && dispTeamId == null) {
+      res.status(403).json({ error: 'You are not assigned to a team, so there is no disposition list of yours to edit.' });
+      return;
     }
   }
 
@@ -609,9 +626,10 @@ async function handleDispositions(req, res, session) {
       return;
     }
     try {
-      const dispositions = await addProcessDisposition(body.processKey, body.label, body.description, session.email, body.parentId);
+      const dispositions = await addProcessDisposition(body.processKey, body.label, body.description, session.email, body.parentId, dispTeamId);
+      const treeLabel = dispTeamId == null ? 'shared' : `team #${dispTeamId}`;
       await logEvent(session.uid, session.email, 'calling', 'disposition-add',
-        `${body.processKey}: added "${body.label}"${body.parentId ? ` (child of #${body.parentId})` : ''}`, ip);
+        `${body.processKey} (${treeLabel}): added "${body.label}"${body.parentId ? ` (child of #${body.parentId})` : ''}`, ip);
       res.status(200).json({ dispositions });
     } catch (e) {
       res.status(400).json({ error: e.message || 'Could not add disposition' });
@@ -626,10 +644,11 @@ async function handleDispositions(req, res, session) {
     }
     try {
       const dispositions = Array.isArray(body.orderedIds)
-        ? await reorderProcessDispositions(body.processKey, body.parentId, body.orderedIds)
-        : await updateProcessDisposition(body.processKey, body.id, { label: body.label, description: body.description, childrenInputType: body.childrenInputType });
+        ? await reorderProcessDispositions(body.processKey, body.parentId, body.orderedIds, dispTeamId)
+        : await updateProcessDisposition(body.processKey, body.id, { label: body.label, description: body.description, childrenInputType: body.childrenInputType }, dispTeamId);
+      const treeLabel = dispTeamId == null ? 'shared' : `team #${dispTeamId}`;
       await logEvent(session.uid, session.email, 'calling', 'disposition-edit',
-        Array.isArray(body.orderedIds) ? `${body.processKey}: reordered` : `${body.processKey}: edited #${body.id}`, ip);
+        Array.isArray(body.orderedIds) ? `${body.processKey} (${treeLabel}): reordered` : `${body.processKey} (${treeLabel}): edited #${body.id}`, ip);
       res.status(200).json({ dispositions });
     } catch (e) {
       res.status(400).json({ error: e.message || 'Could not update disposition' });
@@ -642,8 +661,9 @@ async function handleDispositions(req, res, session) {
       res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
       return;
     }
-    const dispositions = await deleteProcessDisposition(body.processKey, body.id);
-    await logEvent(session.uid, session.email, 'calling', 'disposition-delete', `${body.processKey}: deleted #${body.id}`, ip);
+    const dispositions = await deleteProcessDisposition(body.processKey, body.id, dispTeamId);
+    const treeLabel = dispTeamId == null ? 'shared' : `team #${dispTeamId}`;
+    await logEvent(session.uid, session.email, 'calling', 'disposition-delete', `${body.processKey} (${treeLabel}): deleted #${body.id}`, ip);
     res.status(200).json({ dispositions });
     return;
   }
@@ -669,7 +689,7 @@ async function handleDispositions(req, res, session) {
     res.status(403).json({ error: 'You do not have access to that process.' });
     return;
   }
-  res.status(200).json({ dispositions: await getProcessDispositions(processKey) });
+  res.status(200).json({ dispositions: await getProcessDispositions(processKey, dispTeamId) });
 }
 
 // GET    ?process=<key>       -> that process's teams (active only unless ?includeInactive=1)
