@@ -257,8 +257,6 @@ export default function NdrCallingClient() {
   } = session;
 
   const hours = useBusinessHours(PROCESS_KEY, { userRole, isProcessAdmin, showToast });
-  const disp = useProcessDispositions(PROCESS_KEY, { googleUser, showToast });
-  const { processDispositions } = disp;
   const teamsHook = useCallingTeams(PROCESS_KEY, { googleUser, showToast });
   const { teams: ndrTeams } = teamsHook;
 
@@ -291,6 +289,12 @@ export default function NdrCallingClient() {
   // guarded against.
   const ndrSheetTeamRef = useRef(null);
   ndrSheetTeamRef.current = ndrSheetTeam;
+
+  // Reuses the header team picker above (ndrSheetTeam) to also drive which disposition tree is
+  // shown/edited - one dropdown, two purposes. Declared here (after ndrSheetTeam) rather than up
+  // near hours/teamsHook so it can read ndrSheetTeam?.id without a temporal-dead-zone error.
+  const disp = useProcessDispositions(PROCESS_KEY, { googleUser, showToast, teamId: ndrSheetTeam?.id ?? null });
+  const { processDispositions } = disp;
 
   const pickNdrTeam = (id) => {
     setNdrTeamIdPref(id);
@@ -1734,7 +1738,7 @@ export default function NdrCallingClient() {
                   <CallingTeamsCard processKey={PROCESS_KEY} processLabel="NDR Calling" teamsHook={teamsHook} sessionIsAdmin={sessionIsAdmin} />
                   {renderNdrRosterTable()}
                   <CallingHoursCard processKey={PROCESS_KEY} processLabel="NDR Calling" hours={hours} />
-                  <ProcessDispositionsCard processLabel="NDR Calling" disp={disp} />
+                  <ProcessDispositionsCard processLabel="NDR Calling" disp={disp} teamName={ndrSheetTeam?.name || ''} />
                 </div>
               )}
             </div>
