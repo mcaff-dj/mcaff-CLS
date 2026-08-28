@@ -56,8 +56,9 @@ assert.strictEqual(normalizeAwb(''), '');
   assert.strictEqual(row.cellsByColumn.I, 'Gunjan .', 'Customer Name -> I');
   assert.strictEqual(row.cellsByColumn.J, '8392939313', 'Customer Mobile -> J');
   assert.strictEqual(row.cellsByColumn.K, 'Rishihood University Gate No 2', 'Address Line 1 -> K');
-  assert.strictEqual(row.cellsByColumn.AB, 'mCaff_Gurgaon3', 'Pickup Address Name -> AB');
-  assert.strictEqual(row.cellsByColumn.AC, 'Blitz Intercity NDD', 'Courier Company -> AC');
+  assert.strictEqual(row.cellsByColumn.AA, 'mCaff_Gurgaon3', 'Pickup Address Name -> AA');
+  assert.strictEqual(row.cellsByColumn.AB, 'Blitz Intercity NDD', 'Courier Company -> AB');
+  assert.strictEqual(row.cellsByColumn.AC, undefined, 'nothing is written past AB any more');
   assert.strictEqual(row.cellsByColumn.C, 'NA', 'blank source value is written as "NA", not empty');
   assert.strictEqual(row.cellsByColumn.D, 'NA', 'blank source value is written as "NA", not empty');
 }
@@ -100,7 +101,9 @@ assert.strictEqual(normalizeAwb(''), '');
     'AWB Code', 'Customer Email', 'Customer Name', 'Customer Mobile', 'Address', 'Address City',
     'Address State', 'Address Pincode', '  Payment Method', 'Order Total', 'Agent Name',
     'Connected', 'Attempt', '', 'New product needed', 'New  order ID', 'Change in address',
-    'x', 'Calling Date', ' Remark', 'Key', 'Facility Name', 'Courier Company',
+    // No 'Key' at AA any more - it was deleted from the live sheet on 2026-08-28, pulling
+    // Facility Name to AA and Courier Company to AB.
+    'x', 'Calling Date', ' Remark', 'Facility Name', 'Courier Company',
   ];
   assert.deepStrictEqual(checkSheetLayout(fullHeaderRow), [], 'matches production layout exactly');
 

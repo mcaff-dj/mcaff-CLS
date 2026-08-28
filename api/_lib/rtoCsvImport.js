@@ -79,8 +79,13 @@ const CSV_TO_COLUMN = {
   'Address Pincode': 'N',
   'Payment Method': 'O',
   'Order Total': 'P',
-  'Pickup Address Name': 'AB',
-  'Courier Company': 'AC',
+  // 2026-08-28: the "Key" column that used to sit at AA was deleted from the live sheet, so
+  // everything right of it shifted one left - Facility Name AB->AA, Courier Company AC->AB.
+  // Nothing else in the codebase needed changing for that: every other reader of this tab caps
+  // at column Z (see api/rto/sheet.js and assign_leads.py, which both read A:Z precisely because
+  // nothing past Z was ever consumed), so these two are the only columns beyond Z anyone maps.
+  'Pickup Address Name': 'AA',
+  'Courier Company': 'AB',
 };
 
 // The live "Data" sheet's own header text at each column this feature writes to, as read on
@@ -92,11 +97,11 @@ const EXPECTED_SHEET_HEADER = {
   A: 'CXB CV', B: 'RTO Initiated Date', C: 'Latest NDR Date', D: 'RTO Reason', E: 'Order ID',
   F: 'Unique', G: 'AWB Code', H: 'Customer Email', I: 'Customer Name', J: 'Customer Mobile',
   K: 'Address', L: 'Address City', M: 'Address State', N: 'Address Pincode',
-  O: 'Payment Method', P: 'Order Total', AB: 'Facility Name', AC: 'Courier Company',
+  O: 'Payment Method', P: 'Order Total', AA: 'Facility Name', AB: 'Courier Company',
 };
 
 // Widest column this feature ever writes to - callers size their output row arrays to this.
-const LAST_COLUMN_LETTER = 'AC';
+const LAST_COLUMN_LETTER = 'AB';
 
 // Every CSV column this feature depends on - callers reject the whole upload if any is absent
 // from the file's own header row, rather than silently writing blanks into that column for

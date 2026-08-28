@@ -184,14 +184,17 @@ EXPECTED_SHEET_HEADER = {
     "E": "Order ID", "F": "Unique", "G": "AWB Code", "H": "Customer Email",
     "I": "Customer Name", "J": "Customer Mobile", "K": "Address", "L": "Address City",
     "M": "Address State", "N": "Address Pincode", "O": "Payment Method", "P": "Order Total",
-    "AB": "Facility Name", "AC": "Courier Company",
+    # 2026-08-28: the "Key" column at AA was deleted from the live sheet, shifting these two one
+    # left (Facility Name AB->AA, Courier Company AC->AB). Kept in sync by hand with
+    # api/_lib/rtoCsvImport.js, same as the rest of this mirror.
+    "AA": "Facility Name", "AB": "Courier Company",
 }
 
 # Fixed sheet column each row's cellsByColumn key maps to what column letter it already is
 # (api/_lib/rtoCsvImport.js's buildRowPlan already keys cellsByColumn by column letter, so
 # this worker just needs AWB Code's own letter, not a full mapping).
 AWB_COLUMN = "G"
-LAST_COLUMN_LETTER = "AC"
+LAST_COLUMN_LETTER = "AB"
 ROW_WIDTH = _column_letter_to_index(LAST_COLUMN_LETTER) + 1
 
 # Sheets' values:append does NOT write at the range it is given. It searches that range for a

@@ -58,7 +58,9 @@ def test_check_sheet_layout_clean_on_production_header_row():
         "AWB Code", "Customer Email", "Customer Name", "Customer Mobile", "Address",
         "Address City", "Address State", "Address Pincode", "  Payment Method", "Order Total",
         "Agent Name", "Connected", "Attempt", "", "New product needed", "New  order ID",
-        "Change in address", "x", "Calling Date", " Remark", "Key", "Facility Name",
+        # No "Key" at AA any more - deleted from the live sheet on 2026-08-28, which pulled
+        # Facility Name to AA and Courier Company to AB.
+        "Change in address", "x", "Calling Date", " Remark", "Facility Name",
         "Courier Company",
     ]
     assert worker._check_sheet_layout(full_header_row) == []
