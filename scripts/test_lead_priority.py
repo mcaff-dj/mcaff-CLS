@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lead_priority import build_assignment_queue  # noqa: E402
+from lead_priority import build_assignment_queue, PREPAID_OVERFLOW_BUFFER  # noqa: E402
 
 AGENTS = ["a@x.com", "b@x.com", "c@x.com"]
 QUOTA = 5  # 3 agents * 5 = 15 total capacity
@@ -158,6 +158,31 @@ def test_prepaid_target_is_measured_against_capacity_not_the_running_tally():
     prepaid_rows = {row_index for row_index, _, _, tier in prepaid}
     got = sum(1 for r, e in assignments.items() if r in prepaid_rows and e == "targeted@x.com")
     assert got == 5, f"targeted agent should get 50% of their 10 slots as prepaid, got {got}"
+
+
+def test_prepaid_overflow_is_bounded_when_one_agent_is_the_only_one_with_capacity():
+    """A lone agent with open capacity can't be handed an entire run's prepaid backlog just
+    for being the only one left under quota (2026-08-28: shilpa.bhupeli@mcaffeine.com got 13
+    Prepaid leads in one run against a 20% target - the old Pass 3 had NO cap at all, so with
+    no other online agent left under quota, round-robin kept landing on her for every single
+    prepaid lead in the pool). With target=20% and quota=20, passes 1-2 cap her at 4; Pass 3
+    (the actual last resort) should relax that by PREPAID_OVERFLOW_BUFFER, not remove the cap -
+    so out of 20 incoming prepaid leads she gets at most 4 + PREPAID_OVERFLOW_BUFFER, and the
+    rest are left unassigned this round rather than dumped on her."""
+    agent = "solo@x.com"
+    quota = 20
+    prepaid = [(i, None, f"PRE{i}", 0) for i in range(20)]
+    current_load = {agent: 0}
+
+    assignments = build_assignment_queue(
+        prepaid, [agent], current_load, quota=quota,
+        agent_prepaid_target={agent: 20},
+    )
+
+    expected_cap = (quota * 20 // 100) + PREPAID_OVERFLOW_BUFFER
+    got = len(assignments)
+    assert got == expected_cap, f"expected the overflow-bounded cap of {expected_cap}, got {got}"
+    assert got < len(prepaid), "the whole prepaid pool should NOT all land on the one lone agent"
 
 
 if __name__ == "__main__":

@@ -60,6 +60,9 @@ import CallTrendChart from './CallTrendChart';
     const HIGH_PRIORITY_COD_RTO_REASONS = leadAssignmentRules.highPriorityCodRtoReasons;
     const LOW_PRIORITY_COD_RTO_REASONS = leadAssignmentRules.lowPriorityCodRtoReasons;
     const ASSIGNMENT_QUOTA = leadAssignmentRules.assignmentQuota;
+    // See leadAssignmentRules.json's _prepaidOverflowNote - mirrors lead_priority.py's
+    // PREPAID_OVERFLOW_BUFFER exactly.
+    const PREPAID_OVERFLOW_BUFFER = leadAssignmentRules.prepaidOverflowBuffer;
     // Floor for the Team Roster's "Priority Reasons" picker - the reason substrings the tier
     // system itself recognizes, kept selectable even on a day no loaded lead carries one. The
     // picker's real option list is priorityReasonOptions inside App(), which adds every reason
@@ -1711,6 +1714,14 @@ import CallTrendChart from './CallTrendChart';
           // lead_priority.py's _within_prepaid_target exactly.
           return (prepaidAssignedThisRun[email] + 1) * 100 <= capacityThisRun[email] * target;
         };
+        // Same shape as withinPrepaidTarget, shifted by PREPAID_OVERFLOW_BUFFER extra leads -
+        // mirrors lead_priority.py's _within_prepaid_overflow exactly.
+        const withinPrepaidOverflow = (email, isPrepaidLead) => {
+          if (!isPrepaidLead) return true;
+          const target = prepaidTargets[email];
+          if (target == null) return true;
+          return (prepaidAssignedThisRun[email] + 1 - PREPAID_OVERFLOW_BUFFER) * 100 <= capacityThisRun[email] * target;
+        };
         // Only gates Connected=No reassignments (item.excludedAgent set) - a fresh/never-
         // touched lead is unaffected by this agent's restriction, same as this setting's
         // column name/tooltip promise. Hard, not soft: never relaxed across passes, so a
@@ -1747,12 +1758,19 @@ import CallTrendChart from './CallTrendChart';
                 assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent
                   && matchesReassignPaymentMode(email, item, isPrepaidLead) && withinPrepaidTarget(email, isPrepaidLead));
               }
-              // Pass 3: every eligible agent is at/over their prepaid target - assign anyway
-              // rather than leave the lead unassigned purely to protect a soft ratio. The
-              // reassign-payment-mode filter stays hard even here - see its own comment.
+              // Pass 3 (last resort): every eligible agent is at/over their prepaid target -
+              // relax it by PREPAID_OVERFLOW_BUFFER leads' worth rather than dropping the check
+              // outright. This USED to fall through to a 4th, fully unconditional pass instead -
+              // exactly how one agent being the only one left with open capacity could absorb an
+              // entire run's prepaid backlog in a single shot regardless of their own target
+              // (see leadAssignmentRules.json's _prepaidOverflowNote). Now a prepaid lead nobody
+              // accepts even under the relaxed buffer is left unassigned this round instead - it
+              // rolls to the next run/preview refresh, same self-healing contract as running out
+              // of raw capacity already has. reassign-payment-mode filter stays hard even here.
               if (assignedEmail == null) {
                 assignedEmail = tryAssign(email => needed[email] > 0 && email !== item.excludedAgent
-                  && matchesReassignPaymentMode(email, item, isPrepaidLead));
+                  && matchesReassignPaymentMode(email, item, isPrepaidLead)
+                  && withinPrepaidOverflow(email, isPrepaidLead));
               }
               if (assignedEmail) {
                 placed.add(item);

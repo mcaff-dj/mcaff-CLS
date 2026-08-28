@@ -131,6 +131,10 @@ LOW_PRIORITY_COD_RTO_REASONS = _RULES["lowPriorityCodRtoReasons"]
 
 DEFAULT_QUOTA = _RULES["assignmentQuota"]
 
+# See leadAssignmentRules.json's _prepaidOverflowNote - bounds how many prepaid leads Pass 3
+# below may hand one agent beyond their soft prepaidPct target in a single run.
+PREPAID_OVERFLOW_BUFFER = _RULES["prepaidOverflowBuffer"]
+
 # Connected=No reassignment - shared with the JS "Next to Assign" preview so none of these can
 # drift between them the way DEFAULT_QUOTA once did. See leadAssignmentRules.json's
 # _reassignNote for what these mean.
@@ -216,12 +220,17 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
     with a target below 100 out of prepaid entirely and handed the whole prepaid pool to
     whoever had no target set. It never leaves a lead unassigned to enforce the ratio: an agent
     already at/over their target is skipped in favour of another eligible agent for a prepaid
-    lead, but if every eligible agent is at/over target the lead is still assigned (falls back
-    to ignoring the ratio) rather than left in the queue. Steers the mix over time rather than
-    guaranteeing an exact percentage - "soft" is the whole point, since a hard cap could strand
-    prepaid leads unassigned purely because everyone online happened to be tuned low. Absent/
-    unset for an agent means no target, i.e. unrestricted exactly as before this parameter
-    existed.
+    lead. If every eligible agent is at/over target, a relaxed target (+PREPAID_OVERFLOW_BUFFER
+    leads' worth of capacity) is tried next as the actual last resort - and a prepaid lead
+    nobody accepts even under that relaxed buffer is left unassigned THIS RUN rather than
+    dumped on whoever happens to still have raw quota left, rolling to the next run instead
+    (see leadAssignmentRules.json's _prepaidOverflowNote for the incident that motivated this:
+    one agent being the only one left under quota absorbed an entire run's prepaid backlog in a
+    single shot, far past their own target, because the old code had no bound on the last-resort
+    pass at all). Steers the mix over time rather than guaranteeing an exact percentage - "soft"
+    is the whole point, since a hard, unbounded cap could strand prepaid leads unassigned
+    indefinitely purely because everyone online happened to be tuned low. Absent/unset for an
+    agent means no target, i.e. unrestricted exactly as before this parameter existed.
     agent_reassign_payment_mode: optional {email: 'Prepaid' or 'COD'} - unlike
     agent_prepaid_target, a HARD filter that only ever applies to a reassignment (a row_index
     present in excluded_by_row); a fresh/never-touched lead ignores it entirely. An agent with
@@ -319,8 +328,19 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
             return True
         # Integer form of (prepaid + 1) <= capacity * target / 100 - floor semantics, so a
         # capacity too small to hold even one lead's worth of the target allows no prepaid in
-        # passes 1-2 and falls through to pass 3 like any other at-target agent.
+        # passes 1-2 and falls through to pass 3/4 like any other at-target agent.
         return (prepaid_assigned_this_run[email] + 1) * 100 <= capacity_this_run[email] * target
+
+    def _within_prepaid_overflow(email, is_prepaid_lead):
+        # Same shape as _within_prepaid_target, shifted by PREPAID_OVERFLOW_BUFFER extra leads -
+        # see leadAssignmentRules.json's _prepaidOverflowNote. An agent with no target set is
+        # already unrestricted in _within_prepaid_target and never reaches pass 3.
+        if not is_prepaid_lead:
+            return True
+        target = agent_prepaid_target.get(email)
+        if target is None:
+            return True
+        return (prepaid_assigned_this_run[email] + 1 - PREPAID_OVERFLOW_BUFFER) * 100 <= capacity_this_run[email] * target
 
     def _matches_reassign_payment_mode(email, row_index, is_prepaid_lead):
         if row_index not in excluded_by_row:
@@ -358,20 +378,29 @@ def build_assignment_queue(unassigned_pending, online_agents, current_load, quot
                 chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0
                                       and _matches_reassign_payment_mode(e, row_index, is_prepaid_lead)
                                       and _within_prepaid_target(e, is_prepaid_lead))
-            # Pass 3: every eligible agent is at/over their prepaid target - assign anyway rather
-            # than leave the lead unassigned purely to protect a soft ratio. reassign-payment-mode
-            # stays hard even here - see its own docstring entry.
+            # Pass 3 (last resort): every eligible agent is at/over their prepaid target - relax
+            # it by PREPAID_OVERFLOW_BUFFER leads' worth rather than dropping the check outright.
+            # This USED to fall through to a 4th, fully unconditional pass instead - which is
+            # exactly how one agent being the only one left with open capacity could absorb an
+            # entire run's prepaid backlog in a single shot regardless of their own target (see
+            # leadAssignmentRules.json's _prepaidOverflowNote). Now a prepaid lead that nobody
+            # accepts even under the relaxed buffer is left unassigned this round instead - it
+            # rolls to the next run, same self-healing contract as running out of raw capacity
+            # already has. reassign-payment-mode stays hard even here - see its own docstring
+            # entry.
             if chosen is None:
                 chosen = _try_assign(lambda e: e not in excluded and needed[e] > 0
-                                      and _matches_reassign_payment_mode(e, row_index, is_prepaid_lead))
+                                      and _matches_reassign_payment_mode(e, row_index, is_prepaid_lead)
+                                      and _within_prepaid_overflow(e, is_prepaid_lead))
 
             if chosen is not None:
                 assignments[row_index] = chosen
                 needed[chosen] -= 1
                 if is_prepaid_lead:
                     prepaid_assigned_this_run[chosen] += 1
-            # else (every agent excluded or at capacity): this lead is left unassigned this
-            # round, same as running out of agent capacity did before this parameter existed.
+            # else (every agent excluded, at capacity, or over their prepaid target+buffer):
+            # this lead is left unassigned this round, same as running out of agent capacity
+            # did before this parameter existed.
 
     fresh_pool = [t for t in sorted_pool if t[0] not in excluded_by_row]
     reassign_pool = [t for t in sorted_pool if t[0] in excluded_by_row]
