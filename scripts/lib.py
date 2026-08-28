@@ -166,8 +166,12 @@ def append_sheet_rows(spreadsheet_id, range_, rows):
     many rows are in the batch - see this feature's own design note on why an unbatched write
     path is not acceptable (a real 429 outage earlier this same day, see git log).
 
-    range_ only needs to name the starting column and sheet/tab (e.g. "'Data'!B2:P") - Google
-    figures out where the actual next blank row is; it does not need to be exact.
+    PASS A SINGLE-COLUMN range (e.g. "'Data'!A2:A"), not the full written width. Sheets does not
+    write at the range given: it searches that range for a "table" and writes starting at that
+    table's OWN first column, however many columns each row in `rows` carries. A multi-column
+    range whose blocks end at different rows lets it pick the wrong block and shift every value
+    sideways - see the shifted-by-27-columns note in process_rto_csv_upload_job.py. One column
+    the caller always fills leaves nothing to mis-detect. Row placement still comes from Google.
 
     Returns Google's raw response dict, or {"updates": {"updatedRows": 0}} without making any
     network call at all if `rows` is empty - avoids both a wasted request and a confusing 400

@@ -193,6 +193,25 @@ EXPECTED_SHEET_HEADER = {
 AWB_COLUMN = "G"
 LAST_COLUMN_LETTER = "AC"
 ROW_WIDTH = _column_letter_to_index(LAST_COLUMN_LETTER) + 1
+
+# Sheets' values:append does NOT write at the range it is given. It searches that range for a
+# "table" and writes starting at THAT table's own first column - so the range only ever selects
+# which block of data to append after, never where the columns land.
+#
+# Handing it the full A2:AC width is what caused the 2026-08-28 corruption: the range spanned two
+# blocks whose data ended at different rows (A-P, then AB-AC), Sheets picked the AB one, and every
+# field landed exactly 27 columns right of target - A->AB, B->AC, C->AD, D->AE, E->AF, G->AH, and
+# so on through L->AM. Worse, it cascades: those shifted rows then sit lower than the A-P block,
+# so the NEXT append mis-detects for the same reason, which is why it looked random rather than
+# one-off.
+#
+# Anchoring on column A alone leaves exactly one column to detect, so "the table's first column"
+# can only ever be A. The row array is still the full ROW_WIDTH, and append writes all of it
+# starting at that first column - the write stays A..AC, only the detection narrows. Column A is
+# the right anchor because this feature fills it on every row it writes and never leaves it empty
+# (api/_lib/rtoCsvImport.js's blankPlaceholder = 'NA'), so its block always reaches the true
+# bottom of our data.
+APPEND_ANCHOR_RANGE = "A2:A"
 # Q (Agent Name) blank, R (Connected) blank, then S/T/U carry the punched/refunded stamp -
 # same layout PUNCHED_STAMP/REFUNDED_STAMP above have always targeted.
 STAMP_START_INDEX = _column_letter_to_index("S")
@@ -411,7 +430,7 @@ def process_job(job_id):
                 s, t, u = row["stamp"]
                 base_row[STAMP_START_INDEX:STAMP_START_INDEX + 3] = [s, t, u]
             values_to_append.append(base_row)
-        append_resp = lib.append_sheet_rows(SPREADSHEET_ID, f"'{SHEET_TAB}'!A2:{LAST_COLUMN_LETTER}", values_to_append)
+        append_resp = lib.append_sheet_rows(SPREADSHEET_ID, f"'{SHEET_TAB}'!{APPEND_ANCHOR_RANGE}", values_to_append)
         # Released the moment the rows are in: the verification read and status writes below
         # cannot create a duplicate, so holding another worker off through them buys nothing.
         _release_append_lock(conn)

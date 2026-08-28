@@ -85,6 +85,30 @@ def test_parse_appended_row_range():
     assert worker.parse_appended_row_range(None) is None
 
 
+def test_append_anchor_range_stays_single_column():
+    """The 2026-08-28 corruption in one assertion. values:append writes starting at the first
+    column of whatever table it detects inside the range it is handed - so a range spanning more
+    than one column of data can, and did, make it start at AB instead of A and shift every field
+    27 columns right. Widening this back reintroduces that silently (the sheet still accepts the
+    write; only the post-append canary notices, after the bad rows are already in), so it is
+    pinned here rather than left to a comment."""
+    anchor = worker.APPEND_ANCHOR_RANGE
+    start, _, end = anchor.partition(":")
+    assert anchor.count(":") == 1, f"expected a start:end range, got {anchor!r}"
+    start_col = "".join(c for c in start if c.isalpha())
+    end_col = "".join(c for c in end if c.isalpha())
+    assert start_col == end_col, (
+        f"append anchor must span ONE column or Sheets can detect the wrong table and shift "
+        f"every written value sideways - got {anchor!r} ({start_col}..{end_col})"
+    )
+    # Column A specifically: it is the only column this worker guarantees is non-empty on every
+    # row it writes (rtoCsvImport's blankPlaceholder = 'NA'), so its block always reaches the
+    # true bottom of our data. An anchor on a column that can be blank would find a short table
+    # and append into the middle of existing rows.
+    assert start_col == "A", f"anchor must be column A, got {start_col}"
+    assert worker._column_letter_to_index(start_col) == 0
+
+
 if __name__ == "__main__":
     test_partition_and_stamp_marks_punched_rows()
     print("  ok  test_partition_and_stamp_marks_punched_rows")
@@ -100,4 +124,6 @@ if __name__ == "__main__":
     print("  ok  test_check_sheet_layout_reports_drifted_column")
     test_parse_appended_row_range()
     print("  ok  test_parse_appended_row_range")
-    print("7 passed")
+    test_append_anchor_range_stays_single_column()
+    print("  ok  test_append_anchor_range_stays_single_column")
+    print("8 passed")

@@ -16,7 +16,7 @@ const { getSession } = require('../_lib/session');
 const { parseCSV } = require('../_lib/csv');
 const { buildRowPlan, checkSheetLayout, columnLetterToIndex, dedupKey, normalizeAwb } = require('../_lib/rtoCsvImport');
 const {
-  NDR_IMPORT, NDR_ROW_WIDTH, NDR_LAST_COLUMN_LETTER, NDR_AWB_COLUMN, NDR_ATTEMPT_COLUMN,
+  NDR_IMPORT, NDR_ROW_WIDTH, NDR_AWB_COLUMN, NDR_ATTEMPT_COLUMN,
 } = require('../_lib/ndrCsvImport');
 const { isCallingProcessAdmin, resolveCallerTeam, listCallingTeams } = require('../_lib/db');
 const { coerceTeamId } = require('../_lib/callingTeams');
@@ -338,7 +338,13 @@ module.exports = async (req, res) => {
     if (plan.validRows.length) {
       await sheetsRequest(
         client, team.sheetId, 'POST',
-        `/values/${encodeURIComponent(`'${team.sheetTab}'!A2:${NDR_LAST_COLUMN_LETTER}`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+        // A2:A, NOT A2:Q - values:append writes starting at the FIRST COLUMN OF THE TABLE it
+        // detects inside the given range, not at the range's own start. A multi-column range
+        // whose blocks bottom out at different rows lets it latch onto the wrong block and shift
+        // every value sideways (this is what corrupted the RTO sheet on 2026-08-28, by 27
+        // columns). One column leaves nothing to mis-detect; the rows written are still the full
+        // A..Q width from rowToFullArray. Column A is Order ID, filled on every row this writes.
+        `/values/${encodeURIComponent(`'${team.sheetTab}'!A2:A`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
         { values: plan.validRows.map((r) => rowToFullArray(r.cellsByColumn)) },
       );
       appended = plan.validRows.length;
