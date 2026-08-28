@@ -3,9 +3,15 @@
 // mapping, dedupes by AWB (within the file first, then against the sheet), and hands every
 // surviving row to a background Lambda that runs the LMD/GoKwik checks and does the actual
 // append. This endpoint writes nothing to the sheet itself - see
-// docs/superpowers/specs/2026-08-20-rto-csv-upload-design.md for why those checks cannot run
-// here (mcaff_prod MySQL is reachable only from Python) or synchronously within one browser
-// request (API Gateway's ~29s ceiling).
+// docs/superpowers/specs/2026-08-20-rto-csv-upload-design.md for the original design.
+//
+// That doc's "mcaff_prod MySQL is reachable only from Python" no longer holds and was corrected
+// here on 2026-08-28: the app's own DB user carries GRANT SELECT ON mcaff_prod.* (verified
+// against the live server), and api/ndr/upload.js now reads mcaff_prod.lmd_courier_tracking
+// straight from Node through the same pool. The split below is justified by the GoKwik call
+// alone - that is one HTTP request PER ROW, and thousands of them cannot finish inside API
+// Gateway's ~29s ceiling. A batched MySQL lookup can, which is why the NDR upload stayed
+// synchronous rather than copying this shape.
 const { JWT } = require('google-auth-library');
 const { getSession } = require('../_lib/session');
 const { parseCSV } = require('../_lib/csv');
