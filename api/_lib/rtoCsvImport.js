@@ -16,6 +16,49 @@ function normalizeHeader(h) {
   return (h || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// Lets one import accept a second family of header names for columns it already knows. The
+// Shiprocket "NDR Full" export spells six of NDR's required columns differently from the export
+// the mapping was written against - "Courier" for "Courier Company", "Pincode" for "Address
+// Pincode", and so on. Identical data, different label, and the file was refused outright until
+// someone renamed the header row by hand before every upload.
+//
+// This is NOT a reintroduction of the by-name header matching the top of this file describes
+// killing. That matched CSV headers against SHEET headers to decide which column a value lands
+// in, so a mismatch shifted whole rows sideways. This only ever renames a CSV key to a name the
+// fixed CSV->column mapping already contains: an alias that is wrong or unrecognised produces the
+// ordinary "missing required column" refusal, and can never route a value to a column it was not
+// explicitly mapped to.
+//
+// Matched through normalizeHeader, so case and punctuation drift ("Payment mode", "Address_1")
+// are absorbed too. Two rules keep it from destroying data:
+//   - the canonical name always wins. A file carrying BOTH "Courier" and "Courier Company" keeps
+//     its own "Courier Company" column untouched.
+//   - the alias key is COPIED, not moved. The file's original headers survive on every row, so
+//     the header row echoed back with an error is still the one the uploader actually has.
+function applyHeaderAliases(rows, aliases) {
+  if (!rows.length || !aliases) return rows;
+  const byNormalized = new Map(
+    Object.entries(aliases).map(([alias, canonical]) => [normalizeHeader(alias), canonical]),
+  );
+  // Seeded with what the file already has, then grown as each rename is planned - so two aliases
+  // of the same canonical name in one file resolve to the first, rather than silently clobbering
+  // each other in object-key order.
+  const claimed = new Set(Object.keys(rows[0]));
+  const renames = [];
+  Object.keys(rows[0]).forEach((header) => {
+    const canonical = byNormalized.get(normalizeHeader(header));
+    if (!canonical || claimed.has(canonical)) return;
+    claimed.add(canonical);
+    renames.push([header, canonical]);
+  });
+  if (!renames.length) return rows;
+  return rows.map((row) => {
+    const out = { ...row };
+    renames.forEach(([from, to]) => { out[to] = out[from]; });
+    return out;
+  });
+}
+
 function normalizeAwb(v) {
   return (v || '').toString().trim().toUpperCase();
 }
@@ -318,5 +361,5 @@ module.exports = {
   normalizeHeader, normalizeAwb, columnLetterToIndex, indexToColumnLetter,
   CSV_TO_COLUMN, EXPECTED_SHEET_HEADER, LAST_COLUMN_LETTER, REQUIRED_CSV_HEADERS,
   checkSheetLayout, buildRowPlan, looksLikeScientificNotation, expandScientificNotation,
-  toSheetText, toSheetNumber, RTO_IMPORT, dedupKey,
+  toSheetText, toSheetNumber, applyHeaderAliases, RTO_IMPORT, dedupKey,
 };

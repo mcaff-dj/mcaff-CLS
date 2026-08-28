@@ -2,10 +2,12 @@
 // rtoCsvImport.js correctly, writes only the columns it should, and dedupes on AWB + Attempt
 // Count rather than AWB alone. No network, no DB. Run: node api/_lib/ndrCsvImport.test.js
 const assert = require('assert');
-const { buildRowPlan, dedupKey, columnLetterToIndex, checkSheetLayout } = require('./rtoCsvImport');
+const {
+  buildRowPlan, dedupKey, columnLetterToIndex, checkSheetLayout, applyHeaderAliases,
+} = require('./rtoCsvImport');
 const {
   NDR_IMPORT, NDR_CSV_TO_COLUMN, NDR_EXPECTED_SHEET_HEADER, NDR_ROW_WIDTH,
-  NDR_LAST_COLUMN_LETTER, NDR_AWB_COLUMN, NDR_ATTEMPT_COLUMN,
+  NDR_LAST_COLUMN_LETTER, NDR_AWB_COLUMN, NDR_ATTEMPT_COLUMN, NDR_CSV_HEADER_ALIASES,
 } = require('./ndrCsvImport');
 
 function csvRow(overrides) {
@@ -175,5 +177,83 @@ NDR_IMPORT.dedupExtraCsvHeaders.forEach((h) => {
   // The dedup key never carries the apostrophe, whichever branch wrote the cell.
   assert.strictEqual(plan('0012345678901').awbCode, '0012345678901');
 }
+
+// 11. Header aliases. The real header row of the Shiprocket "NDR Full" export, verbatim from
+// imports_ndr_reports_c_3594355_NDR_Full_3594355_20260828_114404.csv - the file that was refused
+// with "missing required column(s): Courier Company, Address Line 1, Address Pincode, Address
+// City, Address State, Payment Method" despite carrying every one of them under another name.
+{
+  const NDR_FULL_EXPORT_HEADER = [
+    'Order ID', 'AWB Code', 'Courier', 'Channel', 'Channel SKU', 'Master SKU',
+    'Product Name and Quantity', 'Customer Name', 'Customer Email', 'Customer Mobile',
+    'Customer RTO Risk', 'Address 1', 'Address 2', 'Pincode', 'City', 'State', 'Address Quality',
+    'Order Value', 'Payment Mode', 'Attempt Count', 'Status', 'Next Action',
+    'Seller Input Required', 'Critical Action Required', 'Suggested Seller Action',
+    'Latest OFD Date', 'Latest NDR Date', 'Latest NDR Reason', 'Latest NDR Action',
+    'Latest NDR Action By', 'First OFD Date', 'First NDR Date', 'First NDR Reason',
+    'First NDR Action', 'First NDR Action By', 'Second OFD Date', 'Second NDR Date',
+    'Second NDR Reason', 'Second NDR Action', 'Second NDR Action By', 'Third OFD Date',
+    'Third NDR Date', 'Third NDR Reason', 'Third NDR Action', 'Is Escalated',
+    'Is Buyer Communication Sent', 'Total Communication Attempts',
+    'Last Communication Attempt At', 'Is Buyer Response Received', 'Buyer Response Type',
+    'Buyer Response Source', 'Buyer Response Date',
+  ];
+  const raw = {};
+  NDR_FULL_EXPORT_HEADER.forEach((h) => { raw[h] = `v-${h}`; });
+
+  // Without aliasing this file is refused - the exact six the modal named.
+  assert.deepStrictEqual(
+    NDR_IMPORT.requiredCsvHeaders.filter((h) => !NDR_FULL_EXPORT_HEADER.includes(h)),
+    ['Courier Company', 'Address Line 1', 'Address Pincode', 'Address City', 'Address State', 'Payment Method'],
+  );
+  // With it, nothing is missing.
+  const [aliased] = applyHeaderAliases([raw], NDR_IMPORT.csvHeaderAliases);
+  assert.deepStrictEqual(
+    NDR_IMPORT.requiredCsvHeaders.filter((h) => !(h in aliased)),
+    [],
+    'every required column must resolve through an alias',
+  );
+  // Values follow the rename, and "Address 2" must NOT be mistaken for "Address 1".
+  assert.strictEqual(aliased['Courier Company'], 'v-Courier');
+  assert.strictEqual(aliased['Address Line 1'], 'v-Address 1');
+  assert.strictEqual(aliased['Address Pincode'], 'v-Pincode');
+  assert.strictEqual(aliased['Payment Method'], 'v-Payment Mode');
+  // The file's own headers survive, so an error can still echo the real header row.
+  assert.strictEqual(aliased.Courier, 'v-Courier');
+  assert.strictEqual(aliased['Address 2'], 'v-Address 2');
+
+  // End to end: the aliased row actually maps to the right sheet columns.
+  const plan = buildRowPlan({
+    csvRows: applyHeaderAliases(
+      [{ ...raw, 'AWB Code': '54012345678901', 'Attempt Count': '2', Courier: 'Delhivery', Pincode: '110001' }],
+      NDR_IMPORT.csvHeaderAliases,
+    ),
+    existingKeySet: new Set(),
+    config: NDR_IMPORT,
+  });
+  assert.strictEqual(plan.validRows.length, 1);
+  assert.strictEqual(plan.validRows[0].cellsByColumn.F, 'Delhivery', 'Courier -> F');
+  assert.strictEqual(plan.validRows[0].cellsByColumn.H, '110001', 'Pincode -> H');
+}
+
+// 12. Alias safety: a canonical header already in the file is never overwritten by its alias.
+{
+  const [row] = applyHeaderAliases(
+    [{ Courier: 'alias-value', 'Courier Company': 'canonical-value' }],
+    NDR_CSV_HEADER_ALIASES,
+  );
+  assert.strictEqual(row['Courier Company'], 'canonical-value');
+}
+
+// 13. Every alias must point at a header the fixed column map actually knows - an alias for a
+// name nothing maps is dead config, and one with a typo would silently never apply.
+Object.values(NDR_CSV_HEADER_ALIASES).forEach((canonical) => {
+  assert.ok(NDR_CSV_TO_COLUMN[canonical], `alias target "${canonical}" is not a mapped CSV header`);
+});
+// No alias may collide with a canonical name - that would rename a column onto itself or shadow
+// a real required header.
+Object.keys(NDR_CSV_HEADER_ALIASES).forEach((alias) => {
+  assert.ok(!NDR_CSV_TO_COLUMN[alias], `alias "${alias}" is itself a mapped CSV header`);
+});
 
 console.log('ndrCsvImport.test.js: all assertions passed');

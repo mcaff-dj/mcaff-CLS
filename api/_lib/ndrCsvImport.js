@@ -38,6 +38,27 @@ const NDR_CSV_TO_COLUMN = {
   'Latest NDR Reason': 'Q',
 };
 
+// Alternative CSV header spellings accepted for the columns above, alias -> canonical. Both
+// Shiprocket NDR exports carry the same six fields under different labels: the "NDR Full" export
+// (imports_ndr_reports_*_NDR_Full_*.csv) names them on the left, the export NDR_CSV_TO_COLUMN was
+// written against on the right. Same data, same source system, different label - so a file that
+// was entirely valid used to be refused with "missing required column(s)" and had to have its
+// header row edited by hand before every upload, which is also how an AWB column gets opened in
+// Excel and rounded to 5.4E+13 in the first place.
+//
+// Only these six differ; Order ID, AWB Code, Customer Name, Customer Mobile, Status, Attempt
+// Count, Latest NDR Date and Latest NDR Reason are spelled identically in both exports and need
+// no alias. Matching is case- and punctuation-insensitive, and a canonical header already in the
+// file always wins - see applyHeaderAliases in rtoCsvImport.js.
+const NDR_CSV_HEADER_ALIASES = {
+  Courier: 'Courier Company',
+  'Address 1': 'Address Line 1',
+  Pincode: 'Address Pincode',
+  City: 'Address City',
+  State: 'Address State',
+  'Payment Mode': 'Payment Method',
+};
+
 // The live sheet's own header text at each column above, used ONLY to detect drift before
 // writing - never to locate a column. O/L/P/Q/S/T are named outright in
 // scripts/assign_ndr_leads.py's column constants; the rest come from mapNdrRow's field names.
@@ -80,6 +101,7 @@ const NDR_IMPORT = {
   expectedHeader: NDR_EXPECTED_SHEET_HEADER,
   lastColumn: NDR_LAST_COLUMN_LETTER,
   requiredCsvHeaders: Object.keys(NDR_CSV_TO_COLUMN),
+  csvHeaderAliases: NDR_CSV_HEADER_ALIASES,
   awbCsvHeader: 'AWB Code',
   // AWB alone does NOT identify an NDR lead: one shipment gets a new row per failed delivery
   // attempt, and the sheet really does carry the same AWB on many rows (358 such AWBs on
@@ -114,6 +136,7 @@ const NDR_IMPORT = {
 module.exports = {
   NDR_IMPORT,
   NDR_CSV_TO_COLUMN,
+  NDR_CSV_HEADER_ALIASES,
   NDR_EXPECTED_SHEET_HEADER,
   NDR_LAST_COLUMN_LETTER,
   NDR_ROW_WIDTH,

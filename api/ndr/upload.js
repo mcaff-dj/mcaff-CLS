@@ -14,7 +14,9 @@
 const { JWT } = require('google-auth-library');
 const { getSession } = require('../_lib/session');
 const { parseCSV } = require('../_lib/csv');
-const { buildRowPlan, checkSheetLayout, columnLetterToIndex, dedupKey, normalizeAwb } = require('../_lib/rtoCsvImport');
+const {
+  applyHeaderAliases, buildRowPlan, checkSheetLayout, columnLetterToIndex, dedupKey, normalizeAwb,
+} = require('../_lib/rtoCsvImport');
 const {
   NDR_IMPORT, NDR_ROW_WIDTH, NDR_AWB_COLUMN, NDR_ATTEMPT_COLUMN,
 } = require('../_lib/ndrCsvImport');
@@ -315,9 +317,17 @@ module.exports = async (req, res) => {
 
   // csvHeaders goes back with the error on purpose: the required set is fixed (see
   // ndrCsvImport.js), so when a file doesn't match, the fastest way to see why is the file's own
-  // header row next to the missing names.
+  // header row next to the missing names. Captured from the RAW rows, before aliasing, so what is
+  // echoed is what the uploader will actually see if they open the file.
   const csvHeaders = Object.keys(csvRows[0]);
-  const missingCsvHeaders = NDR_IMPORT.requiredCsvHeaders.filter((h) => !csvHeaders.includes(h));
+  // The two Shiprocket NDR exports label six of the required columns differently (Courier vs
+  // Courier Company, Pincode vs Address Pincode, ...). Accepting both spellings here, before the
+  // required-column check, is what stops a perfectly valid file from being refused and hand-edited
+  // - see NDR_CSV_HEADER_ALIASES in ndrCsvImport.js. Nothing downstream needs to know: this only
+  // adds the canonical key to each row, so buildRowPlan's fixed CSV->column mapping is unchanged.
+  csvRows = applyHeaderAliases(csvRows, NDR_IMPORT.csvHeaderAliases);
+  const aliasedHeaders = Object.keys(csvRows[0]);
+  const missingCsvHeaders = NDR_IMPORT.requiredCsvHeaders.filter((h) => !aliasedHeaders.includes(h));
   if (missingCsvHeaders.length) {
     res.status(400).json({
       error: `This CSV is missing required column(s): ${missingCsvHeaders.join(', ')}.`,
