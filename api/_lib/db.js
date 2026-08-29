@@ -1554,6 +1554,18 @@ const DE_CONTACT_BUCKET_RANGES = {
   '10+': { sql: 'contact_count >= ?', params: [10] },
 };
 
+// Same buckets/labels as DE_CONTACT_BUCKET_RANGES above and getDeliveryEscalationRepeatStats'
+// own CASE, as a groupable label instead of a filter predicate - for the day-wise table's own
+// "TAT by Repeat Contacts" breakdown (getDeliveryEscalationDaywiseStats). contact_count is
+// always >= 1 by the time a ticket exists (the sync job/dispose flow both stamp it), so the <= 1
+// branch is really just "= 1" written defensively rather than a real 0/negative case.
+const DE_CONTACT_BUCKET_SQL = `CASE
+    WHEN contact_count <= 1 THEN '1 time'
+    WHEN contact_count BETWEEN 2 AND 4 THEN '2-4 times'
+    WHEN contact_count BETWEEN 5 AND 9 THEN '5-9 times'
+    ELSE '10+ times'
+  END`;
+
 // Which date column a query groups/filters rows by - 'added_date' (the Query date shown
 // elsewhere on this page) or 'order_date' (when the underlying order was placed, per
 // sync_delivery_tickets_to_sheet.py). A whitelist, not user-supplied SQL, since callers below
@@ -1765,10 +1777,10 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
   // (or triple-, ...) counts it. Ignores NULL/blank awb_code the same way COUNT(DISTINCT) does
   // there too - a ticket with no AWB at all doesn't land in any bucket.
   const [rows] = await pool.execute(`
-    SELECT DATE_FORMAT(${col}, '%Y-%m-%d') AS d, COALESCE(delivery_partner, 'Unknown') AS partner, COALESCE(query_category, 'Unknown') AS category, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(DISTINCT awb_code) AS c
+    SELECT DATE_FORMAT(${col}, '%Y-%m-%d') AS d, COALESCE(delivery_partner, 'Unknown') AS partner, COALESCE(query_category, 'Unknown') AS category, ${DE_CONTACT_BUCKET_SQL} AS contactBucket, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(DISTINCT awb_code) AS c
     FROM Delivery_escalation
     WHERE ${col} IS NOT NULL${extra}${floorClause}
-    GROUP BY d, partner, category, bucket
+    GROUP BY d, partner, category, contactBucket, bucket
     ORDER BY d
   `, [...params, ...floorParams]);
   const [[{ noDateCount }]] = await pool.execute(
@@ -1784,18 +1796,22 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
   let grandTotalAll = 0;
   for (const r of rows) {
     const c = Number(r.c) || 0;
-    if (!byDate.has(r.d)) byDate.set(r.d, { date: r.d, counts: zeroCounts(), total: 0, partners: new Map(), categories: new Map() });
+    if (!byDate.has(r.d)) byDate.set(r.d, { date: r.d, counts: zeroCounts(), total: 0, partners: new Map(), categories: new Map(), contactBuckets: new Map() });
     const entry = byDate.get(r.d);
     if (!entry.partners.has(r.partner)) entry.partners.set(r.partner, { partner: r.partner, counts: zeroCounts(), total: 0 });
     const partnerEntry = entry.partners.get(r.partner);
     if (!entry.categories.has(r.category)) entry.categories.set(r.category, { category: r.category, counts: zeroCounts(), total: 0 });
     const categoryEntry = entry.categories.get(r.category);
+    if (!entry.contactBuckets.has(r.contactBucket)) entry.contactBuckets.set(r.contactBucket, { contactBucket: r.contactBucket, counts: zeroCounts(), total: 0 });
+    const contactBucketEntry = entry.contactBuckets.get(r.contactBucket);
     entry.counts[r.bucket] += c;
     entry.total += c;
     partnerEntry.counts[r.bucket] += c;
     partnerEntry.total += c;
     categoryEntry.counts[r.bucket] += c;
     categoryEntry.total += c;
+    contactBucketEntry.counts[r.bucket] += c;
+    contactBucketEntry.total += c;
     grandTotal[r.bucket] += c;
     grandTotalAll += c;
   }
@@ -1813,6 +1829,9 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
     categories: [...entry.categories.values()]
       .sort((a, b) => b.total - a.total)
       .map((c) => ({ category: c.category, total: c.total, counts: c.counts, pct: pctOf(c.counts, c.total) })),
+    contactBuckets: [...entry.contactBuckets.values()]
+      .sort((a, b) => b.total - a.total)
+      .map((cb) => ({ contactBucket: cb.contactBucket, total: cb.total, counts: cb.counts, pct: pctOf(cb.counts, cb.total) })),
   }));
   return { buckets: DE_DAYWISE_BUCKETS, rows: rowsOut, grandTotal, grandTotalAll, missingDateCount };
 }

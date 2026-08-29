@@ -376,6 +376,47 @@ function buildCategoryWeeks(days, category, buckets, keyPrefix) {
   return buildWeeksOfMonth(mergeDayRowsByDate(dayRows, buckets), buckets, keyPrefix).filter((week) => week.total > 0);
 }
 
+// Each date row carries its own query_category split (r.categories) - same re-grouping
+// groupPartnerwiseRows does for partners (Month -> Week -> Day underneath), for a standalone
+// Query Class TAT table.
+function groupCategorywiseRows(dayRows, buckets) {
+  const categories = new Map();
+  for (const r of dayRows) {
+    for (const c of (r.categories || [])) {
+      if (!categories.has(c.category)) categories.set(c.category, []);
+      categories.get(c.category).push({ date: r.date, counts: c.counts, total: c.total });
+    }
+  }
+  return [...categories.entries()].map(([category, rows]) => {
+    const merged = mergeDayRowsByDate(rows, buckets);
+    const months = buildMonthsFromDayRows(merged, buckets, `${category}::`);
+    return { key: category, category, months, ...sumDaywiseRows(merged, buckets) };
+  }).sort((a, b) => b.total - a.total);
+}
+
+// Natural 1 -> 2-4 -> 5-9 -> 10+ order (an ordinal scale), not by total - unlike partner/category
+// this dimension has a real order the reader expects, same labels
+// getDeliveryEscalationRepeatStats/DE_CONTACT_BUCKET_SQL already use.
+const CONTACT_BUCKET_ORDER = ['1 time', '2-4 times', '5-9 times', '10+ times'];
+
+// Each date row carries its own repeat-contact split (r.contactBuckets, from the server, same
+// shape as r.partners/r.categories) - same re-grouping groupPartnerwiseRows does for partners,
+// for a standalone "how many times did the customer come" TAT table.
+function groupContactBucketwiseRows(dayRows, buckets) {
+  const contactBuckets = new Map();
+  for (const r of dayRows) {
+    for (const c of (r.contactBuckets || [])) {
+      if (!contactBuckets.has(c.contactBucket)) contactBuckets.set(c.contactBucket, []);
+      contactBuckets.get(c.contactBucket).push({ date: r.date, counts: c.counts, total: c.total });
+    }
+  }
+  return [...contactBuckets.entries()].map(([contactBucket, rows]) => {
+    const merged = mergeDayRowsByDate(rows, buckets);
+    const months = buildMonthsFromDayRows(merged, buckets, `${contactBucket}::`);
+    return { key: contactBucket, contactBucket, months, ...sumDaywiseRows(merged, buckets) };
+  }).sort((a, b) => CONTACT_BUCKET_ORDER.indexOf(a.contactBucket) - CONTACT_BUCKET_ORDER.indexOf(b.contactBucket));
+}
+
 function formatDaywiseMonth(monthKey) {
   const plain = monthKey.includes('::') ? monthKey.split('::').pop() : monthKey;
   const [y, m] = plain.split('-').map(Number);
@@ -389,6 +430,166 @@ function formatDaywiseWeek(week) {
   const dayNum = (d) => Number(d.split('-')[2]);
   const range = first && last ? (first === last ? `${dayNum(first)}` : `${dayNum(first)}-${dayNum(last)}`) : '';
   return `Week ${week.weekOfMonth}${range ? ` (${formatDaywiseDate(first).split(' ')[0]} ${range})` : ''}`;
+}
+
+// Same TAT-bucket-column table (Month -> Week -> Day drill under each row) as the day-wise table
+// above it, just grouped by a different dimension (delivery partner / query class / repeat-
+// contact bucket) instead of by date - shared here so those three tables don't triplicate ~150
+// lines of identical row/month/week/day JSX with only the row label and grouping source differing.
+function TatBreakdownTable({
+  title, description, rowHeader, rows, grandTotal, buckets, loading,
+  expandedRows, toggleRow, expandedMonths, toggleMonth, expandedWeeks, toggleWeek,
+  getLabel, onDrill,
+}) {
+  return (
+    <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
+      <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
+        <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500">{title}</p>
+        {loading && <span className="text-[11px] text-zinc-600">Loading…</span>}
+      </div>
+      <p className="text-[12px] text-zinc-500 mb-3">{description}</p>
+      <div className="rounded-xl border border-zinc-800/80 overflow-hidden">
+        <div className="overflow-x-auto custom-scroll">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-zinc-800/80 text-zinc-500">
+                <th rowSpan={2} className="py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">{rowHeader}</th>
+                {buckets.map((b) => (
+                  <th key={b} colSpan={2} className="py-2 px-3 text-center font-medium border-l border-zinc-800/60 whitespace-nowrap">{b}</th>
+                ))}
+                <th rowSpan={2} className="py-2 px-3 text-right font-medium align-bottom border-l border-zinc-800/60 whitespace-nowrap">Grand Total</th>
+              </tr>
+              <tr className="border-b border-zinc-800/80 text-zinc-600 text-[11px]">
+                {buckets.flatMap((b) => ([
+                  <th key={`${b}-n`} className="py-1 px-3 text-right font-medium border-l border-zinc-800/60"> </th>,
+                  <th key={`${b}-pct`} className="py-1 px-3 text-right font-medium">%</th>,
+                ]))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/50">
+              {rows.map((row) => {
+                const rowOpen = expandedRows.has(row.key);
+                return (
+                  <Fragment key={row.key}>
+                    <tr onClick={() => toggleRow(row.key)} className="hover:bg-zinc-800/30 transition-colors cursor-pointer">
+                      <td className="py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">
+                        <span className="inline-block w-4 text-zinc-500">{rowOpen ? '▾' : '▸'}</span>
+                        {getLabel(row)}
+                      </td>
+                      {buckets.flatMap((b) => {
+                        const count = row.counts[b] || 0;
+                        const allDays = row.months.flatMap((mo) => mo.days);
+                        return [
+                          <td
+                            key={`${b}-n`}
+                            onClick={count ? (e) => { e.stopPropagation(); onDrill(allDays[0]?.date, allDays[allDays.length - 1]?.date, b); } : undefined}
+                            title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
+                            className={`py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
+                          >{count}</td>,
+                          <td key={`${b}-pct`} style={pctHeatStyle(row.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{row.pct[b] || 0}%</td>,
+                        ];
+                      })}
+                      <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{row.total.toLocaleString('en-IN')}</td>
+                    </tr>
+                    {rowOpen && row.months.map((month) => {
+                      const monthOpen = expandedMonths.has(month.key);
+                      return (
+                        <Fragment key={month.key}>
+                          <tr onClick={() => toggleMonth(month.key)} className="hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/30">
+                            <td className="py-2 px-3 pl-8 text-zinc-300 whitespace-nowrap">
+                              <span className="inline-block w-4 text-zinc-500">{monthOpen ? '▾' : '▸'}</span>
+                              {formatDaywiseMonth(month.key)}
+                            </td>
+                            {buckets.flatMap((b) => {
+                              const count = month.counts[b] || 0;
+                              const days = month.days;
+                              return [
+                                <td
+                                  key={`${b}-n`}
+                                  onClick={count ? (e) => { e.stopPropagation(); onDrill(days[0]?.date, days[days.length - 1]?.date, b); } : undefined}
+                                  title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
+                                  className={`py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
+                                >{count}</td>,
+                                <td key={`${b}-pct`} style={pctHeatStyle(month.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
+                              ];
+                            })}
+                            <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
+                          </tr>
+                          {monthOpen && month.weeks.map((week) => {
+                            const weekOpen = expandedWeeks.has(week.key);
+                            return (
+                              <Fragment key={week.key}>
+                                <tr onClick={() => toggleWeek(week.key)} className="hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/30">
+                                  <td className="py-2 px-3 pl-14 text-zinc-300 whitespace-nowrap">
+                                    <span className="inline-block w-4 text-zinc-500">{weekOpen ? '▾' : '▸'}</span>
+                                    {formatDaywiseWeek(week)}
+                                  </td>
+                                  {buckets.flatMap((b) => {
+                                    const count = week.counts[b] || 0;
+                                    return [
+                                      <td
+                                        key={`${b}-n`}
+                                        onClick={count ? (e) => { e.stopPropagation(); onDrill(week.days[0]?.date, week.days[week.days.length - 1]?.date, b); } : undefined}
+                                        title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
+                                        className={`py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
+                                      >{count}</td>,
+                                      <td key={`${b}-pct`} style={pctHeatStyle(week.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{week.pct[b] || 0}%</td>,
+                                    ];
+                                  })}
+                                  <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{week.total.toLocaleString('en-IN')}</td>
+                                </tr>
+                                {weekOpen && week.days.map((r) => (
+                                  <tr key={r.date} className="hover:bg-zinc-800/30 transition-colors">
+                                    <td className="py-2 px-3 pl-20 text-zinc-400 whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
+                                    {buckets.flatMap((b) => {
+                                      const count = r.counts[b] || 0;
+                                      return [
+                                        <td
+                                          key={`${b}-n`}
+                                          onClick={count ? () => onDrill(r.date, r.date, b) : undefined}
+                                          title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
+                                          className={`py-2 px-3 text-right text-zinc-400 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
+                                        >{count}</td>,
+                                        <td key={`${b}-pct`} style={pctHeatStyle(r.pct[b])} className="py-2 px-3 text-right text-zinc-600 tabular-nums text-[12px]">{r.pct[b] || 0}%</td>,
+                                      ];
+                                    })}
+                                    <td className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">{r.total.toLocaleString('en-IN')}</td>
+                                  </tr>
+                                ))}
+                              </Fragment>
+                            );
+                          })}
+                        </Fragment>
+                      );
+                    })}
+                  </Fragment>
+                );
+              })}
+              {rows.length === 0 && (
+                <tr><td colSpan={buckets.length * 2 + 2} className="py-8 text-center text-zinc-500">
+                  {loading ? 'Loading…' : 'No data.'}
+                </td></tr>
+              )}
+            </tbody>
+            {rows.length > 0 && (
+              <tfoot>
+                <tr className="border-t border-zinc-800/80 bg-zinc-950/40 font-semibold">
+                  <td className="py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
+                  {buckets.flatMap((b) => ([
+                    <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{(grandTotal.totals[b] || 0).toLocaleString('en-IN')}</td>,
+                    <td key={`${b}-pct`} style={pctHeatStyle(grandTotal.all ? Math.round(((grandTotal.totals[b] || 0) / grandTotal.all) * 100) : 0)} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">
+                      {grandTotal.all ? Math.round(((grandTotal.totals[b] || 0) / grandTotal.all) * 100) : 0}%
+                    </td>,
+                  ]))}
+                  <td className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{grandTotal.all.toLocaleString('en-IN')}</td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket }) {
@@ -728,6 +929,11 @@ export default function DeliveryEscalationClient() {
   const [expandedPartners, setExpandedPartners] = useState(() => new Set());
   const [expandedWeeks, setExpandedWeeks] = useState(() => new Set());
   const [expandedCategories, setExpandedCategories] = useState(() => new Set());
+  // Top-level row expand state for the standalone Query Class / Repeat Contacts TAT tables -
+  // same shared expandedMonths/expandedWeeks as the partner-wise table above (key prefixes keep
+  // all these tables' month/week keys from colliding with each other).
+  const [expandedQueryClasses, setExpandedQueryClasses] = useState(() => new Set());
+  const [expandedContactBuckets, setExpandedContactBuckets] = useState(() => new Set());
   // Fresh/Resolved list's own expand state - same repeat-contact AWBs contactCount already
   // flags, collapsed to one parent (the newest row, since rows arrive id/disposed_at DESC)
   // with every older ticket for that AWB nested under it as a timeline. Keyed by the parent's
@@ -758,6 +964,32 @@ export default function DeliveryEscalationClient() {
     }
     return { totals, all };
   }, [groupedPartnerwise, daywise.buckets]);
+  const groupedCategorywise = useMemo(
+    () => groupCategorywiseRows(daywise.rows, daywise.buckets),
+    [daywise.rows, daywise.buckets]
+  );
+  const categorywiseGrandTotal = useMemo(() => {
+    const totals = Object.fromEntries(daywise.buckets.map((b) => [b, 0]));
+    let all = 0;
+    for (const c of groupedCategorywise) {
+      daywise.buckets.forEach((b) => { totals[b] += c.counts[b] || 0; });
+      all += c.total;
+    }
+    return { totals, all };
+  }, [groupedCategorywise, daywise.buckets]);
+  const groupedContactBucketwise = useMemo(
+    () => groupContactBucketwiseRows(daywise.rows, daywise.buckets),
+    [daywise.rows, daywise.buckets]
+  );
+  const contactBucketwiseGrandTotal = useMemo(() => {
+    const totals = Object.fromEntries(daywise.buckets.map((b) => [b, 0]));
+    let all = 0;
+    for (const c of groupedContactBucketwise) {
+      daywise.buckets.forEach((b) => { totals[b] += c.counts[b] || 0; });
+      all += c.total;
+    }
+    return { totals, all };
+  }, [groupedContactBucketwise, daywise.buckets]);
   const [bulkUploading, setBulkUploading] = useState(false);
   const [bulkResult, setBulkResult] = useState(null);
   const [exporting, setExporting] = useState(false);
@@ -1418,166 +1650,63 @@ export default function DeliveryEscalationClient() {
               )}
 
               {tab === 'overview' && (
-                <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
-                  <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
-                    <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500">
-                      TAT by Delivery Partner
-                    </p>
-                    {daywiseLoading && <span className="text-[11px] text-zinc-600">Loading…</span>}
-                  </div>
-                  <p className="text-[12px] text-zinc-500 mb-3">
-                    Same {daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} Date buckets as above, grouped by delivery partner instead of by date.
-                  </p>
-                  <div className="rounded-xl border border-zinc-800/80 overflow-hidden">
-                    <div className="overflow-x-auto custom-scroll">
-                      <table className="w-full text-[13px]">
-                        <thead>
-                          <tr className="border-b border-zinc-800/80 text-zinc-500">
-                            <th rowSpan={2} className="py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">Delivery Partner</th>
-                            {daywise.buckets.map((b) => (
-                              <th key={b} colSpan={2} className="py-2 px-3 text-center font-medium border-l border-zinc-800/60 whitespace-nowrap">{b}</th>
-                            ))}
-                            <th rowSpan={2} className="py-2 px-3 text-right font-medium align-bottom border-l border-zinc-800/60 whitespace-nowrap">Grand Total</th>
-                          </tr>
-                          <tr className="border-b border-zinc-800/80 text-zinc-600 text-[11px]">
-                            {daywise.buckets.flatMap((b) => ([
-                              <th key={`${b}-n`} className="py-1 px-3 text-right font-medium border-l border-zinc-800/60"> </th>,
-                              <th key={`${b}-pct`} className="py-1 px-3 text-right font-medium">%</th>,
-                            ]))}
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-zinc-800/50">
-                          {groupedPartnerwise.map((partner) => {
-                            const partnerOpen = expandedPartners.has(partner.key);
-                            return (
-                              <Fragment key={partner.key}>
-                                <tr
-                                  onClick={() => toggleExpanded(setExpandedPartners, partner.key)}
-                                  className="hover:bg-zinc-800/30 transition-colors cursor-pointer"
-                                >
-                                  <td className="py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">
-                                    <span className="inline-block w-4 text-zinc-500">{partnerOpen ? '▾' : '▸'}</span>
-                                    {partner.partner}
-                                  </td>
-                                  {daywise.buckets.flatMap((b) => {
-                                    const count = partner.counts[b] || 0;
-                                    const allDays = partner.months.flatMap((mo) => mo.days);
-                                    return [
-                                      <td
-                                        key={`${b}-n`}
-                                        onClick={count ? (e) => { e.stopPropagation(); drillIntoDaywise(allDays[0]?.date, allDays[allDays.length - 1]?.date, b); } : undefined}
-                                        title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
-                                        className={`py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
-                                      >{count}</td>,
-                                      <td key={`${b}-pct`} style={pctHeatStyle(partner.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{partner.pct[b] || 0}%</td>,
-                                    ];
-                                  })}
-                                  <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{partner.total.toLocaleString('en-IN')}</td>
-                                </tr>
-                                {partnerOpen && partner.months.map((month) => {
-                                  const monthOpen = expandedMonths.has(month.key);
-                                  return (
-                                    <Fragment key={month.key}>
-                                      <tr
-                                        onClick={() => toggleExpanded(setExpandedMonths, month.key)}
-                                        className="hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/30"
-                                      >
-                                        <td className="py-2 px-3 pl-8 text-zinc-300 whitespace-nowrap">
-                                          <span className="inline-block w-4 text-zinc-500">{monthOpen ? '▾' : '▸'}</span>
-                                          {formatDaywiseMonth(month.key)}
-                                        </td>
-                                        {daywise.buckets.flatMap((b) => {
-                                          const count = month.counts[b] || 0;
-                                          const days = month.days;
-                                          return [
-                                            <td
-                                              key={`${b}-n`}
-                                              onClick={count ? (e) => { e.stopPropagation(); drillIntoDaywise(days[0]?.date, days[days.length - 1]?.date, b); } : undefined}
-                                              title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
-                                              className={`py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
-                                            >{count}</td>,
-                                            <td key={`${b}-pct`} style={pctHeatStyle(month.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
-                                          ];
-                                        })}
-                                        <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
-                                      </tr>
-                                      {monthOpen && month.weeks.map((week) => {
-                                        const weekOpen = expandedWeeks.has(week.key);
-                                        return (
-                                          <Fragment key={week.key}>
-                                            <tr
-                                              onClick={() => toggleExpanded(setExpandedWeeks, week.key)}
-                                              className="hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/30"
-                                            >
-                                              <td className="py-2 px-3 pl-14 text-zinc-300 whitespace-nowrap">
-                                                <span className="inline-block w-4 text-zinc-500">{weekOpen ? '▾' : '▸'}</span>
-                                                {formatDaywiseWeek(week)}
-                                              </td>
-                                              {daywise.buckets.flatMap((b) => {
-                                                const count = week.counts[b] || 0;
-                                                return [
-                                                  <td
-                                                    key={`${b}-n`}
-                                                    onClick={count ? (e) => { e.stopPropagation(); drillIntoDaywise(week.days[0]?.date, week.days[week.days.length - 1]?.date, b); } : undefined}
-                                                    title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
-                                                    className={`py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
-                                                  >{count}</td>,
-                                                  <td key={`${b}-pct`} style={pctHeatStyle(week.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{week.pct[b] || 0}%</td>,
-                                                ];
-                                              })}
-                                              <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{week.total.toLocaleString('en-IN')}</td>
-                                            </tr>
-                                            {weekOpen && week.days.map((r) => (
-                                              <tr key={r.date} className="hover:bg-zinc-800/30 transition-colors">
-                                                <td className="py-2 px-3 pl-20 text-zinc-400 whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
-                                                {daywise.buckets.flatMap((b) => {
-                                                  const count = r.counts[b] || 0;
-                                                  return [
-                                                    <td
-                                                      key={`${b}-n`}
-                                                      onClick={count ? () => drillIntoDaywise(r.date, r.date, b) : undefined}
-                                                      title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
-                                                      className={`py-2 px-3 text-right text-zinc-400 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
-                                                    >{count}</td>,
-                                                    <td key={`${b}-pct`} style={pctHeatStyle(r.pct[b])} className="py-2 px-3 text-right text-zinc-600 tabular-nums text-[12px]">{r.pct[b] || 0}%</td>,
-                                                  ];
-                                                })}
-                                                <td className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">{r.total.toLocaleString('en-IN')}</td>
-                                              </tr>
-                                            ))}
-                                          </Fragment>
-                                        );
-                                      })}
-                                    </Fragment>
-                                  );
-                                })}
-                              </Fragment>
-                            );
-                          })}
-                          {groupedPartnerwise.length === 0 && (
-                            <tr><td colSpan={daywise.buckets.length * 2 + 2} className="py-8 text-center text-zinc-500">
-                              {daywiseLoading ? 'Loading…' : 'No data.'}
-                            </td></tr>
-                          )}
-                        </tbody>
-                        {groupedPartnerwise.length > 0 && (
-                          <tfoot>
-                            <tr className="border-t border-zinc-800/80 bg-zinc-950/40 font-semibold">
-                              <td className="py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
-                              {daywise.buckets.flatMap((b) => ([
-                                <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{(partnerwiseGrandTotal.totals[b] || 0).toLocaleString('en-IN')}</td>,
-                                <td key={`${b}-pct`} style={pctHeatStyle(partnerwiseGrandTotal.all ? Math.round(((partnerwiseGrandTotal.totals[b] || 0) / partnerwiseGrandTotal.all) * 100) : 0)} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">
-                                  {partnerwiseGrandTotal.all ? Math.round(((partnerwiseGrandTotal.totals[b] || 0) / partnerwiseGrandTotal.all) * 100) : 0}%
-                                </td>,
-                              ]))}
-                              <td className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{partnerwiseGrandTotal.all.toLocaleString('en-IN')}</td>
-                            </tr>
-                          </tfoot>
-                        )}
-                      </table>
-                    </div>
-                  </div>
-                </div>
+                <TatBreakdownTable
+                  title="TAT by Delivery Partner"
+                  description={`Same ${daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} Date buckets as above, grouped by delivery partner instead of by date.`}
+                  rowHeader="Delivery Partner"
+                  rows={groupedPartnerwise}
+                  grandTotal={partnerwiseGrandTotal}
+                  buckets={daywise.buckets}
+                  loading={daywiseLoading}
+                  expandedRows={expandedPartners}
+                  toggleRow={(key) => toggleExpanded(setExpandedPartners, key)}
+                  expandedMonths={expandedMonths}
+                  toggleMonth={(key) => toggleExpanded(setExpandedMonths, key)}
+                  expandedWeeks={expandedWeeks}
+                  toggleWeek={(key) => toggleExpanded(setExpandedWeeks, key)}
+                  getLabel={(row) => row.partner}
+                  onDrill={drillIntoDaywise}
+                />
+              )}
+
+              {tab === 'overview' && (
+                <TatBreakdownTable
+                  title="TAT by Query Class"
+                  description={`Same ${daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} Date buckets as above, grouped by query class instead of by date.`}
+                  rowHeader="Query Class"
+                  rows={groupedCategorywise}
+                  grandTotal={categorywiseGrandTotal}
+                  buckets={daywise.buckets}
+                  loading={daywiseLoading}
+                  expandedRows={expandedQueryClasses}
+                  toggleRow={(key) => toggleExpanded(setExpandedQueryClasses, key)}
+                  expandedMonths={expandedMonths}
+                  toggleMonth={(key) => toggleExpanded(setExpandedMonths, key)}
+                  expandedWeeks={expandedWeeks}
+                  toggleWeek={(key) => toggleExpanded(setExpandedWeeks, key)}
+                  getLabel={(row) => row.category}
+                  onDrill={drillIntoDaywise}
+                />
+              )}
+
+              {tab === 'overview' && (
+                <TatBreakdownTable
+                  title="TAT by Repeat Contacts"
+                  description={`Same ${daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} Date buckets as above, grouped by how many times the customer came instead of by date.`}
+                  rowHeader="Times Contacted"
+                  rows={groupedContactBucketwise}
+                  grandTotal={contactBucketwiseGrandTotal}
+                  buckets={daywise.buckets}
+                  loading={daywiseLoading}
+                  expandedRows={expandedContactBuckets}
+                  toggleRow={(key) => toggleExpanded(setExpandedContactBuckets, key)}
+                  expandedMonths={expandedMonths}
+                  toggleMonth={(key) => toggleExpanded(setExpandedMonths, key)}
+                  expandedWeeks={expandedWeeks}
+                  toggleWeek={(key) => toggleExpanded(setExpandedWeeks, key)}
+                  getLabel={(row) => row.contactBucket}
+                  onDrill={drillIntoDaywise}
+                />
               )}
 
               {tab === 'overview' && repeatStats.length > 0 && (
