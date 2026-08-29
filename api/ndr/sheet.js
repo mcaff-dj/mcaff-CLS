@@ -3,8 +3,10 @@
 // to api/rto/sheet.js. Read+write: the Call modal's disposition form writes exactly three of
 // that sheet's own existing columns (Calling Date/Connected/Remarks - see
 // RtoCrmClient.js's saveNdrDisposition) and the claim-on-open path writes Agent Name, directly
-// from the browser, same trust model as RTO's own writeToSheetRow (the frontend owns which
-// range it writes; this route stays a dumb, permission-gated proxy). Confirmed this session
+// from the browser, same trust model as RTO's own writeToSheetRow for the CELL portion of a
+// range (the frontend owns which rows/columns it writes). The TAB portion is not trusted from
+// the frontend at all (see withResolvedTab below) - this route stays a dumb, permission-gated
+// proxy only for the part of the range the caller can't get wrong. Confirmed this session
 // that the service account (GOOGLE_SHEETS_CLIENT_EMAIL/GOOGLE_SHEETS_PRIVATE_KEY) already has
 // Editor access on this external sheet, not just Viewer.
 const { JWT } = require('google-auth-library');
@@ -131,6 +133,24 @@ function cachedRead(key, fetcher) {
   return promise;
 }
 
+// Rewrites whatever tab a range string names to the CALLER'S OWN resolved team's real tab,
+// regardless of what the client sent. The client only ever needs to be right about the range's
+// CELL portion (A2:A1000000, R5, ...) - it never learns another team's sheetTab (non-admin GETs
+// on /api/admin/calling-teams strip it), so for anyone but a full admin picking a team it had no
+// correct tab name to send in the first place and always fell back to a hardcoded default. That
+// default is only right for the one sheet it was copied from; every other team's real tab 400s
+// with "Unable to parse range" the instant an agent or team lead opens the page. Fixing it here,
+// not in the client, means it's correct for EVERY caller (old app/ deploys included, since api/
+// and app/ ship separately) without waiting on an app/ redeploy: whatever tab-qualifier a range
+// carries (or lacks - a bare cell range with no '!' at all also works) is discarded and replaced.
+// Sheets range syntax always uses '!' as the tab/cell delimiter and never inside the cell part,
+// so the last '!' is exactly the split point regardless of how the tab portion was quoted.
+function withResolvedTab(range, team) {
+  const bangIdx = range.lastIndexOf('!');
+  const cellPart = bangIdx >= 0 ? range.slice(bangIdx + 1) : range;
+  return `'${team.sheetTab}'!${cellPart}`;
+}
+
 module.exports = async (req, res) => {
   const session = await getSession(req);
   const denied = checkAccess(session);
@@ -157,7 +177,7 @@ module.exports = async (req, res) => {
 
   try {
     if (req.method === 'GET' && req.query.op === 'values') {
-      const range = req.query.range || '';
+      const range = withResolvedTab(req.query.range || '', team);
       // The spreadsheet id is part of the key, not just the range. Both NDR sheets name their
       // tab 'Latest NDR ' (trailing space included), so two teams request byte-identical range
       // strings - keyed on range alone they collide inside a warm Lambda container and one team
@@ -174,7 +194,7 @@ module.exports = async (req, res) => {
     }
 
     if (req.method === 'POST' && (req.body || {}).op === 'batchUpdate') {
-      const data = (req.body || {}).data || [];
+      const data = ((req.body || {}).data || []).map((d) => ({ ...d, range: withResolvedTab(d.range, team) }));
       // RAW, not USER_ENTERED: every value this UI ever writes (Agent Name, Connected Yes/No,
       // Outcome, Remarks, Calling Date) is plain text nobody needs Sheets to auto-convert.
       // USER_ENTERED bit us for real - writing "06-08-2026" (DD-MM-YYYY, the format the user
