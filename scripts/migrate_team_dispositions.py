@@ -18,11 +18,26 @@ cloned rows carry created_by = 'migration' so a partial run can be removed by th
 Cloning is per team and skipped for any team that already has rows of its own, which is what makes
 the whole script safe to re-run.
 
+FOUR INDEPENDENT STEPS, not one transaction: ADD COLUMN, then the FK, then the index, then the
+clone. The column and the FK were a single ALTER until a live run met
+  (1142, "REFERENCES command denied ... for table 'PEP_CLS.calling_teams'")
+and the whole statement rolled back - taking the column, the only part api/ actually needs, with
+it and leaving every disposition write in the app broken. The runner's grants on PEP_CLS are
+SELECT/INSERT/UPDATE/DELETE/CREATE/DROP/ALTER/CREATE VIEW; neither REFERENCES (the FK) nor INDEX
+(CREATE INDEX - ALTER does not cover it) has ever been among them.
+
+So the two hardening steps tolerate 1142 and say so loudly, while ADD COLUMN and the clone do not:
+skipping those is an outage, skipping an FK nothing fires or an index on a table of tens of rows is
+not. Both are retried on every run, so a later GRANT plus a plain re-run picks them up with nothing
+else to redo.
+
 Dry-run by default; --apply performs the DDL and the inserts.
 """
 import argparse
 import sys
 from pathlib import Path
+
+import pymysql
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mysql_lib import get_credential
@@ -33,6 +48,11 @@ TEAMS_TABLE = "calling_teams"
 PROCESS_KEY = "ndr"
 CLONE_CREATED_BY = "migration"
 INDEX_NAME = "calling_process_dispositions_team_idx"
+FK_NAME = "calling_process_dispositions_team_fk"
+# MySQL's error for "you hold no such privilege on this object" - what a missing REFERENCES grant
+# raises when the FK below is attempted. Distinct from 1045 (bad credentials) and 1044 (no access
+# to the database at all), neither of which this script should ever survive.
+ER_SPECIFIC_ACCESS_DENIED = 1142
 
 
 def plan_tree_clone(rows):
@@ -73,6 +93,44 @@ def _column_exists(cur, column):
         "SELECT 1 FROM information_schema.columns "
         "WHERE table_schema = %s AND table_name = %s AND column_name = %s",
         (SCHEMA, TABLE, column),
+    )
+    return cur.fetchone() is not None
+
+
+def _try_optional_ddl(cur, statement, what, privilege, why_survivable):
+    """Runs a DDL step that needs a privilege beyond the plain DML+ALTER this script's runner is
+    known to hold, and treats a denial as a skip rather than a failure. Returns True if it ran.
+
+    Both callers are hardening, not function: the app is correct without either. What is NOT
+    optional is the ADD COLUMN, which is why that one runs unguarded and this helper is never
+    pointed at it - api/ selects team_id on every disposition write, so a skip there is an outage,
+    not a downgrade.
+
+    Only ER_SPECIFIC_ACCESS_DENIED is swallowed. Any other OperationalError (a syntax error, a
+    duplicate name, a dead connection) still raises, because those mean the step is broken rather
+    than merely not permitted."""
+    try:
+        cur.execute(statement)
+        print(f"  {what}: added")
+        return True
+    except pymysql.err.OperationalError as e:
+        if e.args[0] != ER_SPECIFIC_ACCESS_DENIED:
+            raise
+        print(f"  {what}: SKIPPED - {e.args[1]}")
+        for line in why_survivable:
+            print(f"      {line}")
+        print(f"      To add it later, have a DBA run  GRANT {privilege} ON `{SCHEMA}`.* TO `<user>`@`%`;")
+        print("      then re-run this script - it picks the step up on its own, nothing else to redo.")
+        return False
+
+
+def _fk_exists(cur, name):
+    """REFERENTIAL_CONSTRAINTS rather than KEY_COLUMN_USAGE: the latter also lists plain unique
+    and primary keys, so a name collision there would read as an FK that isn't one."""
+    cur.execute(
+        "SELECT 1 FROM information_schema.referential_constraints "
+        "WHERE constraint_schema = %s AND table_name = %s AND constraint_name = %s",
+        (SCHEMA, TABLE, name),
     )
     return cur.fetchone() is not None
 
@@ -139,8 +197,6 @@ def main():
     cred = get_credential()
     if cred is None:
         raise SystemExit("MYSQL_* credentials not configured.")
-    import pymysql
-
     conn = pymysql.connect(
         host=cred["host"], user=cred["user"], password=cred["password"],
         database=SCHEMA, port=cred["port"], autocommit=False,
@@ -148,27 +204,65 @@ def main():
     )
     try:
         with conn.cursor() as cur:
-            # Step 1: the column and its index.
+            # Step 1: the column, then (separately) its FK, then its index.
+            #
+            # The column and the constraint were one ALTER until a live run died on it:
+            #   (1142, "REFERENCES command denied to user 'Vikash'@... for table
+            #    'PEP_CLS.calling_teams'")
+            # The app's DB user holds SELECT/INSERT/UPDATE/DELETE/CREATE/DROP/ALTER/CREATE VIEW on
+            # PEP_CLS and has never held REFERENCES, so the FK half is unrunnable by whoever
+            # actually runs this script. As ONE statement that took the column - the half api/
+            # genuinely needs - down with it, and left every disposition write in the app broken
+            # (the read path has an ER_BAD_FIELD_ERROR fallback, the four write paths do not).
+            #
+            # Split so the FK is retried independently and a denial is survivable but LOUD. This
+            # is not the "swallow the error" the read path's fallback is warned about: what is
+            # skipped here is a referential guard against `DELETE FROM calling_teams`, and there
+            # is no such statement anywhere in api/ - teams are paused via calling_teams.active,
+            # never dropped. calling_agent_process.team_id is already FK-less for the same reason
+            # (see migrate_ndr_team_id.py, which only ever did the plain ADD COLUMN), so this
+            # matches its sibling rather than inventing a weaker rule.
             team_id_exists = _column_exists(cur, "team_id")
             if team_id_exists:
                 print("  column team_id: already present")
             elif args.apply:
-                cur.execute(
-                    f"ALTER TABLE {TABLE} ADD COLUMN team_id INT NULL, "
-                    f"ADD CONSTRAINT {TABLE}_team_fk FOREIGN KEY (team_id) "
-                    f"REFERENCES {TEAMS_TABLE}(id) ON DELETE CASCADE"
-                )
+                cur.execute(f"ALTER TABLE {TABLE} ADD COLUMN team_id INT NULL")
                 print("  column team_id: added")
                 team_id_exists = True
             else:
-                print("  column team_id: would add (with FK to calling_teams, ON DELETE CASCADE)")
+                print("  column team_id: would add")
+
+            # Attempted on every run, not just the one that adds the column: once someone grants
+            # REFERENCES, a plain re-run picks the constraint up with nothing else to redo.
+            if team_id_exists:
+                if _fk_exists(cur, FK_NAME):
+                    print(f"  fk {FK_NAME}: already present")
+                elif args.apply:
+                    _try_optional_ddl(
+                        cur,
+                        f"ALTER TABLE {TABLE} ADD CONSTRAINT {FK_NAME} FOREIGN KEY (team_id) "
+                        f"REFERENCES {TEAMS_TABLE}(id) ON DELETE CASCADE",
+                        f"fk {FK_NAME}", "REFERENCES",
+                        ["only the ON DELETE CASCADE guard is missing - a team hard-deleted straight in",
+                         "SQL would orphan its disposition rows instead of taking them with it, and",
+                         "nothing in api/ hard-deletes a team (they are paused via calling_teams.active)."],
+                    )
+                else:
+                    print(f"  fk {FK_NAME}: would add (ON DELETE CASCADE)")
+            else:
+                print(f"  fk {FK_NAME}: would add (ON DELETE CASCADE, skipped if REFERENCES is denied)")
 
             if team_id_exists:
                 if _index_exists(cur, INDEX_NAME):
                     print(f"  index {INDEX_NAME}: already present")
                 elif args.apply:
-                    cur.execute(f"CREATE INDEX {INDEX_NAME} ON {TABLE} (process_key, team_id, sort_order)")
-                    print(f"  index {INDEX_NAME}: added")
+                    _try_optional_ddl(
+                        cur,
+                        f"CREATE INDEX {INDEX_NAME} ON {TABLE} (process_key, team_id, sort_order)",
+                        f"index {INDEX_NAME}", "INDEX",
+                        ["this one is pure lookup speed and the table holds tens of rows, so its",
+                         "absence is not measurable - every query still returns the same answer."],
+                    )
                 else:
                     print(f"  index {INDEX_NAME}: would add")
             else:
