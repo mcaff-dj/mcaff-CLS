@@ -59,7 +59,7 @@ module.exports = async (req, res) => {
   if (req.method === 'GET') {
     const q = req.query || {};
     const view = q.view || 'fresh';
-    if (view !== 'fresh' && view !== 'resolved' && view !== 'forced_rto') {
+    if (view !== 'fresh' && view !== 'resolved' && view !== 'forced_rto' && view !== 'new_order_placed') {
       // A bad query param is the caller's error, not a server fault - answering 500 here would
       // look identical to a real outage.
       res.status(400).json({ error: `Unknown view: ${view}` });

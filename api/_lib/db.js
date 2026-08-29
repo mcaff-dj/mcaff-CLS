@@ -1480,9 +1480,18 @@ const DE_FRESH_WHERE = `((outcome IS NULL OR outcome = ''
 // two comments above record. Kept separate from 'Delivered' rather than reusing it: those 18.5k
 // rows mean the parcel actually reached the customer, which a cancelled-and-refunded or
 // POD-requested ticket does not.
+// 'Resolved > New order placed' moved to its own tab/view (DE_NEW_ORDER_PLACED_WHERE below) -
+// excluded here so it stops double-counting into Resolved's own tile and ticket list.
 const DE_RESOLVED_WHERE = `(outcome = 'Delivered' OR outcome LIKE 'Delivered > %'
-   OR outcome = 'Resolved' OR outcome LIKE 'Resolved > %')`;
-const DE_VIEW_WHERE = { fresh: DE_FRESH_WHERE, resolved: DE_RESOLVED_WHERE, forced_rto: DE_FORCED_RTO_WHERE };
+   OR outcome = 'Resolved' OR (outcome LIKE 'Resolved > %' AND outcome <> 'Resolved > New order placed'))`;
+// Its own tab: agent- or auto_dispose_de_categories.py-marked 'Resolved > New order placed' is
+// common enough (Fake Order RTO/Pickup Exception/Lost-Damaged-Destroyed all map to it) to want
+// its own queue rather than being buried in the wider Resolved list.
+const DE_NEW_ORDER_PLACED_WHERE = `(outcome = 'Resolved > New order placed')`;
+const DE_VIEW_WHERE = {
+  fresh: DE_FRESH_WHERE, resolved: DE_RESOLVED_WHERE, forced_rto: DE_FORCED_RTO_WHERE,
+  new_order_placed: DE_NEW_ORDER_PLACED_WHERE,
+};
 
 // Days-to-deliver (disposed_at, when the agent actually marked it Delivered, minus added_date)
 // bucketed into the same 6 names the sheet's own column P formula uses for ITS metric - that
@@ -1630,10 +1639,11 @@ function dePaging(opts = {}) {
   return { page, perPage, offset: (page - 1) * perPage };
 }
 
-// Resolved reads newest-disposed first; Fresh has no meaningful disposed_at yet, so it reads
-// newest-row first. id breaks ties so paging can't repeat or skip a row between pages.
+// Resolved (and New Order Placed, itself a Resolved sub-outcome) reads newest-disposed first;
+// Fresh/Forced RTO have no meaningful disposed_at yet, so they read newest-row first. id breaks
+// ties so paging can't repeat or skip a row between pages.
 function deOrderBy(view) {
-  return view === 'resolved' ? 'disposed_at DESC, id DESC' : 'id DESC';
+  return (view === 'resolved' || view === 'new_order_placed') ? 'disposed_at DESC, id DESC' : 'id DESC';
 }
 
 // One page of a tab, plus the total matching that same filter - the client needs the total to
@@ -1668,7 +1678,8 @@ async function getDeliveryEscalationStats(opts = {}) {
             COUNT(DISTINCT CASE WHEN agent_email IS NOT NULL AND agent_email != '' THEN awb_code END) AS assigned,
             COUNT(DISTINCT CASE WHEN ${DE_RESOLVED_WHERE} THEN awb_code END) AS resolved,
             COUNT(DISTINCT CASE WHEN ${DE_FRESH_WHERE} THEN awb_code END) AS fresh,
-            COUNT(DISTINCT CASE WHEN ${DE_FORCED_RTO_WHERE} THEN awb_code END) AS forcedRto
+            COUNT(DISTINCT CASE WHEN ${DE_FORCED_RTO_WHERE} THEN awb_code END) AS forcedRto,
+            COUNT(DISTINCT CASE WHEN ${DE_NEW_ORDER_PLACED_WHERE} THEN awb_code END) AS newOrderPlaced
      FROM Delivery_escalation WHERE ${where}`, params);
   const r = rows[0] || {};
   return {
@@ -1677,6 +1688,7 @@ async function getDeliveryEscalationStats(opts = {}) {
     resolved: Number(r.resolved) || 0,
     fresh: Number(r.fresh) || 0,
     forcedRto: Number(r.forcedRto) || 0,
+    newOrderPlaced: Number(r.newOrderPlaced) || 0,
   };
 }
 

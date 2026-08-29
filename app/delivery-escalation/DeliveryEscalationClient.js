@@ -93,9 +93,9 @@ function ticketRowCells(t, tab, openAction, isChild) {
       <td className="py-3 px-4 text-zinc-400 text-[12px]">{t.assignedAgent ? t.assignedAgent.split('@')[0] : '—'}</td>
       <td className="py-3 px-4 text-zinc-400">{t.outcome || '—'}</td>
       <td className="py-3 px-4 text-zinc-400">{t.childDisposition || '—'}</td>
-      {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.actionDate}</td>}
-      {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400 max-w-xs truncate" title={t.remarks}>{t.remarks}</td>}
-      {tab === 'resolved' && <td className="py-3 px-4 text-zinc-400">{t.tatBucket}</td>}
+      {(tab === 'resolved' || tab === 'new_order_placed') && <td className="py-3 px-4 text-zinc-400">{t.actionDate}</td>}
+      {(tab === 'resolved' || tab === 'new_order_placed') && <td className="py-3 px-4 text-zinc-400 max-w-xs truncate" title={t.remarks}>{t.remarks}</td>}
+      {(tab === 'resolved' || tab === 'new_order_placed') && <td className="py-3 px-4 text-zinc-400">{t.tatBucket}</td>}
       <td className="py-3 px-4 text-right">
         {/* Resolving is a parent-only action - a child is the same ticket-cascade target
             saveAction already updates when its parent is disposed (see db.js's
@@ -614,13 +614,15 @@ async function fetchPage({ view, page, perPage, search, brand, agent, date, date
   p.set('page', String(page));
   p.set('perPage', String(perPage));
   const d = await getJson(`/api/delivery-escalation/record?${p}`);
-  return { rows: (d.rows || []).map((r) => mapRow(r, view === 'resolved')), total: d.total || 0 };
+  return { rows: (d.rows || []).map((r) => mapRow(r, view === 'resolved' || view === 'new_order_placed')), total: d.total || 0 };
 }
 
-// Mirrors db.js's DE_RESOLVED_WHERE - a history row is read-only once it's actually Delivered,
-// regardless of which tab (Fresh/Resolved/Forced RTO) the currently loaded page is showing.
+// Mirrors db.js's DE_RESOLVED_WHERE (pre-New-Order-Placed-carve-out - Delivered or ANY Resolved
+// child counts) - a history row is read-only once it's actually resolved, regardless of which
+// tab (Fresh/Resolved/Forced RTO/New Order Placed) the currently loaded page is showing.
 function isDeResolvedOutcome(outcome) {
-  return outcome === 'Delivered' || (outcome || '').startsWith('Delivered > ');
+  const o = outcome || '';
+  return o === 'Delivered' || o.startsWith('Delivered > ') || o === 'Resolved' || o.startsWith('Resolved > ');
 }
 
 // Every ticket ever raised for one parcel (see db.js's getDeliveryEscalationAwbHistory) - the
@@ -638,7 +640,7 @@ async function fetchAwbHistory(awb, brand) {
 async function fetchStats() {
   const d = await getJson('/api/delivery-escalation/record?op=stats');
   return {
-    stats: d.stats || { total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0 },
+    stats: d.stats || { total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0, newOrderPlaced: 0 },
     agents: d.agents || [],
     repeatStats: d.repeatStats || [],
   };
@@ -775,7 +777,7 @@ async function downloadCsv({ view, search, brand, agent, date, dateTo, dateField
     p.set('page', String(page));
     const d = await getJson(`/api/delivery-escalation/record?${p}`);
     const chunk = d.rows || [];
-    for (const r of chunk) rows.push(mapRow(r, view === 'resolved'));
+    for (const r of chunk) rows.push(mapRow(r, view === 'resolved' || view === 'new_order_placed'));
     onChunk?.(rows.length);
     if (!d.hasMore) break;
   }
@@ -917,7 +919,7 @@ export default function DeliveryEscalationClient() {
 
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
-  const [stats, setStats] = useState({ total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0 });
+  const [stats, setStats] = useState({ total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0, newOrderPlaced: 0 });
   const [agents, setAgents] = useState([]);
   const [repeatStats, setRepeatStats] = useState([]);
   const [daywise, setDaywise] = useState({ buckets: [], rows: [], grandTotal: {}, grandTotalAll: 0, missingDateCount: 0 });
@@ -1028,7 +1030,7 @@ export default function DeliveryEscalationClient() {
   // Guards against a slow earlier request landing after a faster later one and overwriting the
   // newer rows - only the most recent request is allowed to apply its result.
   const reqIdRef = useRef(0);
-  const listTab = tab === 'fresh' || tab === 'resolved' || tab === 'forced_rto';
+  const listTab = tab === 'fresh' || tab === 'resolved' || tab === 'forced_rto' || tab === 'new_order_placed';
 
   const loadPage = useCallback(async (silent = false) => {
     if (!listTab) return;
@@ -1347,6 +1349,7 @@ export default function DeliveryEscalationClient() {
     { key: 'fresh', label: '⚡ Fresh', count: stats.fresh },
     { key: 'forced_rto', label: '↩️ Forced RTO', count: stats.forcedRto },
     { key: 'resolved', label: '✅ Resolved', count: stats.resolved },
+    { key: 'new_order_placed', label: '🆕 New Order Placed', count: stats.newOrderPlaced },
     ...(sessionIsAdmin ? [{ key: 'admin', label: '🛡️ Admin Panel', count: (processDispositions || []).length }] : []),
   ];
 
@@ -1858,9 +1861,9 @@ export default function DeliveryEscalationClient() {
                           <th className="py-3 px-4 text-left font-medium">Agent Name</th>
                           <th className="py-3 px-4 text-left font-medium">Outcome</th>
                           <th className="py-3 px-4 text-left font-medium">Child Disposition</th>
-                          {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">Action Date</th>}
-                          {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">Remarks</th>}
-                          {tab === 'resolved' && <th className="py-3 px-4 text-left font-medium">TAT Bucket</th>}
+                          {(tab === 'resolved' || tab === 'new_order_placed') && <th className="py-3 px-4 text-left font-medium">Action Date</th>}
+                          {(tab === 'resolved' || tab === 'new_order_placed') && <th className="py-3 px-4 text-left font-medium">Remarks</th>}
+                          {(tab === 'resolved' || tab === 'new_order_placed') && <th className="py-3 px-4 text-left font-medium">TAT Bucket</th>}
                           <th className="py-3 px-4 text-right font-medium">Action</th>
                         </tr></thead>
                         <tbody className="divide-y divide-zinc-800/50">
@@ -1870,7 +1873,7 @@ export default function DeliveryEscalationClient() {
                             const history = hasRepeat ? awbHistory.get(`${parent.brand}|${parent.awb}`) : null;
                             const childRows = history?.status === 'loaded'
                               ? history.rows.filter((t) => t.id !== parent.id) : [];
-                            const colSpan = tab === 'resolved' ? 17 : 14;
+                            const colSpan = (tab === 'resolved' || tab === 'new_order_placed') ? 17 : 14;
                             return (
                               <Fragment key={parent.id}>
                                 <tr
@@ -1913,7 +1916,7 @@ export default function DeliveryEscalationClient() {
                             );
                           })}
                           {groupedTicketRows.length === 0 && (
-                            <tr><td colSpan={tab === 'resolved' ? 17 : 14} className="py-8 text-center text-zinc-500">
+                            <tr><td colSpan={(tab === 'resolved' || tab === 'new_order_placed') ? 17 : 14} className="py-8 text-center text-zinc-500">
                               {syncing ? 'Loading…' : 'No tickets in this view.'}
                             </td></tr>
                           )}
