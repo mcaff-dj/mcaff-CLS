@@ -6,11 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       since:
-        description: "Backfill from this date (YYYY-MM-DD) through today; leave blank for today only"
+        description: "Backfill from this date (YYYY-MM-DD) through now; leave blank for the normal incremental run"
         required: false
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: sync-delivery-tickets
@@ -31,6 +31,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Source is Flowcall's own API directly (FLOWCALL_TOKEN_*, same tokens
+      # export-resolved-tickets.yml uses) - not hyphen_tickets/mcaff_tickets, whose
+      # external feed silently went dark for 4+ days starting 2026-08-25. MYSQL_* is
+      # still needed: this job writes to Delivery_escalation and reads Item_level_data
+      # for AWB/city backfill.
       - name: Sync HYPHEN tickets
         env:
           MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
@@ -38,7 +43,7 @@ jobs:
           MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
           MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
           MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
-        run: python scripts/sync_delivery_tickets_to_sheet.py --tab HYPHEN ${{ github.event.inputs.since && format('--since {0}', github.event.inputs.since) || '' }}
+        run: python scripts/sync_delivery_tickets_to_sheet.py --tab HYPHEN --api-token "${{ secrets.FLOWCALL_TOKEN_HYPHEN }}" ${{ github.event.inputs.since && format('--since {0}', github.event.inputs.since) || '' }}
 
       - name: Sync mCaffeine tickets
         env:
@@ -47,4 +52,28 @@ jobs:
           MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
           MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
           MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
-        run: python scripts/sync_delivery_tickets_to_sheet.py --tab mCaffeine ${{ github.event.inputs.since && format('--since {0}', github.event.inputs.since) || '' }}
+        run: python scripts/sync_delivery_tickets_to_sheet.py --tab mCaffeine --api-token "${{ secrets.FLOWCALL_TOKEN_MCAFFEINE }}" ${{ github.event.inputs.since && format('--since {0}', github.event.inputs.since) || '' }}
+
+      # Commits the incremental-sync cursor (data/delivery-escalation-sync-state.json) - same
+      # need, same rebase-and-retry pattern, as export-resolved-tickets.yml's own state commit.
+      # A --since run never touches this file, so a manual backfill has nothing to commit here.
+      - name: Commit state file if changed
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/delivery-escalation-sync-state.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update delivery-escalation sync state ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+            for attempt in 1 2 3 4 5; do
+              if git push; then
+                break
+              fi
+              echo "push attempt $attempt failed - fetching and rebasing onto latest main"
+              git fetch origin main
+              git rebase origin/main
+              sleep 3
+            done
+          else
+            echo "No state change; nothing to commit."
+          fi
