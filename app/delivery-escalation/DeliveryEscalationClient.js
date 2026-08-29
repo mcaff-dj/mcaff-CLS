@@ -453,7 +453,7 @@ function TatBreakdownTable({
           <table className="w-full text-[13px]">
             <thead>
               <tr className="border-b border-zinc-800/80 text-zinc-500">
-                <th rowSpan={2} className="py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">{rowHeader}</th>
+                <th rowSpan={2} className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">{rowHeader}</th>
                 {buckets.map((b) => (
                   <th key={b} colSpan={2} className="py-2 px-3 text-center font-medium border-l border-zinc-800/60 whitespace-nowrap">{b}</th>
                 ))}
@@ -471,8 +471,8 @@ function TatBreakdownTable({
                 const rowOpen = expandedRows.has(row.key);
                 return (
                   <Fragment key={row.key}>
-                    <tr onClick={() => toggleRow(row.key)} className="hover:bg-zinc-800/30 transition-colors cursor-pointer">
-                      <td className="py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">
+                    <tr onClick={() => toggleRow(row.key)} className="group hover:bg-zinc-800/30 transition-colors cursor-pointer">
+                      <td className="sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800/30 transition-colors py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">
                         <span className="inline-block w-4 text-zinc-500">{rowOpen ? '▾' : '▸'}</span>
                         {getLabel(row)}
                       </td>
@@ -495,8 +495,8 @@ function TatBreakdownTable({
                       const monthOpen = expandedMonths.has(month.key);
                       return (
                         <Fragment key={month.key}>
-                          <tr onClick={() => toggleMonth(month.key)} className="hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/30">
-                            <td className="py-2 px-3 pl-8 text-zinc-300 whitespace-nowrap">
+                          <tr onClick={() => toggleMonth(month.key)} className="group hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/30">
+                            <td className="sticky left-0 z-10 bg-zinc-950 group-hover:bg-zinc-800/30 transition-colors py-2 px-3 pl-8 text-zinc-300 whitespace-nowrap">
                               <span className="inline-block w-4 text-zinc-500">{monthOpen ? '▾' : '▸'}</span>
                               {formatDaywiseMonth(month.key)}
                             </td>
@@ -519,8 +519,8 @@ function TatBreakdownTable({
                             const weekOpen = expandedWeeks.has(week.key);
                             return (
                               <Fragment key={week.key}>
-                                <tr onClick={() => toggleWeek(week.key)} className="hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/30">
-                                  <td className="py-2 px-3 pl-14 text-zinc-300 whitespace-nowrap">
+                                <tr onClick={() => toggleWeek(week.key)} className="group hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/30">
+                                  <td className="sticky left-0 z-10 bg-zinc-950 group-hover:bg-zinc-800/30 transition-colors py-2 px-3 pl-14 text-zinc-300 whitespace-nowrap">
                                     <span className="inline-block w-4 text-zinc-500">{weekOpen ? '▾' : '▸'}</span>
                                     {formatDaywiseWeek(week)}
                                   </td>
@@ -539,8 +539,8 @@ function TatBreakdownTable({
                                   <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{week.total.toLocaleString('en-IN')}</td>
                                 </tr>
                                 {weekOpen && week.days.map((r) => (
-                                  <tr key={r.date} className="hover:bg-zinc-800/30 transition-colors">
-                                    <td className="py-2 px-3 pl-20 text-zinc-400 whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
+                                  <tr key={r.date} className="group hover:bg-zinc-800/30 transition-colors">
+                                    <td className="sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800/30 transition-colors py-2 px-3 pl-20 text-zinc-400 whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
                                     {buckets.flatMap((b) => {
                                       const count = r.counts[b] || 0;
                                       return [
@@ -574,7 +574,7 @@ function TatBreakdownTable({
             {rows.length > 0 && (
               <tfoot>
                 <tr className="border-t border-zinc-800/80 bg-zinc-950/40 font-semibold">
-                  <td className="py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
+                  <td className="sticky left-0 z-10 bg-zinc-950 py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
                   {buckets.flatMap((b) => ([
                     <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{(grandTotal.totals[b] || 0).toLocaleString('en-IN')}</td>,
                     <td key={`${b}-pct`} style={pctHeatStyle(grandTotal.all ? Math.round(((grandTotal.totals[b] || 0) / grandTotal.all) * 100) : 0)} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">
@@ -1525,7 +1525,7 @@ export default function DeliveryEscalationClient() {
                       <table className="w-full text-[13px]">
                         <thead>
                           <tr className="border-b border-zinc-800/80 text-zinc-500">
-                            <th rowSpan={2} className="py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">{daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} date</th>
+                            <th rowSpan={2} className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">{daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} date</th>
                             {daywise.buckets.map((b) => (
                               <th key={b} colSpan={2} className="py-2 px-3 text-center font-medium border-l border-zinc-800/60 whitespace-nowrap">{b}</th>
                             ))}
@@ -1545,9 +1545,9 @@ export default function DeliveryEscalationClient() {
                               <Fragment key={month.key}>
                                 <tr
                                   onClick={() => toggleExpanded(setExpandedMonths, month.key)}
-                                  className="hover:bg-zinc-800/30 transition-colors cursor-pointer"
+                                  className="group hover:bg-zinc-800/30 transition-colors cursor-pointer"
                                 >
-                                  <td className="py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">
+                                  <td className="sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800/30 transition-colors py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">
                                     <span className="inline-block w-4 text-zinc-500">{monthOpen ? '▾' : '▸'}</span>
                                     {formatDaywiseMonth(month.key)}
                                   </td>
@@ -1574,9 +1574,9 @@ export default function DeliveryEscalationClient() {
                                     <Fragment key={catKey}>
                                       <tr
                                         onClick={() => toggleExpanded(setExpandedCategories, catKey)}
-                                        className="bg-zinc-950/10 hover:bg-zinc-800/30 transition-colors cursor-pointer"
+                                        className="group bg-zinc-950/10 hover:bg-zinc-800/30 transition-colors cursor-pointer"
                                       >
-                                        <td className="py-1.5 px-3 pl-8 text-zinc-500 text-[12px] italic whitespace-nowrap">
+                                        <td className="sticky left-0 z-10 bg-zinc-950 group-hover:bg-zinc-800/30 transition-colors py-1.5 px-3 pl-8 text-zinc-500 text-[12px] italic whitespace-nowrap">
                                           <span className="inline-block w-4 text-zinc-600 not-italic">{catOpen ? '▾' : '▸'}</span>
                                           {cat.category}
                                         </td>
@@ -1592,9 +1592,9 @@ export default function DeliveryEscalationClient() {
                                           <Fragment key={week.key}>
                                             <tr
                                               onClick={() => toggleExpanded(setExpandedWeeks, week.key)}
-                                              className="hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/20"
+                                              className="group hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/20"
                                             >
-                                              <td className="py-1.5 px-3 pl-14 text-zinc-500 text-[12px] whitespace-nowrap">
+                                              <td className="sticky left-0 z-10 bg-zinc-950 group-hover:bg-zinc-800/30 transition-colors py-1.5 px-3 pl-14 text-zinc-500 text-[12px] whitespace-nowrap">
                                                 <span className="inline-block w-4 text-zinc-600">{weekOpen ? '▾' : '▸'}</span>
                                                 {formatDaywiseWeek(week)}
                                               </td>
@@ -1605,8 +1605,8 @@ export default function DeliveryEscalationClient() {
                                               <td className="py-1.5 px-3 text-right text-zinc-300 text-[12px] tabular-nums border-l border-zinc-800/60">{week.total.toLocaleString('en-IN')}</td>
                                             </tr>
                                             {weekOpen && week.days.filter((r) => r.total > 0).map((r) => (
-                                              <tr key={r.date} className="hover:bg-zinc-800/30 transition-colors">
-                                                <td className="py-1.5 px-3 pl-20 text-zinc-500 text-[12px] whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
+                                              <tr key={r.date} className="group hover:bg-zinc-800/30 transition-colors">
+                                                <td className="sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800/30 transition-colors py-1.5 px-3 pl-20 text-zinc-500 text-[12px] whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
                                                 {daywise.buckets.flatMap((b) => ([
                                                   <td key={`${b}-n`} className="py-1.5 px-3 text-right text-zinc-500 text-[12px] tabular-nums border-l border-zinc-800/60">{r.counts[b] || 0}</td>,
                                                   <td key={`${b}-pct`} className="py-1.5 px-3 text-right text-zinc-600 tabular-nums text-[11px]">{r.pct[b] || 0}%</td>,
@@ -1632,7 +1632,7 @@ export default function DeliveryEscalationClient() {
                         {daywise.rows.length > 0 && (
                           <tfoot>
                             <tr className="border-t border-zinc-800/80 bg-zinc-950/40 font-semibold">
-                              <td className="py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
+                              <td className="sticky left-0 z-10 bg-zinc-950 py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
                               {daywise.buckets.flatMap((b) => ([
                                 <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{(daywise.grandTotal[b] || 0).toLocaleString('en-IN')}</td>,
                                 <td key={`${b}-pct`} style={pctHeatStyle(daywise.grandTotalAll ? Math.round(((daywise.grandTotal[b] || 0) / daywise.grandTotalAll) * 100) : 0)} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">
