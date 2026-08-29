@@ -553,36 +553,35 @@ def build_combo2(rows, title, score_label, score_max):
 
 
 def build_top_rated_area_panel(ctx):
-    """Top Rated Area: nps_delivery.top_rated_area, "which area mattered most to your
-    experience" (ctx.top_rated_area, see nps_source.fetch_top_rated_area) - a single-choice
-    breakdown, not a monthly trend, so a horizontal bar list rather than build_combo2's
-    line+bar chart. "Not answered" (collapsed NA/NULL) is real signal (a third of responses
-    don't answer this question at all) so it's shown, not dropped."""
-    rows = ctx.top_rated_area or []
+    """Top Rated Area: five dedicated per-question CSAT columns on nps_delivery (Order
+    placement, Product experience, Customer support, Delivery, Website/app experience - see
+    nps_source.AREA_RATING_COLUMNS), scored %positive (top-2-box) by month
+    (ctx.top_rated_area_by_month, see nps_source.fetch_top_rated_area_by_month) as a plain
+    area x month table - same pivot-table shape as _build_prodwise_heatmap, minus the heatmap
+    coloring."""
+    rows = ctx.top_rated_area_by_month or []
     if not rows:
         return ""
-    total = sum(r["count"] for r in rows)
-    max_count = max(r["count"] for r in rows)
-    bars = []
-    for r in rows:
-        width = round(r["count"] / max_count * 100, 1) if max_count else 0
-        muted = " style='opacity:.55'" if r["area"] == "Not answered" else ""
-        bars.append(
-            f"<div class='tra-row'{muted}><span class='tra-label'>{h_enc(r['area'])}</span>"
-            f"<span class='tra-bar-wrap'><span class='tra-bar' style='width:{width}%'></span></span>"
-            f"<span class='tra-num'>{n0(r['count'])} <span class='tra-pct'>({fnum(r['pct'])}%)</span></span></div>"
-        )
+    all_yms = sorted({ym for r in rows for ym in r["months"]})
+    if not all_yms:
+        return ""
+    head_cells = "".join(f"<th class='month-hdr' data-yr='{ym[:4]}'>{h_enc(_nps_month_label(ym))}</th>" for ym in all_yms)
+    body_rows = []
+    for i, r in enumerate(rows):
+        z = "zebra" if i % 2 == 1 else ""
+        cells = []
+        for ym in all_yms:
+            m = r["months"].get(ym)
+            label = fnum(m["score"]) if m else "&ndash;"
+            title = f" title='{h_enc(r['area'])} &middot; {h_enc(_nps_month_label(ym))}: {n0(m['responses'])} responses'" if m else ""
+            cells.append(f"<td class='num' data-yr='{ym[:4]}'{title}>{label}</td>")
+        body_rows.append(f"<tr class='{z}'><td class='rowlabel'>{h_enc(r['area'])}</td>{''.join(cells)}</tr>")
     return (
         "<div class='pivot-wrap'><div class='pivot-title'>Top Rated Area</div>"
-        "<p class='desc'>Which area mattered most to the respondent's experience, out of "
-        f"{n0(total)} total survey responses.</p>"
-        "<style>.tra-row{display:flex;align-items:center;gap:10px;margin:6px 0}"
-        ".tra-label{width:190px;flex:0 0 auto;font-size:13px}"
-        ".tra-bar-wrap{flex:1 1 auto;background:var(--s7,#eee);border-radius:3px;height:14px;overflow:hidden}"
-        ".tra-bar{display:block;height:100%;background:var(--s2,#4a90d9);border-radius:3px}"
-        ".tra-num{width:130px;flex:0 0 auto;text-align:right;font-size:13px}"
-        ".tra-pct{color:var(--muted,#888)}</style>"
-        f"<div>{''.join(bars)}</div></div>"
+        "<p class='desc'>%positive (top-2-box, rated 4 or 5 of 5) per area's CSAT question, per month. "
+        "Blank cells had no responses to that question that month.</p>"
+        f"<div class='pivot-scroll'><table class='pivot-table'><thead><tr>"
+        f"<th class='corner'>Area</th>{head_cells}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
     )
 
 

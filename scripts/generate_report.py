@@ -281,11 +281,15 @@ def main():
             nps_cache["prodwise_nps"] = prodwise_nps
             with open(nps_cache_path, "w", encoding="utf-8") as f:
                 json.dump(nps_cache, f, separators=(",", ":"))
-        # Older caches predate the "Top Rated Area" breakdown - same backfill-in-place idea.
+        # Older caches predate the "Top Rated Area" breakdown, or predate its switch from a
+        # single-choice count to the five per-question CSAT columns (old cache shape has no
+        # "months" key on each row) - same backfill-in-place idea either way.
         top_rated_area = nps_cache.get("top_rated_area")
+        if top_rated_area and "months" not in top_rated_area[0]:
+            top_rated_area = None
         if top_rated_area is None:
             print(f"[{b['brand']}] no cached top-rated-area breakdown yet, querying...")
-            top_rated_area = nps_source.fetch_top_rated_area(b["nps_mysql_brand"])
+            top_rated_area = nps_source.fetch_top_rated_area_by_month(b["nps_mysql_brand"])
             nps_cache["top_rated_area"] = top_rated_area
             with open(nps_cache_path, "w", encoding="utf-8") as f:
                 json.dump(nps_cache, f, separators=(",", ":"))
@@ -300,8 +304,8 @@ def main():
             nps_source.fetch_product_nps(b["nps_mysql_brand"]), sheet_prodnps, NPS_SHEET_OVERRIDE_MONTHS)
         # Product wise NPS (per product name, not per month) - no sheet override, MySQL-only.
         prodwise_nps = nps_source.fetch_product_wise_nps(b["nps_mysql_brand"])
-        # Top Rated Area breakdown (which area mattered most) - also no sheet override, MySQL-only.
-        top_rated_area = nps_source.fetch_top_rated_area(b["nps_mysql_brand"])
+        # Top Rated Area breakdown (per-question CSAT %positive by month) - also no sheet override, MySQL-only.
+        top_rated_area = nps_source.fetch_top_rated_area_by_month(b["nps_mysql_brand"])
         nps_cache_path.parent.mkdir(parents=True, exist_ok=True)
         with open(nps_cache_path, "w", encoding="utf-8") as f:
             json.dump({"mom": mom, "prodnps": prodnps, "prodwise_nps": prodwise_nps, "top_rated_area": top_rated_area}, f, separators=(",", ":"))
@@ -324,7 +328,7 @@ def main():
     agent, ai = agent_hist, ai_hist
 
     ctx.data_rows = data_rows
-    ctx.mom, ctx.prodnps, ctx.prodwise_nps, ctx.top_rated_area, ctx.agent, ctx.ai = mom, prodnps, prodwise_nps, top_rated_area, agent, ai
+    ctx.mom, ctx.prodnps, ctx.prodwise_nps, ctx.top_rated_area_by_month, ctx.agent, ctx.ai = mom, prodnps, prodwise_nps, top_rated_area, agent, ai
     ctx.months = b["months"]
     ctx.n = len(ctx.months)
     # ctx.months is a list, and nearly every per-row loop in the panel builders needs the
