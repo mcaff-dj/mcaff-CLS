@@ -337,6 +337,23 @@ function groupPartnerwiseRows(dayRows, buckets) {
   }).sort((a, b) => b.total - a.total);
 }
 
+// Each date row carries its own query_category split (r.categories, from the server, same shape
+// as r.partners) - re-summed here straight from a month's own day rows (no further Week/Day
+// nesting - shown flat under the expanded month, unlike the partner breakdown which is its own
+// standalone table).
+function categoryBreakdownForDays(days, buckets) {
+  const byCategory = new Map();
+  for (const r of days) {
+    for (const c of (r.categories || [])) {
+      if (!byCategory.has(c.category)) byCategory.set(c.category, []);
+      byCategory.get(c.category).push({ counts: c.counts, total: c.total });
+    }
+  }
+  return [...byCategory.entries()]
+    .map(([category, rows]) => ({ category, ...sumDaywiseRows(rows, buckets) }))
+    .sort((a, b) => b.total - a.total);
+}
+
 function formatDaywiseMonth(monthKey) {
   const plain = monthKey.includes('::') ? monthKey.split('::').pop() : monthKey;
   const [y, m] = plain.split('-').map(Number);
@@ -1273,6 +1290,16 @@ export default function DeliveryEscalationClient() {
                                   })}
                                   <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
                                 </tr>
+                                {monthOpen && categoryBreakdownForDays(month.days, daywise.buckets).map((cat) => (
+                                  <tr key={`${month.key}::cat::${cat.category}`} className="bg-zinc-950/10">
+                                    <td className="py-1.5 px-3 pl-8 text-zinc-500 text-[12px] italic whitespace-nowrap">{cat.category}</td>
+                                    {daywise.buckets.flatMap((b) => ([
+                                      <td key={`${b}-n`} className="py-1.5 px-3 text-right text-zinc-500 text-[12px] tabular-nums border-l border-zinc-800/60">{cat.counts[b] || 0}</td>,
+                                      <td key={`${b}-pct`} className="py-1.5 px-3 text-right text-zinc-600 tabular-nums text-[11px]">{cat.pct[b] || 0}%</td>,
+                                    ]))}
+                                    <td className="py-1.5 px-3 text-right text-zinc-400 text-[12px] tabular-nums border-l border-zinc-800/60">{cat.total.toLocaleString('en-IN')}</td>
+                                  </tr>
+                                ))}
                                 {monthOpen && month.weeks.map((week) => {
                                   const weekOpen = expandedWeeks.has(week.key);
                                   return (
