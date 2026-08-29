@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""One-off DDL + backfill: adds `Payment_Mode` to PEP_CLS.Delivery_escalation and maps it from
+"""One-off DDL + backfill: adds `Payment_Mode` to PEP_CLS.Delivery_escalation and derives it from
 mcaff_prod.Item_level_data by AWB (Delivery_escalation.awb_code = Item_level_data.Tracking_Number)
 - same cross-schema lookup key backfill_delivery_escalation_shipping_city.py already uses for
-Shipping_Address_City. Kept fresh for new tickets going forward by
-sync_delivery_tickets_to_sheet.py's own fetch_payment_mode_by_awb, at insert time.
+Shipping_Address_City. Item_level_data has no Payment_Mode/Payment_Method column of its own -
+only `COD` (bigint) - so the value is derived: COD = 1 -> 'COD', else -> 'Prepaid'. A row whose
+COD itself is NULL is skipped rather than guessed at, same "only write when a real match exists"
+rule backfill_payment_mode.py already applies to its own (unrelated) sheet-sourced backfill.
+Kept fresh for new tickets going forward by sync_delivery_tickets_to_sheet.py's own
+fetch_payment_mode_by_awb, at insert time.
 
 Batched IN(...) lookups against Item_level_data, not a JOIN across the whole ~50M-row table -
 same reasoning as the city backfill: a targeted IN() on its indexed Tracking_Number is fast, an
@@ -27,6 +31,9 @@ SCHEMA = "PEP_CLS"
 TABLE = "Delivery_escalation"
 COLUMN = "Payment_Mode"
 SOURCE = "mcaff_prod.Item_level_data"
+# Item_level_data's own payment signal - see this module's docstring on why it's derived rather
+# than copied 1:1 from a same-named column (there isn't one).
+SOURCE_EXPR = "CASE WHEN COD = 1 THEN 'COD' ELSE 'Prepaid' END"
 BATCH_SIZE = 500
 
 
@@ -102,9 +109,9 @@ def main():
             batch = awbs[i:i + BATCH_SIZE]
             placeholders = ",".join(["%s"] * len(batch))
             cur.execute(
-                f"SELECT Tracking_Number, {COLUMN} FROM {SOURCE} "
+                f"SELECT Tracking_Number, {SOURCE_EXPR} FROM {SOURCE} "
                 f"WHERE Tracking_Number IN ({placeholders}) "
-                f"AND {COLUMN} IS NOT NULL AND {COLUMN} <> '' "
+                f"AND COD IS NOT NULL "
                 f"ORDER BY Created DESC",
                 batch,
             )

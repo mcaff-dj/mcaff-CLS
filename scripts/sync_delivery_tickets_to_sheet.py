@@ -222,15 +222,19 @@ def fetch_city_by_awb(awbs):
 
 def fetch_payment_mode_by_awb(awbs):
     """Tracking_Number -> Payment_Mode from mcaff_prod's Item_level_data - same source and
-    latest-row-wins tie-break as fetch_city_by_awb / backfill_delivery_escalation_payment_mode.py."""
+    latest-row-wins tie-break as fetch_city_by_awb / backfill_delivery_escalation_payment_mode.py.
+
+    Item_level_data has no Payment_Mode/Payment_Method column of its own - only `COD` (bigint) -
+    so this derives it the same way that backfill script does: COD = 1 -> 'COD', else ->
+    'Prepaid'. A row whose COD itself is NULL is skipped rather than guessed at."""
     if not awbs:
         return {}
     unique_awbs = sorted(set(awbs))
     placeholders = ",".join(["%s"] * len(unique_awbs))
     rows = mysql_lib.query(
-        f"SELECT Tracking_Number, Payment_Mode FROM Item_level_data "
+        f"SELECT Tracking_Number, CASE WHEN COD = 1 THEN 'COD' ELSE 'Prepaid' END FROM Item_level_data "
         f"WHERE Tracking_Number IN ({placeholders}) "
-        f"AND Payment_Mode IS NOT NULL AND Payment_Mode != '' "
+        f"AND COD IS NOT NULL "
         f"ORDER BY Created DESC",
         tuple(unique_awbs), database="mcaff_prod",
     )
