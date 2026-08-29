@@ -1738,12 +1738,20 @@ async function getDeliveryEscalationRepeatStats() {
 const DE_ORDER_DATE_FLOOR = '2026-06-01';
 
 async function getDeliveryEscalationDaywiseStats(opts = {}) {
-  const { brand, agent, dateField } = opts;
+  const { brand, agent, dateField, partner, paymentMode } = opts;
   const col = DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date';
   const extraClauses = [];
   const params = [];
   if (brand) { extraClauses.push('brand = ?'); params.push(brand); }
   if (agent) { extraClauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
+  // partner is a list of raw delivery_partner values the client already resolved from its own
+  // canonical-name -> raw-variant map (PARTNER_NAME_MAP in DeliveryEscalationClient.js) - this
+  // stays a dumb IN() over whatever it's handed rather than duplicating that map server-side.
+  if (Array.isArray(partner) && partner.length) {
+    extraClauses.push(`delivery_partner IN (${partner.map(() => '?').join(',')})`);
+    params.push(...partner);
+  }
+  if (paymentMode) { extraClauses.push('Payment_Mode = ?'); params.push(paymentMode); }
   const extra = extraClauses.length ? ` AND ${extraClauses.join(' AND ')}` : '';
   const pool = await getPool();
   // The floor only ever applies to the dated rows query, never to noDateCount below - that one

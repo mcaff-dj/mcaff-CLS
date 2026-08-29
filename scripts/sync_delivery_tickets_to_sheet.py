@@ -220,6 +220,26 @@ def fetch_city_by_awb(awbs):
     return city_by_awb
 
 
+def fetch_payment_mode_by_awb(awbs):
+    """Tracking_Number -> Payment_Mode from mcaff_prod's Item_level_data - same source and
+    latest-row-wins tie-break as fetch_city_by_awb / backfill_delivery_escalation_payment_mode.py."""
+    if not awbs:
+        return {}
+    unique_awbs = sorted(set(awbs))
+    placeholders = ",".join(["%s"] * len(unique_awbs))
+    rows = mysql_lib.query(
+        f"SELECT Tracking_Number, Payment_Mode FROM Item_level_data "
+        f"WHERE Tracking_Number IN ({placeholders}) "
+        f"AND Payment_Mode IS NOT NULL AND Payment_Mode != '' "
+        f"ORDER BY Created DESC",
+        tuple(unique_awbs), database="mcaff_prod",
+    )
+    payment_mode_by_awb = {}
+    for awb, mode in (rows or []):
+        payment_mode_by_awb.setdefault(awb, mode)
+    return payment_mode_by_awb
+
+
 def parent_order_of(row):
     (_ticket_number, _subcategory, order_name, disposition_order, *_rest) = row
     return order_name or disposition_order or ""
@@ -247,8 +267,8 @@ DELIVERY_ESCALATION_INSERT = """
     INSERT INTO Delivery_escalation
         (brand, order_id, awb_code, delivery_partner, query_class, query_category,
          wh_name, ticket_number, added_date, order_date, order_month, query_date, query_month,
-         outcome, agent_remarks, disposed_at, agent_email, Shipping_Address_City)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         outcome, agent_remarks, disposed_at, agent_email, Shipping_Address_City, Payment_Mode)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE
         order_id = VALUES(order_id),
         awb_code = COALESCE(awb_code, VALUES(awb_code)),
@@ -258,7 +278,8 @@ DELIVERY_ESCALATION_INSERT = """
         added_date = VALUES(added_date), order_date = VALUES(order_date),
         order_month = VALUES(order_month), query_date = VALUES(query_date),
         query_month = VALUES(query_month),
-        Shipping_Address_City = COALESCE(VALUES(Shipping_Address_City), Shipping_Address_City)
+        Shipping_Address_City = COALESCE(VALUES(Shipping_Address_City), Shipping_Address_City),
+        Payment_Mode = COALESCE(VALUES(Payment_Mode), Payment_Mode)
         -- outcome/agent_remarks/disposed_at/agent_email deliberately NOT re-written here: this
         -- job must never overwrite a ticket an agent (or the carry-forward below) already
         -- disposed - only a brand-new ticket_number (the INSERT branch) ever gets them set.
@@ -306,12 +327,14 @@ def fetch_terminal_outcomes(tab_awb_pairs):
     return out
 
 
-def build_delivery_escalation_row(row, tab, terminal_by_awb=None, city_by_awb=None):
+def build_delivery_escalation_row(row, tab, terminal_by_awb=None, city_by_awb=None, payment_mode_by_awb=None):
     """row is a raw tuple from fetch_flowcall_delivery_rows - real DATE/datetime objects for
     added_date/order_date/query_date, not display strings, since this row needs to stay
     queryable. terminal_by_awb (see fetch_terminal_outcomes) carries an already-resolved AWB's
     outcome forward onto this brand-new ticket instead of leaving it Fresh. city_by_awb (see
-    fetch_city_by_awb) maps this row's own AWB to its Shipping_Address_City."""
+    fetch_city_by_awb) maps this row's own AWB to its Shipping_Address_City, and
+    payment_mode_by_awb (see fetch_payment_mode_by_awb) to its Payment_Mode - same source,
+    same lookup key."""
     (ticket_number, subcategory, order_name, disposition_order,
      awb, partner, order_date, created_at, resolved_at, warehouse) = row
     parent_order = order_name or disposition_order or ""
@@ -329,20 +352,22 @@ def build_delivery_escalation_row(row, tab, terminal_by_awb=None, city_by_awb=No
     else:
         outcome = agent_remarks = agent_email = disposed_at = None
     shipping_city = (city_by_awb or {}).get(awb) if awb else None
+    payment_mode = (payment_mode_by_awb or {}).get(awb) if awb else None
     return (
         tab, parent_order, awb or None, partner, "Delivery",
         subcategory or None, warehouse or None, ticket_number,
         resolved_at, order_date, format_month(order_date), created_at, format_month(created_at),
-        outcome, agent_remarks, disposed_at, agent_email, shipping_city,
+        outcome, agent_remarks, disposed_at, agent_email, shipping_city, payment_mode,
     )
 
 
-def upsert_delivery_escalation_rows(rows, tab, terminal_by_awb=None, city_by_awb=None):
+def upsert_delivery_escalation_rows(rows, tab, terminal_by_awb=None, city_by_awb=None, payment_mode_by_awb=None):
     for r in rows:
         try:
             mysql_lib.execute(
                 DELIVERY_ESCALATION_INSERT,
-                build_delivery_escalation_row(r, tab, terminal_by_awb, city_by_awb), database="PEP_CLS")
+                build_delivery_escalation_row(r, tab, terminal_by_awb, city_by_awb, payment_mode_by_awb),
+                database="PEP_CLS")
         except Exception as e:
             print(f"  WARNING: Delivery_escalation upsert failed for ticket {r[0]}: {e}")
 
@@ -384,6 +409,7 @@ def sync_tab(tab, dry_run, since=None, hours_back=2, api_token=None):
     fill_missing_awb(rows)
 
     city_by_awb = fetch_city_by_awb([r[4] for r in rows if r[4]])
+    payment_mode_by_awb = fetch_payment_mode_by_awb([r[4] for r in rows if r[4]])
 
     terminal_by_awb = fetch_terminal_outcomes([(tab, r[4]) for r in rows if r[4]])
     if terminal_by_awb:
@@ -391,13 +417,13 @@ def sync_tab(tab, dry_run, since=None, hours_back=2, api_token=None):
 
     if dry_run:
         for r in rows[:5]:
-            print("   ", build_delivery_escalation_row(r, tab, terminal_by_awb, city_by_awb))
+            print("   ", build_delivery_escalation_row(r, tab, terminal_by_awb, city_by_awb, payment_mode_by_awb))
         if len(rows) > 5:
             print(f"    ... and {len(rows) - 5} more")
         print(f"  would upsert {len(rows)} row(s) into MySQL Delivery_escalation")
         return
 
-    upsert_delivery_escalation_rows(rows, tab, terminal_by_awb, city_by_awb)
+    upsert_delivery_escalation_rows(rows, tab, terminal_by_awb, city_by_awb, payment_mode_by_awb)
     print(f"  upserted {len(rows)} row(s) into MySQL Delivery_escalation")
     # Categories whose outcome follows from the category alone never reach an agent - see
     # auto_dispose_de_categories.py. Runs after the upsert so tickets mirrored a moment ago are
@@ -443,14 +469,14 @@ def self_check():
     assert build_delivery_escalation_row(row, "mCaffeine") == (
         "mCaffeine", "MCaff123", "AWB1", "BlueDart", "Delivery", "Wrong Pincode", "WH1", "TCK1",
         row[8], row[6], format_month(row[6]), row[7], format_month(row[7]),
-        None, None, None, None, None,
+        None, None, None, None, None, None,
     )
     # Blank order_name falls back to disposition_order, same as parent_order_of.
     row2 = ("TCK2", None, "", "HYP999", "", "Delhivery", None, None, None, "")
     assert build_delivery_escalation_row(row2, "HYPHEN") == (
         "HYPHEN", "HYP999", None, "Delhivery", "Delivery", None, None, "TCK2",
         None, None, "", None, "",
-        None, None, None, None, None,
+        None, None, None, None, None, None,
     )
     # An AWB already terminal carries its outcome forward onto a brand-new ticket for it.
     terminal = {("mCaffeine", "AWB1"): ("RTO > New AWB# XYZ", "reshipped", "shahid.khan@mcaffeine.com")}
@@ -458,12 +484,16 @@ def self_check():
     assert built[13] == "RTO > New AWB# XYZ"
     assert built[14] == "[Auto-carried: AWB already RTO > New AWB# XYZ] reshipped"
     assert built[15] is not None  # disposed_at stamped now
-    # city_by_awb maps this row's own AWB to Shipping_Address_City; a row with no AWB, or one
-    # missing from the map, stays None rather than raising.
+    # city_by_awb/payment_mode_by_awb map this row's own AWB to Shipping_Address_City/Payment_Mode;
+    # a row with no AWB, or one missing from the map, stays None rather than raising.
     built_city = build_delivery_escalation_row(row, "mCaffeine", city_by_awb={"AWB1": "Mumbai"})
     assert built_city[17] == "Mumbai"
     assert build_delivery_escalation_row(row2, "HYPHEN", city_by_awb={"AWB1": "Mumbai"})[17] is None
+    built_payment_mode = build_delivery_escalation_row(row, "mCaffeine", payment_mode_by_awb={"AWB1": "Prepaid"})
+    assert built_payment_mode[18] == "Prepaid"
+    assert build_delivery_escalation_row(row2, "HYPHEN", payment_mode_by_awb={"AWB1": "Prepaid"})[18] is None
     assert fetch_city_by_awb([]) == {}
+    assert fetch_payment_mode_by_awb([]) == {}
     assert parent_order_of(row) == "MCaff123"
     assert parent_order_of(row2) == "HYP999"
     print("self-check ok")

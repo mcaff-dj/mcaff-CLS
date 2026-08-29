@@ -30,6 +30,7 @@ import { useProcessDispositions, ProcessDispositionsCard } from '../_calling/Cal
 import { safeStorage } from '../_calling/util';
 
 const BRANDS = ['HYPHEN', 'mCaffeine'];
+const PAYMENT_MODES = ['Prepaid', 'COD'];
 // Same repeat-contact buckets getDeliveryEscalationRepeatStats already groups by (see db.js) -
 // reusing them here rather than inventing a second bucketing keeps "how many times did this
 // customer come" meaning one thing everywhere on this page.
@@ -299,6 +300,15 @@ function mapPartnerName(raw) {
   return PARTNER_NAME_MAP[key] || key;
 }
 
+// canonical partner name -> every raw shipping_courier value that folds into it, so the Partner
+// filter dropdown can show ~9 clean names while the server still filters delivery_partner (the
+// raw column) - see fetchDaywiseStats, which sends this list rather than the canonical name.
+const CANONICAL_TO_RAW_PARTNER = Object.entries(PARTNER_NAME_MAP).reduce((m, [raw, canon]) => {
+  (m[canon] = m[canon] || []).push(raw);
+  return m;
+}, {});
+const PARTNER_FILTER_OPTIONS = [...new Set(Object.values(PARTNER_NAME_MAP))].sort();
+
 // Several raw couriers can fold into the same final partner (see PARTNER_NAME_MAP) - if two of
 // them fire on the same date, sums them into one row per date rather than leaving two rows that
 // would collide on the same React key when the day level renders.
@@ -433,11 +443,13 @@ async function fetchStats() {
 
 // Overview's day-wise TAT table - unlike fetchStats above, this DOES take the page's current
 // brand/agent filters (see record.js's own op=daywise comment on why).
-async function fetchDaywiseStats({ brand, agent, dateField }) {
+async function fetchDaywiseStats({ brand, agent, dateField, partner, paymentMode }) {
   const p = new URLSearchParams({ op: 'daywise' });
   if (brand && brand !== 'ALL') p.set('brand', brand);
   if (agent && agent !== 'ALL') p.set('agent', agent);
   if (dateField) p.set('dateField', dateField);
+  if (partner && partner !== 'ALL') p.set('partner', (CANONICAL_TO_RAW_PARTNER[partner] || [partner]).join(','));
+  if (paymentMode && paymentMode !== 'ALL') p.set('paymentMode', paymentMode);
   const d = await getJson(`/api/delivery-escalation/record?${p}`);
   return {
     buckets: d.buckets || [],
@@ -679,6 +691,10 @@ export default function DeliveryEscalationClient() {
   const [tab, setTab] = useState('overview');
   const [search, setSearch] = useState('');
   const [brandFilter, setBrandFilter] = useState(() => safeStorage.getItem('de_brand_filter') || 'ALL');
+  // Daywise-table-only filters (unlike brandFilter/agentFilter below, these don't touch the
+  // Fresh/Resolved ticket list - see fetchDaywiseStats, the only place they're read).
+  const [daywisePartnerFilter, setDaywisePartnerFilter] = useState(() => safeStorage.getItem('de_daywise_partner_filter') || 'ALL');
+  const [daywisePaymentModeFilter, setDaywisePaymentModeFilter] = useState(() => safeStorage.getItem('de_daywise_payment_mode_filter') || 'ALL');
   // Which date column the TAT-by-date table's rows are grouped under - 'added_date' (labeled
   // Query Date here, same as the rest of this page) or 'order_date' (when the order was placed).
   const [daywiseDateBasis, setDaywiseDateBasis] = useState(() => safeStorage.getItem('de_daywise_date_basis') || 'added_date');
@@ -826,14 +842,17 @@ export default function DeliveryEscalationClient() {
     if (tab !== 'overview') return;
     setDaywiseLoading(true);
     try {
-      setDaywise(await fetchDaywiseStats({ brand: brandFilter, agent: agentFilter, dateField: daywiseDateBasis }));
+      setDaywise(await fetchDaywiseStats({
+        brand: brandFilter, agent: agentFilter, dateField: daywiseDateBasis,
+        partner: daywisePartnerFilter, paymentMode: daywisePaymentModeFilter,
+      }));
     } catch (e) {
       console.error('Delivery-Escalation daywise stats failed:', e);
       if (isSessionExpired(e)) setSessionExpired(true);
     } finally {
       setDaywiseLoading(false);
     }
-  }, [tab, brandFilter, agentFilter, daywiseDateBasis]);
+  }, [tab, brandFilter, agentFilter, daywiseDateBasis, daywisePartnerFilter, daywisePaymentModeFilter]);
 
   // Clicking a bucket cell in the day-wise table (a month/week's rolled-up count, or a single
   // day once expanded) jumps to the tab that actually holds those rows and filters the list down
@@ -1245,6 +1264,18 @@ export default function DeliveryEscalationClient() {
                         onChange={(v) => { setBrandFilter(v); safeStorage.setItem('de_brand_filter', v); }}
                         options={[{ value: 'ALL', label: 'All Brands' }, ...BRANDS.map(b => ({ value: b, label: b }))]}
                         placeholder="Brand"
+                      />
+                      <CustomSelect
+                        value={daywisePartnerFilter}
+                        onChange={(v) => { setDaywisePartnerFilter(v); safeStorage.setItem('de_daywise_partner_filter', v); }}
+                        options={[{ value: 'ALL', label: 'All Partners' }, ...PARTNER_FILTER_OPTIONS.map(p => ({ value: p, label: p }))]}
+                        placeholder="Partner"
+                      />
+                      <CustomSelect
+                        value={daywisePaymentModeFilter}
+                        onChange={(v) => { setDaywisePaymentModeFilter(v); safeStorage.setItem('de_daywise_payment_mode_filter', v); }}
+                        options={[{ value: 'ALL', label: 'All Payment Modes' }, ...PAYMENT_MODES.map(m => ({ value: m, label: m }))]}
+                        placeholder="Payment Mode"
                       />
                     </div>
                   </div>

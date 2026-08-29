@@ -104,9 +104,13 @@ module.exports = async (req, res) => {
       if (q.op === 'daywise') {
         // Overview's day-wise TAT table - respects the page's current brand/agent filters
         // (unlike op=stats, which is deliberately whole-desk); view is irrelevant here since it
-        // spans Fresh+Resolved+Forced RTO in one table.
+        // spans Fresh+Resolved+Forced RTO in one table. partner arrives as a comma-joined list
+        // of raw delivery_partner values (the client already resolved its own canonical-name
+        // filter down to that list - see PARTNER_NAME_MAP in DeliveryEscalationClient.js).
         const daywise = await getDeliveryEscalationDaywiseStats({
           brand: filters.brand, agent: filters.agent, dateField: q.dateField,
+          partner: q.partner ? String(q.partner).split(',').filter(Boolean) : undefined,
+          paymentMode: q.paymentMode && q.paymentMode !== 'ALL' ? q.paymentMode : '',
         });
         res.status(200).json(daywise);
         return;
