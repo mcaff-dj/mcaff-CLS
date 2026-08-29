@@ -76,6 +76,12 @@ BRANDS = {
 # land in Delivery_escalation.
 EXCLUDED_SUBCATEGORIES = {"Estimated time of delivery", "Late/Delay Dispatch"}
 
+# "Marked Undelivered" and "Fake update" are the same real-world case (courier reports a
+# delivery attempt/failure that never actually happened) surfaced under two different
+# subcategory labels - collapsed onto one (query_category = "Fake update") so the report and
+# every filter/bucket built on query_category don't have to treat them separately.
+QUERY_CATEGORY_ALIASES = {"Marked Undelivered": "Fake update"}
+
 # Tracks the last successful window end per tab, same pattern (and same idea, separate file)
 # as export_recurring.py's own resolved-ticket-export-state.json - a run that fires late still
 # catches up the full gap instead of dropping it. Only advanced by normal (non---since) runs;
@@ -140,6 +146,7 @@ def fetch_flowcall_delivery_rows(flowcall_tab, api_token, start_str, end_str):
         subcategory = get(row, "Subcategory") or None
         if subcategory in EXCLUDED_SUBCATEGORIES:
             continue
+        subcategory = QUERY_CATEGORY_ALIASES.get(subcategory, subcategory)
         ticket_number = get(row, "Ticket Number")
         if not ticket_number:
             continue
