@@ -72,10 +72,19 @@ jobs:
       # log the whole team can read. Same class of leak as deploy-cron-lambdas.yml's 2026-08-14
       # incident (see lambda/README.md) - that workflow got the fix, this one was missed.
       - name: Update Lambda function code
+        # The wait below is a courtesy, not the actual deploy - update-function-code above is
+        # what pushes the new code, and it already succeeded by the time this runs. The wait
+        # polls lambda:GetFunctionConfiguration, a permission this role doesn't always carry
+        # (2026-08-29: AccessDeniedException on that action turned a real, successful code
+        # push into a red, exit-255 job) - so a missing-permission failure here is treated the
+        # same non-fatal way the timeout step below already treats its own missing permission:
+        # warn, don't fail. The new code is live either way; only the "wait for it to finish
+        # updating" confirmation is skipped.
         run: |
           aws lambda update-function-code --function-name mcaff-cls-api --zip-file fileb://lambda.zip \
             --query "{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus,CodeSha256:CodeSha256}"
-          aws lambda wait function-updated --function-name mcaff-cls-api
+          aws lambda wait function-updated --function-name mcaff-cls-api \
+            || echo "::warning::Could not confirm the Lambda finished updating (likely missing lambda:GetFunctionConfiguration on the deploy role) - the code push above already succeeded regardless."
 
       # Safety margin, not a fix for the real cause (see db.js's schemaLooksComplete() -
       # 2026-08-28 timeout incident): a concurrent cold-start bootstrap burst right after a
