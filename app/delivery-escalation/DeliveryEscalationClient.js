@@ -363,7 +363,7 @@ function buildCategoryWeeks(days, category, buckets, keyPrefix) {
     const cat = (r.categories || []).find((c) => c.category === category);
     return { date: r.date, counts: cat ? cat.counts : Object.fromEntries(buckets.map((b) => [b, 0])), total: cat ? cat.total : 0 };
   });
-  return buildWeeksOfMonth(dayRows, buckets, keyPrefix).filter((week) => week.total > 0);
+  return buildWeeksOfMonth(mergeDayRowsByDate(dayRows, buckets), buckets, keyPrefix).filter((week) => week.total > 0);
 }
 
 function formatDaywiseMonth(monthKey) {
@@ -1354,53 +1354,6 @@ export default function DeliveryEscalationClient() {
                                           </Fragment>
                                         );
                                       })}
-                                    </Fragment>
-                                  );
-                                })}
-                                {monthOpen && month.weeks.map((week) => {
-                                  const weekOpen = expandedWeeks.has(week.key);
-                                  return (
-                                    <Fragment key={week.key}>
-                                      <tr
-                                        onClick={() => toggleExpanded(setExpandedWeeks, week.key)}
-                                        className="hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/30"
-                                      >
-                                        <td className="py-2 px-3 pl-8 text-zinc-300 whitespace-nowrap">
-                                          <span className="inline-block w-4 text-zinc-500">{weekOpen ? '▾' : '▸'}</span>
-                                          {formatDaywiseWeek(week)}
-                                        </td>
-                                        {daywise.buckets.flatMap((b) => {
-                                          const count = week.counts[b] || 0;
-                                          return [
-                                            <td
-                                              key={`${b}-n`}
-                                              onClick={count ? (e) => { e.stopPropagation(); drillIntoDaywise(week.days[0]?.date, week.days[week.days.length - 1]?.date, b); } : undefined}
-                                              title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
-                                              className={`py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
-                                            >{count}</td>,
-                                            <td key={`${b}-pct`} style={pctHeatStyle(week.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{week.pct[b] || 0}%</td>,
-                                          ];
-                                        })}
-                                        <td className="py-2 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/60">{week.total.toLocaleString('en-IN')}</td>
-                                      </tr>
-                                      {weekOpen && week.days.map((r) => (
-                                        <tr key={r.date} className="hover:bg-zinc-800/30 transition-colors">
-                                          <td className="py-2 px-3 pl-14 text-zinc-400 whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
-                                          {daywise.buckets.flatMap((b) => {
-                                            const count = r.counts[b] || 0;
-                                            return [
-                                              <td
-                                                key={`${b}-n`}
-                                                onClick={count ? () => drillIntoDaywise(r.date, r.date, b) : undefined}
-                                                title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
-                                                className={`py-2 px-3 text-right text-zinc-400 tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
-                                              >{count}</td>,
-                                              <td key={`${b}-pct`} className="py-2 px-3 text-right text-zinc-600 tabular-nums text-[12px]">{r.pct[b] || 0}%</td>,
-                                            ];
-                                          })}
-                                          <td className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">{r.total.toLocaleString('en-IN')}</td>
-                                        </tr>
-                                      ))}
                                     </Fragment>
                                   );
                                 })}
