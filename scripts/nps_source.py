@@ -228,52 +228,66 @@ def fetch_product_wise_nps(mysql_brand):
 
 
 AREA_RATING_COLUMNS = {
-    "Order placement": "order_placement_experience",
-    "Product experience": "product_first_impression",
-    "Customer support": "cs_team_rating",
+    "Product": "product_first_impression",
     "Delivery": "delivery_service_rating",
-    "Website / app experience": "website_experience",
+    "Customer support": "cs_team_rating",
+    "Website / app experience": "order_placement_experience",
 }
 
 
 def fetch_top_rated_area_by_month(mysql_brand):
-    """Top Rated Area x Month: five dedicated per-question rating columns on nps_delivery
+    """Top Rated Area x Month: four dedicated per-question rating columns on nps_delivery
     (AREA_RATING_COLUMNS above, as given by Soumya 2026-08-30) - NOT the single-choice
     top_rated_area column, which this replaced (that only names which area mattered most,
-    not how it scored). Each column is its own 1-5 CSAT rating asked of every respondent;
-    cell value is %positive (top-2-box, value IN (4,5)) of non-null answers to that column,
-    per month - matches the report's other %-based scores in scale (compare NPS%'s -100..100
-    to this 0..100).
+    not how it scored).
 
-    Returns [{"area": "Order placement", "months": {"2026-04": {"score": 56.0, "responses": 1234}, ...}}, ...]
-    in AREA_RATING_COLUMNS order (the survey's own question order, not sorted by volume)."""
-    select_parts = []
+    Raw values (checked via a GROUP BY dump against real data, not assumed) are a MIX of
+    scales: order_placement_experience/product_first_impression/delivery_service_rating are
+    genuinely 1-10, while cs_team_rating is ~1-5 with a handful of stray 6-10 values - so
+    every raw value is normalized to a common 1-5 scale via ceil(v/2) (1,2->1, 3,4->2, 5,6->3,
+    7,8->4, 9,10->5, as given by Soumya) before scoring, applied uniformly across all four
+    columns rather than only the three "real" 1-10 ones - deliberately including
+    cs_team_rating's native 5s/4s, which the halving also demotes (raw 5->3, raw 4->2),
+    per Soumya's explicit call to apply it everywhere. Cell value is then %positive (mapped
+    value 4 or 5) of non-null, non-"NA" answers to that column, per month. One GROUP BY per
+    column (four total) rather than a single pivoted query, since the four raw columns differ
+    and the ceil/bucket step is Python-side either way.
+
+    Returns [{"area": "Product", "months": {"2026-04": {"score": 56.0, "responses": 1234}, ...}}, ...]
+    in AREA_RATING_COLUMNS order (the survey's own question order)."""
+    by_area = {}
     for area, col in AREA_RATING_COLUMNS.items():
-        select_parts.append(f"SUM({col} IN (4,5)) AS `{col}_pos`")
-        select_parts.append(f"SUM({col} IS NOT NULL) AS `{col}_tot`")
-    rows = mysql_lib.query(
-        f"""
-        SELECT DATE_FORMAT(STR_TO_DATE(submitted_date, "%%d/%%m/%%Y"), "%%Y-%%m") AS ym,
-               {", ".join(select_parts)}
-        FROM nps_delivery
-        WHERE brand = %s
-        GROUP BY ym
-        """,
-        params=(mysql_brand,),
-        database=DWH_DATABASE,
-    )
-    if rows is None:
-        raise RuntimeError("MySQL credentials not configured - set MYSQL_HOST/USER/PASSWORD/DATABASE (or .env.local).")
+        rows = mysql_lib.query(
+            f"""
+            SELECT DATE_FORMAT(STR_TO_DATE(submitted_date, "%%d/%%m/%%Y"), "%%Y-%%m") AS ym,
+                   `{col}` AS val, COUNT(*) AS c
+            FROM nps_delivery
+            WHERE brand = %s
+            GROUP BY ym, val
+            """,
+            params=(mysql_brand,),
+            database=DWH_DATABASE,
+        )
+        if rows is None:
+            raise RuntimeError("MySQL credentials not configured - set MYSQL_HOST/USER/PASSWORD/DATABASE (or .env.local).")
 
-    by_area = {area: {} for area in AREA_RATING_COLUMNS}
-    for row in rows:
-        ym = row[0]
-        for i, area in enumerate(AREA_RATING_COLUMNS):
-            pos, tot = row[1 + i * 2], row[2 + i * 2]
-            tot = int(tot)
-            if not tot:
+        months = {}
+        for ym, val, c in rows:
+            if val is None or val == "NA":
                 continue
-            score = round(float(pos) / tot * 100, 1)
-            by_area[area][ym] = {"score": score, "responses": tot}
+            try:
+                v = int(val)
+            except ValueError:
+                continue
+            c = int(c)
+            mapped = -(-v // 2)  # ceil(v/2)
+            bucket = months.setdefault(ym, {"pos": 0, "tot": 0})
+            bucket["tot"] += c
+            if mapped in (4, 5):
+                bucket["pos"] += c
+        by_area[area] = {
+            ym: {"score": round(b["pos"] / b["tot"] * 100, 1), "responses": b["tot"]}
+            for ym, b in months.items() if b["tot"]
+        }
 
     return [{"area": area, "months": months} for area, months in by_area.items()]

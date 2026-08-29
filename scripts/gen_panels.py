@@ -553,9 +553,9 @@ def build_combo2(rows, title, score_label, score_max):
 
 
 def build_top_rated_area_panel(ctx):
-    """Top Rated Area: five dedicated per-question CSAT columns on nps_delivery (Order
-    placement, Product experience, Customer support, Delivery, Website/app experience - see
-    nps_source.AREA_RATING_COLUMNS), scored %positive (top-2-box) by month
+    """Top Rated Area: four dedicated per-question CSAT columns on nps_delivery (Product,
+    Delivery, Customer support, Website/app experience - see nps_source.AREA_RATING_COLUMNS),
+    scored %positive (top-2-box on a 1-5 scale, after normalizing raw 1-10 values) by month
     (ctx.top_rated_area_by_month, see nps_source.fetch_top_rated_area_by_month) as a plain
     area x month table - same pivot-table shape as _build_prodwise_heatmap, minus the heatmap
     coloring."""
@@ -578,8 +578,8 @@ def build_top_rated_area_panel(ctx):
         body_rows.append(f"<tr class='{z}'><td class='rowlabel'>{h_enc(r['area'])}</td>{''.join(cells)}</tr>")
     return (
         "<div class='pivot-wrap'><div class='pivot-title'>Top Rated Area</div>"
-        "<p class='desc'>%positive (top-2-box, rated 4 or 5 of 5) per area's CSAT question, per month. "
-        "Blank cells had no responses to that question that month.</p>"
+        "<p class='desc'>%positive (top-2-box, rated 4 or 5 of 5 after normalizing to a 1-5 scale) per "
+        "area's CSAT question, per month. Blank cells had no responses to that question that month.</p>"
         f"<div class='pivot-scroll'><table class='pivot-table'><thead><tr>"
         f"<th class='corner'>Area</th>{head_cells}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
     )
