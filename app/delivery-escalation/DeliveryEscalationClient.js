@@ -56,6 +56,7 @@ function mapRow(row, readOnly) {
     statusAsPerAwb: row.status_as_per_awb || '', tat: row.tat || '',
     ticketNumber: row.ticket_number || '', assignedAgent: row.agent_email || '',
     addedDate: row.added_date ? new Date(row.added_date).toLocaleDateString('en-GB') : '',
+    orderDate: row.order_date ? new Date(row.order_date).toLocaleDateString('en-GB') : '',
     actionDate: row.disposed_at ? new Date(row.disposed_at).toLocaleDateString('en-GB') : '',
     outcome: row.outcome || '', childDisposition: row.child_disposition || '',
     remarks: row.agent_remarks || '',
@@ -79,6 +80,7 @@ function ticketRowCells(t, tab, openAction, isChild) {
       <td className="py-3 px-4 text-zinc-400">{t.deliveryPartner}</td>
       <td className="py-3 px-4 text-zinc-400">{t.queryCategory}</td>
       <td className="py-3 px-4 text-zinc-400 whitespace-nowrap">{t.addedDate || '—'}</td>
+      <td className="py-3 px-4 text-zinc-400 whitespace-nowrap">{t.orderDate || '—'}</td>
       <td className="py-3 px-4 text-zinc-400">{t.tat}</td>
       <td className="py-3 px-4 text-zinc-400 tabular-nums">
         {t.contactCount === '' ? '—' : (
@@ -751,7 +753,7 @@ function csvCell(v) {
 const EXPORT_COLUMNS = [
   ['Brand', 'brand'], ['Order ID', 'orderId'], ['AWB', 'awb'], ['Ticket Number', 'ticketNumber'],
   ['Delivery Partner', 'deliveryPartner'], ['Query Class', 'queryClass'],
-  ['Query Category', 'queryCategory'], ['Added Date', 'addedDate'],
+  ['Query Category', 'queryCategory'], ['Added Date', 'addedDate'], ['Order Date', 'orderDate'],
   ['TAT', 'tat'], ['Times Contacted', 'contactCount'], ['First Contact', 'firstContactDate'],
   ['Agent Name', 'assignedAgent'],
   ['Action Date', 'actionDate'], ['Outcome', 'outcome'],
@@ -1849,6 +1851,7 @@ export default function DeliveryEscalationClient() {
                           <th className="py-3 px-4 text-left font-medium">Delivery Partner</th>
                           <th className="py-3 px-4 text-left font-medium">Query Category</th>
                           <th className="py-3 px-4 text-left font-medium">Added Date</th>
+                          <th className="py-3 px-4 text-left font-medium">Order Date</th>
                           <th className="py-3 px-4 text-left font-medium">TAT</th>
                           <th className="py-3 px-4 text-left font-medium">Times Contacted</th>
                           <th className="py-3 px-4 text-left font-medium">First Contact</th>
@@ -1867,7 +1870,7 @@ export default function DeliveryEscalationClient() {
                             const history = hasRepeat ? awbHistory.get(`${parent.brand}|${parent.awb}`) : null;
                             const childRows = history?.status === 'loaded'
                               ? history.rows.filter((t) => t.id !== parent.id) : [];
-                            const colSpan = tab === 'resolved' ? 16 : 13;
+                            const colSpan = tab === 'resolved' ? 17 : 14;
                             return (
                               <Fragment key={parent.id}>
                                 <tr
@@ -1910,7 +1913,7 @@ export default function DeliveryEscalationClient() {
                             );
                           })}
                           {groupedTicketRows.length === 0 && (
-                            <tr><td colSpan={tab === 'resolved' ? 16 : 13} className="py-8 text-center text-zinc-500">
+                            <tr><td colSpan={tab === 'resolved' ? 17 : 14} className="py-8 text-center text-zinc-500">
                               {syncing ? 'Loading…' : 'No tickets in this view.'}
                             </td></tr>
                           )}

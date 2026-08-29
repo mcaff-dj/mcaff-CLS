@@ -1542,7 +1542,7 @@ const DE_DAYWISE_BUCKETS = [
 const DE_SELECT_COLUMNS = `id, brand, order_id, awb_code, delivery_partner, query_class,
     query_category, wh_name, status_as_per_awb, tat, ticket_number, agent_email, outcome,
     child_disposition, LEFT(agent_remarks, 300) AS agent_remarks, disposed_at, added_date,
-    contact_count, first_added_date,
+    order_date, contact_count, first_added_date,
     ${DE_TAT_BUCKET_SQL} AS tat_bucket`;
 
 // Same buckets getDeliveryEscalationRepeatStats groups by - reused here so the Total-times-
