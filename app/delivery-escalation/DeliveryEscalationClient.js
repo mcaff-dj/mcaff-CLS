@@ -354,6 +354,18 @@ function categoryBreakdownForDays(days, buckets) {
     .sort((a, b) => b.total - a.total);
 }
 
+// One category's own Week -> Day breakdown, re-derived from the month's day rows the same way
+// categoryBreakdownForDays sums the flat total - here each day's r.categories entry for this
+// category (or a zero row if the category didn't fire that day) feeds buildWeeksOfMonth, so an
+// expanded category gets the same drill chain as the month itself.
+function buildCategoryWeeks(days, category, buckets, keyPrefix) {
+  const dayRows = days.map((r) => {
+    const cat = (r.categories || []).find((c) => c.category === category);
+    return { date: r.date, counts: cat ? cat.counts : Object.fromEntries(buckets.map((b) => [b, 0])), total: cat ? cat.total : 0 };
+  });
+  return buildWeeksOfMonth(dayRows, buckets, keyPrefix).filter((week) => week.total > 0);
+}
+
 function formatDaywiseMonth(monthKey) {
   const plain = monthKey.includes('::') ? monthKey.split('::').pop() : monthKey;
   const [y, m] = plain.split('-').map(Number);
@@ -699,6 +711,7 @@ export default function DeliveryEscalationClient() {
   const [expandedMonths, setExpandedMonths] = useState(() => new Set());
   const [expandedPartners, setExpandedPartners] = useState(() => new Set());
   const [expandedWeeks, setExpandedWeeks] = useState(() => new Set());
+  const [expandedCategories, setExpandedCategories] = useState(() => new Set());
   // Fresh/Resolved list's own expand state - same repeat-contact AWBs contactCount already
   // flags, collapsed to one parent (the newest row, since rows arrive id/disposed_at DESC)
   // with every older ticket for that AWB nested under it as a timeline. Keyed by the parent's
@@ -1290,16 +1303,60 @@ export default function DeliveryEscalationClient() {
                                   })}
                                   <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
                                 </tr>
-                                {monthOpen && categoryBreakdownForDays(month.days, daywise.buckets).map((cat) => (
-                                  <tr key={`${month.key}::cat::${cat.category}`} className="bg-zinc-950/10">
-                                    <td className="py-1.5 px-3 pl-8 text-zinc-500 text-[12px] italic whitespace-nowrap">{cat.category}</td>
-                                    {daywise.buckets.flatMap((b) => ([
-                                      <td key={`${b}-n`} className="py-1.5 px-3 text-right text-zinc-500 text-[12px] tabular-nums border-l border-zinc-800/60">{cat.counts[b] || 0}</td>,
-                                      <td key={`${b}-pct`} className="py-1.5 px-3 text-right text-zinc-600 tabular-nums text-[11px]">{cat.pct[b] || 0}%</td>,
-                                    ]))}
-                                    <td className="py-1.5 px-3 text-right text-zinc-400 text-[12px] tabular-nums border-l border-zinc-800/60">{cat.total.toLocaleString('en-IN')}</td>
-                                  </tr>
-                                ))}
+                                {monthOpen && categoryBreakdownForDays(month.days, daywise.buckets).map((cat) => {
+                                  const catKey = `${month.key}::${cat.category}`;
+                                  const catOpen = expandedCategories.has(catKey);
+                                  const catWeeks = catOpen ? buildCategoryWeeks(month.days, cat.category, daywise.buckets, catKey) : [];
+                                  return (
+                                    <Fragment key={catKey}>
+                                      <tr
+                                        onClick={() => toggleExpanded(setExpandedCategories, catKey)}
+                                        className="bg-zinc-950/10 hover:bg-zinc-800/30 transition-colors cursor-pointer"
+                                      >
+                                        <td className="py-1.5 px-3 pl-8 text-zinc-500 text-[12px] italic whitespace-nowrap">
+                                          <span className="inline-block w-4 text-zinc-600 not-italic">{catOpen ? '▾' : '▸'}</span>
+                                          {cat.category}
+                                        </td>
+                                        {daywise.buckets.flatMap((b) => ([
+                                          <td key={`${b}-n`} className="py-1.5 px-3 text-right text-zinc-500 text-[12px] tabular-nums border-l border-zinc-800/60">{cat.counts[b] || 0}</td>,
+                                          <td key={`${b}-pct`} className="py-1.5 px-3 text-right text-zinc-600 tabular-nums text-[11px]">{cat.pct[b] || 0}%</td>,
+                                        ]))}
+                                        <td className="py-1.5 px-3 text-right text-zinc-400 text-[12px] tabular-nums border-l border-zinc-800/60">{cat.total.toLocaleString('en-IN')}</td>
+                                      </tr>
+                                      {catOpen && catWeeks.map((week) => {
+                                        const weekOpen = expandedWeeks.has(week.key);
+                                        return (
+                                          <Fragment key={week.key}>
+                                            <tr
+                                              onClick={() => toggleExpanded(setExpandedWeeks, week.key)}
+                                              className="hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/20"
+                                            >
+                                              <td className="py-1.5 px-3 pl-14 text-zinc-500 text-[12px] whitespace-nowrap">
+                                                <span className="inline-block w-4 text-zinc-600">{weekOpen ? '▾' : '▸'}</span>
+                                                {formatDaywiseWeek(week)}
+                                              </td>
+                                              {daywise.buckets.flatMap((b) => ([
+                                                <td key={`${b}-n`} className="py-1.5 px-3 text-right text-zinc-400 text-[12px] tabular-nums border-l border-zinc-800/60">{week.counts[b] || 0}</td>,
+                                                <td key={`${b}-pct`} className="py-1.5 px-3 text-right text-zinc-600 tabular-nums text-[11px]">{week.pct[b] || 0}%</td>,
+                                              ]))}
+                                              <td className="py-1.5 px-3 text-right text-zinc-300 text-[12px] tabular-nums border-l border-zinc-800/60">{week.total.toLocaleString('en-IN')}</td>
+                                            </tr>
+                                            {weekOpen && week.days.filter((r) => r.total > 0).map((r) => (
+                                              <tr key={r.date} className="hover:bg-zinc-800/30 transition-colors">
+                                                <td className="py-1.5 px-3 pl-20 text-zinc-500 text-[12px] whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
+                                                {daywise.buckets.flatMap((b) => ([
+                                                  <td key={`${b}-n`} className="py-1.5 px-3 text-right text-zinc-500 text-[12px] tabular-nums border-l border-zinc-800/60">{r.counts[b] || 0}</td>,
+                                                  <td key={`${b}-pct`} className="py-1.5 px-3 text-right text-zinc-600 tabular-nums text-[11px]">{r.pct[b] || 0}%</td>,
+                                                ]))}
+                                                <td className="py-1.5 px-3 text-right text-zinc-400 text-[12px] tabular-nums border-l border-zinc-800/60">{r.total.toLocaleString('en-IN')}</td>
+                                              </tr>
+                                            ))}
+                                          </Fragment>
+                                        );
+                                      })}
+                                    </Fragment>
+                                  );
+                                })}
                                 {monthOpen && month.weeks.map((week) => {
                                   const weekOpen = expandedWeeks.has(week.key);
                                   return (
