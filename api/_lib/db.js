@@ -1897,9 +1897,13 @@ async function getDeliveryEscalationGeoCategoryStats(opts = {}) {
   }
   // Same category set and order (by volume) at every level, so a state's/city's/pincode's
   // columns and the outer Grand Total row always line up under the same category rows -
-  // categories a branch doesn't have just read 0 (see counts lookup on the client).
-  const categories = [...categoryTotals.entries()].sort((a, b) => b[1] - a[1]).map(([category]) => category);
-  const rows = [...byGeo.values()].sort((a, b) => b.total - a.total);
+  // categories a branch doesn't have just read 0 (see counts lookup on the client). Always
+  // highest-volume first, at every level the client drills into - ties broken alphabetically
+  // so equal totals don't jitter between requests.
+  const categories = [...categoryTotals.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([category]) => category);
+  const rows = [...byGeo.values()].sort((a, b) => b.total - a.total || String(a[geoKey]).localeCompare(String(b[geoKey])));
   const grandTotal = Object.fromEntries(categories.map((cat) => [cat, categoryTotals.get(cat) || 0]));
   const grandTotalAll = [...categoryTotals.values()].reduce((sum, v) => sum + v, 0);
   return { categories, rows, grandTotal, grandTotalAll };

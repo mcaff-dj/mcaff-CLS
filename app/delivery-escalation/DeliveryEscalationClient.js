@@ -621,66 +621,75 @@ function GeoCategoryTable({
       </p>
       <div className="rounded-xl border border-zinc-800/80 overflow-hidden">
         <div className="overflow-x-auto custom-scroll">
+          {/* Depth (State/City/Pincode) is carried by indent + label weight/size alone, never by
+              a translucent row fill - stacking a tinted row on top of this card's own
+              bg-zinc-900/70 is exactly the "translucent surface on translucent surface"
+              legibility trap (see apple-design's Materials section), which is what made every
+              expanded row read as a flat gray smear. The sticky first column still needs a real
+              (non-alpha) backdrop so horizontally-scrolled data can't show through it - that's
+              the one spot with an explicit solid bg. Every value column stays full-contrast
+              zinc-100 regardless of depth: the numbers are the content, only the row LABEL may
+              recede with depth. */}
           <table className="w-full text-[13px]">
             <thead>
-              <tr className="border-b border-zinc-800/80 text-zinc-500">
-                <th className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 text-left font-medium whitespace-nowrap">State / City / Pincode</th>
+              <tr className="border-b border-zinc-800/80">
+                <th className="sticky left-0 z-10 bg-zinc-900 py-2.5 px-3 text-left font-semibold text-zinc-400 whitespace-nowrap">State / City / Pincode</th>
                 {categories.map((cat) => (
-                  <th key={cat} className="py-2 px-3 text-right font-medium border-l border-zinc-800/60 whitespace-nowrap">{cat}</th>
+                  <th key={cat} className="py-2.5 px-3 text-right font-semibold text-zinc-400 whitespace-nowrap">{cat}</th>
                 ))}
-                <th className="py-2 px-3 text-right font-medium border-l border-zinc-800/60 whitespace-nowrap">Grand Total</th>
+                <th className="py-2.5 px-3 text-right font-semibold text-zinc-400 border-l border-zinc-800/80 whitespace-nowrap">Grand Total</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/50">
               {tree.map((s) => (
                 <Fragment key={s.key}>
-                  <tr onClick={() => onToggleState(s.state)} className="group hover:bg-zinc-800/30 transition-colors cursor-pointer">
-                    <td className="sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800/30 transition-colors py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">
+                  <tr onClick={() => onToggleState(s.state)} className="group hover:bg-white/[0.04] transition-colors cursor-pointer">
+                    <td className="sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800 transition-colors py-2.5 px-3 text-zinc-100 font-semibold whitespace-nowrap">
                       <span className="inline-block w-4 text-zinc-500">{s.expanded ? '▾' : '▸'}</span>{s.state}
                     </td>
                     {categories.map((cat) => (
-                      <td key={cat} className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">
+                      <td key={cat} className="py-2.5 px-3 text-right text-zinc-100 tabular-nums">
                         {(s.counts[cat] || 0).toLocaleString('en-IN')}
                       </td>
                     ))}
-                    <td className="py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60">
+                    <td className="py-2.5 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/80">
                       {(s.total || 0).toLocaleString('en-IN')}
                     </td>
                   </tr>
                   {s.expanded && s.cities.map((c) => (
                     c.pending ? (
                       <tr key={c.key}>
-                        <td colSpan={colSpan} className="py-2 px-4 pl-8 text-zinc-500 text-[12px] border-l-2 border-indigo-500/20">{pendingLabel(c.status)}</td>
+                        <td colSpan={colSpan} className="py-2 px-3 pl-9 text-zinc-500 text-[12px]">{pendingLabel(c.status)}</td>
                       </tr>
                     ) : (
                       <Fragment key={c.key}>
-                        <tr onClick={() => onToggleCity(s.state, c.city)} className="group bg-zinc-950/30 hover:bg-zinc-800/30 transition-colors cursor-pointer">
-                          <td className="sticky left-0 z-10 bg-zinc-950 group-hover:bg-zinc-800/30 transition-colors py-2 px-4 pl-8 text-zinc-300 whitespace-nowrap border-l-2 border-indigo-500/20">
+                        <tr onClick={() => onToggleCity(s.state, c.city)} className="group hover:bg-white/[0.04] transition-colors cursor-pointer">
+                          <td className="sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800 transition-colors py-2 px-3 pl-9 text-zinc-300 font-medium whitespace-nowrap">
                             <span className="inline-block w-4 text-zinc-500">{c.expanded ? '▾' : '▸'}</span>↳ {c.city}
                           </td>
                           {categories.map((cat) => (
-                            <td key={cat} className="py-2 px-3 text-right text-zinc-400 tabular-nums border-l border-zinc-800/60">
+                            <td key={cat} className="py-2 px-3 text-right text-zinc-100 tabular-nums">
                               {(c.counts[cat] || 0).toLocaleString('en-IN')}
                             </td>
                           ))}
-                          <td className="py-2 px-3 text-right text-zinc-300 font-semibold tabular-nums border-l border-zinc-800/60">
+                          <td className="py-2 px-3 text-right text-zinc-100 font-medium tabular-nums border-l border-zinc-800/80">
                             {(c.total || 0).toLocaleString('en-IN')}
                           </td>
                         </tr>
                         {c.expanded && c.pincodes.map((p) => (
                           p.pending ? (
                             <tr key={p.key}>
-                              <td colSpan={colSpan} className="py-2 px-4 pl-14 text-zinc-500 text-[12px] border-l-2 border-indigo-500/10">{pendingLabel(p.status)}</td>
+                              <td colSpan={colSpan} className="py-2 px-3 pl-16 text-zinc-500 text-[12px]">{pendingLabel(p.status)}</td>
                             </tr>
                           ) : (
-                            <tr key={p.key} className="bg-zinc-950/50 hover:bg-zinc-800/30 transition-colors">
-                              <td className="sticky left-0 z-10 bg-zinc-950 py-2 px-4 pl-14 text-zinc-500 text-[12px] whitespace-nowrap border-l-2 border-indigo-500/10">↳ {p.pincode}</td>
+                            <tr key={p.key} className="hover:bg-white/[0.04] transition-colors">
+                              <td className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 pl-16 text-zinc-400 text-[12px] whitespace-nowrap">↳ {p.pincode}</td>
                               {categories.map((cat) => (
-                                <td key={cat} className="py-2 px-3 text-right text-zinc-500 tabular-nums border-l border-zinc-800/60">
+                                <td key={cat} className="py-2 px-3 text-right text-zinc-200 tabular-nums text-[12px]">
                                   {(p.counts[cat] || 0).toLocaleString('en-IN')}
                                 </td>
                               ))}
-                              <td className="py-2 px-3 text-right text-zinc-400 tabular-nums border-l border-zinc-800/60">
+                              <td className="py-2 px-3 text-right text-zinc-200 tabular-nums text-[12px] border-l border-zinc-800/80">
                                 {(p.total || 0).toLocaleString('en-IN')}
                               </td>
                             </tr>
@@ -699,14 +708,14 @@ function GeoCategoryTable({
             </tbody>
             {tree.length > 0 && (
               <tfoot>
-                <tr className="border-t border-zinc-800/80 bg-zinc-950/40 font-semibold">
-                  <td className="sticky left-0 z-10 bg-zinc-950 py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
+                <tr className="border-t border-zinc-800/80 bg-zinc-950 font-semibold">
+                  <td className="sticky left-0 z-10 bg-zinc-950 py-2.5 px-3 text-zinc-100 whitespace-nowrap">Grand Total</td>
                   {categories.map((cat) => (
-                    <td key={cat} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">
+                    <td key={cat} className="py-2.5 px-3 text-right text-zinc-100 tabular-nums">
                       {(grandTotal[cat] || 0).toLocaleString('en-IN')}
                     </td>
                   ))}
-                  <td className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{grandTotalAll.toLocaleString('en-IN')}</td>
+                  <td className="py-2.5 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/80">{grandTotalAll.toLocaleString('en-IN')}</td>
                 </tr>
               </tfoot>
             )}
