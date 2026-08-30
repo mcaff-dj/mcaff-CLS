@@ -241,20 +241,24 @@ def fetch_top_rated_area_by_month(mysql_brand):
     top_rated_area column, which this replaced (that only names which area mattered most,
     not how it scored).
 
-    Raw values (checked via a GROUP BY dump against real data, not assumed) are a MIX of
-    scales: order_placement_experience/product_first_impression/delivery_service_rating are
-    genuinely 1-10, while cs_team_rating is ~1-5 with a handful of stray 6-10 values - so
-    every raw value is normalized to a common 1-5 scale via ceil(v/2) (1,2->1, 3,4->2, 5,6->3,
-    7,8->4, 9,10->5, as given by Soumya) before scoring, applied uniformly across all four
-    columns rather than only the three "real" 1-10 ones - deliberately including
-    cs_team_rating's native 5s/4s, which the halving also demotes (raw 5->3, raw 4->2),
-    per Soumya's explicit call to apply it everywhere. Cell value is then %positive (mapped
-    value 4 or 5) of non-null, non-"NA" answers to that column, per month. One GROUP BY per
-    column (four total) rather than a single pivoted query, since the four raw columns differ
-    and the ceil/bucket step is Python-side either way.
+    Raw values (checked via a per-month GROUP BY dump against real data, not assumed) are NOT
+    one consistent scale over time - all four columns cleanly switch from a genuine 1-10 scale
+    to a genuine 1-5 scale at the same point, Mar'26 (every month before it is 1-10-dominant;
+    every month from Mar'26 on has zero values above 5 at all - Jan/Feb'26 are a negligible
+    13-16-row transition either way). So the ceil(v/2) normalization Soumya gave (1,2->1,
+    3,4->2, 5,6->3, 7,8->4, 9,10->5) is applied only to responses BEFORE the cutoff; from the
+    cutoff on, raw 1-5 values are used as-is - applying ceil(v/2) unconditionally (this
+    function's first pass) silently halved every genuine post-cutoff 4/5 down to 2/3, zeroing
+    out %positive for every month from Mar'26 onward.
+
+    Cell value is %positive (value 4 or 5, post-normalization) of non-null, non-"NA" answers
+    to that column, per month. One GROUP BY per column (four total) rather than a single
+    pivoted query, since the four raw columns differ and the cutoff/bucket step is Python-side
+    either way.
 
     Returns [{"area": "Product", "months": {"2026-04": {"score": 56.0, "responses": 1234}, ...}}, ...]
     in AREA_RATING_COLUMNS order (the survey's own question order)."""
+    SCALE_CUTOFF_YM = "2026-03"  # ponytail: hardcoded cutoff from the one switch seen so far; revisit if the scale ever changes again
     by_area = {}
     for area, col in AREA_RATING_COLUMNS.items():
         rows = mysql_lib.query(
@@ -280,7 +284,7 @@ def fetch_top_rated_area_by_month(mysql_brand):
             except ValueError:
                 continue
             c = int(c)
-            mapped = -(-v // 2)  # ceil(v/2)
+            mapped = -(-v // 2) if ym < SCALE_CUTOFF_YM else v  # ceil(v/2) pre-cutoff (1-10 scale), raw post-cutoff (already 1-5)
             bucket = months.setdefault(ym, {"pos": 0, "tot": 0})
             bucket["tot"] += c
             if mapped in (4, 5):
