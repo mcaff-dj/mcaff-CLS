@@ -1384,17 +1384,58 @@ async function disposeNdrLead(awbNumber, disposition, agentRemarks, email) {
 // the ticket is actually done. One row per (brand, awb_code); upserts rather than requiring a
 // prior row to exist, since a ticket can go straight from unclaimed to a terminal dispose in
 // one action (claim-on-open, then Resolve).
+// Shipping_Address_City/State/Pincode/Payment_Mode for an AWB, straight from mcaff_prod's
+// Item_level_data - same source and per-column latest-row-wins tie-break as the Python side's
+// fetch_city_by_awb/fetch_state_by_awb/fetch_pincode_by_awb/fetch_payment_mode_by_awb
+// (scripts/sync_delivery_tickets_to_sheet.py). A single-AWB lookup (this fires once per dispose,
+// not batched), LIMIT 20 rather than 1: Item_level_data has multiple rows per Tracking_Number
+// (split shipments/re-syncs) and the most recent one isn't guaranteed to have every column
+// filled, so each field independently takes the newest row that actually has it - not just
+// whatever the single latest row happens to carry. Item_level_data has no Payment_Mode column of
+// its own, only COD (bigint); derived the same way the Python backfill does: COD = 1 -> 'COD',
+// else -> 'Prepaid'. Best-effort: a lookup failure (or the AWB simply not existing there yet)
+// must never block the actual disposal - it just leaves these four columns for a later backfill.
+async function fetchItemLevelGeoByAwb(awbCode) {
+  const empty = { city: null, state: null, pincode: null, paymentMode: null };
+  if (!awbCode) return empty;
+  try {
+    const { rows } = await sql`
+      SELECT Shipping_Address_City, Shipping_Address_State, Pincode, COD
+      FROM mcaff_prod.Item_level_data
+      WHERE Tracking_Number = ${awbCode}
+      ORDER BY Created DESC
+      LIMIT 20
+    `;
+    const out = { ...empty };
+    for (const r of rows) {
+      if (out.city === null && r.Shipping_Address_City) out.city = r.Shipping_Address_City;
+      if (out.state === null && r.Shipping_Address_State) out.state = r.Shipping_Address_State;
+      if (out.pincode === null && r.Pincode) out.pincode = String(r.Pincode);
+      if (out.paymentMode === null && r.COD !== null && r.COD !== undefined) {
+        out.paymentMode = Number(r.COD) === 1 ? 'COD' : 'Prepaid';
+      }
+    }
+    return out;
+  } catch (e) {
+    console.error('fetchItemLevelGeoByAwb: Item_level_data lookup failed for', awbCode, e.message);
+    return empty;
+  }
+}
+
 async function disposeDeliveryEscalationTicket(ticket, email, outcome, agentRemarks) {
   const { brand, orderId, awbCode, deliveryPartner, queryClass, queryCategory, whName, statusAsPerAwb, tat } = ticket;
   const now = new Date();
+  const { city, state, pincode, paymentMode } = await fetchItemLevelGeoByAwb(awbCode);
   await sql`
     INSERT INTO Delivery_escalation
       (brand, order_id, awb_code, delivery_partner, query_class, query_category, wh_name,
-       status_as_per_awb, tat, agent_email, assigned_at, outcome, agent_remarks, disposed_at)
+       status_as_per_awb, tat, agent_email, assigned_at, outcome, agent_remarks, disposed_at,
+       Shipping_Address_City, Payment_Mode, Shipping_Address_State, Pincode)
     VALUES (
       ${brand}, ${orderId}, ${awbCode || null}, ${deliveryPartner || null}, ${queryClass || null},
       ${queryCategory || null}, ${whName || null}, ${statusAsPerAwb || null}, ${tat || null},
-      ${email || null}, ${now}, ${outcome || null}, ${agentRemarks || null}, ${now}
+      ${email || null}, ${now}, ${outcome || null}, ${agentRemarks || null}, ${now},
+      ${city}, ${paymentMode}, ${state}, ${pincode}
     )
     ON DUPLICATE KEY UPDATE
       order_id = VALUES(order_id),
@@ -1408,7 +1449,11 @@ async function disposeDeliveryEscalationTicket(ticket, email, outcome, agentRema
       assigned_at = IF(agent_email IS NULL OR agent_email = '', VALUES(assigned_at), assigned_at),
       outcome = VALUES(outcome),
       agent_remarks = VALUES(agent_remarks),
-      disposed_at = VALUES(disposed_at)
+      disposed_at = VALUES(disposed_at),
+      Shipping_Address_City = COALESCE(VALUES(Shipping_Address_City), Shipping_Address_City),
+      Payment_Mode = COALESCE(VALUES(Payment_Mode), Payment_Mode),
+      Shipping_Address_State = COALESCE(VALUES(Shipping_Address_State), Shipping_Address_State),
+      Pincode = COALESCE(VALUES(Pincode), Pincode)
   `;
 }
 
