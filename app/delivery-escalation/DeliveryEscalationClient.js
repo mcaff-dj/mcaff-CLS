@@ -594,20 +594,18 @@ function TatBreakdownTable({
   );
 }
 
-// Query Category (rows, fixed for the whole table) x State -> City -> Pincode (columns,
-// expandable one level at a time) - the inverse of TatBreakdownTable above, which drills ROWS
-// under fixed columns; here the drill is in the COLUMNS under fixed category rows, so it gets
-// its own header/body layout rather than reusing that one. `tree` is pre-built by the caller
-// (see geoTree in DeliveryEscalationClient) from the raw state/city/pincode responses plus
-// which columns are currently expanded - this component only renders it.
+// State -> City -> Pincode (rows, expandable one level at a time - click a State to see its
+// Cities, click a City to see its Pincodes) x Query Category (fixed columns, unique/distinct-
+// AWB count). Same indented-row-under-its-parent drill TatBreakdownTable's Month -> Week -> Day
+// nesting already uses on this page, just State/City/Pincode instead of date - `tree` is
+// pre-built by the caller (see geoTree in DeliveryEscalationClient) from the raw per-level
+// responses plus which rows are currently expanded.
 function GeoCategoryTable({
-  month, monthOptions, onMonthChange, tree, leafColumns, categories, grandTotal, grandTotalAll,
+  month, monthOptions, onMonthChange, tree, categories, grandTotal, grandTotalAll,
   loading, onToggleState, onToggleCity,
 }) {
-  const anyCityExpanded = tree.some((s) => s.expanded && s.cities.some((c) => !c.pending && c.expanded));
-  const anyStateExpanded = tree.some((s) => s.expanded);
-  const maxDepth = anyCityExpanded ? 3 : anyStateExpanded ? 2 : 1;
-  const pendingLabel = (status) => (status === 'error' ? 'Error' : '…');
+  const pendingLabel = (status) => (status === 'error' ? 'Error' : 'Loading…');
+  const colSpan = categories.length + 2;
 
   return (
     <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
@@ -626,76 +624,86 @@ function GeoCategoryTable({
           <table className="w-full text-[13px]">
             <thead>
               <tr className="border-b border-zinc-800/80 text-zinc-500">
-                <th rowSpan={maxDepth} className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">Query Category</th>
-                {tree.map((s) => (
-                  <th
-                    key={s.key}
-                    colSpan={s.leafCount || 1}
-                    rowSpan={s.expanded ? 1 : maxDepth}
-                    onClick={() => onToggleState(s.state)}
-                    className="py-2 px-3 text-center font-medium border-l border-zinc-800/60 whitespace-nowrap cursor-pointer hover:text-zinc-300"
-                  >
-                    <span className="inline-block w-3 text-zinc-500">{s.expanded ? '▾' : '▸'}</span>{s.state}
-                  </th>
+                <th className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 text-left font-medium whitespace-nowrap">State / City / Pincode</th>
+                {categories.map((cat) => (
+                  <th key={cat} className="py-2 px-3 text-right font-medium border-l border-zinc-800/60 whitespace-nowrap">{cat}</th>
                 ))}
-                <th rowSpan={maxDepth} className="py-2 px-3 text-right font-medium align-bottom border-l border-zinc-800/60 whitespace-nowrap">Grand Total</th>
+                <th className="py-2 px-3 text-right font-medium border-l border-zinc-800/60 whitespace-nowrap">Grand Total</th>
               </tr>
-              {maxDepth >= 2 && (
-                <tr className="border-b border-zinc-800/80 text-zinc-600 text-[11px]">
-                  {tree.filter((s) => s.expanded).flatMap((s) => s.cities.map((c) => (
-                    c.pending ? (
-                      <th key={c.key} rowSpan={maxDepth - 1} className="py-1 px-3 text-center border-l border-zinc-800/60">{pendingLabel(c.status)}</th>
-                    ) : (
-                      <th
-                        key={c.key}
-                        colSpan={c.leafCount || 1}
-                        rowSpan={c.expanded ? 1 : maxDepth - 1}
-                        onClick={() => onToggleCity(s.state, c.city)}
-                        className="py-1 px-3 text-center border-l border-zinc-800/60 cursor-pointer hover:text-zinc-300"
-                      >
-                        <span className="inline-block w-3 text-zinc-500">{c.expanded ? '▾' : '▸'}</span>{c.city}
-                      </th>
-                    )
-                  )))}
-                </tr>
-              )}
-              {maxDepth >= 3 && (
-                <tr className="border-b border-zinc-800/80 text-zinc-600 text-[11px]">
-                  {tree.filter((s) => s.expanded).flatMap((s) => s.cities.filter((c) => c.expanded).flatMap((c) => c.pincodes.map((p) => (
-                    <th key={p.key} className="py-1 px-3 text-center border-l border-zinc-800/60">
-                      {p.pending ? pendingLabel(p.status) : p.pincode}
-                    </th>
-                  ))))}
-                </tr>
-              )}
             </thead>
             <tbody className="divide-y divide-zinc-800/50">
-              {categories.map((cat) => (
-                <tr key={cat} className="hover:bg-zinc-800/30 transition-colors">
-                  <td className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">{cat}</td>
-                  {leafColumns.map((leaf) => (
-                    <td key={leaf.key} className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">
-                      {leaf.level === 'pending' ? pendingLabel(leaf.node.status) : (leaf.node.counts?.[cat] || 0).toLocaleString('en-IN')}
+              {tree.map((s) => (
+                <Fragment key={s.key}>
+                  <tr onClick={() => onToggleState(s.state)} className="group hover:bg-zinc-800/30 transition-colors cursor-pointer">
+                    <td className="sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800/30 transition-colors py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">
+                      <span className="inline-block w-4 text-zinc-500">{s.expanded ? '▾' : '▸'}</span>{s.state}
                     </td>
+                    {categories.map((cat) => (
+                      <td key={cat} className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">
+                        {(s.counts[cat] || 0).toLocaleString('en-IN')}
+                      </td>
+                    ))}
+                    <td className="py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60">
+                      {(s.total || 0).toLocaleString('en-IN')}
+                    </td>
+                  </tr>
+                  {s.expanded && s.cities.map((c) => (
+                    c.pending ? (
+                      <tr key={c.key}>
+                        <td colSpan={colSpan} className="py-2 px-4 pl-8 text-zinc-500 text-[12px] border-l-2 border-indigo-500/20">{pendingLabel(c.status)}</td>
+                      </tr>
+                    ) : (
+                      <Fragment key={c.key}>
+                        <tr onClick={() => onToggleCity(s.state, c.city)} className="group bg-zinc-950/30 hover:bg-zinc-800/30 transition-colors cursor-pointer">
+                          <td className="sticky left-0 z-10 bg-zinc-950 group-hover:bg-zinc-800/30 transition-colors py-2 px-4 pl-8 text-zinc-300 whitespace-nowrap border-l-2 border-indigo-500/20">
+                            <span className="inline-block w-4 text-zinc-500">{c.expanded ? '▾' : '▸'}</span>↳ {c.city}
+                          </td>
+                          {categories.map((cat) => (
+                            <td key={cat} className="py-2 px-3 text-right text-zinc-400 tabular-nums border-l border-zinc-800/60">
+                              {(c.counts[cat] || 0).toLocaleString('en-IN')}
+                            </td>
+                          ))}
+                          <td className="py-2 px-3 text-right text-zinc-300 font-semibold tabular-nums border-l border-zinc-800/60">
+                            {(c.total || 0).toLocaleString('en-IN')}
+                          </td>
+                        </tr>
+                        {c.expanded && c.pincodes.map((p) => (
+                          p.pending ? (
+                            <tr key={p.key}>
+                              <td colSpan={colSpan} className="py-2 px-4 pl-14 text-zinc-500 text-[12px] border-l-2 border-indigo-500/10">{pendingLabel(p.status)}</td>
+                            </tr>
+                          ) : (
+                            <tr key={p.key} className="bg-zinc-950/50 hover:bg-zinc-800/30 transition-colors">
+                              <td className="sticky left-0 z-10 bg-zinc-950 py-2 px-4 pl-14 text-zinc-500 text-[12px] whitespace-nowrap border-l-2 border-indigo-500/10">↳ {p.pincode}</td>
+                              {categories.map((cat) => (
+                                <td key={cat} className="py-2 px-3 text-right text-zinc-500 tabular-nums border-l border-zinc-800/60">
+                                  {(p.counts[cat] || 0).toLocaleString('en-IN')}
+                                </td>
+                              ))}
+                              <td className="py-2 px-3 text-right text-zinc-400 tabular-nums border-l border-zinc-800/60">
+                                {(p.total || 0).toLocaleString('en-IN')}
+                              </td>
+                            </tr>
+                          )
+                        ))}
+                      </Fragment>
+                    )
                   ))}
-                  <td className="py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60">
-                    {(grandTotal[cat] || 0).toLocaleString('en-IN')}
-                  </td>
-                </tr>
+                </Fragment>
               ))}
-              {categories.length === 0 && (
-                <tr><td colSpan={leafColumns.length + 2} className="py-8 text-center text-zinc-500">
+              {tree.length === 0 && (
+                <tr><td colSpan={colSpan} className="py-8 text-center text-zinc-500">
                   {loading ? 'Loading…' : 'No data for this month.'}
                 </td></tr>
               )}
             </tbody>
-            {categories.length > 0 && (
+            {tree.length > 0 && (
               <tfoot>
                 <tr className="border-t border-zinc-800/80 bg-zinc-950/40 font-semibold">
                   <td className="sticky left-0 z-10 bg-zinc-950 py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
-                  {leafColumns.map((leaf) => (
-                    <td key={leaf.key} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">
-                      {leaf.level === 'pending' ? pendingLabel(leaf.node.status) : (leaf.node.total || 0).toLocaleString('en-IN')}
+                  {categories.map((cat) => (
+                    <td key={cat} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">
+                      {(grandTotal[cat] || 0).toLocaleString('en-IN')}
                     </td>
                   ))}
                   <td className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{grandTotalAll.toLocaleString('en-IN')}</td>
@@ -1192,10 +1200,10 @@ export default function DeliveryEscalationClient() {
     });
   }, [geoMonth, brandFilter]);
 
-  // Builds the State -> City -> Pincode column tree the table actually renders from the raw
-  // per-level responses plus which columns are currently expanded - each level not (yet)
-  // expanded collapses to a single leaf column, same "column exists, deeper rows lazy-load on
-  // expand" idea as the ticket list's own AWB groups.
+  // Builds the State -> City -> Pincode row tree the table actually renders from the raw
+  // per-level responses plus which rows are currently expanded - a level not (yet) expanded
+  // just has an empty cities/pincodes array, same "row exists, children lazy-load on expand"
+  // idea as the ticket list's own AWB groups.
   const geoTree = useMemo(() => geoData.rows.map((s) => {
     const stateExpanded = expandedGeoStates.has(s.state);
     let cities = [];
@@ -1213,29 +1221,11 @@ export default function DeliveryEscalationClient() {
             ? pLoaded.map((p) => ({ ...p, key: `${cityKey}::${p.pincode}` }))
             : [{ pending: true, status: pEntry?.status || 'loading', key: `${cityKey}::pending` }];
         }
-        return { ...c, key: cityKey, expanded: cityExpanded, pincodes, leafCount: cityExpanded ? pincodes.length : 1 };
-      }) : [{ pending: true, status: entry?.status || 'loading', key: `${s.state}::pending`, leafCount: 1 }];
+        return { ...c, key: cityKey, expanded: cityExpanded, pincodes };
+      }) : [{ pending: true, status: entry?.status || 'loading', key: `${s.state}::pending` }];
     }
-    const leafCount = stateExpanded ? cities.reduce((sum, c) => sum + c.leafCount, 0) : 1;
-    return { ...s, key: s.state, expanded: stateExpanded, cities, leafCount };
+    return { ...s, key: s.state, expanded: stateExpanded, cities };
   }), [geoData.rows, expandedGeoStates, expandedGeoCities, geoCities, geoPincodes]);
-
-  // Flat, left-to-right leaf column list matching the header's own rendering order - what the
-  // body actually iterates to draw one cell per category row per visible column.
-  const geoLeafColumns = useMemo(() => {
-    const leaves = [];
-    for (const s of geoTree) {
-      if (!s.expanded) { leaves.push({ key: s.key, node: s, level: 'state' }); continue; }
-      for (const c of s.cities) {
-        if (c.pending) { leaves.push({ key: c.key, node: c, level: 'pending' }); continue; }
-        if (!c.expanded) { leaves.push({ key: c.key, node: c, level: 'city' }); continue; }
-        for (const p of c.pincodes) {
-          leaves.push({ key: p.key, node: p, level: p.pending ? 'pending' : 'pincode' });
-        }
-      }
-    }
-    return leaves;
-  }, [geoTree]);
 
   const [bulkUploading, setBulkUploading] = useState(false);
   const [bulkResult, setBulkResult] = useState(null);
@@ -1963,7 +1953,6 @@ export default function DeliveryEscalationClient() {
                   monthOptions={geoMonthOptions}
                   onMonthChange={setGeoMonth}
                   tree={geoTree}
-                  leafColumns={geoLeafColumns}
                   categories={geoData.categories}
                   grandTotal={geoData.grandTotal}
                   grandTotalAll={geoData.grandTotalAll}
