@@ -634,10 +634,13 @@ function GeoCategoryTable({
             <thead>
               <tr className="border-b border-zinc-800/80">
                 <th className="sticky left-0 z-10 bg-zinc-900 py-2.5 px-3 text-left font-semibold text-zinc-400 whitespace-nowrap">State / City / Pincode</th>
+                {/* Grand Total right after the label, not after every category - it's the sort
+                    key every row below is ordered by (highest first), so it needs to be visible
+                    without scrolling past the whole category breakdown to confirm the order. */}
+                <th className="py-2.5 px-3 text-right font-semibold text-zinc-300 border-l border-zinc-800/80 whitespace-nowrap">Grand Total</th>
                 {categories.map((cat) => (
                   <th key={cat} className="py-2.5 px-3 text-right font-semibold text-zinc-400 whitespace-nowrap">{cat}</th>
                 ))}
-                <th className="py-2.5 px-3 text-right font-semibold text-zinc-400 border-l border-zinc-800/80 whitespace-nowrap">Grand Total</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/50">
@@ -647,14 +650,14 @@ function GeoCategoryTable({
                     <td className="sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800 transition-colors py-2.5 px-3 text-zinc-100 font-semibold whitespace-nowrap">
                       <span className="inline-block w-4 text-zinc-500">{s.expanded ? '▾' : '▸'}</span>{s.state}
                     </td>
+                    <td className="py-2.5 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/80">
+                      {(s.total || 0).toLocaleString('en-IN')}
+                    </td>
                     {categories.map((cat) => (
                       <td key={cat} className="py-2.5 px-3 text-right text-zinc-100 tabular-nums">
                         {(s.counts[cat] || 0).toLocaleString('en-IN')}
                       </td>
                     ))}
-                    <td className="py-2.5 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/80">
-                      {(s.total || 0).toLocaleString('en-IN')}
-                    </td>
                   </tr>
                   {s.expanded && s.cities.map((c) => (
                     c.pending ? (
@@ -667,14 +670,14 @@ function GeoCategoryTable({
                           <td className="sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800 transition-colors py-2 px-3 pl-9 text-zinc-300 font-medium whitespace-nowrap">
                             <span className="inline-block w-4 text-zinc-500">{c.expanded ? '▾' : '▸'}</span>↳ {c.city}
                           </td>
+                          <td className="py-2 px-3 text-right text-zinc-100 font-medium tabular-nums border-l border-zinc-800/80">
+                            {(c.total || 0).toLocaleString('en-IN')}
+                          </td>
                           {categories.map((cat) => (
                             <td key={cat} className="py-2 px-3 text-right text-zinc-100 tabular-nums">
                               {(c.counts[cat] || 0).toLocaleString('en-IN')}
                             </td>
                           ))}
-                          <td className="py-2 px-3 text-right text-zinc-100 font-medium tabular-nums border-l border-zinc-800/80">
-                            {(c.total || 0).toLocaleString('en-IN')}
-                          </td>
                         </tr>
                         {c.expanded && c.pincodes.map((p) => (
                           p.pending ? (
@@ -684,14 +687,14 @@ function GeoCategoryTable({
                           ) : (
                             <tr key={p.key} className="hover:bg-white/[0.04] transition-colors">
                               <td className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 pl-16 text-zinc-400 text-[12px] whitespace-nowrap">↳ {p.pincode}</td>
+                              <td className="py-2 px-3 text-right text-zinc-200 tabular-nums text-[12px] border-l border-zinc-800/80">
+                                {(p.total || 0).toLocaleString('en-IN')}
+                              </td>
                               {categories.map((cat) => (
                                 <td key={cat} className="py-2 px-3 text-right text-zinc-200 tabular-nums text-[12px]">
                                   {(p.counts[cat] || 0).toLocaleString('en-IN')}
                                 </td>
                               ))}
-                              <td className="py-2 px-3 text-right text-zinc-200 tabular-nums text-[12px] border-l border-zinc-800/80">
-                                {(p.total || 0).toLocaleString('en-IN')}
-                              </td>
                             </tr>
                           )
                         ))}
@@ -710,12 +713,12 @@ function GeoCategoryTable({
               <tfoot>
                 <tr className="border-t border-zinc-800/80 bg-zinc-950 font-semibold">
                   <td className="sticky left-0 z-10 bg-zinc-950 py-2.5 px-3 text-zinc-100 whitespace-nowrap">Grand Total</td>
+                  <td className="py-2.5 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/80">{grandTotalAll.toLocaleString('en-IN')}</td>
                   {categories.map((cat) => (
                     <td key={cat} className="py-2.5 px-3 text-right text-zinc-100 tabular-nums">
                       {(grandTotal[cat] || 0).toLocaleString('en-IN')}
                     </td>
                   ))}
-                  <td className="py-2.5 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/80">{grandTotalAll.toLocaleString('en-IN')}</td>
                 </tr>
               </tfoot>
             )}
