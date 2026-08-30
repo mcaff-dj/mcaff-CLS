@@ -242,23 +242,26 @@ def fetch_top_rated_area_by_month(mysql_brand):
     not how it scored).
 
     Raw values (checked via a per-month GROUP BY dump against real data, not assumed) are NOT
-    one consistent scale over time - all four columns cleanly switch from a genuine 1-10 scale
-    to a genuine 1-5 scale at the same point, Mar'26 (every month before it is 1-10-dominant;
-    every month from Mar'26 on has zero values above 5 at all - Jan/Feb'26 are a negligible
-    13-16-row transition either way). So the ceil(v/2) normalization Soumya gave (1,2->1,
-    3,4->2, 5,6->3, 7,8->4, 9,10->5) is applied only to responses BEFORE the cutoff; from the
-    cutoff on, raw 1-5 values are used as-is - applying ceil(v/2) unconditionally (this
-    function's first pass) silently halved every genuine post-cutoff 4/5 down to 2/3, zeroing
-    out %positive for every month from Mar'26 onward.
+    one consistent scale over time - each column switches at some point from a genuine 1-10
+    scale to a genuine 1-5 scale. Confirmed on mCaffeine (switch at Mar'26) and observed to
+    land on a DIFFERENT month for Hyphen - so the switch month is per-brand (maybe per-area),
+    not one global date. Detected per (area, month) instead of hardcoded: if the month's own
+    data has no value above 5, it's already 1-5 scale (used as-is); otherwise it's 1-10
+    scale and gets Soumya's ceil(v/2) normalization (1,2->1, 3,4->2, 5,6->3, 7,8->4, 9,10->5).
+    A prior version hardcoded a single Mar'26 cutoff for every brand, which silently zeroed
+    out Hyphen's %positive from its (earlier) switch month onward since Hyphen's real 1-5
+    values kept getting halved as if still on the 1-10 scale.
+    # ponytail: a month with only-low genuine 1-10 answers (all <=5) would misclassify as
+    # already-1-5 and skip the halving - matches the one real transition seen (all-or-nothing
+    # switch, not a slow blend); revisit with a per-response_id scale flag if that changes.
 
     Cell value is %positive (value 4 or 5, post-normalization) of non-null, non-"NA" answers
     to that column, per month. One GROUP BY per column (four total) rather than a single
-    pivoted query, since the four raw columns differ and the cutoff/bucket step is Python-side
+    pivoted query, since the four raw columns differ and the bucket step is Python-side
     either way.
 
     Returns [{"area": "Product", "months": {"2026-04": {"score": 56.0, "responses": 1234}, ...}}, ...]
     in AREA_RATING_COLUMNS order (the survey's own question order)."""
-    SCALE_CUTOFF_YM = "2026-03"  # ponytail: hardcoded cutoff from the one switch seen so far; revisit if the scale ever changes again
     by_area = {}
     for area, col in AREA_RATING_COLUMNS.items():
         rows = mysql_lib.query(
@@ -275,7 +278,7 @@ def fetch_top_rated_area_by_month(mysql_brand):
         if rows is None:
             raise RuntimeError("MySQL credentials not configured - set MYSQL_HOST/USER/PASSWORD/DATABASE (or .env.local).")
 
-        months = {}
+        by_ym = {}
         for ym, val, c in rows:
             if val is None or val == "NA":
                 continue
@@ -283,12 +286,17 @@ def fetch_top_rated_area_by_month(mysql_brand):
                 v = int(val)
             except ValueError:
                 continue
-            c = int(c)
-            mapped = -(-v // 2) if ym < SCALE_CUTOFF_YM else v  # ceil(v/2) pre-cutoff (1-10 scale), raw post-cutoff (already 1-5)
+            by_ym.setdefault(ym, []).append((v, int(c)))
+
+        months = {}
+        for ym, vals in by_ym.items():
+            is_ten_scale = any(v > 5 for v, _ in vals)
             bucket = months.setdefault(ym, {"pos": 0, "tot": 0})
-            bucket["tot"] += c
-            if mapped in (4, 5):
-                bucket["pos"] += c
+            for v, c in vals:
+                mapped = -(-v // 2) if is_ten_scale else v  # ceil(v/2) on a 1-10 scale, raw on a 1-5 scale
+                bucket["tot"] += c
+                if mapped in (4, 5):
+                    bucket["pos"] += c
         by_area[area] = {
             ym: {"score": round(b["pos"] / b["tot"] * 100, 1), "responses": b["tot"]}
             for ym, b in months.items() if b["tot"]
