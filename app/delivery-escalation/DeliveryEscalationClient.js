@@ -594,6 +594,121 @@ function TatBreakdownTable({
   );
 }
 
+// Query Category (rows, fixed for the whole table) x State -> City -> Pincode (columns,
+// expandable one level at a time) - the inverse of TatBreakdownTable above, which drills ROWS
+// under fixed columns; here the drill is in the COLUMNS under fixed category rows, so it gets
+// its own header/body layout rather than reusing that one. `tree` is pre-built by the caller
+// (see geoTree in DeliveryEscalationClient) from the raw state/city/pincode responses plus
+// which columns are currently expanded - this component only renders it.
+function GeoCategoryTable({
+  month, monthOptions, onMonthChange, tree, leafColumns, categories, grandTotal, grandTotalAll,
+  loading, onToggleState, onToggleCity,
+}) {
+  const anyCityExpanded = tree.some((s) => s.expanded && s.cities.some((c) => !c.pending && c.expanded));
+  const anyStateExpanded = tree.some((s) => s.expanded);
+  const maxDepth = anyCityExpanded ? 3 : anyStateExpanded ? 2 : 1;
+  const pendingLabel = (status) => (status === 'error' ? 'Error' : '…');
+
+  return (
+    <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
+      <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
+        <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500">Query Category by Location</p>
+        <div className="flex items-center gap-2">
+          {loading && <span className="text-[11px] text-zinc-600">Loading…</span>}
+          <CustomSelect value={month} onChange={onMonthChange} options={monthOptions} placeholder="Month" />
+        </div>
+      </div>
+      <p className="text-[12px] text-zinc-500 mb-3">
+        Unique ticket count (distinct AWB) per query category, by Query Date. Click a State to see its Cities, click a City to see its Pincodes.
+      </p>
+      <div className="rounded-xl border border-zinc-800/80 overflow-hidden">
+        <div className="overflow-x-auto custom-scroll">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-zinc-800/80 text-zinc-500">
+                <th rowSpan={maxDepth} className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">Query Category</th>
+                {tree.map((s) => (
+                  <th
+                    key={s.key}
+                    colSpan={s.leafCount || 1}
+                    rowSpan={s.expanded ? 1 : maxDepth}
+                    onClick={() => onToggleState(s.state)}
+                    className="py-2 px-3 text-center font-medium border-l border-zinc-800/60 whitespace-nowrap cursor-pointer hover:text-zinc-300"
+                  >
+                    <span className="inline-block w-3 text-zinc-500">{s.expanded ? '▾' : '▸'}</span>{s.state}
+                  </th>
+                ))}
+                <th rowSpan={maxDepth} className="py-2 px-3 text-right font-medium align-bottom border-l border-zinc-800/60 whitespace-nowrap">Grand Total</th>
+              </tr>
+              {maxDepth >= 2 && (
+                <tr className="border-b border-zinc-800/80 text-zinc-600 text-[11px]">
+                  {tree.filter((s) => s.expanded).flatMap((s) => s.cities.map((c) => (
+                    c.pending ? (
+                      <th key={c.key} rowSpan={maxDepth - 1} className="py-1 px-3 text-center border-l border-zinc-800/60">{pendingLabel(c.status)}</th>
+                    ) : (
+                      <th
+                        key={c.key}
+                        colSpan={c.leafCount || 1}
+                        rowSpan={c.expanded ? 1 : maxDepth - 1}
+                        onClick={() => onToggleCity(s.state, c.city)}
+                        className="py-1 px-3 text-center border-l border-zinc-800/60 cursor-pointer hover:text-zinc-300"
+                      >
+                        <span className="inline-block w-3 text-zinc-500">{c.expanded ? '▾' : '▸'}</span>{c.city}
+                      </th>
+                    )
+                  )))}
+                </tr>
+              )}
+              {maxDepth >= 3 && (
+                <tr className="border-b border-zinc-800/80 text-zinc-600 text-[11px]">
+                  {tree.filter((s) => s.expanded).flatMap((s) => s.cities.filter((c) => c.expanded).flatMap((c) => c.pincodes.map((p) => (
+                    <th key={p.key} className="py-1 px-3 text-center border-l border-zinc-800/60">
+                      {p.pending ? pendingLabel(p.status) : p.pincode}
+                    </th>
+                  ))))}
+                </tr>
+              )}
+            </thead>
+            <tbody className="divide-y divide-zinc-800/50">
+              {categories.map((cat) => (
+                <tr key={cat} className="hover:bg-zinc-800/30 transition-colors">
+                  <td className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">{cat}</td>
+                  {leafColumns.map((leaf) => (
+                    <td key={leaf.key} className="py-2 px-3 text-right text-zinc-300 tabular-nums border-l border-zinc-800/60">
+                      {leaf.level === 'pending' ? pendingLabel(leaf.node.status) : (leaf.node.counts?.[cat] || 0).toLocaleString('en-IN')}
+                    </td>
+                  ))}
+                  <td className="py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60">
+                    {(grandTotal[cat] || 0).toLocaleString('en-IN')}
+                  </td>
+                </tr>
+              ))}
+              {categories.length === 0 && (
+                <tr><td colSpan={leafColumns.length + 2} className="py-8 text-center text-zinc-500">
+                  {loading ? 'Loading…' : 'No data for this month.'}
+                </td></tr>
+              )}
+            </tbody>
+            {categories.length > 0 && (
+              <tfoot>
+                <tr className="border-t border-zinc-800/80 bg-zinc-950/40 font-semibold">
+                  <td className="sticky left-0 z-10 bg-zinc-950 py-2 px-3 text-zinc-200 whitespace-nowrap">Grand Total</td>
+                  {leafColumns.map((leaf) => (
+                    <td key={leaf.key} className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">
+                      {leaf.level === 'pending' ? pendingLabel(leaf.node.status) : (leaf.node.total || 0).toLocaleString('en-IN')}
+                    </td>
+                  ))}
+                  <td className="py-2 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/60">{grandTotalAll.toLocaleString('en-IN')}</td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket }) {
   const p = new URLSearchParams();
   if (view) p.set('view', view);
@@ -994,6 +1109,134 @@ export default function DeliveryEscalationClient() {
     }
     return { totals, all };
   }, [groupedContactBucketwise, daywise.buckets]);
+  // Query Category by Location table - its own month filter (defaults to the latest month once
+  // groupedDaywise has one), independent of the page's main date filter since this table is a
+  // standalone monthly snapshot, not a filtered ticket list. State/city/pincode data is fetched
+  // one level at a time as each column is expanded (see toggleGeoState/toggleGeoCity below) -
+  // cached by key so re-collapsing and re-expanding the same column doesn't refetch, same
+  // pattern as awbHistory.
+  const [geoMonth, setGeoMonth] = useState('');
+  const [geoData, setGeoData] = useState({ categories: [], rows: [], grandTotal: {}, grandTotalAll: 0 });
+  const [geoLoading, setGeoLoading] = useState(false);
+  const [expandedGeoStates, setExpandedGeoStates] = useState(() => new Set());
+  const [expandedGeoCities, setExpandedGeoCities] = useState(() => new Set());
+  const [geoCities, setGeoCities] = useState(() => new Map()); // stateName -> {status, rows}
+  const [geoPincodes, setGeoPincodes] = useState(() => new Map()); // `${state}::${city}` -> {status, rows}
+  const geoMonthOptions = useMemo(
+    () => groupedDaywise.map((m) => ({ value: m.key, label: formatDaywiseMonth(m.key) })),
+    [groupedDaywise]
+  );
+  useEffect(() => {
+    if (!geoMonth && geoMonthOptions.length) setGeoMonth(geoMonthOptions[geoMonthOptions.length - 1].value);
+  }, [geoMonth, geoMonthOptions]);
+
+  useEffect(() => {
+    if (!geoMonth) return;
+    let cancelled = false;
+    setGeoLoading(true);
+    setExpandedGeoStates(new Set());
+    setExpandedGeoCities(new Set());
+    setGeoCities(new Map());
+    setGeoPincodes(new Map());
+    const p = new URLSearchParams({ op: 'geoCategory', level: 'state', month: geoMonth });
+    if (brandFilter !== 'ALL') p.set('brand', brandFilter);
+    getJson(`/api/delivery-escalation/record?${p.toString()}`)
+      .then((d) => { if (!cancelled) setGeoData(d); })
+      .catch((e) => {
+        if (cancelled) return;
+        setGeoData({ categories: [], rows: [], grandTotal: {}, grandTotalAll: 0 });
+        if (isSessionExpired(e)) setSessionExpired(true);
+      })
+      .finally(() => { if (!cancelled) setGeoLoading(false); });
+    return () => { cancelled = true; };
+  }, [geoMonth, brandFilter]);
+
+  const toggleGeoState = useCallback((stateName) => {
+    setExpandedGeoStates((prev) => {
+      const next = new Set(prev);
+      if (next.has(stateName)) next.delete(stateName); else next.add(stateName);
+      return next;
+    });
+    setGeoCities((prev) => {
+      if (prev.has(stateName)) return prev;
+      const p = new URLSearchParams({ op: 'geoCategory', level: 'city', month: geoMonth, state: stateName });
+      if (brandFilter !== 'ALL') p.set('brand', brandFilter);
+      getJson(`/api/delivery-escalation/record?${p.toString()}`)
+        .then((d) => setGeoCities((m) => new Map(m).set(stateName, { status: 'loaded', rows: d.rows })))
+        .catch((e) => {
+          setGeoCities((m) => new Map(m).set(stateName, { status: 'error', rows: [] }));
+          if (isSessionExpired(e)) setSessionExpired(true);
+        });
+      return new Map(prev).set(stateName, { status: 'loading', rows: [] });
+    });
+  }, [geoMonth, brandFilter]);
+
+  const toggleGeoCity = useCallback((stateName, cityName) => {
+    const key = `${stateName}::${cityName}`;
+    setExpandedGeoCities((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+    setGeoPincodes((prev) => {
+      if (prev.has(key)) return prev;
+      const p = new URLSearchParams({ op: 'geoCategory', level: 'pincode', month: geoMonth, state: stateName, city: cityName });
+      if (brandFilter !== 'ALL') p.set('brand', brandFilter);
+      getJson(`/api/delivery-escalation/record?${p.toString()}`)
+        .then((d) => setGeoPincodes((m) => new Map(m).set(key, { status: 'loaded', rows: d.rows })))
+        .catch((e) => {
+          setGeoPincodes((m) => new Map(m).set(key, { status: 'error', rows: [] }));
+          if (isSessionExpired(e)) setSessionExpired(true);
+        });
+      return new Map(prev).set(key, { status: 'loading', rows: [] });
+    });
+  }, [geoMonth, brandFilter]);
+
+  // Builds the State -> City -> Pincode column tree the table actually renders from the raw
+  // per-level responses plus which columns are currently expanded - each level not (yet)
+  // expanded collapses to a single leaf column, same "column exists, deeper rows lazy-load on
+  // expand" idea as the ticket list's own AWB groups.
+  const geoTree = useMemo(() => geoData.rows.map((s) => {
+    const stateExpanded = expandedGeoStates.has(s.state);
+    let cities = [];
+    if (stateExpanded) {
+      const entry = geoCities.get(s.state);
+      const loaded = entry?.status === 'loaded' ? entry.rows : [];
+      cities = loaded.length ? loaded.map((c) => {
+        const cityKey = `${s.state}::${c.city}`;
+        const cityExpanded = expandedGeoCities.has(cityKey);
+        let pincodes = [];
+        if (cityExpanded) {
+          const pEntry = geoPincodes.get(cityKey);
+          const pLoaded = pEntry?.status === 'loaded' ? pEntry.rows : [];
+          pincodes = pLoaded.length
+            ? pLoaded.map((p) => ({ ...p, key: `${cityKey}::${p.pincode}` }))
+            : [{ pending: true, status: pEntry?.status || 'loading', key: `${cityKey}::pending` }];
+        }
+        return { ...c, key: cityKey, expanded: cityExpanded, pincodes, leafCount: cityExpanded ? pincodes.length : 1 };
+      }) : [{ pending: true, status: entry?.status || 'loading', key: `${s.state}::pending`, leafCount: 1 }];
+    }
+    const leafCount = stateExpanded ? cities.reduce((sum, c) => sum + c.leafCount, 0) : 1;
+    return { ...s, key: s.state, expanded: stateExpanded, cities, leafCount };
+  }), [geoData.rows, expandedGeoStates, expandedGeoCities, geoCities, geoPincodes]);
+
+  // Flat, left-to-right leaf column list matching the header's own rendering order - what the
+  // body actually iterates to draw one cell per category row per visible column.
+  const geoLeafColumns = useMemo(() => {
+    const leaves = [];
+    for (const s of geoTree) {
+      if (!s.expanded) { leaves.push({ key: s.key, node: s, level: 'state' }); continue; }
+      for (const c of s.cities) {
+        if (c.pending) { leaves.push({ key: c.key, node: c, level: 'pending' }); continue; }
+        if (!c.expanded) { leaves.push({ key: c.key, node: c, level: 'city' }); continue; }
+        for (const p of c.pincodes) {
+          leaves.push({ key: p.key, node: p, level: p.pending ? 'pending' : 'pincode' });
+        }
+      }
+    }
+    return leaves;
+  }, [geoTree]);
+
   const [bulkUploading, setBulkUploading] = useState(false);
   const [bulkResult, setBulkResult] = useState(null);
   const [exporting, setExporting] = useState(false);
@@ -1711,6 +1954,22 @@ export default function DeliveryEscalationClient() {
                   toggleWeek={(key) => toggleExpanded(setExpandedWeeks, key)}
                   getLabel={(row) => row.contactBucket}
                   onDrill={drillIntoDaywise}
+                />
+              )}
+
+              {tab === 'overview' && (
+                <GeoCategoryTable
+                  month={geoMonth}
+                  monthOptions={geoMonthOptions}
+                  onMonthChange={setGeoMonth}
+                  tree={geoTree}
+                  leafColumns={geoLeafColumns}
+                  categories={geoData.categories}
+                  grandTotal={geoData.grandTotal}
+                  grandTotalAll={geoData.grandTotalAll}
+                  loading={geoLoading}
+                  onToggleState={toggleGeoState}
+                  onToggleCity={toggleGeoCity}
                 />
               )}
 

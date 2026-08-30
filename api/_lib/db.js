@@ -1848,6 +1848,63 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
   return { buckets: DE_DAYWISE_BUCKETS, rows: rowsOut, grandTotal, grandTotalAll, missingDateCount };
 }
 
+// State -> City -> Pincode x Query Category breakdown for the Overview's standalone geo table -
+// drilled lazily ONE LEVEL AT A TIME as the client expands a column (level 'state'|'city'
+// scoped by state|'pincode' scoped by state+city), same shape as getDeliveryEscalationAwbHistory's
+// own fetch-on-expand. Shipping_Address_State/City/Pincode come from Item_level_data via the
+// backfill scripts (backfill_delivery_escalation_shipping_city.py /
+// backfill_delivery_escalation_state_pincode.py) - plain nullable columns on this table, not
+// computed here. Returning every pincode for a whole month in one response could be thousands
+// of rows; scoping to whichever branch is actually expanded keeps this well under Lambda's 6MB
+// cap regardless of how deep someone drills.
+//
+// month is 'YYYY-MM' against added_date (Query Date - same basis the tables above this one use).
+// Grouped by query_category same as everywhere else on this page, COUNT(DISTINCT awb_code) for
+// the same "how many parcels, not how many rows" reason getDeliveryEscalationDaywiseStats uses.
+async function getDeliveryEscalationGeoCategoryStats(opts = {}) {
+  const { brand, month, level, state, city } = opts;
+  if (!month) return { categories: [], rows: [], grandTotal: {}, grandTotalAll: 0 };
+  const geoCol = level === 'pincode' ? 'Pincode' : level === 'city' ? 'Shipping_Address_City' : 'Shipping_Address_State';
+  const geoKey = level === 'pincode' ? 'pincode' : level === 'city' ? 'city' : 'state';
+  const clauses = ['added_date IS NOT NULL', "DATE_FORMAT(added_date, '%Y-%m') = ?"];
+  const params = [month];
+  if (brand) { clauses.push('brand = ?'); params.push(brand); }
+  if (level === 'city' || level === 'pincode') {
+    clauses.push("COALESCE(Shipping_Address_State, 'Unknown') = ?");
+    params.push(state || 'Unknown');
+  }
+  if (level === 'pincode') {
+    clauses.push("COALESCE(Shipping_Address_City, 'Unknown') = ?");
+    params.push(city || 'Unknown');
+  }
+  const pool = await getPool();
+  const [dbRows] = await pool.execute(`
+    SELECT COALESCE(query_category, 'Unknown') AS category, COALESCE(${geoCol}, 'Unknown') AS geo, COUNT(DISTINCT awb_code) AS c
+    FROM Delivery_escalation
+    WHERE ${clauses.join(' AND ')}
+    GROUP BY category, geo
+  `, params);
+
+  const categoryTotals = new Map();
+  const byGeo = new Map();
+  for (const r of dbRows) {
+    const c = Number(r.c) || 0;
+    categoryTotals.set(r.category, (categoryTotals.get(r.category) || 0) + c);
+    if (!byGeo.has(r.geo)) byGeo.set(r.geo, { [geoKey]: r.geo, counts: {}, total: 0 });
+    const entry = byGeo.get(r.geo);
+    entry.counts[r.category] = (entry.counts[r.category] || 0) + c;
+    entry.total += c;
+  }
+  // Same category set and order (by volume) at every level, so a state's/city's/pincode's
+  // columns and the outer Grand Total row always line up under the same category rows -
+  // categories a branch doesn't have just read 0 (see counts lookup on the client).
+  const categories = [...categoryTotals.entries()].sort((a, b) => b[1] - a[1]).map(([category]) => category);
+  const rows = [...byGeo.values()].sort((a, b) => b.total - a.total);
+  const grandTotal = Object.fromEntries(categories.map((cat) => [cat, categoryTotals.get(cat) || 0]));
+  const grandTotalAll = [...categoryTotals.values()].reduce((sum, v) => sum + v, 0);
+  return { categories, rows, grandTotal, grandTotalAll };
+}
+
 async function getDeliveryEscalationAgents() {
   const { rows } = await sql`
     SELECT DISTINCT agent_email FROM Delivery_escalation
@@ -3731,6 +3788,7 @@ module.exports = {
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
   getDeliveryEscalationDaywiseStats, getDeliveryEscalationAwbHistory,
+  getDeliveryEscalationGeoCategoryStats,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,

@@ -8,6 +8,7 @@
 //   ?op=stats                                            -> { stats, agents }
 //   ?op=export&view=...(+ same filters)                  -> { rows, capped }
 //   ?op=awbHistory&awb&brand                             -> { rows } (every ticket for that parcel)
+//   ?op=geoCategory&month&level=state|city|pincode(&state)(&city) -> { categories, rows, grandTotal, grandTotalAll }
 //
 // POST action 'claim'/'dispose' is the Fresh tab's own claim/resolve, and 'bulkDispose' its CSV
 // upload - all MySQL-only, no sheet write, same model as CLS_RTO_calling's own claim/dispose.
@@ -25,6 +26,7 @@ const {
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
   getDeliveryEscalationDaywiseStats, getDeliveryEscalationAwbHistory,
+  getDeliveryEscalationGeoCategoryStats,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
 } = require('../_lib/db');
@@ -113,6 +115,24 @@ module.exports = async (req, res) => {
           paymentMode: q.paymentMode && q.paymentMode !== 'ALL' ? q.paymentMode : '',
         });
         res.status(200).json(daywise);
+        return;
+      }
+
+      if (q.op === 'geoCategory') {
+        // Overview's standalone State/City/Pincode x Query Category table - one level per
+        // request (see getDeliveryEscalationGeoCategoryStats's own comment on why), the client
+        // walks deeper only as each column is actually expanded.
+        const level = ['state', 'city', 'pincode'].includes(q.level) ? q.level : 'state';
+        if (!q.month) { res.status(400).json({ error: 'month is required' }); return; }
+        if (level === 'city' && !q.state) { res.status(400).json({ error: 'state is required' }); return; }
+        if (level === 'pincode' && (!q.state || !q.city)) {
+          res.status(400).json({ error: 'state and city are required' });
+          return;
+        }
+        const geo = await getDeliveryEscalationGeoCategoryStats({
+          brand: filters.brand, month: q.month, level, state: q.state, city: q.city,
+        });
+        res.status(200).json(geo);
         return;
       }
 
