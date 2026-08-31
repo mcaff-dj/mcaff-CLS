@@ -282,40 +282,53 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
 .login-page .err { margin-top: 16px; font-size: 12.5px; color: #d6503f; }
 
 /* ── admin.html → /admin ─────────────────────────────────────────────── */
-.admin-page { min-height: 100vh; background: var(--page); color: var(--text-primary); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; padding: 32px 20px; }
-.admin-page .wrap { max-width: 900px; margin: 0 auto; }
-.admin-page .home-link { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 20px; }
+.admin-page { min-height: 100vh; background: var(--page); color: var(--text-primary); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; padding: 40px 20px 64px; -webkit-font-smoothing: antialiased; }
+.admin-page .wrap { max-width: 920px; margin: 0 auto; }
+.admin-page .home-link { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 24px; transition: color 0.15s ease-out, transform 0.1s ease-out; }
 .admin-page .home-link:hover { color: var(--text-primary); }
-.admin-page h1 { font-size: 22px; margin: 0 0 6px; }
-.admin-page .sub { color: var(--text-secondary); font-size: 13.5px; margin: 0 0 24px; }
-.admin-page section { background: var(--surface-card); border: 1px solid var(--border); border-radius: 14px; padding: 22px 24px; margin-bottom: 22px; }
-.admin-page section h2 { font-size: 15px; margin: 0 0 14px; }
-.admin-page .row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; align-items: flex-end; }
-.admin-page label { display: block; font-size: 11.5px; color: var(--text-muted); margin-bottom: 4px; }
-.admin-page input[type=text], .admin-page input[type=email] { font-size: 13px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--page); color: var(--text-primary); font-family: inherit; min-width: 200px; }
-.admin-page .bulk-emails-textarea { width: 100%; font-size: 13px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--page); color: var(--text-primary); font-family: inherit; resize: vertical; }
+.admin-page .home-link:active { transform: scale(0.97); }
+.admin-page h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; margin: 0 0 6px; }
+.admin-page .sub { color: var(--text-secondary); font-size: 14px; line-height: 1.5; margin: 0 0 32px; max-width: 560px; }
+.admin-page section { background: var(--surface-card); border: 1px solid var(--border); border-radius: 16px; padding: 24px 26px; margin-bottom: 20px; box-shadow: 0 1px 2px rgba(0,0,0,0.03), 0 8px 24px -16px rgba(0,0,0,0.08); }
+.admin-page section h2 { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 16px; }
+.admin-page .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; align-items: flex-end; }
+.admin-page label { display: block; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; }
+.admin-page input[type=text], .admin-page input[type=email] { font-size: 13.5px; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--page); color: var(--text-primary); font-family: inherit; min-width: 220px; transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out; }
+.admin-page .bulk-emails-textarea { width: 100%; font-size: 13.5px; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--page); color: var(--text-primary); font-family: inherit; resize: vertical; transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out; }
+.admin-page input[type=text]:focus, .admin-page input[type=email]:focus, .admin-page .bulk-emails-textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(74,58,167,0.14); }
 .admin-page .chip-row { display: flex; gap: 10px; flex-wrap: wrap; }
-.admin-page .chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 6px 10px; border-radius: 999px; border: 1px solid var(--border); cursor: pointer; user-select: none; }
-.admin-page .chip input { margin: 0; }
-.admin-page button { appearance: none; border: none; background: var(--accent); color: #fff; font-size: 13px; font-weight: 600; padding: 9px 16px; border-radius: 8px; cursor: pointer; font-family: inherit; }
-.admin-page button:hover { opacity: .9; }
-.admin-page table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.admin-page th { text-align: left; padding: 8px 10px; border-bottom: 2px solid var(--grid); color: var(--text-secondary); }
-.admin-page td { padding: 8px 10px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
-.admin-page .perm-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border); cursor: pointer; margin: 2px; }
-.admin-page .perm-toggle.on { background: rgba(26,156,92,.14); color: #1a9c5c; border-color: transparent; }
-.admin-page .msg { font-size: 12.5px; color: var(--text-muted); margin-top: 8px; }
+.admin-page .chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 500; padding: 7px 12px; border-radius: 999px; border: 1px solid var(--border); cursor: pointer; user-select: none; background: var(--page); transition: border-color 0.15s ease-out, transform 0.1s ease-out; }
+.admin-page .chip:hover { border-color: var(--accent); }
+.admin-page .chip:active { transform: scale(0.96); }
+.admin-page .chip input { margin: 0; accent-color: var(--accent); }
+.admin-page button { appearance: none; border: none; background: var(--accent); color: #fff; font-size: 13.5px; font-weight: 600; padding: 10px 18px; border-radius: 10px; cursor: pointer; font-family: inherit; letter-spacing: -0.005em; box-shadow: 0 1px 2px rgba(0,0,0,0.06); transition: transform 0.1s ease-out, opacity 0.15s ease-out; }
+.admin-page button:hover { opacity: .92; }
+.admin-page button:active { transform: scale(0.97); opacity: .85; }
+.admin-page table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.admin-page th { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: 11px; font-weight: 650; letter-spacing: 0.03em; text-transform: uppercase; }
+.admin-page td { padding: 10px 12px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+.admin-page tbody tr { transition: background 0.12s ease-out; }
+.admin-page tbody tr:hover { background: var(--page); }
+.admin-page .perm-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 500; padding: 4px 9px; border-radius: 999px; border: 1px solid var(--border); cursor: pointer; margin: 2px; transition: transform 0.1s ease-out, border-color 0.15s ease-out; }
+.admin-page .perm-toggle:hover { border-color: var(--accent); }
+.admin-page .perm-toggle:active { transform: scale(0.95); }
+.admin-page .perm-toggle.on { background: rgba(26,156,92,.14); color: var(--good); border-color: transparent; }
+.admin-page .msg { font-size: 12.5px; color: var(--text-muted); margin-top: 10px; min-height: 16px; }
 .admin-page .card-perm-block { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.admin-page .tab-toggle-link { font-size: 11px; color: var(--accent); text-decoration: none; white-space: nowrap; }
+.admin-page .tab-toggle-link { font-size: 11.5px; font-weight: 500; color: var(--accent); text-decoration: none; white-space: nowrap; }
 .admin-page .tab-toggle-link:hover { text-decoration: underline; }
-.admin-page .tab-subrow { display: flex; gap: 8px; flex-wrap: wrap; width: 100%; padding: 8px 0 2px 18px; }
-.admin-page .tab-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 4px 9px; border-radius: 999px; border: 1px dashed var(--border); color: var(--text-secondary); cursor: pointer; user-select: none; }
-.admin-page .tab-chip input { margin: 0; }
-.admin-page .tabs-edit-link { font-size: 10.5px; color: var(--accent); text-decoration: none; margin-left: 2px; }
+.admin-page .tab-subrow { display: flex; gap: 8px; flex-wrap: wrap; width: 100%; padding: 10px 0 2px 18px; }
+.admin-page .tab-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 4px 10px; border-radius: 999px; border: 1px dashed var(--border); color: var(--text-secondary); cursor: pointer; user-select: none; transition: border-color 0.15s ease-out; }
+.admin-page .tab-chip:hover { border-color: var(--accent); }
+.admin-page .tab-chip input { margin: 0; accent-color: var(--accent); }
+.admin-page .tabs-edit-link { font-size: 10.5px; font-weight: 500; color: var(--accent); text-decoration: none; margin-left: 4px; }
 .admin-page .tabs-edit-link:hover { text-decoration: underline; }
 .admin-page .tab-edit-row td { background: var(--page); font-size: 12px; }
-.admin-page .tab-edit-row .save-tabs-btn { padding: 4px 10px; font-size: 11.5px; margin-left: 6px; }
-.admin-page .denied { padding: 60px 20px; text-align: center; color: var(--text-secondary); }
+.admin-page .tab-edit-row .save-tabs-btn { padding: 5px 12px; font-size: 11.5px; margin-left: 8px; }
+.admin-page .denied { padding: 80px 20px; text-align: center; color: var(--text-secondary); font-size: 14px; }
+@media (prefers-reduced-motion: reduce) {
+  .admin-page * { transition: none !important; }
+}
 
 /* ── Shared sidebar-shell rules for dashboard.html (/dashboard) and
  * index.html (/, .home-page) - the two pages are near-identical (dashboard is
