@@ -72,6 +72,16 @@
   .raw-export-row{display:flex;justify-content:flex-end;margin:0 0 12px;}
   .raw-export-btn{appearance:none;border:1px solid var(--border);background:var(--surface-card);color:var(--text-secondary);font-size:11.5px;font-weight:600;font-family:inherit;padding:6px 12px;border-radius:7px;text-decoration:none;white-space:nowrap;display:inline-flex;align-items:center;gap:5px;}
   .raw-export-btn:hover{color:var(--text-primary);border-color:var(--text-muted);}
+  .raw-export-modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:50;display:none;align-items:center;justify-content:center;}
+  .raw-export-modal-bg.open{display:flex;}
+  .raw-export-modal{background:var(--surface-card);border:1px solid var(--border);border-radius:12px;padding:20px;width:280px;box-shadow:0 12px 32px rgba(0,0,0,.3);}
+  .raw-export-modal h3{margin:0 0 14px;font-size:14px;font-weight:600;color:var(--text-primary);}
+  .raw-export-modal label{display:block;font-size:11.5px;color:var(--text-secondary);margin:10px 0 4px;}
+  .raw-export-modal input[type=date]{width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:7px;padding:6px 8px;font-size:12.5px;font-family:inherit;background:var(--page);color:var(--text-primary);}
+  .raw-export-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px;}
+  .raw-export-modal-err{font-size:11px;color:var(--s6);margin-top:6px;display:none;}
+  .raw-export-modal-err.show{display:block;}
+  .raw-export-modal-all{display:block;text-align:center;font-size:11px;color:var(--text-muted);margin-top:12px;text-decoration:underline;cursor:pointer;}
   .pivot-scroll{
     overflow-x:auto;border:1px solid var(--border);border-radius:10px;width:100%;max-width:100%;
     scrollbar-width:thin;scrollbar-color:var(--s1) var(--grid);
@@ -963,5 +973,72 @@
       .then(function(r){ return r.ok ? r.json() : { comments: {} }; })
       .then(function(d2){ comments = d2.comments || {}; markAllDots(); });
   }).catch(function(){ signedOut = true; });
+})();
+</script>
+<script>
+(function(){
+  // Date-range picker for the raw CSV export buttons (see gen_raw_export.py's
+  // raw_download_link) - a click now opens a small modal asking for From/To instead of
+  // going straight to the full-file link. "download everything instead" falls back to
+  // the button's original href unchanged.
+  var bg = null, modal = null, fromInput = null, toInput = null, errEl = null, allLink = null;
+  var activeCard = '', activeTab = '', activeHref = '';
+
+  function closeModal(){
+    if (bg) bg.classList.remove('open');
+    if (errEl) errEl.classList.remove('show');
+  }
+
+  function ensureModal(){
+    if (bg) return;
+    bg = document.createElement('div');
+    bg.className = 'raw-export-modal-bg';
+    bg.innerHTML =
+      '<div class="raw-export-modal">' +
+        '<h3>Download raw data</h3>' +
+        '<label>From</label><input type="date">' +
+        '<label>To</label><input type="date">' +
+        '<div class="raw-export-modal-err"></div>' +
+        '<div class="raw-export-modal-actions">' +
+          '<button type="button" class="export-btn raw-export-cancel">Cancel</button>' +
+          '<button type="button" class="export-btn raw-export-go">Download</button>' +
+        '</div>' +
+        '<a class="raw-export-modal-all">download everything instead</a>' +
+      '</div>';
+    document.body.appendChild(bg);
+    modal = bg.firstChild;
+    var inputs = modal.querySelectorAll('input[type=date]');
+    fromInput = inputs[0]; toInput = inputs[1];
+    errEl = modal.querySelector('.raw-export-modal-err');
+    allLink = modal.querySelector('.raw-export-modal-all');
+    modal.querySelector('.raw-export-cancel').onclick = closeModal;
+    bg.addEventListener('click', function(ev){ if (ev.target === bg) closeModal(); });
+    modal.querySelector('.raw-export-go').onclick = function(){
+      var from = fromInput.value, to = toInput.value;
+      if (!from || !to) { errEl.textContent = 'Pick both a From and a To date.'; errEl.classList.add('show'); return; }
+      if (from > to) { errEl.textContent = 'From date must be before To date.'; errEl.classList.add('show'); return; }
+      window.location = '/api/report/raw?card=' + encodeURIComponent(activeCard) + '&tab=' + encodeURIComponent(activeTab) +
+        '&from=' + from + '&to=' + to;
+      closeModal();
+    };
+    allLink.onclick = function(){ window.location = activeHref; closeModal(); };
+  }
+
+  function openModal(a){
+    ensureModal();
+    activeCard = a.getAttribute('data-card') || '';
+    activeTab = a.getAttribute('data-tab') || '';
+    activeHref = a.getAttribute('href') || '';
+    fromInput.value = ''; toInput.value = '';
+    errEl.classList.remove('show');
+    bg.classList.add('open');
+  }
+
+  document.addEventListener('click', function(ev){
+    var a = ev.target.closest && ev.target.closest('.raw-export-btn');
+    if (!a) return;
+    ev.preventDefault();
+    openModal(a);
+  });
 })();
 </script>

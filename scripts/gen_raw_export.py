@@ -117,6 +117,10 @@ def build_raw_exports(ctx, out_dir):
 
 
 def raw_download_link(ctx, tab_key):
+    # data-card/data-tab let _shell_head.html's click handler open the date-range modal;
+    # href stays the full-file URL as the fallback ("download everything instead" link,
+    # and for no-JS/right-click-copy).
     return (f'<div class="raw-export-row"><a class="raw-export-btn" '
+            f'data-card="{ctx.b["brand"]}" data-tab="{tab_key}" '
             f'href="/api/report/raw?card={ctx.b["brand"]}&amp;tab={tab_key}">'
             f'&#8681; Download Raw Data (CSV)</a></div>')
