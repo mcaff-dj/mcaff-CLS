@@ -83,14 +83,12 @@ export default function AdminPage() {
       });
     }
 
-    function loadUsers() {
-      fetch('/api/admin/users').then(function (r) { return r.json(); }).then(function (d) {
-        CARD_KEYS = d.cardKeys || [];
-        CARD_TABS = d.cardTabs || {};
-        renderInvitePerms();
+    var ALL_USERS = [];
+
+    function renderUsersTable(users) {
         var body = document.getElementById('users-body');
         var rows = [];
-        (d.users || []).forEach(function (u) {
+        users.forEach(function (u) {
           var perms = CARD_KEYS.map(function (k) {
             var on = u.permissions.indexOf(k) !== -1;
             var tabs = CARD_TABS[k];
@@ -150,8 +148,30 @@ export default function AdminPage() {
             });
           });
         });
+    }
+
+    function loadUsers() {
+      fetch('/api/admin/users').then(function (r) { return r.json(); }).then(function (d) {
+        CARD_KEYS = d.cardKeys || [];
+        CARD_TABS = d.cardTabs || {};
+        ALL_USERS = d.users || [];
+        renderInvitePerms();
+        renderUsersTable(filterUsers(document.getElementById('user-search').value));
       });
     }
+
+    function filterUsers(query) {
+      query = (query || '').trim().toLowerCase();
+      if (!query) return ALL_USERS;
+      return ALL_USERS.filter(function (u) {
+        return (u.email || '').toLowerCase().indexOf(query) !== -1 ||
+          (u.name || '').toLowerCase().indexOf(query) !== -1;
+      });
+    }
+
+    document.getElementById('user-search').addEventListener('input', function () {
+      renderUsersTable(filterUsers(this.value));
+    });
 
     var ACTION_LABELS = { view: 'View', login: 'Login', csv_export: 'CSV export', raw_download: 'Raw download' };
     function loadAudit() {
@@ -254,7 +274,10 @@ export default function AdminPage() {
         </section>
 
         <section>
-          <h2>Users &amp; permissions</h2>
+          <div className="section-head">
+            <h2>Users &amp; permissions</h2>
+            <input type="text" id="user-search" className="search-input" placeholder="Search email or name…" />
+          </div>
           <table>
             <thead><tr><th>Email</th><th>Name</th><th>Admin</th><th>Reports</th><th></th></tr></thead>
             <tbody id="users-body"></tbody>
