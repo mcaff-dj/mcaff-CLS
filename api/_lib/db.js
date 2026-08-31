@@ -1859,8 +1859,19 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
     const partnerEntry = entry.partners.get(r.partner);
     if (!entry.categories.has(r.category)) entry.categories.set(r.category, { category: r.category, counts: zeroCounts(), total: 0 });
     const categoryEntry = entry.categories.get(r.category);
-    if (!entry.contactBuckets.has(r.contactBucket)) entry.contactBuckets.set(r.contactBucket, { contactBucket: r.contactBucket, counts: zeroCounts(), total: 0 });
+    if (!entry.contactBuckets.has(r.contactBucket)) {
+      entry.contactBuckets.set(r.contactBucket, { contactBucket: r.contactBucket, counts: zeroCounts(), total: 0, partners: new Map() });
+    }
     const contactBucketEntry = entry.contactBuckets.get(r.contactBucket);
+    // Same raw row already carries partner alongside contactBucket (the SELECT above groups by
+    // both together) - folding that pairing into its own map here, instead of throwing it away
+    // like the two flat breakdowns above do, is what lets the Repeat Contacts table drill
+    // Times Contacted -> Delivery Partner (see groupContactBucketPartnerwiseRows) without a
+    // second query.
+    if (!contactBucketEntry.partners.has(r.partner)) {
+      contactBucketEntry.partners.set(r.partner, { partner: r.partner, counts: zeroCounts(), total: 0 });
+    }
+    const contactBucketPartnerEntry = contactBucketEntry.partners.get(r.partner);
     entry.counts[r.bucket] += c;
     entry.total += c;
     partnerEntry.counts[r.bucket] += c;
@@ -1869,6 +1880,8 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
     categoryEntry.total += c;
     contactBucketEntry.counts[r.bucket] += c;
     contactBucketEntry.total += c;
+    contactBucketPartnerEntry.counts[r.bucket] += c;
+    contactBucketPartnerEntry.total += c;
     grandTotal[r.bucket] += c;
     grandTotalAll += c;
   }
@@ -1888,7 +1901,12 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
       .map((c) => ({ category: c.category, total: c.total, counts: c.counts, pct: pctOf(c.counts, c.total) })),
     contactBuckets: [...entry.contactBuckets.values()]
       .sort((a, b) => b.total - a.total)
-      .map((cb) => ({ contactBucket: cb.contactBucket, total: cb.total, counts: cb.counts, pct: pctOf(cb.counts, cb.total) })),
+      .map((cb) => ({
+        contactBucket: cb.contactBucket, total: cb.total, counts: cb.counts, pct: pctOf(cb.counts, cb.total),
+        partners: [...cb.partners.values()]
+          .sort((a, b) => b.total - a.total)
+          .map((p) => ({ partner: p.partner, total: p.total, counts: p.counts, pct: pctOf(p.counts, p.total) })),
+      })),
   }));
   return { buckets: DE_DAYWISE_BUCKETS, rows: rowsOut, grandTotal, grandTotalAll, missingDateCount };
 }
