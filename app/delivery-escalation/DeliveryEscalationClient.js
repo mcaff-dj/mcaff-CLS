@@ -25,7 +25,7 @@
 // everyone invited to this process sees the whole shared desk, admin or not, since tickets are
 // self-claimed from a common unassigned pool - the Agent filter narrows the view by choice.
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from 'react';
-import { CustomSelect, CheckIcon, XIcon, RefreshIcon, Overlay } from '../_calling/ui';
+import { CustomSelect, MultiSelectDropdown, CheckIcon, XIcon, RefreshIcon, Overlay } from '../_calling/ui';
 import { useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { safeStorage } from '../_calling/util';
 
@@ -1150,17 +1150,20 @@ function downloadNewOrderAwbSampleCsv() {
 }
 
 // Admin Panel card - per-user Delivery Partner allowlist (see api/admin/[action].js's
-// handleDeliveryPartnerAccess). Self-contained fetch/save, same pattern as ProcessDispositionsCard
-// alongside it, but its own component rather than reusing useProcessDispositions - this isn't a
-// disposition tree, it's a flat per-user partner list against a totally different endpoint.
+// handleDeliveryPartnerAccess). Name | Access table, Access being the SAME MultiSelectDropdown
+// the RTO roster's own Priority Reasons column already uses (app/_calling/ui.js) - one control
+// language across the app instead of a new bespoke picker, and it already solves the actual
+// problem a flat wall of 50 chip buttons per row had: scanning, comparing rows at a glance, and
+// telling "selected" from "everything else" apart.
 //
-// pending[userId] is a Set of the LOCAL, unsaved selection for that user (undefined = no edits
-// yet, falls back to the last-loaded deliveryPartners) - so switching chips for one agent never
-// touches any other agent's row, and each row saves independently via its own button.
+// Saves per row, debounced ~500ms after the last change to that row (not on every checkbox
+// click, not requiring a separate Save button) - a few quick clicks while narrowing someone's
+// access become one write, and the row's own "Saving…" label is the only feedback needed since
+// setDeliveryPartnerAccess already replaces the full list atomically.
 function DeliveryPartnerAccessCard({ showToast }) {
   const [state, setState] = useState({ status: 'loading', users: [], partners: [] });
-  const [saving, setSaving] = useState(null);
-  const [pending, setPending] = useState({});
+  const [savingIds, setSavingIds] = useState(() => new Set());
+  const saveTimers = useRef({});
 
   const load = useCallback(async () => {
     setState((s) => ({ ...s, status: 'loading' }));
@@ -1169,43 +1172,38 @@ function DeliveryPartnerAccessCard({ showToast }) {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `Load failed (${r.status})`);
       setState({ status: 'loaded', users: d.users || [], partners: d.partners || [] });
-      setPending({});
     } catch (e) {
       setState({ status: 'error', users: [], partners: [], error: e.message });
     }
   }, []);
 
   useEffect(() => { load(); }, [load]);
+  // Any in-flight debounce timers must die with the component, or a save fires against an
+  // unmounted card's stale closure after navigating away.
+  useEffect(() => () => Object.values(saveTimers.current).forEach(clearTimeout), []);
 
-  const toggle = (userId, partner) => {
-    setPending((prev) => {
-      const base = prev[userId] || new Set(state.users.find((u) => u.id === userId)?.deliveryPartners || []);
-      const next = new Set(base);
-      if (next.has(partner)) next.delete(partner); else next.add(partner);
-      return { ...prev, [userId]: next };
-    });
-  };
-
-  const save = async (userId) => {
-    const set = pending[userId];
-    if (!set) return; // nothing changed for this user - no-op
-    setSaving(userId);
+  const commitSave = async (userId, partners) => {
+    setSavingIds((prev) => new Set(prev).add(userId));
     try {
       const r = await fetch('/api/admin/delivery-partner-access', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, partners: [...set] }),
+        body: JSON.stringify({ userId, partners }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `Save failed (${r.status})`);
-      setState((s) => ({ ...s, users: s.users.map((u) => (u.id === userId ? { ...u, deliveryPartners: [...set] } : u)) }));
-      setPending((prev) => { const next = { ...prev }; delete next[userId]; return next; });
-      showToast?.('Delivery Partner access saved');
     } catch (e) {
       showToast?.(`⚠️ Could not save: ${e.message}`);
+      load(); // revert this row (and everyone else's) to the server's own truth
     } finally {
-      setSaving(null);
+      setSavingIds((prev) => { const next = new Set(prev); next.delete(userId); return next; });
     }
+  };
+
+  const handleChange = (userId, partners) => {
+    setState((s) => ({ ...s, users: s.users.map((u) => (u.id === userId ? { ...u, deliveryPartners: partners } : u)) }));
+    clearTimeout(saveTimers.current[userId]);
+    saveTimers.current[userId] = setTimeout(() => commitSave(userId, partners), 500);
   };
 
   if (state.status === 'loading') {
@@ -1235,55 +1233,42 @@ function DeliveryPartnerAccessCard({ showToast }) {
           </p>
         </div>
       </div>
-      <div className="space-y-3">
-        {state.users.length === 0 && (
-          <p className="text-[12px] text-zinc-500">No one has Delivery-Escalation access yet.</p>
-        )}
-        {state.users.map((u) => {
-          const selected = pending[u.id] || new Set(u.deliveryPartners);
-          const dirty = !!pending[u.id];
-          return (
-            <div key={u.id} className="border border-zinc-800 rounded-lg p-3">
-              <div className="flex items-center justify-between mb-2 gap-2">
-                <div className="text-[13px] text-zinc-200 font-semibold truncate">{u.name || u.email}</div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className="text-[11px] text-zinc-500">
-                    {selected.size === 0 ? 'All partners' : `${selected.size} partner${selected.size === 1 ? '' : 's'}`}
-                  </span>
-                  {dirty && (
-                    <button
-                      onClick={() => save(u.id)}
-                      disabled={saving === u.id}
-                      className="px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold transition-colors disabled:opacity-50"
-                    >
-                      {saving === u.id ? 'Saving…' : 'Save'}
-                    </button>
-                  )}
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {state.partners.map((p) => {
-                  const checked = selected.has(p);
-                  return (
-                    <button
-                      key={p}
-                      type="button"
-                      onClick={() => toggle(u.id, p)}
-                      className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border transition-colors ${checked
-                          ? 'bg-indigo-600 border-indigo-500 text-white'
-                          : 'bg-zinc-950/60 border-zinc-800 text-zinc-400 hover:border-zinc-700'
-                        }`}
-                    >
-                      {p}
-                    </button>
-                  );
-                })}
-                {state.partners.length === 0 && <span className="text-[11px] text-zinc-600">No delivery partners found.</span>}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      {state.users.length === 0 ? (
+        <p className="text-[12px] text-zinc-500">No one has Delivery-Escalation access yet.</p>
+      ) : (
+        <div className="border border-zinc-800 rounded-xl overflow-hidden">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-zinc-800/80 text-zinc-500">
+                <th className="text-left font-medium py-2.5 px-4">Name</th>
+                <th className="text-left font-medium py-2.5 px-4">Access</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/50">
+              {state.users.map((u) => (
+                <tr key={u.id} className="hover:bg-zinc-800/20 transition-colors">
+                  <td className="py-2.5 px-4">
+                    <div className="text-zinc-200 font-semibold">{u.name || u.email}</div>
+                    {u.name && <div className="text-[11px] text-zinc-500">{u.email}</div>}
+                  </td>
+                  <td className="py-2.5 px-4">
+                    <div className="flex items-center gap-2">
+                      <MultiSelectDropdown
+                        value={u.deliveryPartners}
+                        onChange={(next) => handleChange(u.id, next)}
+                        options={state.partners}
+                        placeholder="All partners"
+                        itemNoun="partners"
+                      />
+                      {savingIds.has(u.id) && <span className="text-[11px] text-zinc-500">Saving…</span>}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
