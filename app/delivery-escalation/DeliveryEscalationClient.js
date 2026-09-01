@@ -1165,6 +1165,22 @@ function DeliveryPartnerAccessCard({ showToast }) {
   const [savingIds, setSavingIds] = useState(() => new Set());
   const saveTimers = useRef({});
 
+  // The dropdown picks/shows CANONICAL names (DELHIVERY, Shadowfax, ... - same PARTNER_NAME_MAP/
+  // mapPartnerName the Overview's own Partner breakdown already groups by), never the raw
+  // delivery_partner spelling - a wall of 50 near-duplicate raw variants (DELHIVERY_NDD_DIRECT_H,
+  // Shadowfax_H_NDD, XBSRF_Direct_NDD_HYPHEN, ...) is what made the picker unreadable in the
+  // first place. Storage/enforcement still key off the raw column (db.js has no notion of
+  // "canonical"), so this expands on save and collapses on load, same convention as
+  // fetchDaywiseStats' own Partner filter (see CANONICAL_TO_RAW_PARTNER's own comment).
+  // Built from state.partners (the LIVE distinct raw values) rather than the static
+  // PARTNER_FILTER_OPTIONS list, so a raw value with no PARTNER_NAME_MAP entry (passes through
+  // mapPartnerName unchanged - 'SELF', '#N/A', 'M_SHIPROCKET', ...) still gets its own option
+  // instead of silently having no way to be picked at all.
+  const canonicalPartnerOptions = useMemo(
+    () => [...new Set(state.partners.map(mapPartnerName))].sort(),
+    [state.partners],
+  );
+
   const load = useCallback(async () => {
     setState((s) => ({ ...s, status: 'loading' }));
     try {
@@ -1200,10 +1216,15 @@ function DeliveryPartnerAccessCard({ showToast }) {
     }
   };
 
-  const handleChange = (userId, partners) => {
-    setState((s) => ({ ...s, users: s.users.map((u) => (u.id === userId ? { ...u, deliveryPartners: partners } : u)) }));
+  // canonicalList is what the dropdown hands back (canonical names) - expand each to every raw
+  // variant that folds into it (CANONICAL_TO_RAW_PARTNER; a canonical name with no map entry -
+  // an unmapped raw passing through as itself - falls back to just itself) before storing/
+  // sending, since that's what's actually persisted and enforced against.
+  const handleCanonicalChange = (userId, canonicalList) => {
+    const rawList = [...new Set(canonicalList.flatMap((c) => CANONICAL_TO_RAW_PARTNER[c] || [c]))];
+    setState((s) => ({ ...s, users: s.users.map((u) => (u.id === userId ? { ...u, deliveryPartners: rawList } : u)) }));
     clearTimeout(saveTimers.current[userId]);
-    saveTimers.current[userId] = setTimeout(() => commitSave(userId, partners), 500);
+    saveTimers.current[userId] = setTimeout(() => commitSave(userId, rawList), 500);
   };
 
   if (state.status === 'loading') {
@@ -1245,7 +1266,11 @@ function DeliveryPartnerAccessCard({ showToast }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/50">
-              {state.users.map((u) => (
+              {state.users.map((u) => {
+                // Raw storage collapsed to canonical for display - multiple raw variants under
+                // one canonical name (e.g. every DELHIVERY_* row) always dedupe to one chip.
+                const canonicalSelected = [...new Set(u.deliveryPartners.map(mapPartnerName))];
+                return (
                 <tr key={u.id} className="hover:bg-zinc-800/20 transition-colors">
                   <td className="py-2.5 px-4">
                     <div className="text-zinc-200 font-semibold">{u.name || u.email}</div>
@@ -1254,9 +1279,9 @@ function DeliveryPartnerAccessCard({ showToast }) {
                   <td className="py-2.5 px-4">
                     <div className="flex items-center gap-2">
                       <MultiSelectDropdown
-                        value={u.deliveryPartners}
-                        onChange={(next) => handleChange(u.id, next)}
-                        options={state.partners}
+                        value={canonicalSelected}
+                        onChange={(next) => handleCanonicalChange(u.id, next)}
+                        options={canonicalPartnerOptions}
                         placeholder="All partners"
                         itemNoun="partners"
                       />
@@ -1264,7 +1289,8 @@ function DeliveryPartnerAccessCard({ showToast }) {
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
