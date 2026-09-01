@@ -25,13 +25,19 @@
 // self-claimed from a common unassigned pool, so hiding unclaimed rows from one caller left a
 // newly-invited agent with an empty page and nothing to claim. The GET `agent` param is a plain
 // filter anyone may use to narrow the view to one person (usually themselves).
+//
+// There IS per-user row scoping by Delivery Partner, though - an admin-configured allowlist
+// (see getDeliveryPartnerAccess/allowedPartners below), separate from and on top of the
+// deliveryescalation tab grant itself. Unrestricted by default (empty allowlist = every
+// partner), and only ever applies to a cookie-carrying caller - the no-auth path above has no
+// user to look one up for, same as it skips every other permission check.
 const { getSession } = require('../_lib/session');
 const {
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
   getDeliveryEscalationDaywiseStats, getDeliveryEscalationAwbHistory,
-  getDeliveryEscalationGeoCategoryStats,
+  getDeliveryEscalationGeoCategoryStats, getDeliveryPartnerAccess,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
 } = require('../_lib/db');
@@ -50,6 +56,12 @@ module.exports = async (req, res) => {
   // passing `agent` explicitly (see callerEmail below); getSession() itself never throws for a
   // missing/invalid cookie, it just resolves null.
   const session = await getSession(req).catch(() => null);
+  // Delivery Partner allowlist (see getDeliveryPartnerAccess) - empty for a no-cookie caller
+  // (there's no user to look one up for) or a cookie-carrying user with no restriction
+  // configured, both of which mean unrestricted, same convention the DB layer already uses.
+  // Threaded through every read below so it enforces everywhere at once, not just the ticket
+  // list - stats tiles, export, day-wise table, geo table, AWB history all narrow the same way.
+  const allowedPartners = session ? await getDeliveryPartnerAccess(session.uid) : [];
 
   if (req.method === 'GET') {
     const q = req.query || {};
@@ -69,15 +81,17 @@ module.exports = async (req, res) => {
       dateField: q.dateField || '',
       tatBucket: q.tatBucket || '',
       contactBucket: q.contactBucket && q.contactBucket !== 'ALL' ? q.contactBucket : '',
+      allowedPartners,
     };
     try {
       if (q.op === 'stats') {
-        // Tiles describe the whole desk; agents populates the Agent filter, which everyone with
-        // access now has (it is the only way to get back the old "just my tickets" view).
+        // Tiles describe the whole desk (whole = everything THIS caller may see); agents
+        // populates the Agent filter, which everyone with access now has (it is the only way to
+        // get back the old "just my tickets" view).
         const [stats, agents, repeatStats] = await Promise.all([
-          getDeliveryEscalationStats(),
+          getDeliveryEscalationStats({ allowedPartners }),
           getDeliveryEscalationAgents(),
-          getDeliveryEscalationRepeatStats(),
+          getDeliveryEscalationRepeatStats(allowedPartners),
         ]);
         res.status(200).json({ stats, agents, repeatStats });
         return;
@@ -91,7 +105,7 @@ module.exports = async (req, res) => {
           res.status(400).json({ error: 'awb and brand are required' });
           return;
         }
-        const history = await getDeliveryEscalationAwbHistory(q.awb, q.brand);
+        const history = await getDeliveryEscalationAwbHistory(q.awb, q.brand, allowedPartners);
         res.status(200).json({ rows: history });
         return;
       }
@@ -106,6 +120,7 @@ module.exports = async (req, res) => {
           brand: filters.brand, agent: filters.agent, dateField: q.dateField,
           partner: q.partner ? String(q.partner).split(',').filter(Boolean) : undefined,
           paymentMode: q.paymentMode && q.paymentMode !== 'ALL' ? q.paymentMode : '',
+          allowedPartners,
         });
         res.status(200).json(daywise);
         return;
@@ -123,7 +138,7 @@ module.exports = async (req, res) => {
           return;
         }
         const geo = await getDeliveryEscalationGeoCategoryStats({
-          brand: filters.brand, month: q.month, level, state: q.state, city: q.city,
+          brand: filters.brand, month: q.month, level, state: q.state, city: q.city, allowedPartners,
         });
         res.status(200).json(geo);
         return;

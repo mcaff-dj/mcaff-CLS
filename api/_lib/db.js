@@ -109,7 +109,7 @@ const BOOTSTRAP_TABLES = [
   'mom_boards', 'mom_board_members', 'mom_statuses', 'mom_columns', 'mom_tasks', 'mom_task_field_values',
   'report_cell_comments', 'ndr_lead_assignments', 'calling_process_dispositions', 'calling_business_hours',
   'calling_agent_process', 'calling_teams', 'rto_csv_upload_jobs', 'order_punch_jobs',
-  'order_punch_job_rows', 'order_punch_settings',
+  'order_punch_job_rows', 'order_punch_settings', 'delivery_escalation_partner_access',
 ];
 
 // Fails open (false) on any error - a broken existence check must never be the reason schema
@@ -179,6 +179,23 @@ async function bootstrapSchema() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `;
+  // Which Delivery Partners (Delivery_escalation.delivery_partner, e.g. 'DELHIVERY',
+  // 'SHADOWFAX_DIRECT') an agent may see on the Delivery-Escalation card - an ADDITIONAL,
+  // finer-grained restriction on top of report_tab_permissions' own deliveryescalation tab
+  // grant, not a replacement for it. Same "no rows = no restriction, full access" convention as
+  // report_tab_permissions: this only ever narrows what an already-tab-permitted agent sees, it
+  // can't grant tab access on its own. See getDeliveryPartnerAccess/setDeliveryPartnerAccess and
+  // deFilterSql's own allowedPartners handling for where this is actually enforced.
+  await sql`
+    CREATE TABLE IF NOT EXISTS delivery_escalation_partner_access (
+      user_id INT NOT NULL,
+      delivery_partner VARCHAR(128) NOT NULL,
+      granted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, delivery_partner),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `;
+
   // The npsdeepdive card was renamed to deepdive (gained a CSAT/Agent tab split) -
   // carry forward any rows granted under the old key so no one silently loses
   // access. Safe to run on every cold start: a no-op once the old key is gone.
@@ -574,6 +591,51 @@ async function setTabPermissions(userId, cardKey, tabKeys) {
   for (const tabKey of tabKeys) {
     await sql`INSERT IGNORE INTO report_tab_permissions (user_id, card_key, tab_key) VALUES (${userId}, ${cardKey}, ${tabKey})`;
   }
+}
+
+// Delivery-Escalation's own per-user Delivery Partner allowlist - see
+// delivery_escalation_partner_access's own comment in bootstrapSchema for what this does and
+// doesn't restrict. Empty array = unrestricted (every partner), same convention as
+// getUserTabPermissions' own "no rows" meaning.
+async function getDeliveryPartnerAccess(userId) {
+  await ensureSchema();
+  const { rows } = await sql`SELECT delivery_partner FROM delivery_escalation_partner_access WHERE user_id = ${userId}`;
+  return rows.map((r) => r.delivery_partner);
+}
+
+// One query for every user's own allowlist at once - what the admin picker (api/admin/[action].js's
+// 'delivery-partner-access' GET) renders, same "one query, group in JS" shape handleUsers already
+// uses for tabsByUser.
+async function getAllDeliveryPartnerAccess() {
+  await ensureSchema();
+  const { rows } = await sql`SELECT user_id, delivery_partner FROM delivery_escalation_partner_access`;
+  const byUser = {};
+  for (const r of rows) {
+    (byUser[r.user_id] = byUser[r.user_id] || []).push(r.delivery_partner);
+  }
+  return byUser;
+}
+
+// Replaces the full set of allowed Delivery Partners for userId - an empty array removes the
+// restriction entirely (back to seeing every partner), same shape as setTabPermissions.
+async function setDeliveryPartnerAccess(userId, partners) {
+  await ensureSchema();
+  await sql`DELETE FROM delivery_escalation_partner_access WHERE user_id = ${userId}`;
+  for (const partner of partners) {
+    await sql`INSERT IGNORE INTO delivery_escalation_partner_access (user_id, delivery_partner) VALUES (${userId}, ${partner})`;
+  }
+}
+
+// Every distinct delivery_partner value actually in the table - what the admin picker offers to
+// choose from. Cached (see cachedRead) since this is a full-table DISTINCT scan and the set of
+// partners in use changes far more slowly than any admin session.
+async function getDeliveryEscalationPartnerOptions() {
+  return cachedRead('de-partner-options', async () => {
+    const pool = await getPool();
+    const [rows] = await pool.execute(
+      "SELECT DISTINCT delivery_partner FROM Delivery_escalation WHERE delivery_partner IS NOT NULL AND delivery_partner != '' ORDER BY delivery_partner");
+    return rows.map((r) => r.delivery_partner);
+  });
 }
 
 // Auto-provisions the very first admin(s) from ADMIN_EMAILS on their first successful
@@ -1658,11 +1720,20 @@ const DE_DAYWISE_DATE_FIELDS = { added_date: 'added_date', order_date: 'order_da
 // columns, minus its Forced-RTO/Fresh special-casing - see DE_DAYWISE_BUCKET_SQL's own comment
 // on why those two are whole views instead) - bound as a value, not interpolated, so it needs no
 // whitelist.
-function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket } = {}) {
+// allowedPartners: the calling session's own Delivery Partner allowlist (see
+// getDeliveryPartnerAccess) - empty/omitted means unrestricted, same convention that constant's
+// own comment describes. Applied here rather than as a separate step so every caller of
+// deWhere/deFilterSql (getDeliveryEscalationPage, getDeliveryEscalationStats,
+// getDeliveryEscalationExport) enforces it automatically, with no per-caller opt-in to forget.
+function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, allowedPartners } = {}) {
   const clauses = [];
   const params = [];
   if (brand) { clauses.push('brand = ?'); params.push(brand); }
   if (agent) { clauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
+  if (Array.isArray(allowedPartners) && allowedPartners.length) {
+    clauses.push(`delivery_partner IN (${allowedPartners.map(() => '?').join(',')})`);
+    params.push(...allowedPartners);
+  }
   if (date) {
     const col = DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date';
     if (dateTo) { clauses.push(`DATE(${col}) BETWEEN ? AND ?`); params.push(date, dateTo); }
@@ -1773,7 +1844,9 @@ async function getDeliveryEscalationStats(opts = {}) {
 // turns every ${} into a bound parameter, which would send the predicate as a string literal
 // instead of SQL. Reusing the constant is the point - "unresolved" here is exactly what the
 // Fresh tab lists, so the two can never drift apart if that definition changes.
-async function getDeliveryEscalationRepeatStats() {
+async function getDeliveryEscalationRepeatStats(allowedPartners) {
+  const restricted = Array.isArray(allowedPartners) && allowedPartners.length > 0;
+  const partnerClause = restricted ? ` AND delivery_partner IN (${allowedPartners.map(() => '?').join(',')})` : '';
   const pool = await getPool();
   const [rows] = await pool.execute(`
     SELECT CASE WHEN times = 1 THEN '1 time'
@@ -1787,13 +1860,13 @@ async function getDeliveryEscalationRepeatStats() {
              COUNT(*) AS times,
              MAX(${DE_FRESH_WHERE}) AS has_open
       FROM Delivery_escalation
-      WHERE awb_code IS NOT NULL AND awb_code <> ''
+      WHERE awb_code IS NOT NULL AND awb_code <> ''${partnerClause}
       GROUP BY awb_code
     ) per_awb
     WHERE has_open = 1
     GROUP BY bucket
     ORDER BY sort_key
-  `);
+  `, restricted ? allowedPartners : []);
   return rows.map((r) => ({ bucket: r.bucket, customers: Number(r.customers) || 0 }));
 }
 
@@ -1824,18 +1897,24 @@ async function getDeliveryEscalationRepeatStats() {
 const DE_ORDER_DATE_FLOOR = '2026-06-01';
 
 async function getDeliveryEscalationDaywiseStats(opts = {}) {
-  const { brand, agent, dateField, partner, paymentMode } = opts;
+  const { brand, agent, dateField, partner, paymentMode, allowedPartners } = opts;
   const col = DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date';
   const extraClauses = [];
   const params = [];
   if (brand) { extraClauses.push('brand = ?'); params.push(brand); }
   if (agent) { extraClauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
-  // partner is a list of raw delivery_partner values the client already resolved from its own
-  // canonical-name -> raw-variant map (PARTNER_NAME_MAP in DeliveryEscalationClient.js) - this
-  // stays a dumb IN() over whatever it's handed rather than duplicating that map server-side.
+  // partner is the client's OWN chosen filter (a list of raw delivery_partner values, already
+  // resolved from its canonical-name -> raw-variant map - PARTNER_NAME_MAP in
+  // DeliveryEscalationClient.js); allowedPartners is the security floor underneath it (see
+  // getDeliveryPartnerAccess) - both are plain IN()s, ANDed together when both are present, so a
+  // restricted agent's own partner filter can only ever narrow further, never escape the floor.
   if (Array.isArray(partner) && partner.length) {
     extraClauses.push(`delivery_partner IN (${partner.map(() => '?').join(',')})`);
     params.push(...partner);
+  }
+  if (Array.isArray(allowedPartners) && allowedPartners.length) {
+    extraClauses.push(`delivery_partner IN (${allowedPartners.map(() => '?').join(',')})`);
+    params.push(...allowedPartners);
   }
   if (paymentMode) { extraClauses.push('Payment_Mode = ?'); params.push(paymentMode); }
   const extra = extraClauses.length ? ` AND ${extraClauses.join(' AND ')}` : '';
@@ -1942,13 +2021,17 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
 // Grouped by query_category same as everywhere else on this page, COUNT(DISTINCT awb_code) for
 // the same "how many parcels, not how many rows" reason getDeliveryEscalationDaywiseStats uses.
 async function getDeliveryEscalationGeoCategoryStats(opts = {}) {
-  const { brand, month, level, state, city } = opts;
+  const { brand, month, level, state, city, allowedPartners } = opts;
   if (!month) return { categories: [], rows: [], grandTotal: {}, grandTotalAll: 0 };
   const geoCol = level === 'pincode' ? 'Pincode' : level === 'city' ? 'Shipping_Address_City' : 'Shipping_Address_State';
   const geoKey = level === 'pincode' ? 'pincode' : level === 'city' ? 'city' : 'state';
   const clauses = ['added_date IS NOT NULL', "DATE_FORMAT(added_date, '%Y-%m') = ?"];
   const params = [month];
   if (brand) { clauses.push('brand = ?'); params.push(brand); }
+  if (Array.isArray(allowedPartners) && allowedPartners.length) {
+    clauses.push(`delivery_partner IN (${allowedPartners.map(() => '?').join(',')})`);
+    params.push(...allowedPartners);
+  }
   if (level === 'city' || level === 'pincode') {
     clauses.push("COALESCE(Shipping_Address_State, 'Unknown') = ?");
     params.push(state || 'Unknown');
@@ -2006,11 +2089,13 @@ async function getDeliveryEscalationAgents() {
 // scoping disposeDeliveryEscalationTicketById's cascade already uses for "this AWB" - a bare
 // awb_code isn't guaranteed unique across both brands. No paging: contact_count (bounded, see
 // its own sync) keeps this a handful of rows, never the whole table.
-async function getDeliveryEscalationAwbHistory(awb, brand) {
+async function getDeliveryEscalationAwbHistory(awb, brand, allowedPartners) {
+  const restricted = Array.isArray(allowedPartners) && allowedPartners.length > 0;
+  const partnerClause = restricted ? ` AND delivery_partner IN (${allowedPartners.map(() => '?').join(',')})` : '';
   const pool = await getPool();
   const [rows] = await pool.execute(
-    `SELECT ${DE_SELECT_COLUMNS} FROM Delivery_escalation WHERE awb_code = ? AND brand = ? ORDER BY id DESC`,
-    [awb, brand]
+    `SELECT ${DE_SELECT_COLUMNS} FROM Delivery_escalation WHERE awb_code = ? AND brand = ?${partnerClause} ORDER BY id DESC`,
+    restricted ? [awb, brand, ...allowedPartners] : [awb, brand]
   );
   return rows;
 }
@@ -3891,6 +3976,8 @@ async function getDeliveredAwbNumbers(awbNumbers) {
 module.exports = {
   sql, ensureSchema, CARD_KEYS, CARD_LABELS,
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
+  getDeliveryPartnerAccess, getAllDeliveryPartnerAccess, setDeliveryPartnerAccess,
+  getDeliveryEscalationPartnerOptions,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
   getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow,

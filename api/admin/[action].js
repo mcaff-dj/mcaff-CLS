@@ -43,6 +43,12 @@
 //                                        FULL ADMIN ONLY (see handleCallingTeams for why).
 //   PUT    /api/admin/calling-teams   -> update: { id, name?, sheetId?, sheetTab?, active? }
 //                                        FULL ADMIN ONLY (see handleCallingTeams for why).
+//   GET    /api/admin/delivery-partner-access -> { users: [{id,email,name,deliveryPartners}],
+//                                        partners: [...] } - Delivery-Escalation's own per-user
+//                                        Delivery Partner allowlist, on top of the
+//                                        deliveryescalation tab grant, not instead of it.
+//   PUT    /api/admin/delivery-partner-access -> { userId, partners: [...] } - replaces that
+//                                        user's own list; [] removes the restriction.
 const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser,
   getUserByEmail, getUserTabPermissions,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours, logEvent,
@@ -50,7 +56,8 @@ const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser
   isCallingProcessAdmin, getAdministeredProcesses, resolveCallerTeam,
   listCallingTeams, createCallingTeam, updateCallingTeam,
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
-  deleteProcessDisposition, reorderProcessDispositions } = require('../_lib/db');
+  deleteProcessDisposition, reorderProcessDispositions,
+  getAllDeliveryPartnerAccess, setDeliveryPartnerAccess, getDeliveryEscalationPartnerOptions } = require('../_lib/db');
 const { teamScopeFor, coerceTeamId } = require('../_lib/callingTeams');
 const { dispositionTeamFor } = require('../_lib/dispositionTrees');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
@@ -681,6 +688,61 @@ async function handleDispositions(req, res, session) {
 }
 
 // GET    ?process=<key>       -> that process's teams (active only unless ?includeInactive=1)
+// Delivery-Escalation's own per-user Delivery Partner allowlist (delivery_escalation_partner_
+// access) - an ADDITIONAL restriction on top of the deliveryescalation tab grant itself, not a
+// replacement for it (see that table's own comment in bootstrapSchema). Readable/writable by a
+// full admin OR a 'deliveryescalation' process admin (isCallingProcessAdmin) - no team concept
+// here (this process has none, see DeliveryEscalationClient.js's own header comment), so unlike
+// handleCallingTeams there's no "which team's data" question to gate on.
+//
+// GET -> { users: [{id, email, name, deliveryPartners: [...]}], partners: [...every distinct
+//         delivery_partner value in Delivery_escalation] } - users is pre-filtered to whoever
+//         would actually see the deliveryescalation tab (full admin, or holds the 'calling' card
+//         with no tab restriction, or with deliveryescalation explicitly in their tab list) -
+//         configuring this for someone who can't open the tab at all wouldn't do anything.
+// PUT { userId, partners: [...] } -> replaces that user's own list entirely; [] removes the
+//         restriction (back to every partner).
+async function handleDeliveryPartnerAccess(req, res, session) {
+  const isProcessAdmin = session.isAdmin || await isCallingProcessAdmin(session.email, 'deliveryescalation');
+  if (!isProcessAdmin) {
+    res.status(403).json({ error: 'You do not administer Delivery-Escalation' });
+    return;
+  }
+
+  if (req.method === 'GET') {
+    const { rows: users } = await sql`SELECT id, email, name, is_admin FROM users ORDER BY email`;
+    const { rows: perms } = await sql`SELECT user_id FROM permissions WHERE card_key = 'calling'`;
+    const { rows: tabPerms } = await sql`SELECT user_id, tab_key FROM report_tab_permissions WHERE card_key = 'calling'`;
+    const callingUserIds = new Set(perms.map((p) => p.user_id));
+    const restrictedTabsByUser = {};
+    tabPerms.forEach((t) => { (restrictedTabsByUser[t.user_id] = restrictedTabsByUser[t.user_id] || []).push(t.tab_key); });
+    const eligible = users.filter((u) => {
+      if (u.is_admin) return true; // full admin: every card/tab, regardless of `permissions` rows
+      if (!callingUserIds.has(u.id)) return false; // no Calling card at all
+      const tabs = restrictedTabsByUser[u.id];
+      return !tabs || tabs.length === 0 || tabs.includes('deliveryescalation');
+    });
+    const [byUser, partners] = await Promise.all([
+      getAllDeliveryPartnerAccess(),
+      getDeliveryEscalationPartnerOptions(),
+    ]);
+    const result = eligible.map((u) => ({ id: u.id, email: u.email, name: u.name, deliveryPartners: byUser[u.id] || [] }));
+    res.status(200).json({ users: result, partners });
+    return;
+  }
+
+  if (req.method === 'PUT') {
+    const body = parseBody(req);
+    if (!body.userId) { res.status(400).json({ error: 'userId is required' }); return; }
+    const partners = Array.isArray(body.partners) ? body.partners.filter((p) => typeof p === 'string' && p) : [];
+    await setDeliveryPartnerAccess(body.userId, partners);
+    res.status(200).json({ ok: true });
+    return;
+  }
+
+  res.status(405).json({ error: 'Method not allowed' });
+}
+
 // POST   { processKey, name, sheetId, sheetTab }        -> create   (FULL ADMIN ONLY)
 // PUT    { id, name?, sheetId?, sheetTab?, active? }    -> update   (FULL ADMIN ONLY)
 //
@@ -786,7 +848,7 @@ module.exports = async (req, res) => {
   // being read or written; passing this gate alone authorises nothing. 'calling-teams' is
   // listed here only for its GET branch (a team lead reading its own team name) - the handler
   // itself still turns every POST/PUT away from anyone but a full admin.
-  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'calling-agents', 'dispositions', 'calling-teams'];
+  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'calling-agents', 'dispositions', 'calling-teams', 'delivery-partner-access'];
   if (!session.isAdmin && !PROCESS_ADMIN_ACTIONS.includes(action)) {
     res.status(403).json({ error: 'Forbidden' });
     return;
@@ -799,6 +861,7 @@ module.exports = async (req, res) => {
   if (action === 'calling-agents') return handleCallingAgents(req, res, session);
   if (action === 'dispositions') return handleDispositions(req, res, session);
   if (action === 'calling-teams') return handleCallingTeams(req, res, session);
+  if (action === 'delivery-partner-access') return handleDeliveryPartnerAccess(req, res, session);
 
   res.status(404).json({ error: 'Unknown admin route' });
 };

@@ -41,6 +41,16 @@ const CONTACT_BUCKET_OPTIONS = [
   { value: '5-9', label: '5-9 times' },
   { value: '10+', label: '10+ times' },
 ];
+// Quick date-range presets for the filter bar, shared by every tab (Fresh/Forced RTO/Resolved/
+// New Order Placed all render the same filter row - see the `listTab` block below).
+const DATE_RANGE_PRESET_OPTIONS = [
+  { value: 'all', label: 'All Dates' },
+  { value: 'today', label: 'Today' },
+  { value: 'yesterday', label: 'Yesterday' },
+  { value: 'this_month', label: 'This Month' },
+  { value: 'last_month', label: 'Last Month' },
+  { value: 'custom', label: 'Custom' },
+];
 const CARD_KEY = 'calling';
 const TAB_KEY = 'deliveryescalation';
 
@@ -132,6 +142,35 @@ async function getJson(url) {
 function formatDaywiseDate(d) {
   if (!d) return d;
   return new Date(`${d}T00:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+// { y, m, d } of "today" in IST (Asia/Kolkata), regardless of the browser's own timezone -
+// matches the backend's own IST calendar-day convention for date filters (see api/_lib/db.js's
+// dateBounds). en-CA formats as 'YYYY-MM-DD', the one locale that does by default.
+function istTodayParts() {
+  const [y, m, d] = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }).split('-').map(Number);
+  return { y, m, d };
+}
+// y/m/d as plain numbers (m is 1-12, either can be out of its normal range) -> 'YYYY-MM-DD'.
+// Built on Date.UTC, never the browser's local timezone, specifically so day=0/month=-1 etc.
+// normalize (day 0 = last day of the previous month) without any manual carry logic, and so this
+// never drifts by the browser's own UTC offset the way `new Date(dateStr)` would.
+function ymd(y, m, d) {
+  return new Date(Date.UTC(y, m - 1, d)).toISOString().slice(0, 10);
+}
+// Presets for DATE_RANGE_PRESET_OPTIONS above - returns { from, to } (YYYY-MM-DD), or null for
+// 'all'/'custom' (both leave the current from/to alone: 'all' is cleared by the caller instead,
+// 'custom' is the agent typing both ends by hand).
+function dateRangeForPreset(preset) {
+  const { y, m, d } = istTodayParts();
+  const todayStr = ymd(y, m, d);
+  switch (preset) {
+    case 'today': return { from: todayStr, to: todayStr };
+    case 'yesterday': { const t = ymd(y, m, d - 1); return { from: t, to: t }; }
+    case 'this_month': return { from: ymd(y, m, 1), to: todayStr };
+    case 'last_month': return { from: ymd(y, m - 1, 1), to: ymd(y, m, 0) };
+    default: return null;
+  }
 }
 
 // The exact string checkAccess() in record.js/sheet.js sends when getSession(req) comes back
@@ -1110,6 +1149,145 @@ function downloadNewOrderAwbSampleCsv() {
   URL.revokeObjectURL(url);
 }
 
+// Admin Panel card - per-user Delivery Partner allowlist (see api/admin/[action].js's
+// handleDeliveryPartnerAccess). Self-contained fetch/save, same pattern as ProcessDispositionsCard
+// alongside it, but its own component rather than reusing useProcessDispositions - this isn't a
+// disposition tree, it's a flat per-user partner list against a totally different endpoint.
+//
+// pending[userId] is a Set of the LOCAL, unsaved selection for that user (undefined = no edits
+// yet, falls back to the last-loaded deliveryPartners) - so switching chips for one agent never
+// touches any other agent's row, and each row saves independently via its own button.
+function DeliveryPartnerAccessCard({ showToast }) {
+  const [state, setState] = useState({ status: 'loading', users: [], partners: [] });
+  const [saving, setSaving] = useState(null);
+  const [pending, setPending] = useState({});
+
+  const load = useCallback(async () => {
+    setState((s) => ({ ...s, status: 'loading' }));
+    try {
+      const r = await fetch('/api/admin/delivery-partner-access');
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `Load failed (${r.status})`);
+      setState({ status: 'loaded', users: d.users || [], partners: d.partners || [] });
+      setPending({});
+    } catch (e) {
+      setState({ status: 'error', users: [], partners: [], error: e.message });
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const toggle = (userId, partner) => {
+    setPending((prev) => {
+      const base = prev[userId] || new Set(state.users.find((u) => u.id === userId)?.deliveryPartners || []);
+      const next = new Set(base);
+      if (next.has(partner)) next.delete(partner); else next.add(partner);
+      return { ...prev, [userId]: next };
+    });
+  };
+
+  const save = async (userId) => {
+    const set = pending[userId];
+    if (!set) return; // nothing changed for this user - no-op
+    setSaving(userId);
+    try {
+      const r = await fetch('/api/admin/delivery-partner-access', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, partners: [...set] }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `Save failed (${r.status})`);
+      setState((s) => ({ ...s, users: s.users.map((u) => (u.id === userId ? { ...u, deliveryPartners: [...set] } : u)) }));
+      setPending((prev) => { const next = { ...prev }; delete next[userId]; return next; });
+      showToast?.('Delivery Partner access saved');
+    } catch (e) {
+      showToast?.(`⚠️ Could not save: ${e.message}`);
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  if (state.status === 'loading') {
+    return (
+      <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5">
+        <p className="text-zinc-500 text-[13px]">Loading Delivery Partner access…</p>
+      </div>
+    );
+  }
+  if (state.status === 'error') {
+    return (
+      <div className="bg-zinc-900/60 rounded-xl border border-rose-900/50 p-5 space-y-2">
+        <p className="text-rose-400 text-[13px]">Could not load Delivery Partner access: {state.error}</p>
+        <button onClick={load} className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[12px] font-semibold">Retry</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
+      <div className="flex items-center gap-3">
+        <span className="h-9 w-9 rounded-lg bg-indigo-500/10 flex items-center justify-center text-lg">🚚</span>
+        <div>
+          <h3 className="text-[15px] font-bold text-zinc-100">Delivery Partner Access</h3>
+          <p className="text-[12px] text-zinc-500">
+            Restrict which Delivery Partners each agent may see - on top of their existing Delivery-Escalation access, not instead of it. No partners selected = sees every partner.
+          </p>
+        </div>
+      </div>
+      <div className="space-y-3">
+        {state.users.length === 0 && (
+          <p className="text-[12px] text-zinc-500">No one has Delivery-Escalation access yet.</p>
+        )}
+        {state.users.map((u) => {
+          const selected = pending[u.id] || new Set(u.deliveryPartners);
+          const dirty = !!pending[u.id];
+          return (
+            <div key={u.id} className="border border-zinc-800 rounded-lg p-3">
+              <div className="flex items-center justify-between mb-2 gap-2">
+                <div className="text-[13px] text-zinc-200 font-semibold truncate">{u.name || u.email}</div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-[11px] text-zinc-500">
+                    {selected.size === 0 ? 'All partners' : `${selected.size} partner${selected.size === 1 ? '' : 's'}`}
+                  </span>
+                  {dirty && (
+                    <button
+                      onClick={() => save(u.id)}
+                      disabled={saving === u.id}
+                      className="px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold transition-colors disabled:opacity-50"
+                    >
+                      {saving === u.id ? 'Saving…' : 'Save'}
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {state.partners.map((p) => {
+                  const checked = selected.has(p);
+                  return (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => toggle(u.id, p)}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border transition-colors ${checked
+                          ? 'bg-indigo-600 border-indigo-500 text-white'
+                          : 'bg-zinc-950/60 border-zinc-800 text-zinc-400 hover:border-zinc-700'
+                        }`}
+                    >
+                      {p}
+                    </button>
+                  );
+                })}
+                {state.partners.length === 0 && <span className="text-[11px] text-zinc-600">No delivery partners found.</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function DeliveryEscalationClient() {
   // Same theme setup as every other Calling page - one theme, always; body.theme-light in
   // app/globals.css repaints the "dark" Tailwind classes used throughout to a light background.
@@ -1159,7 +1337,13 @@ export default function DeliveryEscalationClient() {
   // Query Date here, same as the rest of this page) or 'order_date' (when the order was placed).
   const [daywiseDateBasis, setDaywiseDateBasis] = useState(() => safeStorage.getItem('de_daywise_date_basis') || 'added_date');
   const [agentFilter, setAgentFilter] = useState('ALL');
+  // dateFilter/dateFilterTo are the actual from/to bounds sent to the server (see
+  // effectiveFilters below) - dateRangePreset is purely a UI convenience that fills them in.
+  // 'custom' leaves them for the agent to type by hand; any other preset (over)writes both from
+  // handleDateRangePresetChange.
+  const [dateRangePreset, setDateRangePreset] = useState(() => safeStorage.getItem('de_date_range_preset') || 'all');
   const [dateFilter, setDateFilter] = useState('');
+  const [dateFilterTo, setDateFilterTo] = useState('');
   // Which date column the ticket list's date filter (and its CSV export) matches against -
   // same 'added_date'/'order_date' choice as the Overview tab's day-wise table.
   const [dateFilterBasis, setDateFilterBasis] = useState(() => safeStorage.getItem('de_date_filter_basis') || 'added_date');
@@ -1389,12 +1573,23 @@ export default function DeliveryEscalationClient() {
   // therefore refetch) on every render, not just on an actual filter change.
   const effectiveDateFilter = useMemo(() => (dateDrill
     ? { date: dateDrill.dateFrom, dateTo: dateDrill.dateTo, dateField: dateDrill.dateField, tatBucket: dateDrill.tatBucket }
-    : { date: dateFilter, dateTo: '', dateField: dateFilterBasis, tatBucket: '' }
-  ), [dateDrill, dateFilter, dateFilterBasis]);
+    : { date: dateFilter, dateTo: dateFilterTo, dateField: dateFilterBasis, tatBucket: '' }
+  ), [dateDrill, dateFilter, dateFilterTo, dateFilterBasis]);
 
   // Any change to what's being asked for restarts at page 1 - staying on page 12 of a filter
   // that now has 3 pages would just show an empty table.
-  useEffect(() => { setPage(1); }, [tab, debouncedSearch, brandFilter, agentFilter, dateFilter, dateFilterBasis, dateDrill, contactBucketFilter, perPage]);
+  useEffect(() => { setPage(1); }, [tab, debouncedSearch, brandFilter, agentFilter, dateFilter, dateFilterTo, dateFilterBasis, dateDrill, contactBucketFilter, perPage]);
+
+  // Picking a preset (over)writes both dateFilter/dateFilterTo; 'custom' leaves them for the
+  // agent to type; 'all' clears them (there's no preset that means "no filter" to compute a
+  // range for).
+  const handleDateRangePreset = (v) => {
+    setDateRangePreset(v);
+    safeStorage.setItem('de_date_range_preset', v);
+    if (v === 'all') { setDateFilter(''); setDateFilterTo(''); return; }
+    const range = dateRangeForPreset(v);
+    if (range) { setDateFilter(range.from); setDateFilterTo(range.to); }
+  };
 
   // Guards against a slow earlier request landing after a faster later one and overwriting the
   // newer rows - only the most recent request is allowed to apply its result.
@@ -2181,13 +2376,30 @@ export default function DeliveryEscalationClient() {
                         </span>
                       ) : (
                         <>
-                          <input
-                            type="date"
-                            value={dateFilter}
-                            onChange={e => setDateFilter(e.target.value)}
-                            title={`Filter by ${dateFilterBasis === 'order_date' ? 'order' : 'query'} date (${dateFilterBasis})`}
-                            className="h-8 px-3 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                          <CustomSelect
+                            value={dateRangePreset}
+                            onChange={handleDateRangePreset}
+                            options={DATE_RANGE_PRESET_OPTIONS}
+                            placeholder="Date Range"
                           />
+                          {dateRangePreset === 'custom' && (
+                            <>
+                              <input
+                                type="date"
+                                value={dateFilter}
+                                onChange={e => setDateFilter(e.target.value)}
+                                title={`From (${dateFilterBasis === 'order_date' ? 'order' : 'query'} date)`}
+                                className="h-8 px-3 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                              />
+                              <input
+                                type="date"
+                                value={dateFilterTo}
+                                onChange={e => setDateFilterTo(e.target.value)}
+                                title={`To (${dateFilterBasis === 'order_date' ? 'order' : 'query'} date)`}
+                                className="h-8 px-3 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                              />
+                            </>
+                          )}
                           <CustomSelect
                             value={dateFilterBasis}
                             onChange={(v) => { setDateFilterBasis(v); safeStorage.setItem('de_date_filter_basis', v); }}
@@ -2344,6 +2556,7 @@ export default function DeliveryEscalationClient() {
               {tab === 'admin' && sessionIsAdmin && (
                 <ProcessDispositionsCard processLabel="Delivery-Escalation" disp={disp} allowInputTypeControl />
               )}
+              {tab === 'admin' && sessionIsAdmin && <DeliveryPartnerAccessCard showToast={showToast} />}
             </div>
           </div>
         )}
