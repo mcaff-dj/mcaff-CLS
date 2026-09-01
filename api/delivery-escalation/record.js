@@ -81,6 +81,10 @@ module.exports = async (req, res) => {
       dateField: q.dateField || '',
       tatBucket: q.tatBucket || '',
       contactBucket: q.contactBucket && q.contactBucket !== 'ALL' ? q.contactBucket : '',
+      // The ticket list's own Delivery Partner filter, comma-joined raw values (client already
+      // resolved canonical -> raw - see DeliveryEscalationClient.js's filterQuery). Distinct from
+      // allowedPartners: this is a user-chosen filter, that's the always-enforced access floor.
+      partner: q.partner ? String(q.partner).split(',').filter(Boolean) : undefined,
       allowedPartners,
     };
     try {
@@ -116,10 +120,14 @@ module.exports = async (req, res) => {
         // spans Fresh+Resolved+Forced RTO in one table. partner arrives as a comma-joined list
         // of raw delivery_partner values (the client already resolved its own canonical-name
         // filter down to that list - see PARTNER_NAME_MAP in DeliveryEscalationClient.js).
+        // dateFrom/dateTo are this table's OWN date-range filter, independent of the ticket
+        // list's own `date`/`dateTo` (q.date/q.dateTo) - the day-wise table has no `view`, so it
+        // can't share deWhere/deFilterSql, hence separate query params.
         const daywise = await getDeliveryEscalationDaywiseStats({
           brand: filters.brand, agent: filters.agent, dateField: q.dateField,
           partner: q.partner ? String(q.partner).split(',').filter(Boolean) : undefined,
           paymentMode: q.paymentMode && q.paymentMode !== 'ALL' ? q.paymentMode : '',
+          dateFrom: q.dateFrom || '', dateTo: q.dateTo || '',
           allowedPartners,
         });
         res.status(200).json(daywise);

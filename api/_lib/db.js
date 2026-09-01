@@ -1725,11 +1725,20 @@ const DE_DAYWISE_DATE_FIELDS = { added_date: 'added_date', order_date: 'order_da
 // own comment describes. Applied here rather than as a separate step so every caller of
 // deWhere/deFilterSql (getDeliveryEscalationPage, getDeliveryEscalationStats,
 // getDeliveryEscalationExport) enforces it automatically, with no per-caller opt-in to forget.
-function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, allowedPartners } = {}) {
+function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, allowedPartners } = {}) {
   const clauses = [];
   const params = [];
   if (brand) { clauses.push('brand = ?'); params.push(brand); }
   if (agent) { clauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
+  // partner is the ticket list's OWN Delivery Partner filter (a list of raw values, already
+  // resolved from canonical - PARTNER_NAME_MAP in DeliveryEscalationClient.js), same
+  // relationship to allowedPartners (the access floor) that getDeliveryEscalationDaywiseStats'
+  // own partner/allowedPartners pair already has - both plain IN()s, ANDed, so this can only
+  // narrow further, never escape the floor.
+  if (Array.isArray(partner) && partner.length) {
+    clauses.push(`delivery_partner IN (${partner.map(() => '?').join(',')})`);
+    params.push(...partner);
+  }
   if (Array.isArray(allowedPartners) && allowedPartners.length) {
     clauses.push(`delivery_partner IN (${allowedPartners.map(() => '?').join(',')})`);
     params.push(...allowedPartners);
@@ -1897,7 +1906,7 @@ async function getDeliveryEscalationRepeatStats(allowedPartners) {
 const DE_ORDER_DATE_FLOOR = '2026-06-01';
 
 async function getDeliveryEscalationDaywiseStats(opts = {}) {
-  const { brand, agent, dateField, partner, paymentMode, allowedPartners } = opts;
+  const { brand, agent, dateField, partner, paymentMode, allowedPartners, dateFrom, dateTo } = opts;
   const col = DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date';
   const extraClauses = [];
   const params = [];
@@ -1924,6 +1933,18 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
   // silently zero out.
   const floorClause = col === 'order_date' ? ' AND order_date >= ?' : '';
   const floorParams = col === 'order_date' ? [DE_ORDER_DATE_FLOOR] : [];
+  // Same reasoning as the floor above, same restriction to the dated-rows query only: a NULL-date
+  // row can never fall inside a `col BETWEEN` range by definition, so applying this to noDateCount
+  // too would always contradict its own `col IS NULL` and silently zero it out - exactly the bug
+  // class this file's other comments (DE_FORCED_RTO_WHERE, DE_FRESH_WHERE) already document for
+  // SQL's three-valued logic, just via a different mechanism (AND-ing two clauses that can never
+  // both be true, rather than a bare NULL propagating through NOT()).
+  // DATE(${col}), not a bare BETWEEN on the column - same reason deFilterSql's own date/dateTo
+  // wraps it: col is a DATETIME, and a plain string bound `'2026-08-16'` compares as
+  // '2026-08-16 00:00:00', which would wrongly exclude every row on the end date that has a
+  // real time component.
+  const rangeClause = dateFrom && dateTo ? ` AND DATE(${col}) BETWEEN ? AND ?` : '';
+  const rangeParams = dateFrom && dateTo ? [dateFrom, dateTo] : [];
   // COUNT(DISTINCT awb_code), not COUNT(*) - same "how many parcels, not how many rows" fix
   // getDeliveryEscalationStats' own Fresh tile already applies (see its comment): a repeat-
   // contact AWB gets a fresh ticket_number per day it's still flagged, so row count double-
@@ -1932,10 +1953,10 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
   const [rows] = await pool.execute(`
     SELECT DATE_FORMAT(${col}, '%Y-%m-%d') AS d, COALESCE(delivery_partner, 'Unknown') AS partner, COALESCE(query_category, 'Unknown') AS category, ${DE_CONTACT_BUCKET_SQL} AS contactBucket, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(DISTINCT awb_code) AS c
     FROM Delivery_escalation
-    WHERE ${col} IS NOT NULL${extra}${floorClause}
+    WHERE ${col} IS NOT NULL${extra}${floorClause}${rangeClause}
     GROUP BY d, partner, category, contactBucket, bucket
     ORDER BY d
-  `, [...params, ...floorParams]);
+  `, [...params, ...floorParams, ...rangeParams]);
   const [[{ noDateCount }]] = await pool.execute(
     `SELECT COUNT(DISTINCT awb_code) AS noDateCount FROM Delivery_escalation WHERE ${col} IS NULL${extra}`, params);
 

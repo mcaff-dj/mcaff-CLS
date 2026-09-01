@@ -834,7 +834,7 @@ function GeoCategoryTable({
   );
 }
 
-function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket }) {
+function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner }) {
   const p = new URLSearchParams();
   if (view) p.set('view', view);
   if (search) p.set('search', search);
@@ -845,12 +845,16 @@ function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatB
   if (date && dateField) p.set('dateField', dateField);
   if (tatBucket) p.set('tatBucket', tatBucket);
   if (contactBucket && contactBucket !== 'ALL') p.set('contactBucket', contactBucket);
+  // Canonical name -> every raw delivery_partner variant it folds into, same
+  // CANONICAL_TO_RAW_PARTNER convention fetchDaywiseStats already uses - the server only ever
+  // filters the raw column, never learns what "canonical" means.
+  if (partner && partner !== 'ALL') p.set('partner', (CANONICAL_TO_RAW_PARTNER[partner] || [partner]).join(','));
   return p;
 }
 
 // One page of whichever tab is open, with the current filters applied server-side.
-async function fetchPage({ view, page, perPage, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket }) {
-  const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket });
+async function fetchPage({ view, page, perPage, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner }) {
+  const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner });
   p.set('page', String(page));
   p.set('perPage', String(perPage));
   const d = await getJson(`/api/delivery-escalation/record?${p}`);
@@ -890,13 +894,14 @@ async function fetchStats() {
 
 // Overview's day-wise TAT table - unlike fetchStats above, this DOES take the page's current
 // brand/agent filters (see record.js's own op=daywise comment on why).
-async function fetchDaywiseStats({ brand, agent, dateField, partner, paymentMode }) {
+async function fetchDaywiseStats({ brand, agent, dateField, partner, paymentMode, dateFrom, dateTo }) {
   const p = new URLSearchParams({ op: 'daywise' });
   if (brand && brand !== 'ALL') p.set('brand', brand);
   if (agent && agent !== 'ALL') p.set('agent', agent);
   if (dateField) p.set('dateField', dateField);
   if (partner && partner !== 'ALL') p.set('partner', (CANONICAL_TO_RAW_PARTNER[partner] || [partner]).join(','));
   if (paymentMode && paymentMode !== 'ALL') p.set('paymentMode', paymentMode);
+  if (dateFrom && dateTo) { p.set('dateFrom', dateFrom); p.set('dateTo', dateTo); }
   const d = await getJson(`/api/delivery-escalation/record?${p}`);
   return {
     buckets: d.buckets || [],
@@ -1043,10 +1048,10 @@ const EXPORT_COLUMNS = [
 // db.js/record.js); this walks page 1, 2, 3... until a chunk comes back short, then builds one
 // CSV from everything collected. onChunk reports progress for a long export.
 // ﻿ prefix: without a BOM Excel reads a UTF-8 CSV as ANSI and mangles non-ASCII text.
-async function downloadCsv({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket }, onChunk) {
+async function downloadCsv({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner }, onChunk) {
   const rows = [];
   for (let page = 1; ; page++) {
-    const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket });
+    const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner });
     p.set('op', 'export');
     p.set('page', String(page));
     const d = await getJson(`/api/delivery-escalation/record?${p}`);
@@ -1347,7 +1352,21 @@ export default function DeliveryEscalationClient() {
   // Which date column the TAT-by-date table's rows are grouped under - 'added_date' (labeled
   // Query Date here, same as the rest of this page) or 'order_date' (when the order was placed).
   const [daywiseDateBasis, setDaywiseDateBasis] = useState(() => safeStorage.getItem('de_daywise_date_basis') || 'added_date');
+  // The day-wise table's OWN date-range filter - independent of the ticket list's dateRangePreset/
+  // dateFilter/dateFilterTo below (this table has no `view`, spans Fresh+Resolved+Forced RTO at
+  // once, and filters the DATE-GROUPED rows themselves rather than a ticket list). Same
+  // preset/custom shape and same istTodayParts/dateRangeForPreset helpers, just its own state.
+  const [daywiseDateRangePreset, setDaywiseDateRangePreset] = useState(() => safeStorage.getItem('de_daywise_date_range_preset') || 'all');
+  const [daywiseDateFrom, setDaywiseDateFrom] = useState('');
+  const [daywiseDateTo, setDaywiseDateTo] = useState('');
   const [agentFilter, setAgentFilter] = useState('ALL');
+  // Ticket list's own Delivery Partner filter (Fresh/Forced RTO/Resolved/New Order Placed all
+  // share this one filter bar) - a canonical name, same PARTNER_FILTER_OPTIONS/
+  // CANONICAL_TO_RAW_PARTNER convention as daywisePartnerFilter above, resolved to raw values in
+  // filterQuery. Separate from allowedPartners (the admin-set access floor, always enforced,
+  // never shown as a filter) - this one narrows further, same relationship
+  // getDeliveryEscalationDaywiseStats' own partner/allowedPartners pair already has.
+  const [partnerFilter, setPartnerFilter] = useState(() => safeStorage.getItem('de_partner_filter') || 'ALL');
   // dateFilter/dateFilterTo are the actual from/to bounds sent to the server (see
   // effectiveFilters below) - dateRangePreset is purely a UI convenience that fills them in.
   // 'custom' leaves them for the agent to type by hand; any other preset (over)writes both from
@@ -1589,7 +1608,7 @@ export default function DeliveryEscalationClient() {
 
   // Any change to what's being asked for restarts at page 1 - staying on page 12 of a filter
   // that now has 3 pages would just show an empty table.
-  useEffect(() => { setPage(1); }, [tab, debouncedSearch, brandFilter, agentFilter, dateFilter, dateFilterTo, dateFilterBasis, dateDrill, contactBucketFilter, perPage]);
+  useEffect(() => { setPage(1); }, [tab, debouncedSearch, brandFilter, agentFilter, partnerFilter, dateFilter, dateFilterTo, dateFilterBasis, dateDrill, contactBucketFilter, perPage]);
 
   // Picking a preset (over)writes both dateFilter/dateFilterTo; 'custom' leaves them for the
   // agent to type; 'all' clears them (there's no preset that means "no filter" to compute a
@@ -1600,6 +1619,15 @@ export default function DeliveryEscalationClient() {
     if (v === 'all') { setDateFilter(''); setDateFilterTo(''); return; }
     const range = dateRangeForPreset(v);
     if (range) { setDateFilter(range.from); setDateFilterTo(range.to); }
+  };
+
+  // Same shape as handleDateRangePreset above, own state - see daywiseDateRangePreset's comment.
+  const handleDaywiseDateRangePreset = (v) => {
+    setDaywiseDateRangePreset(v);
+    safeStorage.setItem('de_daywise_date_range_preset', v);
+    if (v === 'all') { setDaywiseDateFrom(''); setDaywiseDateTo(''); return; }
+    const range = dateRangeForPreset(v);
+    if (range) { setDaywiseDateFrom(range.from); setDaywiseDateTo(range.to); }
   };
 
   // Guards against a slow earlier request landing after a faster later one and overwriting the
@@ -1614,7 +1642,7 @@ export default function DeliveryEscalationClient() {
     try {
       const res = await fetchPage({
         view: tab, page, perPage, search: debouncedSearch, brand: brandFilter, agent: agentFilter,
-        contactBucket: contactBucketFilter, ...effectiveDateFilter,
+        contactBucket: contactBucketFilter, partner: partnerFilter, ...effectiveDateFilter,
       });
       if (reqId !== reqIdRef.current) return;
       setRows(res.rows);
@@ -1631,7 +1659,7 @@ export default function DeliveryEscalationClient() {
     } finally {
       if (reqId === reqIdRef.current) setSyncing(false);
     }
-  }, [listTab, tab, page, perPage, debouncedSearch, brandFilter, agentFilter, contactBucketFilter, effectiveDateFilter, showToast]);
+  }, [listTab, tab, page, perPage, debouncedSearch, brandFilter, agentFilter, contactBucketFilter, partnerFilter, effectiveDateFilter, showToast]);
 
   const loadStats = useCallback(async () => {
     try {
@@ -1656,6 +1684,7 @@ export default function DeliveryEscalationClient() {
       setDaywise(await fetchDaywiseStats({
         brand: brandFilter, agent: agentFilter, dateField: daywiseDateBasis,
         partner: daywisePartnerFilter, paymentMode: daywisePaymentModeFilter,
+        dateFrom: daywiseDateFrom, dateTo: daywiseDateTo,
       }));
     } catch (e) {
       console.error('Delivery-Escalation daywise stats failed:', e);
@@ -1663,7 +1692,7 @@ export default function DeliveryEscalationClient() {
     } finally {
       setDaywiseLoading(false);
     }
-  }, [tab, brandFilter, agentFilter, daywiseDateBasis, daywisePartnerFilter, daywisePaymentModeFilter]);
+  }, [tab, brandFilter, agentFilter, daywiseDateBasis, daywisePartnerFilter, daywisePaymentModeFilter, daywiseDateFrom, daywiseDateTo]);
 
   // Clicking a bucket cell in the day-wise table (a month/week's rolled-up count, or a single
   // day once expanded) jumps to the tab that actually holds those rows and filters the list down
@@ -1868,7 +1897,7 @@ export default function DeliveryEscalationClient() {
     setExporting(true);
     try {
       const { count } = await downloadCsv(
-        { view: tab, search: debouncedSearch, brand: brandFilter, agent: agentFilter, contactBucket: contactBucketFilter, ...effectiveDateFilter },
+        { view: tab, search: debouncedSearch, brand: brandFilter, agent: agentFilter, contactBucket: contactBucketFilter, partner: partnerFilter, ...effectiveDateFilter },
         (soFar) => showToast(`Exporting… ${soFar.toLocaleString('en-IN')} rows so far`),
       );
       showToast(`Downloaded ${count.toLocaleString('en-IN')} rows`);
@@ -2087,6 +2116,30 @@ export default function DeliveryEscalationClient() {
                         options={[{ value: 'added_date', label: 'Query Date' }, { value: 'order_date', label: 'Order Date' }]}
                         placeholder="Date"
                       />
+                      <CustomSelect
+                        value={daywiseDateRangePreset}
+                        onChange={handleDaywiseDateRangePreset}
+                        options={DATE_RANGE_PRESET_OPTIONS}
+                        placeholder="Date Range"
+                      />
+                      {daywiseDateRangePreset === 'custom' && (
+                        <>
+                          <input
+                            type="date"
+                            value={daywiseDateFrom}
+                            onChange={(e) => setDaywiseDateFrom(e.target.value)}
+                            title={`From (${daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} date)`}
+                            className="h-8 px-3 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                          />
+                          <input
+                            type="date"
+                            value={daywiseDateTo}
+                            onChange={(e) => setDaywiseDateTo(e.target.value)}
+                            title={`To (${daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} date)`}
+                            className="h-8 px-3 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                          />
+                        </>
+                      )}
                       <CustomSelect
                         value={brandFilter}
                         onChange={(v) => { setBrandFilter(v); safeStorage.setItem('de_brand_filter', v); }}
@@ -2372,6 +2425,12 @@ export default function DeliveryEscalationClient() {
                       {/* Everyone with access gets this - it is how an agent narrows the shared
                           desk down to their own tickets now that nothing is hidden from them. */}
                       <CustomSelect value={agentFilter} onChange={setAgentFilter} options={agentOptions} placeholder="Agent" />
+                      <CustomSelect
+                        value={partnerFilter}
+                        onChange={(v) => { setPartnerFilter(v); safeStorage.setItem('de_partner_filter', v); }}
+                        options={[{ value: 'ALL', label: 'All Partners' }, ...PARTNER_FILTER_OPTIONS.map(p => ({ value: p, label: p }))]}
+                        placeholder="Partner"
+                      />
                       {dateDrill ? (
                         // Set by clicking a day-wise bucket cell - a range plus a TAT bucket, which
                         // the plain date+basis inputs below can't represent, so they're swapped for
