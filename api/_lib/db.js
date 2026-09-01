@@ -1512,27 +1512,32 @@ const DE_FORCED_RTO_WHERE = `((tat IS NOT NULL AND tat = 'Forced to be marked as
 // delivery partner) - EXCLUDING Forced RTO, which moved to its own view (DE_FORCED_RTO_WHERE)
 // instead of sitting inside Fresh's ordinary RTO rows. Resolved is Delivered ONLY. Matched on
 // the top-level outcome label, so a nested "Delivered > <sub-reason>" still counts.
+// 'Escalated > New order placed' is explicitly excluded from the generic Escalated match below:
+// it's still a DISPOSED, terminal state with its own tab (DE_NEW_ORDER_PLACED_WHERE), not an
+// open Fresh ticket, even though it sits under the same 'Escalated' root as a genuinely-open one.
 const DE_FRESH_WHERE = `((outcome IS NULL OR outcome = ''
    OR outcome = 'RTO' OR outcome LIKE 'RTO > %'
-   OR outcome = 'Escalated' OR outcome LIKE 'Escalated > %')
+   OR (outcome = 'Escalated' OR (outcome LIKE 'Escalated > %' AND outcome <> 'Escalated > New order placed')))
    AND NOT (${DE_FORCED_RTO_WHERE}))`;
 // 'Resolved' is scripts/auto_dispose_de_categories.py's own root: query categories whose
-// outcome is known from the category alone (Fake Order RTO -> new order placed, Pincode not
-// serviceable -> cancelled and refunded, ...) are stamped by that job rather than clicked
-// through by an agent. Nested under one root ON PURPOSE - matching on the top-level label is
-// what this clause does, so each such outcome as its own top-level sibling would have landed in
-// no view at all (not Fresh, not Resolved, not Forced RTO), the same silent-disappearance the
-// two comments above record. Kept separate from 'Delivered' rather than reusing it: those 18.5k
-// rows mean the parcel actually reached the customer, which a cancelled-and-refunded or
-// POD-requested ticket does not.
-// 'Resolved > New order placed' moved to its own tab/view (DE_NEW_ORDER_PLACED_WHERE below) -
-// excluded here so it stops double-counting into Resolved's own tile and ticket list.
+// outcome is known from the category alone (Pincode not serviceable -> cancelled and refunded,
+// ...) are stamped by that job rather than clicked through by an agent. Nested under one root ON
+// PURPOSE - matching on the top-level label is what this clause does, so each such outcome as
+// its own top-level sibling would have landed in no view at all (not Fresh, not Resolved, not
+// Forced RTO), the same silent-disappearance the two comments above record. Kept separate from
+// 'Delivered' rather than reusing it: those 18.5k rows mean the parcel actually reached the
+// customer, which a cancelled-and-refunded or POD-requested ticket does not.
+// No 'New order placed' exclusion here (there was one, historically) - that child moved out from
+// under this root entirely, to 'Escalated' (see DE_FRESH_WHERE/DE_NEW_ORDER_PLACED_WHERE and
+// scripts/backfill_de_new_order_placed_root.py, which retagged every row that still carried the
+// old 'Resolved > New order placed' path), so there is nothing left under 'Resolved > %' for
+// this clause to accidentally double-count.
 const DE_RESOLVED_WHERE = `(outcome = 'Delivered' OR outcome LIKE 'Delivered > %'
-   OR outcome = 'Resolved' OR (outcome LIKE 'Resolved > %' AND outcome <> 'Resolved > New order placed'))`;
-// Its own tab: agent- or auto_dispose_de_categories.py-marked 'Resolved > New order placed' is
+   OR outcome = 'Resolved' OR outcome LIKE 'Resolved > %')`;
+// Its own tab: agent- or auto_dispose_de_categories.py-marked 'Escalated > New order placed' is
 // common enough (Fake Order RTO/Pickup Exception/Lost-Damaged-Destroyed all map to it) to want
-// its own queue rather than being buried in the wider Resolved list.
-const DE_NEW_ORDER_PLACED_WHERE = `(outcome = 'Resolved > New order placed')`;
+// its own queue rather than being buried in the wider Escalated list.
+const DE_NEW_ORDER_PLACED_WHERE = `(outcome = 'Escalated > New order placed')`;
 const DE_VIEW_WHERE = {
   fresh: DE_FRESH_WHERE, resolved: DE_RESOLVED_WHERE, forced_rto: DE_FORCED_RTO_WHERE,
   new_order_placed: DE_NEW_ORDER_PLACED_WHERE,
@@ -1543,7 +1548,17 @@ const DE_VIEW_WHERE = {
 // one is "logistics-fed Delivered Date minus Query Date", this one is the agent's own dispose
 // date against added_date, so it's a distinct figure, not a duplicate. 'unresolved' covers
 // "can't compute" (added_date missing on some pre-backfill rows) as well as "not yet delivered".
+// Gated on DE_RESOLVED_WHERE (NOT it -> 'unresolved') rather than just checking disposed_at is
+// set: a row can carry disposed_at while still not being actually resolved - Escalated >
+// New order placed is exactly that case (disposed, has its own tab via
+// DE_NEW_ORDER_PLACED_WHERE, but Escalated still means waiting on the delivery partner) - so
+// DATEDIFF must only ever run for the same population the Resolved tab itself shows.
+// NOT(DE_RESOLVED_WHERE) is NULL, not FALSE, for a blank-outcome row (same 3-valued-logic trap
+// DE_FORCED_RTO_WHERE's own comment documents) - harmless here specifically because a blank
+// outcome is only ever written together with a NULL disposed_at (every dispose path sets both
+// at once), so the very next WHEN below always catches it regardless of what this one returned.
 const DE_TAT_BUCKET_SQL = `CASE
+    WHEN NOT (${DE_RESOLVED_WHERE}) THEN 'unresolved'
     WHEN disposed_at IS NULL OR added_date IS NULL THEN 'unresolved'
     WHEN DATEDIFF(disposed_at, added_date) <= 2 THEN 'Within 48 hrs'
     WHEN DATEDIFF(disposed_at, added_date) <= 4 THEN 'Within 2-4 days'
@@ -1553,16 +1568,18 @@ const DE_TAT_BUCKET_SQL = `CASE
   END`;
 
 // For the Overview's day-wise table (getDeliveryEscalationDaywiseStats). 'unresolved' is
-// exactly the Fresh tab's own population (DE_FRESH_WHERE: outcome blank/RTO/Escalated, minus
-// Forced RTO, which is its own bucket below) - a ticket sitting in Fresh sits in 'unresolved'
-// here too, whole and un-split, rather than being sliced into the age buckets by how long it's
-// been open. Everything that reaches the DATEDIFF buckets below is therefore Delivered (the
-// only outcome left once Forced RTO and Fresh are both accounted for), so those buckets now
-// measure actual resolution time (disposed_at minus added_date) - the same figure
-// DE_TAT_BUCKET_SQL already reports per-row for Resolved, just grouped by day here. The
-// disposed_at/added_date IS NULL branch is a defensive catch-all for a Delivered row somehow
-// missing one of those dates (2 rows total right now, see getDeliveryEscalationDaywiseStats'
-// own missingDateCount) - it can't be dated, so it can't be aged either.
+// everything that isn't Forced RTO and isn't DE_RESOLVED_WHERE - Fresh, RTO, and any Escalated
+// outcome including 'Escalated > New order placed' (disposed, has its own tab via
+// DE_NEW_ORDER_PLACED_WHERE, but still not actually resolved - same gate DE_TAT_BUCKET_SQL uses,
+// see its own comment) - all sit in 'unresolved' here too, whole and un-split, rather than being
+// sliced into the age buckets by how long they've been open. Everything that reaches the
+// DATEDIFF buckets below is therefore Delivered/Resolved (the only population left once Forced
+// RTO and "not resolved" are both accounted for), so those buckets now measure actual resolution
+// time (disposed_at minus added_date) - the same figure DE_TAT_BUCKET_SQL already reports
+// per-row, just grouped by day here. The disposed_at/added_date IS NULL branch is a defensive
+// catch-all for a Delivered row somehow missing one of those dates (2 rows total right now, see
+// getDeliveryEscalationDaywiseStats' own missingDateCount) - it can't be dated, so it can't be
+// aged either.
 //
 // getDeliveryEscalationDaywiseStats itself counts DISTINCT awb_code per (date, bucket), not
 // rows, so this table's 'unresolved' lines up with the Fresh tile instead of over-counting
@@ -1572,7 +1589,7 @@ const DE_TAT_BUCKET_SQL = `CASE
 // its own per-AWB grouping.
 const DE_DAYWISE_BUCKET_SQL = `CASE
     WHEN ${DE_FORCED_RTO_WHERE} THEN 'Forced to be marked as RTO'
-    WHEN ${DE_FRESH_WHERE} THEN 'unresolved'
+    WHEN NOT (${DE_RESOLVED_WHERE}) THEN 'unresolved'
     WHEN disposed_at IS NULL OR added_date IS NULL THEN 'unresolved'
     WHEN DATEDIFF(disposed_at, added_date) <= 2 THEN 'Within 48 hrs'
     WHEN DATEDIFF(disposed_at, added_date) <= 4 THEN 'Within 2-4 days'
