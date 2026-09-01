@@ -1596,7 +1596,7 @@ const DE_DAYWISE_BUCKETS = [
 const DE_SELECT_COLUMNS = `id, brand, order_id, awb_code, delivery_partner, query_class,
     query_category, wh_name, status_as_per_awb, tat, ticket_number, agent_email, outcome,
     child_disposition, LEFT(agent_remarks, 300) AS agent_remarks, disposed_at, added_date,
-    order_date, contact_count, first_added_date,
+    order_date, contact_count, first_added_date, new_order_AWB AS new_order_awb,
     ${DE_TAT_BUCKET_SQL} AS tat_bucket`;
 
 // Same buckets getDeliveryEscalationRepeatStats groups by - reused here so the Total-times-
@@ -2061,9 +2061,10 @@ async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRema
   `, [id, outcome || null, agentRemarks || null, email, id]);
 }
 
-// Bulk outcome upload for the Fresh AND Forced RTO tabs (see api/delivery-escalation/record.js's
-// 'bulkDispose' action) - one UPDATE per (awb, outcome) pair, matching every row with that
-// awb_code THAT'S STILL IN THE UPLOADING TAB'S OWN VIEW (DE_VIEW_WHERE[view]): an AWB can
+// Bulk outcome upload for the Fresh AND Forced RTO tabs, AND the New Order Placed tab's own
+// bulk `new_order_AWB` fill-in (see api/delivery-escalation/record.js's 'bulkDispose' action) -
+// one UPDATE per row, matching every row with that awb_code THAT'S STILL IN THE UPLOADING TAB'S
+// OWN VIEW (DE_VIEW_WHERE[view]): an AWB can
 // legitimately repeat (same AWB reused across brands, a re-shipped order, or the same parcel
 // sitting in both Fresh and Forced RTO as separate ticket rows - see the repeat-contact case
 // disposeDeliveryEscalationTicketById's own cascade handles for the single-dispose path), and
@@ -2090,7 +2091,7 @@ async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRema
 const BULK_CHUNK_SIZE = 8;
 
 async function bulkDisposeDeliveryEscalationByAwb(rows, email, view) {
-  if (view !== 'fresh' && view !== 'forced_rto') {
+  if (view !== 'fresh' && view !== 'forced_rto' && view !== 'new_order_placed') {
     throw new Error(`Unknown Delivery-Escalation bulk-upload view: ${view}`);
   }
   const where = DE_VIEW_WHERE[view];
@@ -2098,15 +2099,24 @@ async function bulkDisposeDeliveryEscalationByAwb(rows, email, view) {
   const results = [];
   for (let i = 0; i < rows.length; i += BULK_CHUNK_SIZE) {
     const chunk = rows.slice(i, i + BULK_CHUNK_SIZE);
-    const chunkResults = await Promise.all(chunk.map(async ({ awb, outcome, remarks }) => {
-      const [result] = await pool.execute(`
-        UPDATE Delivery_escalation
-        SET outcome = ?, agent_remarks = ?, disposed_at = NOW(),
-            agent_email = ?,
-            assigned_at = CASE WHEN assigned_at IS NULL THEN NOW() ELSE assigned_at END
-        WHERE awb_code = ? AND (${where})
-      `, [outcome, remarks || null, email, awb]);
-      return { awb, outcome, matched: result.affectedRows || 0 };
+    const chunkResults = await Promise.all(chunk.map(async ({ awb, outcome, remarks, newOrderAwb }) => {
+      // New Order Placed tab: these rows are already resolved (DE_NEW_ORDER_PLACED_WHERE), so a
+      // bulk row here only fills in the reshipped order's own AWB - it must NOT touch
+      // outcome/disposed_at/agent_email the way the Fresh/Forced-RTO dispose path below does.
+      const [result] = view === 'new_order_placed'
+        ? await pool.execute(`
+            UPDATE Delivery_escalation
+            SET new_order_AWB = ?
+            WHERE awb_code = ? AND (${where})
+          `, [newOrderAwb, awb])
+        : await pool.execute(`
+            UPDATE Delivery_escalation
+            SET outcome = ?, agent_remarks = ?, disposed_at = NOW(),
+                agent_email = ?,
+                assigned_at = CASE WHEN assigned_at IS NULL THEN NOW() ELSE assigned_at END
+            WHERE awb_code = ? AND (${where})
+          `, [outcome, remarks || null, email, awb]);
+      return { awb, outcome, newOrderAwb, matched: result.affectedRows || 0 };
     }));
     results.push(...chunkResults);
   }

@@ -66,6 +66,8 @@ function mapRow(row, readOnly) {
     // not properties of this row alone.
     contactCount: row.contact_count == null ? '' : row.contact_count,
     firstContactDate: row.first_added_date ? new Date(row.first_added_date).toLocaleDateString('en-GB') : '',
+    // Reshipped order's own AWB - New Order Placed tab only (see its own bulk-upload note below).
+    newOrderAwb: row.new_order_awb || '',
   };
 }
 
@@ -77,6 +79,7 @@ function ticketRowCells(t, tab, openAction, isChild) {
     <>
       <td className="py-3 px-4 text-zinc-300 font-mono text-[12px]">{t.orderId}</td>
       <td className="py-3 px-4 text-zinc-300 font-mono text-[12px]">{t.awb}</td>
+      {tab === 'new_order_placed' && <td className="py-3 px-4 text-zinc-300 font-mono text-[12px]">{t.newOrderAwb || '—'}</td>}
       <td className="py-3 px-4 text-zinc-400">{t.deliveryPartner}</td>
       <td className="py-3 px-4 text-zinc-400">{t.queryCategory}</td>
       <td className="py-3 px-4 text-zinc-400 whitespace-nowrap">{t.addedDate || '—'}</td>
@@ -943,6 +946,27 @@ function rowsFromBulkCsv(text) {
     .filter((r) => r.awb && r.outcome);
 }
 
+// New Order Placed tab's own bulk upload - fills in `new_order_AWB` by AWB match, no Outcome
+// involved (those rows are already resolved). Same header lookup convention as rowsFromBulkCsv.
+function rowsFromNewOrderAwbCsv(text) {
+  const [header, ...dataRows] = parseCsv(text);
+  if (!header) return [];
+  const norm = (s) => (s || '').trim().toLowerCase().replace(/[\s_]+/g, '');
+  const idx = {};
+  header.forEach((h, i) => { idx[norm(h)] = i; });
+  const awbIdx = idx.awb ?? idx.awbnumber ?? idx.awbcode;
+  const newAwbIdx = idx.neworderawb ?? idx.newawb;
+  if (awbIdx === undefined || newAwbIdx === undefined) {
+    throw new Error('CSV needs an AWB column and a New Order AWB column');
+  }
+  return dataRows
+    .map((r) => ({
+      awb: (r[awbIdx] || '').trim(),
+      newOrderAwb: (r[newAwbIdx] || '').trim(),
+    }))
+    .filter((r) => r.awb && r.newOrderAwb);
+}
+
 // Quote a CSV field only when it needs it (comma, quote, or newline), doubling embedded quotes
 // - the same rule parseCsv above reads back.
 function csvCell(v) {
@@ -951,7 +975,7 @@ function csvCell(v) {
 }
 
 const EXPORT_COLUMNS = [
-  ['Brand', 'brand'], ['Order ID', 'orderId'], ['AWB', 'awb'], ['Ticket Number', 'ticketNumber'],
+  ['Brand', 'brand'], ['Order ID', 'orderId'], ['AWB', 'awb'], ['New Order AWB', 'newOrderAwb'], ['Ticket Number', 'ticketNumber'],
   ['Delivery Partner', 'deliveryPartner'], ['Query Class', 'queryClass'],
   ['Query Category', 'queryCategory'], ['Added Date', 'addedDate'], ['Order Date', 'orderDate'],
   ['TAT', 'tat'], ['Times Contacted', 'contactCount'], ['First Contact', 'firstContactDate'],
@@ -1047,6 +1071,23 @@ function downloadBulkSampleCsv(processDispositions) {
   const a = document.createElement('a');
   a.href = url;
   a.download = 'delivery-escalation-bulk-upload-sample.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Sample CSV for the New Order Placed tab's own bulk upload - AWB + New Order AWB only.
+function downloadNewOrderAwbSampleCsv() {
+  const lines = [
+    'AWB,New Order AWB',
+    'SF1234567890EX,SF9999999999EX',
+  ];
+  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'delivery-escalation-new-order-awb-sample.csv';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -1548,11 +1589,12 @@ export default function DeliveryEscalationClient() {
     }
   };
 
-  // Fresh AND Forced RTO tabs' bulk outcome upload - parses client-side (so a header/column
-  // mistake shows up immediately, before any network call) then sends the whole batch in one
-  // request, scoped server-side to whichever of those two tabs is open (see
-  // bulkDisposeDeliveryEscalationByAwb's own view-scoping). Resyncs after so every tab reflects
-  // whatever just moved - same reasoning as saveAction's own post-dispose refresh.
+  // Fresh AND Forced RTO tabs' bulk outcome upload, AND New Order Placed's own bulk
+  // `new_order_AWB` fill-in - parses client-side (so a header/column mistake shows up
+  // immediately, before any network call) then sends the whole batch in one request, scoped
+  // server-side to whichever tab is open (see bulkDisposeDeliveryEscalationByAwb's own
+  // view-scoping). Resyncs after so every tab reflects whatever just moved - same reasoning as
+  // saveAction's own post-dispose refresh.
   const handleBulkFile = async (e) => {
     const file = e.target.files?.[0];
     e.target.value = ''; // allow re-selecting the same file (e.g. after fixing a typo) later
@@ -1561,8 +1603,12 @@ export default function DeliveryEscalationClient() {
     setBulkResult(null);
     try {
       const text = await file.text();
-      const parsed = rowsFromBulkCsv(text);
-      if (!parsed.length) throw new Error('No valid rows found - need an AWB and an Outcome column');
+      const parsed = tab === 'new_order_placed' ? rowsFromNewOrderAwbCsv(text) : rowsFromBulkCsv(text);
+      if (!parsed.length) {
+        throw new Error(tab === 'new_order_placed'
+          ? 'No valid rows found - need an AWB column and a New Order AWB column'
+          : 'No valid rows found - need an AWB and an Outcome column');
+      }
       const results = await bulkUploadOutcomes(parsed, tab);
       const unmatched = results.filter((r) => r.matched === 0);
       const matchedCount = results.length - unmatched.length;
@@ -1754,7 +1800,7 @@ export default function DeliveryEscalationClient() {
               {syncError && !sessionExpired && (
                 <div className="text-[12px] text-rose-400">⚠ {syncError} — retrying…</div>
               )}
-              {bulkResult && (tab === 'fresh' || tab === 'forced_rto') && (
+              {bulkResult && (tab === 'fresh' || tab === 'forced_rto' || tab === 'new_order_placed') && (
                 <div className="text-[12px] bg-zinc-900/70 border border-zinc-800 rounded-lg px-3 py-2 flex items-start justify-between gap-3">
                   <div>
                     <span className="text-zinc-300 font-semibold">Bulk upload: {bulkResult.matchedCount}/{bulkResult.total} matched.</span>
@@ -2129,7 +2175,7 @@ export default function DeliveryEscalationClient() {
                         options={CONTACT_BUCKET_OPTIONS}
                         placeholder="Total times user came"
                       />
-                      {(tab === 'fresh' || tab === 'forced_rto') && (
+                      {(tab === 'fresh' || tab === 'forced_rto' || tab === 'new_order_placed') && (
                         <>
                           <input
                             ref={bulkFileInputRef}
@@ -2142,14 +2188,16 @@ export default function DeliveryEscalationClient() {
                             onClick={() => bulkFileInputRef.current?.click()}
                             disabled={bulkUploading}
                             className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
-                            title="Bulk upload outcomes via CSV (columns: AWB, Outcome, Remarks). For a child disposition, put the full path in Outcome, e.g. Escalated > Awaiting Partner."
+                            title={tab === 'new_order_placed'
+                              ? 'Bulk upload New Order AWB via CSV (columns: AWB, New Order AWB).'
+                              : 'Bulk upload outcomes via CSV (columns: AWB, Outcome, Remarks). For a child disposition, put the full path in Outcome, e.g. Escalated > Awaiting Partner.'}
                           >
                             {bulkUploading ? 'Uploading…' : '📤 Bulk Upload'}
                           </button>
                           <button
-                            onClick={() => downloadBulkSampleCsv(processDispositions)}
+                            onClick={() => tab === 'new_order_placed' ? downloadNewOrderAwbSampleCsv() : downloadBulkSampleCsv(processDispositions)}
                             className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors"
-                            title="Download a sample CSV in the format Bulk Upload expects, including how to write a child disposition"
+                            title="Download a sample CSV in the format Bulk Upload expects"
                           >
                             📋 Sample CSV
                           </button>
@@ -2181,6 +2229,7 @@ export default function DeliveryEscalationClient() {
                           <th className="py-3 px-4 text-left font-medium">Brand</th>
                           <th className="py-3 px-4 text-left font-medium">Order ID</th>
                           <th className="py-3 px-4 text-left font-medium">AWB</th>
+                          {tab === 'new_order_placed' && <th className="py-3 px-4 text-left font-medium">New Order AWB</th>}
                           <th className="py-3 px-4 text-left font-medium">Delivery Partner</th>
                           <th className="py-3 px-4 text-left font-medium">Query Category</th>
                           <th className="py-3 px-4 text-left font-medium">Added Date</th>
@@ -2203,7 +2252,7 @@ export default function DeliveryEscalationClient() {
                             const history = hasRepeat ? awbHistory.get(`${parent.brand}|${parent.awb}`) : null;
                             const childRows = history?.status === 'loaded'
                               ? history.rows.filter((t) => t.id !== parent.id) : [];
-                            const colSpan = (tab === 'resolved' || tab === 'new_order_placed') ? 17 : 14;
+                            const colSpan = tab === 'new_order_placed' ? 18 : (tab === 'resolved' ? 17 : 14);
                             return (
                               <Fragment key={parent.id}>
                                 <tr
@@ -2246,7 +2295,7 @@ export default function DeliveryEscalationClient() {
                             );
                           })}
                           {groupedTicketRows.length === 0 && (
-                            <tr><td colSpan={(tab === 'resolved' || tab === 'new_order_placed') ? 17 : 14} className="py-8 text-center text-zinc-500">
+                            <tr><td colSpan={tab === 'new_order_placed' ? 18 : (tab === 'resolved' ? 17 : 14)} className="py-8 text-center text-zinc-500">
                               {syncing ? 'Loading…' : 'No tickets in this view.'}
                             </td></tr>
                           )}

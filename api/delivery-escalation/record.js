@@ -163,7 +163,8 @@ module.exports = async (req, res) => {
 
   const { action, id, ticket, outcome, agentRemarks } = req.body || {};
 
-  // Fresh AND Forced RTO tabs' bulk outcome upload (CSV: AWB, Outcome, optional Remarks) - see
+  // Fresh AND Forced RTO tabs' bulk outcome upload (CSV: AWB, Outcome, optional Remarks), AND
+  // the New Order Placed tab's own bulk `new_order_AWB` fill-in (CSV: AWB, New Order AWB) - see
   // db.js's bulkDisposeDeliveryEscalationByAwb. rows is pre-parsed client-side; this only
   // validates shape/size, not outcome values (a bulk upload's Outcome text is trusted the same
   // way a single dispose's dispPath.join(' > ') already is - no disposition-tree validation
@@ -171,7 +172,8 @@ module.exports = async (req, res) => {
   // send one yet; bulkDisposeDeliveryEscalationByAwb itself rejects anything else.
   if (action === 'bulkDispose') {
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
-    const view = req.body?.view === 'forced_rto' ? 'forced_rto' : 'fresh';
+    const view = req.body?.view === 'forced_rto' ? 'forced_rto'
+      : req.body?.view === 'new_order_placed' ? 'new_order_placed' : 'fresh';
     if (!rows.length) {
       res.status(400).json({ error: 'rows is required' });
       return;
@@ -180,11 +182,19 @@ module.exports = async (req, res) => {
       res.status(400).json({ error: `Too many rows (${rows.length}) - split into batches of ${MAX_BULK_ROWS} or fewer.` });
       return;
     }
-    const clean = rows
-      .map((r) => ({ awb: String(r.awb || '').trim(), outcome: String(r.outcome || '').trim(), remarks: r.remarks ? String(r.remarks).trim() : '' }))
-      .filter((r) => r.awb && r.outcome);
+    const clean = view === 'new_order_placed'
+      ? rows
+        .map((r) => ({ awb: String(r.awb || '').trim(), newOrderAwb: String(r.newOrderAwb || '').trim() }))
+        .filter((r) => r.awb && r.newOrderAwb)
+      : rows
+        .map((r) => ({ awb: String(r.awb || '').trim(), outcome: String(r.outcome || '').trim(), remarks: r.remarks ? String(r.remarks).trim() : '' }))
+        .filter((r) => r.awb && r.outcome);
     if (!clean.length) {
-      res.status(400).json({ error: 'No valid rows (each needs an AWB and an Outcome).' });
+      res.status(400).json({
+        error: view === 'new_order_placed'
+          ? 'No valid rows (each needs an AWB and a New Order AWB).'
+          : 'No valid rows (each needs an AWB and an Outcome).',
+      });
       return;
     }
     try {
