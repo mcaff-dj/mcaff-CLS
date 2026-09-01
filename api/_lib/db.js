@@ -27,9 +27,12 @@ let pool = null;
 const CACHE_TTL_MS = 300000;
 const readCache = new Map();
 
-function cachedRead(key, fn) {
+// ttlMs overrides CACHE_TTL_MS per key - the Delivery-Escalation Overview reads
+// (DE_OVERVIEW_CACHE_TTL_MS) want a much shorter window than the 5-minute default, since the
+// tab re-reads them itself every 60s and an agent who just disposed a ticket watches the tiles.
+function cachedRead(key, fn, ttlMs = CACHE_TTL_MS) {
   const hit = readCache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.promise;
+  if (hit && Date.now() - hit.at < ttlMs) return hit.promise;
   const promise = fn().catch((e) => {
     // Only evict if this entry is still the live one - a later read may already have replaced it.
     if (readCache.get(key) && readCache.get(key).promise === promise) readCache.delete(key);
@@ -1517,6 +1520,7 @@ async function disposeDeliveryEscalationTicket(ticket, email, outcome, agentRema
       Shipping_Address_State = COALESCE(VALUES(Shipping_Address_State), Shipping_Address_State),
       Pincode = COALESCE(VALUES(Pincode), Pincode)
   `;
+  invalidateCache('de-');
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1819,12 +1823,48 @@ async function getDeliveryEscalationPage(view, opts = {}) {
 // double-count those. COUNT(DISTINCT ...) already ignores NULL/blank awb_code on its own, so a
 // ticket with no AWB at all (144 rows currently) doesn't land in any bucket, including total -
 // this reports "how many distinct parcels", not "how many rows".
+// The Overview tab's reads are the expensive ones on this table: op=stats fires three of them
+// at once (stats/agents/repeatStats) and op=daywise two more, all unfiltered by default, so all
+// of them are full-table aggregates that no index can narrow - there is no filter to seek on.
+// Two guards, because they fix different halves of the observed failure (every request dying at
+// the 30s gateway ceiling and never recovering):
+//
+//  - DE_MAX_EXEC_MS: a MySQL-side cap, below the gateway's own 30s. Without it a query the
+//    Lambda has already abandoned keeps running to completion on the server - so each retry and
+//    each 60s auto-refresh stacked another full scan on top of the ones still executing, and the
+//    table never got an idle moment to finish any of them. The hint makes MySQL kill its own
+//    query instead (ER_QUERY_TIMEOUT), which is what lets the DB drain.
+//  - cachedRead at DE_OVERVIEW_CACHE_TTL_MS: collapses the mount's concurrent duplicates and the
+//    retry/refresh storm onto ONE query per key (cachedRead shares an in-flight promise), instead
+//    of one per request per viewer.
+//
+// The key must carry every input that changes the result - allowedPartners above all, since that
+// is the per-session access floor (see deFilterSql), and omitting it would serve a partner-
+// restricted agent another caller's whole-desk numbers. Sorted so two sessions with the same
+// floor in a different order still share one entry.
+const DE_MAX_EXEC_MS = 25000;
+const DE_OVERVIEW_CACHE_TTL_MS = 60000;
+
+function deCacheKey(name, parts) {
+  const norm = { ...parts };
+  for (const k of ['allowedPartners', 'partner']) {
+    if (Array.isArray(norm[k])) norm[k] = [...norm[k]].sort();
+  }
+  return `de-${name}:${JSON.stringify(norm)}`;
+}
+
 async function getDeliveryEscalationStats(opts = {}) {
+  return cachedRead(deCacheKey('stats', opts), () => fetchDeliveryEscalationStats(opts),
+    DE_OVERVIEW_CACHE_TTL_MS);
+}
+
+async function fetchDeliveryEscalationStats(opts = {}) {
   const { clauses, params } = deFilterSql(opts);
   const where = clauses.length ? clauses.join(' AND ') : '1 = 1';
   const pool = await getPool();
   const [rows] = await pool.execute(
-    `SELECT COUNT(DISTINCT awb_code) AS total,
+    `SELECT /*+ MAX_EXECUTION_TIME(${DE_MAX_EXEC_MS}) */
+            COUNT(DISTINCT awb_code) AS total,
             COUNT(DISTINCT CASE WHEN agent_email IS NOT NULL AND agent_email != '' THEN awb_code END) AS assigned,
             COUNT(DISTINCT CASE WHEN ${DE_RESOLVED_WHERE} THEN awb_code END) AS resolved,
             COUNT(DISTINCT CASE WHEN ${DE_FRESH_WHERE} THEN awb_code END) AS fresh,
@@ -1862,11 +1902,20 @@ async function getDeliveryEscalationStats(opts = {}) {
 // instead of SQL. Reusing the constant is the point - "unresolved" here is exactly what the
 // Fresh tab lists, so the two can never drift apart if that definition changes.
 async function getDeliveryEscalationRepeatStats(allowedPartners) {
+  return cachedRead(
+    deCacheKey('repeat', { allowedPartners }),
+    () => fetchDeliveryEscalationRepeatStats(allowedPartners),
+    DE_OVERVIEW_CACHE_TTL_MS,
+  );
+}
+
+async function fetchDeliveryEscalationRepeatStats(allowedPartners) {
   const restricted = Array.isArray(allowedPartners) && allowedPartners.length > 0;
   const partnerClause = restricted ? ` AND delivery_partner IN (${allowedPartners.map(() => '?').join(',')})` : '';
   const pool = await getPool();
   const [rows] = await pool.execute(`
-    SELECT CASE WHEN times = 1 THEN '1 time'
+    SELECT /*+ MAX_EXECUTION_TIME(${DE_MAX_EXEC_MS}) */
+           CASE WHEN times = 1 THEN '1 time'
                 WHEN times BETWEEN 2 AND 4 THEN '2-4 times'
                 WHEN times BETWEEN 5 AND 9 THEN '5-9 times'
                 ELSE '10+ times' END AS bucket,
@@ -1914,6 +1963,11 @@ async function getDeliveryEscalationRepeatStats(allowedPartners) {
 const DE_ORDER_DATE_FLOOR = '2026-06-01';
 
 async function getDeliveryEscalationDaywiseStats(opts = {}) {
+  return cachedRead(deCacheKey('daywise', opts), () => fetchDeliveryEscalationDaywiseStats(opts),
+    DE_OVERVIEW_CACHE_TTL_MS);
+}
+
+async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
   const { brand, agent, dateField, partner, paymentMode, allowedPartners, dateFrom, dateTo } = opts;
   const col = DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date';
   const extraClauses = [];
@@ -1962,14 +2016,14 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
   // (or triple-, ...) counts it. Ignores NULL/blank awb_code the same way COUNT(DISTINCT) does
   // there too - a ticket with no AWB at all doesn't land in any bucket.
   const [rows] = await pool.execute(`
-    SELECT DATE_FORMAT(${col}, '%Y-%m-%d') AS d, COALESCE(delivery_partner, 'Unknown') AS partner, COALESCE(query_category, 'Unknown') AS category, ${DE_CONTACT_BUCKET_SQL} AS contactBucket, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(DISTINCT awb_code) AS c
+    SELECT /*+ MAX_EXECUTION_TIME(${DE_MAX_EXEC_MS}) */ DATE_FORMAT(${col}, '%Y-%m-%d') AS d, COALESCE(delivery_partner, 'Unknown') AS partner, COALESCE(query_category, 'Unknown') AS category, ${DE_CONTACT_BUCKET_SQL} AS contactBucket, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(DISTINCT awb_code) AS c
     FROM Delivery_escalation
     WHERE ${col} IS NOT NULL${extra}${floorClause}${rangeClause}
     GROUP BY d, partner, category, contactBucket, bucket
     ORDER BY d
   `, [...params, ...floorParams, ...rangeParams]);
   const [[{ noDateCount }]] = await pool.execute(
-    `SELECT COUNT(DISTINCT awb_code) AS noDateCount FROM Delivery_escalation WHERE ${col} IS NULL${extra}`, params);
+    `SELECT /*+ MAX_EXECUTION_TIME(${DE_MAX_EXEC_MS}) */ COUNT(DISTINCT awb_code) AS noDateCount FROM Delivery_escalation WHERE ${col} IS NULL${extra}`, params);
 
   const zeroCounts = () => Object.fromEntries(DE_DAYWISE_BUCKETS.map((b) => [b, 0]));
   const pctOf = (counts, total) => Object.fromEntries(DE_DAYWISE_BUCKETS.map((b) => [
@@ -2110,12 +2164,17 @@ async function getDeliveryEscalationGeoCategoryStats(opts = {}) {
 }
 
 async function getDeliveryEscalationAgents() {
-  const { rows } = await sql`
-    SELECT DISTINCT agent_email FROM Delivery_escalation
-    WHERE agent_email IS NOT NULL AND agent_email != ''
-    ORDER BY agent_email
-  `;
-  return rows.map((r) => r.agent_email);
+  // Cached with the other Overview reads (op=stats fetches this alongside them on every mount):
+  // the agent list changes when a ticket is assigned, not between one mount and the next, so it
+  // does not need to be re-derived by a full-table DISTINCT per request.
+  return cachedRead('de-agents', async () => {
+    const { rows } = await sql`
+      SELECT DISTINCT agent_email FROM Delivery_escalation
+      WHERE agent_email IS NOT NULL AND agent_email != ''
+      ORDER BY agent_email
+    `;
+    return rows.map((r) => r.agent_email);
+  }, DE_OVERVIEW_CACHE_TTL_MS);
 }
 
 // Every ticket ever raised for one parcel, across ALL views (Fresh/Resolved/Forced RTO) - not
@@ -2164,6 +2223,7 @@ async function claimDeliveryEscalationTicketById(id, email) {
     SET agent_email = ${email}, assigned_at = now()
     WHERE id = ${id} AND (agent_email IS NULL OR agent_email = '')
   `;
+  invalidateCache('de-'); // moves the Assigned tile and can add a name to the Agent filter
 }
 
 // Disposes a Fresh ticket directly against its own row - no sheet write at all, same model as
@@ -2243,6 +2303,10 @@ async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRema
       WHERE id <> ? AND brand = ? AND order_id = ? AND (${DE_MISSING_AWB_WHERE})
     `, [oldAwb, id, current.brand, current.order_id]);
   }
+  // The agent who just disposed this ticket watches the Overview tiles move, so their own next
+  // read must not come back from the cache this write invalidated (cross-container staleness is
+  // still bounded by DE_OVERVIEW_CACHE_TTL_MS - see cachedRead's own ponytail note).
+  invalidateCache('de-');
 }
 
 // Bulk outcome upload for the Fresh AND Forced RTO tabs, AND the New Order Placed tab's own
@@ -2316,6 +2380,7 @@ async function bulkDisposeDeliveryEscalationByAwb(rows, email, view) {
     }));
     results.push(...chunkResults);
   }
+  invalidateCache('de-');
   return results;
 }
 
@@ -4072,6 +4137,7 @@ module.exports = {
   // db.deliveryEscalation.test.js only - nothing in the app calls these directly.
   deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS,
   cachedRead, invalidateCache, CACHE_TTL_MS,
+  deCacheKey, DE_OVERVIEW_CACHE_TTL_MS, // exported for db.deliveryEscalation.cache.test.js
   buildRefundExportWhere,
   resolveStatusForDeletion,
   getMomBoardsForUser, createMomBoard, getMomBoardRole, isMomBoardArchived, getMomBoardDetail,
