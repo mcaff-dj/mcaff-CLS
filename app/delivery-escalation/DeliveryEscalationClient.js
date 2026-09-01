@@ -815,7 +815,9 @@ async function fetchPage({ view, page, perPage, search, brand, agent, date, date
   p.set('page', String(page));
   p.set('perPage', String(perPage));
   const d = await getJson(`/api/delivery-escalation/record?${p}`);
-  return { rows: (d.rows || []).map((r) => mapRow(r, view === 'resolved' || view === 'new_order_placed')), total: d.total || 0 };
+  // New Order Placed rows are actionable now (dispose to Delivered/RTO, see openAction/saveAction
+  // below) - only Resolved is truly read-only.
+  return { rows: (d.rows || []).map((r) => mapRow(r, view === 'resolved')), total: d.total || 0 };
 }
 
 // Mirrors db.js's DE_RESOLVED_WHERE (pre-New-Order-Placed-carve-out - Delivered or ANY Resolved
@@ -884,11 +886,14 @@ async function claimMysqlTicket(id) {
   if (!r.ok) throw new Error(d.error || `Claim failed (${r.status})`);
 }
 
-async function disposeMysqlTicket(id, outcome, agentRemarks) {
+// newOrderAwb is only ever non-blank when resolving a New Order Placed ticket (see saveAction) -
+// the server enforces it's present when that ticket is being marked Delivered/RTO, and otherwise
+// just carries it through as an optional update (see disposeDeliveryEscalationTicketById).
+async function disposeMysqlTicket(id, outcome, agentRemarks, newOrderAwb) {
   const r = await fetch('/api/delivery-escalation/record', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'dispose', id, outcome, agentRemarks }),
+    body: JSON.stringify({ action: 'dispose', id, outcome, agentRemarks, newOrderAwb }),
   });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error || `Save failed (${r.status})`);
@@ -946,8 +951,12 @@ function rowsFromBulkCsv(text) {
     .filter((r) => r.awb && r.outcome);
 }
 
-// New Order Placed tab's own bulk upload - fills in `new_order_AWB` by AWB match, no Outcome
-// involved (those rows are already resolved). Same header lookup convention as rowsFromBulkCsv.
+// New Order Placed tab's own bulk upload - fills in `new_order_AWB` by AWB match. Outcome is
+// OPTIONAL: blank just updates new_order_AWB (the ticket stays as-is); given, it also disposes
+// the ticket to that outcome (e.g. Delivered/RTO) - same "mandatory New Order AWB" rule the
+// tab's own single-dispose modal enforces, satisfied here for free since New Order AWB is
+// already required on every row regardless of Outcome. Same header lookup convention as
+// rowsFromBulkCsv.
 function rowsFromNewOrderAwbCsv(text) {
   const [header, ...dataRows] = parseCsv(text);
   if (!header) return [];
@@ -956,6 +965,8 @@ function rowsFromNewOrderAwbCsv(text) {
   header.forEach((h, i) => { idx[norm(h)] = i; });
   const awbIdx = idx.awb ?? idx.awbnumber ?? idx.awbcode;
   const newAwbIdx = idx.neworderawb ?? idx.newawb;
+  const outcomeIdx = idx.outcome;
+  const remarksIdx = idx.remarks;
   if (awbIdx === undefined || newAwbIdx === undefined) {
     throw new Error('CSV needs an AWB column and a New Order AWB column');
   }
@@ -963,6 +974,8 @@ function rowsFromNewOrderAwbCsv(text) {
     .map((r) => ({
       awb: (r[awbIdx] || '').trim(),
       newOrderAwb: (r[newAwbIdx] || '').trim(),
+      outcome: outcomeIdx !== undefined ? (r[outcomeIdx] || '').trim() : '',
+      remarks: remarksIdx !== undefined ? (r[remarksIdx] || '').trim() : '',
     }))
     .filter((r) => r.awb && r.newOrderAwb);
 }
@@ -999,7 +1012,7 @@ async function downloadCsv({ view, search, brand, agent, date, dateTo, dateField
     p.set('page', String(page));
     const d = await getJson(`/api/delivery-escalation/record?${p}`);
     const chunk = d.rows || [];
-    for (const r of chunk) rows.push(mapRow(r, view === 'resolved' || view === 'new_order_placed'));
+    for (const r of chunk) rows.push(mapRow(r, view === 'resolved'));
     onChunk?.(rows.length);
     if (!d.hasMore) break;
   }
@@ -1077,11 +1090,14 @@ function downloadBulkSampleCsv(processDispositions) {
   URL.revokeObjectURL(url);
 }
 
-// Sample CSV for the New Order Placed tab's own bulk upload - AWB + New Order AWB only.
+// Sample CSV for the New Order Placed tab's own bulk upload - AWB + New Order AWB, and an
+// OPTIONAL Outcome (blank row just fills New Order AWB; a given Outcome also disposes the
+// ticket, e.g. to Delivered or RTO).
 function downloadNewOrderAwbSampleCsv() {
   const lines = [
-    'AWB,New Order AWB',
-    'SF1234567890EX,SF9999999999EX',
+    'AWB,New Order AWB,Outcome',
+    'SF1234567890EX,SF9999999999EX,',
+    'SF1122334455EX,SF8888888888EX,Delivered',
   ];
   const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
@@ -1495,6 +1511,11 @@ export default function DeliveryEscalationClient() {
   const [dispPath, setDispPath] = useState([]);
   const [remarks, setRemarks] = useState('');
   const [saving, setSaving] = useState(false);
+  // New Order Placed tab only: the reshipped order's own AWB, prefilled from the row (bulk
+  // upload may already have set it) and editable. Mandatory when this tab's ticket is being
+  // resolved to Delivered or RTO now - see newOrderAwbRequired below and
+  // disposeDeliveryEscalationTicketById's own server-side copy of this rule.
+  const [newOrderAwbInput, setNewOrderAwbInput] = useState('');
 
   // dispLevels[i] = { type: 'single'|'multi'|'text', options }. Level 0 is always 'single' (the
   // top-level list has no parent to configure it); level i>0's type comes from whichever node
@@ -1531,6 +1552,11 @@ export default function DeliveryEscalationClient() {
   // types uniformly, since a 'single' pick is never blank by construction and 'multi'/'text'
   // are checked here instead of separately.
   const dispComplete = dispPath.length > 0 && dispLevels.length === dispPath.length && !!(dispPath[dispPath.length - 1] || '').trim();
+  // New Order Placed only: dispPath[0] is the TOP-LEVEL outcome being picked right now (e.g.
+  // "Delivered", "RTO", or still "Escalated" if left alone) - matches the top-level check
+  // disposeDeliveryEscalationTicketById makes server-side off the SAME dispPath.join(' > ').
+  const newOrderAwbRequired = tab === 'new_order_placed' && (dispPath[0] === 'Delivered' || dispPath[0] === 'RTO');
+  const canSave = dispComplete && (!newOrderAwbRequired || !!newOrderAwbInput.trim());
   const pickDisp = (level, label) => setDispPath(prev => [...prev.slice(0, level), label]);
   const toggleMultiDisp = (level, label) => setDispPath(prev => {
     const checked = (prev[level] || '').split(', ').filter(Boolean);
@@ -1556,15 +1582,16 @@ export default function DeliveryEscalationClient() {
     // (an option renamed/removed), this just falls short of dispComplete and the agent re-picks.
     setDispPath(ticket.outcome ? ticket.outcome.split(' > ').filter(Boolean) : []);
     setRemarks(ticket.remarks || '');
+    setNewOrderAwbInput(ticket.newOrderAwb || '');
   };
 
   const saveAction = async () => {
-    if (!detailTkt || !dispComplete) return;
+    if (!detailTkt || !canSave) return;
     setSaving(true);
     try {
       const outcome = dispPath.join(' > ');
       const trimmedRemarks = remarks.trim();
-      await disposeMysqlTicket(detailTkt.mysqlId, outcome, trimmedRemarks);
+      await disposeMysqlTicket(detailTkt.mysqlId, outcome, trimmedRemarks, newOrderAwbInput.trim());
       // The disposed ticket may now belong to the other tab (Delivered -> Resolved) or stay put
       // (Escalated/RTO are still Fresh) - refetch rather than guessing which, since the server
       // owns that classification.
@@ -2189,7 +2216,7 @@ export default function DeliveryEscalationClient() {
                             disabled={bulkUploading}
                             className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
                             title={tab === 'new_order_placed'
-                              ? 'Bulk upload New Order AWB via CSV (columns: AWB, New Order AWB).'
+                              ? 'Bulk upload New Order AWB via CSV (columns: AWB, New Order AWB, optional Outcome - Outcome also disposes the ticket, e.g. Delivered or RTO).'
                               : 'Bulk upload outcomes via CSV (columns: AWB, Outcome, Remarks). For a child disposition, put the full path in Outcome, e.g. Escalated > Awaiting Partner.'}
                           >
                             {bulkUploading ? 'Uploading…' : '📤 Bulk Upload'}
@@ -2394,6 +2421,23 @@ export default function DeliveryEscalationClient() {
                     </div>
                   )}
                 </div>
+                {tab === 'new_order_placed' && (
+                  <div>
+                    <label className="text-[12px] font-semibold text-zinc-400 mb-1 block">
+                      New Order AWB{newOrderAwbRequired && <span className="text-rose-400"> *</span>}
+                    </label>
+                    <input
+                      type="text"
+                      value={newOrderAwbInput}
+                      onChange={e => setNewOrderAwbInput(e.target.value)}
+                      placeholder="AWB the reshipped order closed out under"
+                      className="w-full px-3 py-1.5 text-[13px] bg-zinc-950/60 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                    />
+                    {newOrderAwbRequired && !newOrderAwbInput.trim() && (
+                      <p className="text-[11px] text-rose-400 mt-1">Required to mark this Delivered or RTO.</p>
+                    )}
+                  </div>
+                )}
                 <div>
                   <label className="text-[12px] font-semibold text-zinc-400 mb-1 block">Remarks</label>
                   <textarea
@@ -2411,7 +2455,7 @@ export default function DeliveryEscalationClient() {
               {!detailTkt.readOnly && (
                 <button
                   onClick={saveAction}
-                  disabled={!dispComplete || saving}
+                  disabled={!canSave || saving}
                   className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-semibold transition-colors disabled:opacity-50"
                 >
                   {saving ? 'Saving…' : 'Save'}

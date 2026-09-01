@@ -154,18 +154,23 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const { action, id, ticket, outcome, agentRemarks } = req.body || {};
+  const { action, id, ticket, outcome, agentRemarks, newOrderAwb } = req.body || {};
   // No-auth caller passes `agent` (an email) in the body for attribution; a cookie-carrying
   // browser call falls back to its session email so the existing UI needs no change.
   const callerEmail = (req.body?.agent && String(req.body.agent).trim()) || session?.email || '';
 
   // Fresh AND Forced RTO tabs' bulk outcome upload (CSV: AWB, Outcome, optional Remarks), AND
-  // the New Order Placed tab's own bulk `new_order_AWB` fill-in (CSV: AWB, New Order AWB) - see
-  // db.js's bulkDisposeDeliveryEscalationByAwb. rows is pre-parsed client-side; this only
-  // validates shape/size, not outcome values (a bulk upload's Outcome text is trusted the same
-  // way a single dispose's dispPath.join(' > ') already is - no disposition-tree validation
-  // there either). view defaults to 'fresh' for a stale client bundle mid-deploy that doesn't
-  // send one yet; bulkDisposeDeliveryEscalationByAwb itself rejects anything else.
+  // the New Order Placed tab's own bulk fill-in (CSV: AWB, New Order AWB, optional Outcome +
+  // Remarks) - see db.js's bulkDisposeDeliveryEscalationByAwb. rows is pre-parsed client-side;
+  // this only validates shape/size, not outcome values (a bulk upload's Outcome text is trusted
+  // the same way a single dispose's dispPath.join(' > ') already is - no disposition-tree
+  // validation there either). view defaults to 'fresh' for a stale client bundle mid-deploy that
+  // doesn't send one yet; bulkDisposeDeliveryEscalationByAwb itself rejects anything else.
+  //
+  // New Order Placed's Outcome is OPTIONAL per row (blank = just fill new_order_AWB, current
+  // behavior) - but when given, New Order AWB is required anyway by the very next filter below
+  // (unconditional for this view), which is exactly the "mandatory New Order AWB when marking
+  // Delivered/RTO" rule the tab's own single-dispose modal enforces - satisfied here for free.
   if (action === 'bulkDispose') {
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
     const view = req.body?.view === 'forced_rto' ? 'forced_rto'
@@ -180,7 +185,12 @@ module.exports = async (req, res) => {
     }
     const clean = view === 'new_order_placed'
       ? rows
-        .map((r) => ({ awb: String(r.awb || '').trim(), newOrderAwb: String(r.newOrderAwb || '').trim() }))
+        .map((r) => ({
+          awb: String(r.awb || '').trim(),
+          newOrderAwb: String(r.newOrderAwb || '').trim(),
+          outcome: r.outcome ? String(r.outcome).trim() : '',
+          remarks: r.remarks ? String(r.remarks).trim() : '',
+        }))
         .filter((r) => r.awb && r.newOrderAwb)
       : rows
         .map((r) => ({ awb: String(r.awb || '').trim(), outcome: String(r.outcome || '').trim(), remarks: r.remarks ? String(r.remarks).trim() : '' }))
@@ -193,9 +203,11 @@ module.exports = async (req, res) => {
       });
       return;
     }
-    // new_order_placed's own UPDATE never touches agent_email (see db.js) - only fresh/forced_rto
-    // need an attributing email.
-    if (view !== 'new_order_placed' && !callerEmail) {
+    // new_order_placed's own UPDATE only touches agent_email when a row also carries an Outcome
+    // (it's then a real disposal, same as fresh/forced_rto) - a plain AWB-fill-in row needs no
+    // attribution at all.
+    const needsCallerEmail = view !== 'new_order_placed' || clean.some((r) => r.outcome);
+    if (needsCallerEmail && !callerEmail) {
       res.status(400).json({ error: 'agent (an email) is required' });
       return;
     }
@@ -224,12 +236,19 @@ module.exports = async (req, res) => {
       if (action === 'claim') {
         await claimDeliveryEscalationTicketById(id, callerEmail);
       } else {
-        await disposeDeliveryEscalationTicketById(id, callerEmail, outcome, agentRemarks);
+        // newOrderAwb: mandatory-when-Delivered/RTO-from-New-Order-Placed is enforced inside
+        // disposeDeliveryEscalationTicketById itself (it needs the ticket's pre-update outcome
+        // to know whether that rule even applies here) - it throws a plain Error for that case,
+        // which the isValidation check below turns into a 400 instead of a 500.
+        await disposeDeliveryEscalationTicketById(
+          id, callerEmail, outcome, agentRemarks,
+          newOrderAwb ? String(newOrderAwb).trim() : '');
       }
       res.status(200).json({ ok: true });
     } catch (e) {
       console.error(`api/delivery-escalation/record ${action} error:`, e);
-      res.status(500).json({ error: e.message || `Could not ${action} Delivery-Escalation ticket` });
+      const isValidation = /New Order AWB is required/.test(e.message || '');
+      res.status(isValidation ? 400 : 500).json({ error: e.message || `Could not ${action} Delivery-Escalation ticket` });
     }
     return;
   }

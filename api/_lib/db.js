@@ -2056,16 +2056,35 @@ async function claimDeliveryEscalationTicketById(id, email) {
 // leave every older duplicate sitting in Fresh looking unresolved even though the parcel itself
 // was already handled. Scoped to the SAME brand read off this row (unlike
 // bulkDisposeDeliveryEscalationByAwb below, which only has an AWB string typed into a CSV, with
-// no row to read a brand off).
-async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRemarks) {
+// no row to read a brand off). Deliberately NOT cascaded to new_order_AWB: the reshipped order's
+// AWB belongs to the ONE physical parcel/ticket being disposed, not to every duplicate row this
+// AWB happens to share.
+//
+// newOrderAwb is optional (COALESCE keeps the existing value when omitted, so every pre-existing
+// caller of this function is unaffected) EXCEPT when this ticket is currently sitting in the New
+// Order Placed tab (outcome = 'Escalated > New order placed', DE_NEW_ORDER_PLACED_WHERE) and is
+// being disposed to Delivered or RTO now - that specific transition requires a New Order AWB,
+// since it's the AWB the reshipped parcel actually closed out under. One extra PK-indexed SELECT
+// to read the pre-update outcome; enforced here (not just in the UI) so a direct API call is
+// held to the same rule.
+async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRemarks, newOrderAwb) {
   const pool = await getPool();
+  const [[current]] = await pool.execute(
+    'SELECT outcome FROM Delivery_escalation WHERE id = ?', [id]);
+  const outgoingRoot = (outcome || '').split(' > ')[0];
+  if (current && current.outcome === 'Escalated > New order placed'
+      && (outgoingRoot === 'Delivered' || outgoingRoot === 'RTO') && !newOrderAwb) {
+    throw new Error('New Order AWB is required when marking a New Order Placed ticket Delivered or RTO.');
+  }
+
   await pool.execute(`
     UPDATE Delivery_escalation
     SET outcome = ?, agent_remarks = ?, disposed_at = NOW(),
         agent_email = CASE WHEN agent_email IS NULL OR agent_email = '' THEN ? ELSE agent_email END,
-        assigned_at = CASE WHEN assigned_at IS NULL THEN NOW() ELSE assigned_at END
+        assigned_at = CASE WHEN assigned_at IS NULL THEN NOW() ELSE assigned_at END,
+        new_order_AWB = COALESCE(?, new_order_AWB)
     WHERE id = ?
-  `, [outcome || null, agentRemarks || null, email, id]);
+  `, [outcome || null, agentRemarks || null, email, newOrderAwb || null, id]);
 
   await pool.execute(`
     UPDATE Delivery_escalation d
@@ -2117,15 +2136,27 @@ async function bulkDisposeDeliveryEscalationByAwb(rows, email, view) {
   for (let i = 0; i < rows.length; i += BULK_CHUNK_SIZE) {
     const chunk = rows.slice(i, i + BULK_CHUNK_SIZE);
     const chunkResults = await Promise.all(chunk.map(async ({ awb, outcome, remarks, newOrderAwb }) => {
-      // New Order Placed tab: these rows are already resolved (DE_NEW_ORDER_PLACED_WHERE), so a
-      // bulk row here only fills in the reshipped order's own AWB - it must NOT touch
-      // outcome/disposed_at/agent_email the way the Fresh/Forced-RTO dispose path below does.
+      // New Order Placed tab: every row this view's WHERE matches is already
+      // 'Escalated > New order placed' (DE_NEW_ORDER_PLACED_WHERE), so a bulk row here EITHER
+      // just fills in the reshipped order's own AWB (outcome omitted - unchanged from before),
+      // OR also closes the ticket out (outcome given: agent uploaded a CSV/API call disposing it
+      // to Delivered/RTO, say). newOrderAwb is already unconditionally required for every row in
+      // this view (see record.js's own validation) - which is exactly the "New Order AWB
+      // mandatory when marking Delivered/RTO" rule from the New Order Placed tab's own dispose
+      // modal, satisfied here for free since it's required regardless of outcome.
       const [result] = view === 'new_order_placed'
-        ? await pool.execute(`
-            UPDATE Delivery_escalation
-            SET new_order_AWB = ?
-            WHERE awb_code = ? AND (${where})
-          `, [newOrderAwb, awb])
+        ? (outcome
+            ? await pool.execute(`
+                UPDATE Delivery_escalation
+                SET new_order_AWB = ?, outcome = ?, agent_remarks = ?, disposed_at = NOW(),
+                    agent_email = ?
+                WHERE awb_code = ? AND (${where})
+              `, [newOrderAwb, outcome, remarks || null, email, awb])
+            : await pool.execute(`
+                UPDATE Delivery_escalation
+                SET new_order_AWB = ?
+                WHERE awb_code = ? AND (${where})
+              `, [newOrderAwb, awb]))
         : await pool.execute(`
             UPDATE Delivery_escalation
             SET outcome = ?, agent_remarks = ?, disposed_at = NOW(),
