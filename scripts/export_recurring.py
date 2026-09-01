@@ -91,6 +91,30 @@ def save_state(state):
         json.dump(state, f, indent=4)
 
 
+def poll_export_job(api_token, tab_name, job_id, status_url):
+    """FlowCall queues large exports instead of returning CSV inline - poll
+    statusUrl until success/failure, then download the CSV from downloadUrl.
+    Without this, the 202 JSON envelope itself gets treated as the CSV body
+    (csv.reader sees it as a single row) and the run silently reports "no
+    resolved tickets" while advancing the state cursor past real tickets."""
+    url = f"https://api.flowcall.co{status_url}" if status_url.startswith("/") else status_url
+    for _ in range(60):
+        resp = requests.get(url, headers={"Authorization": f"Bearer {api_token}"}, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        job = data["job"]
+        status = job["status"]
+        if status == "succeeded":
+            download_url = data["downloadUrl"]
+            csv_resp = requests.get(download_url, timeout=180)
+            csv_resp.raise_for_status()
+            return csv_resp.text
+        if status == "failed":
+            raise RuntimeError(f"[{tab_name}] export job {job_id} failed: {job}")
+        time.sleep(5)
+    raise RuntimeError(f"[{tab_name}] export job {job_id} did not finish in time")
+
+
 def fetch_export_csv(api_token, tab_name, start_str, end_str):
     body = {
         "startDate": start_str,
@@ -111,6 +135,9 @@ def fetch_export_csv(api_token, tab_name, start_str, end_str):
                 timeout=180,
             )
             resp.raise_for_status()
+            if resp.status_code == 202:
+                job = resp.json()
+                return poll_export_job(api_token, tab_name, job["jobId"], job["statusUrl"])
             return resp.text
         except Exception as e:
             last_err = e
@@ -126,16 +153,22 @@ def main():
     parser.add_argument("--api-token", required=True)
     parser.add_argument("--tab-name", required=True)
     parser.add_argument("--hours-back", type=int, default=2)
+    parser.add_argument("--start", help="Backfill: explicit window start (ISO 8601), overrides state cursor")
+    parser.add_argument("--end", help="Backfill: explicit window end (ISO 8601), overrides now")
+    parser.add_argument("--no-save-state", action="store_true",
+                         help="Backfill: don't touch the state cursor (it's already past this window)")
     args = parser.parse_args()
 
     tab_name = args.tab_name
     now = datetime.now(timezone.utc)
     state = get_state()
-    if state.get(tab_name):
+    if args.start:
+        start_date = datetime.fromisoformat(args.start.replace("Z", "+00:00"))
+    elif state.get(tab_name):
         start_date = datetime.fromisoformat(state[tab_name].replace("Z", "+00:00"))
     else:
         start_date = now - timedelta(hours=args.hours_back)
-    end_date = now
+    end_date = datetime.fromisoformat(args.end.replace("Z", "+00:00")) if args.end else now
 
     start_str = start_date.strftime("%Y-%m-%dT%H:%M:%S.") + f"{start_date.microsecond // 1000:03d}Z"
     end_str = end_date.strftime("%Y-%m-%dT%H:%M:%S.") + f"{end_date.microsecond // 1000:03d}Z"
@@ -148,7 +181,8 @@ def main():
     if len(all_rows) <= 1:
         print(f"[{tab_name}] no resolved tickets in this window - nothing to append")
         state[tab_name] = end_str
-        save_state(state)
+        if not args.no_save_state:
+            save_state(state)
         return
 
     raw_headers = all_rows[0]
@@ -232,7 +266,8 @@ def main():
     if not raw_rows:
         print(f"[{tab_name}] nothing left to append after filtering")
         state[tab_name] = end_str
-        save_state(state)
+        if not args.no_save_state:
+            save_state(state)
         return
 
     existing_header = lib.get_sheet_values(SHEET_ID, f"'{tab_name}'!A1:ZZ1")
@@ -288,7 +323,8 @@ def main():
     if not mapped_rows:
         print(f"[{tab_name}] nothing new to append (all tickets already present)")
         state[tab_name] = end_str
-        save_state(state)
+        if not args.no_save_state:
+            save_state(state)
         return
 
     next_row = lib.get_last_data_row(SHEET_ID, tab_name) + 1
@@ -299,7 +335,8 @@ def main():
     print(f"[{tab_name}] appended {len(mapped_rows)} unique rows at row {next_row} (window {start_str} -> {end_str})")
 
     state[tab_name] = end_str
-    save_state(state)
+    if not args.no_save_state:
+        save_state(state)
 
 
 if __name__ == "__main__":
