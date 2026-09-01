@@ -1947,11 +1947,14 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
   // class this file's other comments (DE_FORCED_RTO_WHERE, DE_FRESH_WHERE) already document for
   // SQL's three-valued logic, just via a different mechanism (AND-ing two clauses that can never
   // both be true, rather than a bare NULL propagating through NOT()).
-  // DATE(${col}), not a bare BETWEEN on the column - same reason deFilterSql's own date/dateTo
-  // wraps it: col is a DATETIME, and a plain string bound `'2026-08-16'` compares as
-  // '2026-08-16 00:00:00', which would wrongly exclude every row on the end date that has a
-  // real time component.
-  const rangeClause = dateFrom && dateTo ? ` AND DATE(${col}) BETWEEN ? AND ?` : '';
+  // col >= dateFrom AND col < (dateTo + 1 day), not DATE(col) BETWEEN - wrapping the column in
+  // DATE() forces MySQL to evaluate every row before it can even apply the filter (no index use
+  // possible on a function-wrapped column), which is the single biggest cost in this query at
+  // this table's scale. The half-open range is equivalent (col is a DATETIME, so a bare
+  // '2026-08-16' bound would wrongly exclude same-day rows with a real time component, same
+  // reasoning as before) but leaves col unwrapped, so an index on col (see
+  // scripts/alter_delivery_escalation_add_indexes.py) actually gets used.
+  const rangeClause = dateFrom && dateTo ? ` AND ${col} >= ? AND ${col} < DATE_ADD(?, INTERVAL 1 DAY)` : '';
   const rangeParams = dateFrom && dateTo ? [dateFrom, dateTo] : [];
   // COUNT(DISTINCT awb_code), not COUNT(*) - same "how many parcels, not how many rows" fix
   // getDeliveryEscalationStats' own Fresh tile already applies (see its comment): a repeat-
@@ -2054,8 +2057,13 @@ async function getDeliveryEscalationGeoCategoryStats(opts = {}) {
   if (!month) return { categories: [], rows: [], grandTotal: {}, grandTotalAll: 0 };
   const geoCol = level === 'pincode' ? 'Pincode' : level === 'city' ? 'Shipping_Address_City' : 'Shipping_Address_State';
   const geoKey = level === 'pincode' ? 'pincode' : level === 'city' ? 'city' : 'state';
-  const clauses = ['added_date IS NOT NULL', "DATE_FORMAT(added_date, '%Y-%m') = ?"];
-  const params = [month];
+  // added_date >= month AND < next month, not DATE_FORMAT(added_date,'%Y-%m') = ? - same
+  // function-wrapped-column fix as getDeliveryEscalationDaywiseStats' rangeClause above: the
+  // wrap blocks index use on added_date. `month` is 'YYYY-MM'; append '-01' for a real DATE
+  // MySQL can compare and add a month to.
+  const monthStart = `${month}-01`;
+  const clauses = ['added_date IS NOT NULL', 'added_date >= ?', 'added_date < DATE_ADD(?, INTERVAL 1 MONTH)'];
+  const params = [monthStart, monthStart];
   if (brand) { clauses.push('brand = ?'); params.push(brand); }
   if (Array.isArray(allowedPartners) && allowedPartners.length) {
     clauses.push(`delivery_partner IN (${allowedPartners.map(() => '?').join(',')})`);
