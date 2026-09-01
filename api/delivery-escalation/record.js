@@ -177,7 +177,7 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const { action, id, ticket, outcome, agentRemarks, newOrderAwb } = req.body || {};
+  const { action, id, ticket, outcome, agentRemarks, newOrderAwb, oldAwb } = req.body || {};
   // No-auth caller passes `agent` (an email) in the body for attribution; a cookie-carrying
   // browser call falls back to its session email so the existing UI needs no change.
   const callerEmail = (req.body?.agent && String(req.body.agent).trim()) || session?.email || '';
@@ -259,18 +259,21 @@ module.exports = async (req, res) => {
       if (action === 'claim') {
         await claimDeliveryEscalationTicketById(id, callerEmail);
       } else {
-        // newOrderAwb: mandatory-when-Delivered/RTO-from-New-Order-Placed is enforced inside
-        // disposeDeliveryEscalationTicketById itself (it needs the ticket's pre-update outcome
-        // to know whether that rule even applies here) - it throws a plain Error for that case,
-        // which the isValidation check below turns into a 400 instead of a 500.
+        // newOrderAwb/oldAwb: both mandates (Delivered/RTO from New Order Placed; disposing a
+        // ticket with no AWB on file at all) are enforced inside
+        // disposeDeliveryEscalationTicketById itself (it needs the ticket's pre-update outcome/
+        // awb_code/order_id to know whether either rule even applies here) - it throws a plain
+        // Error for either case, which the isValidation check below turns into a 400 instead of
+        // a 500.
         await disposeDeliveryEscalationTicketById(
           id, callerEmail, outcome, agentRemarks,
-          newOrderAwb ? String(newOrderAwb).trim() : '');
+          newOrderAwb ? String(newOrderAwb).trim() : '',
+          oldAwb ? String(oldAwb).trim() : '');
       }
       res.status(200).json({ ok: true });
     } catch (e) {
       console.error(`api/delivery-escalation/record ${action} error:`, e);
-      const isValidation = /New Order AWB is required/.test(e.message || '');
+      const isValidation = /New Order AWB is required|AWB number is required/.test(e.message || '');
       res.status(isValidation ? 400 : 500).json({ error: e.message || `Could not ${action} Delivery-Escalation ticket` });
     }
     return;

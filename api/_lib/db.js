@@ -1541,6 +1541,14 @@ const DELIVERY_ESCALATION_MAX_PER_PAGE = 200;
 // a row this is ~1.5MB).
 const DELIVERY_ESCALATION_MAX_EXPORT = 5000;
 
+// awb_code counts as missing not just when it's NULL/blank but when it's Flowcall's own 'N/A'/
+// '#N/A' placeholder (any casing) - sync_delivery_tickets_to_sheet.py's fill_missing_awb only
+// treats a falsy value as missing, so a literal '#N/A' string from Flowcall sails past that
+// fallback and gets stored verbatim instead of NULL. Used both by
+// disposeDeliveryEscalationTicketById's own "ask for the AWB" mandate and its same-order-id
+// cascade below.
+const DE_MISSING_AWB_WHERE = `(awb_code IS NULL OR awb_code = '' OR UPPER(awb_code) IN ('N/A', '#N/A'))`;
+
 // A ticket is Forced RTO whenever its TAT bucket (tat, the sheet-fed string - see
 // DE_SELECT_COLUMNS/DE_TAT_BUCKET_SQL below for the OTHER, computed tat_bucket, a different
 // field) reads "Forced to be marked as RTO" - the logistics pipeline's own flag for an RTO it
@@ -2170,17 +2178,34 @@ async function claimDeliveryEscalationTicketById(id, email) {
 // caller of this function is unaffected) EXCEPT when this ticket is currently sitting in the New
 // Order Placed tab (outcome = 'Escalated > New order placed', DE_NEW_ORDER_PLACED_WHERE) and is
 // being disposed to Delivered or RTO now - that specific transition requires a New Order AWB,
-// since it's the AWB the reshipped parcel actually closed out under. One extra PK-indexed SELECT
-// to read the pre-update outcome; enforced here (not just in the UI) so a direct API call is
-// held to the same rule.
-async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRemarks, newOrderAwb) {
+// since it's the AWB the reshipped parcel actually closed out under.
+//
+// oldAwb is a SEPARATE mandate, for the opposite situation: this ticket has a real order_id but
+// NO awb_code at all (DE_MISSING_AWB_WHERE) - Flowcall itself never reported one. Disposing such
+// a ticket requires typing in the AWB by hand (whatever the agent can see on the courier's own
+// tracking, an internal note, etc.) rather than closing it out with no parcel identifier at all.
+// Once supplied, it's written to THIS row's awb_code AND cascaded to every OTHER row sharing the
+// same (brand, order_id) that's ALSO missing its own awb_code - unlike the outcome cascade below
+// (keyed on awb_code, which is exactly what's absent here, so order_id is the only shared key
+// left), and NOT restricted to DE_FRESH_WHERE: filling in a missing identifier is a correction,
+// not a disposal, so it applies regardless of any of those other rows' own status.
+//
+// One extra PK-indexed SELECT to read the ticket's pre-update outcome/awb_code/order_id/brand;
+// both mandates are enforced here (not just in the UI) so a direct API call is held to the same
+// rules.
+async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRemarks, newOrderAwb, oldAwb) {
   const pool = await getPool();
   const [[current]] = await pool.execute(
-    'SELECT outcome FROM Delivery_escalation WHERE id = ?', [id]);
+    'SELECT outcome, awb_code, order_id, brand FROM Delivery_escalation WHERE id = ?', [id]);
   const outgoingRoot = (outcome || '').split(' > ')[0];
   if (current && current.outcome === 'Escalated > New order placed'
       && (outgoingRoot === 'Delivered' || outgoingRoot === 'RTO') && !newOrderAwb) {
     throw new Error('New Order AWB is required when marking a New Order Placed ticket Delivered or RTO.');
+  }
+  const awbMissing = current && (!current.awb_code || ['N/A', '#N/A'].includes(String(current.awb_code).toUpperCase()));
+  const orderIdPresent = current && current.order_id && String(current.order_id).trim();
+  if (awbMissing && orderIdPresent && !oldAwb) {
+    throw new Error('AWB number is required to dispose a ticket with no AWB on file - enter the AWB you can see for this order.');
   }
 
   await pool.execute(`
@@ -2188,9 +2213,10 @@ async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRema
     SET outcome = ?, agent_remarks = ?, disposed_at = NOW(),
         agent_email = CASE WHEN agent_email IS NULL OR agent_email = '' THEN ? ELSE agent_email END,
         assigned_at = CASE WHEN assigned_at IS NULL THEN NOW() ELSE assigned_at END,
-        new_order_AWB = COALESCE(?, new_order_AWB)
+        new_order_AWB = COALESCE(?, new_order_AWB),
+        awb_code = COALESCE(?, awb_code)
     WHERE id = ?
-  `, [outcome || null, agentRemarks || null, email, newOrderAwb || null, id]);
+  `, [outcome || null, agentRemarks || null, email, newOrderAwb || null, oldAwb || null, id]);
 
   await pool.execute(`
     UPDATE Delivery_escalation d
@@ -2201,6 +2227,14 @@ async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRema
         d.assigned_at = CASE WHEN d.assigned_at IS NULL THEN NOW() ELSE d.assigned_at END
     WHERE d.id <> ? AND t.awb_code IS NOT NULL AND t.awb_code <> '' AND (${DE_FRESH_WHERE})
   `, [id, outcome || null, agentRemarks || null, email, id]);
+
+  if (oldAwb && current) {
+    await pool.execute(`
+      UPDATE Delivery_escalation
+      SET awb_code = ?
+      WHERE id <> ? AND brand = ? AND order_id = ? AND (${DE_MISSING_AWB_WHERE})
+    `, [oldAwb, id, current.brand, current.order_id]);
+  }
 }
 
 // Bulk outcome upload for the Fresh AND Forced RTO tabs, AND the New Order Placed tab's own

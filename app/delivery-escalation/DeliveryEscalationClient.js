@@ -871,6 +871,13 @@ function isDeResolvedOutcome(outcome) {
   return o === 'Delivered' || o.startsWith('Delivered > ') || o === 'Resolved' || o.startsWith('Resolved > ');
 }
 
+// Mirrors db.js's DE_MISSING_AWB_WHERE - blank, or Flowcall's own 'N/A'/'#N/A' placeholder (any
+// casing), counts as "no AWB on file" for the old-AWB dispose mandate below.
+function isAwbMissing(awb) {
+  const a = (awb || '').trim().toUpperCase();
+  return !a || a === 'N/A' || a === '#N/A';
+}
+
 // Every ticket ever raised for one parcel (see db.js's getDeliveryEscalationAwbHistory) - the
 // repeat's OTHER tickets can land on any page of the id-ordered table, not just this one, so
 // contactCount > 1 alone can't be expanded from what's already loaded; this is the fetch that
@@ -933,11 +940,13 @@ async function claimMysqlTicket(id) {
 // newOrderAwb is only ever non-blank when resolving a New Order Placed ticket (see saveAction) -
 // the server enforces it's present when that ticket is being marked Delivered/RTO, and otherwise
 // just carries it through as an optional update (see disposeDeliveryEscalationTicketById).
-async function disposeMysqlTicket(id, outcome, agentRemarks, newOrderAwb) {
+// oldAwb is the SEPARATE "this ticket has no AWB at all" mandate - non-blank only when the
+// ticket being disposed had a missing awb_code, server-enforced the same way.
+async function disposeMysqlTicket(id, outcome, agentRemarks, newOrderAwb, oldAwb) {
   const r = await fetch('/api/delivery-escalation/record', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'dispose', id, outcome, agentRemarks, newOrderAwb }),
+    body: JSON.stringify({ action: 'dispose', id, outcome, agentRemarks, newOrderAwb, oldAwb }),
   });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error || `Save failed (${r.status})`);
@@ -1751,6 +1760,10 @@ export default function DeliveryEscalationClient() {
   // resolved to Delivered or RTO now - see newOrderAwbRequired below and
   // disposeDeliveryEscalationTicketById's own server-side copy of this rule.
   const [newOrderAwbInput, setNewOrderAwbInput] = useState('');
+  // ANY tab: the ticket's own AWB, when it has none on file at all (order_id present, awb_code
+  // missing/placeholder - see isAwbMissing/oldAwbRequired below). Nothing to prefill (that's the
+  // whole problem), so this always starts blank.
+  const [oldAwbInput, setOldAwbInput] = useState('');
 
   // dispLevels[i] = { type: 'single'|'multi'|'text', options }. Level 0 is always 'single' (the
   // top-level list has no parent to configure it); level i>0's type comes from whichever node
@@ -1791,7 +1804,13 @@ export default function DeliveryEscalationClient() {
   // "Delivered", "RTO", or still "Escalated" if left alone) - matches the top-level check
   // disposeDeliveryEscalationTicketById makes server-side off the SAME dispPath.join(' > ').
   const newOrderAwbRequired = tab === 'new_order_placed' && (dispPath[0] === 'Delivered' || dispPath[0] === 'RTO');
-  const canSave = dispComplete && (!newOrderAwbRequired || !!newOrderAwbInput.trim());
+  // ANY tab: mandatory whenever this ticket has a real order_id but no AWB on file at all
+  // (isAwbMissing mirrors DE_MISSING_AWB_WHERE) - unlike newOrderAwbRequired above, this doesn't
+  // depend on which outcome is picked; disposing such a ticket at all requires the AWB.
+  const oldAwbRequired = !!detailTkt && !detailTkt.readOnly
+    && !!(detailTkt.orderId && String(detailTkt.orderId).trim()) && isAwbMissing(detailTkt.awb);
+  const canSave = dispComplete && (!newOrderAwbRequired || !!newOrderAwbInput.trim())
+    && (!oldAwbRequired || !!oldAwbInput.trim());
   const pickDisp = (level, label) => setDispPath(prev => [...prev.slice(0, level), label]);
   const toggleMultiDisp = (level, label) => setDispPath(prev => {
     const checked = (prev[level] || '').split(', ').filter(Boolean);
@@ -1818,6 +1837,7 @@ export default function DeliveryEscalationClient() {
     setDispPath(ticket.outcome ? ticket.outcome.split(' > ').filter(Boolean) : []);
     setRemarks(ticket.remarks || '');
     setNewOrderAwbInput(ticket.newOrderAwb || '');
+    setOldAwbInput('');
   };
 
   const saveAction = async () => {
@@ -1826,7 +1846,7 @@ export default function DeliveryEscalationClient() {
     try {
       const outcome = dispPath.join(' > ');
       const trimmedRemarks = remarks.trim();
-      await disposeMysqlTicket(detailTkt.mysqlId, outcome, trimmedRemarks, newOrderAwbInput.trim());
+      await disposeMysqlTicket(detailTkt.mysqlId, outcome, trimmedRemarks, newOrderAwbInput.trim(), oldAwbInput.trim());
       // The disposed ticket may now belong to the other tab (Delivered -> Resolved) or stay put
       // (Escalated/RTO are still Fresh) - refetch rather than guessing which, since the server
       // owns that classification.
@@ -2718,6 +2738,23 @@ export default function DeliveryEscalationClient() {
                     />
                     {newOrderAwbRequired && !newOrderAwbInput.trim() && (
                       <p className="text-[11px] text-rose-400 mt-1">Required to mark this Delivered or RTO.</p>
+                    )}
+                  </div>
+                )}
+                {oldAwbRequired && (
+                  <div>
+                    <label className="text-[12px] font-semibold text-zinc-400 mb-1 block">
+                      AWB Number<span className="text-rose-400"> *</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={oldAwbInput}
+                      onChange={e => setOldAwbInput(e.target.value)}
+                      placeholder="This ticket has no AWB on file - enter it to dispose"
+                      className="w-full px-3 py-1.5 text-[13px] bg-zinc-950/60 border border-zinc-800 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                    />
+                    {!oldAwbInput.trim() && (
+                      <p className="text-[11px] text-rose-400 mt-1">Required - this order has no AWB recorded yet.</p>
                     )}
                   </div>
                 )}
