@@ -1,6 +1,12 @@
-// The only way the browser reaches MySQL PEP_CLS.Delivery_escalation - same permission gate as
-// api/delivery-escalation/sheet.js. This table is what BOTH the Fresh and Resolved tabs read
-// from, not the sheet.
+// The only way the browser (or an external caller) reaches MySQL PEP_CLS.Delivery_escalation.
+// This table is what BOTH the Fresh and Resolved tabs read from, not the sheet.
+//
+// NO AUTH: unlike the rest of this app, this endpoint does NOT require the pkyc_session cookie
+// or check report_tab_permissions - it's deliberately open so an external system can call it
+// directly (e.g. Postman, a script) with no login flow. A caller MAY still send the cookie (the
+// in-app UI does) and its session.email is used for attribution if present; a caller with no
+// cookie must instead pass `agent` (an email string) in the POST body for any action that writes
+// agent_email - see callerEmail below.
 //
 // GET serves three shapes, all paged/filtered in SQL (see db.js's own header comment on
 // why - Lambda's 6MB response cap):
@@ -15,11 +21,10 @@
 // Any other POST body falls through to the older ticket-snapshot dispose
 // (disposeDeliveryEscalationTicket), kept as a fallback though the client no longer calls it.
 //
-// The security boundary is checkAccess() alone - the report_tab_permissions row for this
-// process. There is deliberately no per-agent row scoping on top of it: this is one shared desk
-// whose tickets are self-claimed from a common unassigned pool, so hiding unclaimed rows from a
-// non-admin left a newly-invited agent with an empty page and nothing to claim. `agent` is a
-// plain filter anyone may use to narrow the view to one person (usually themselves).
+// There is deliberately no per-agent row scoping: this is one shared desk whose tickets are
+// self-claimed from a common unassigned pool, so hiding unclaimed rows from one caller left a
+// newly-invited agent with an empty page and nothing to claim. The GET `agent` param is a plain
+// filter anyone may use to narrow the view to one person (usually themselves).
 const { getSession } = require('../_lib/session');
 const {
   disposeDeliveryEscalationTicket,
@@ -31,8 +36,6 @@ const {
   bulkDisposeDeliveryEscalationByAwb,
 } = require('../_lib/db');
 
-const CARD_KEY = 'calling';
-const TAB_KEY = 'deliveryescalation';
 // Backstop against a request that can never finish, not an arbitrary business limit:
 // bulkDisposeDeliveryEscalationByAwb now runs 8 row-updates at a time (see its own comment)
 // rather than one at a time, but the whole request still has to finish inside API Gateway's
@@ -42,21 +45,11 @@ const TAB_KEY = 'deliveryescalation';
 // pattern (see api/rto/upload-start.js's own for exactly that reason), not a bigger number here.
 const MAX_BULK_ROWS = 10000;
 
-function checkAccess(session) {
-  if (!session) return 'Not authenticated';
-  if (!(session.perms || []).includes(CARD_KEY)) return 'You do not have access to Delivery-Escalation.';
-  const tabs = session.tabPerms && session.tabPerms[CARD_KEY];
-  if (Array.isArray(tabs) && tabs.length && !tabs.includes(TAB_KEY)) return 'You do not have access to Delivery-Escalation.';
-  return null;
-}
-
 module.exports = async (req, res) => {
-  const session = await getSession(req);
-  const denied = checkAccess(session);
-  if (denied) {
-    res.status(session ? 403 : 401).json({ error: denied });
-    return;
-  }
+  // Best-effort only - never blocks the request. Just lets a cookie-carrying browser call skip
+  // passing `agent` explicitly (see callerEmail below); getSession() itself never throws for a
+  // missing/invalid cookie, it just resolves null.
+  const session = await getSession(req).catch(() => null);
 
   if (req.method === 'GET') {
     const q = req.query || {};
@@ -162,6 +155,9 @@ module.exports = async (req, res) => {
   }
 
   const { action, id, ticket, outcome, agentRemarks } = req.body || {};
+  // No-auth caller passes `agent` (an email) in the body for attribution; a cookie-carrying
+  // browser call falls back to its session email so the existing UI needs no change.
+  const callerEmail = (req.body?.agent && String(req.body.agent).trim()) || session?.email || '';
 
   // Fresh AND Forced RTO tabs' bulk outcome upload (CSV: AWB, Outcome, optional Remarks), AND
   // the New Order Placed tab's own bulk `new_order_AWB` fill-in (CSV: AWB, New Order AWB) - see
@@ -197,8 +193,14 @@ module.exports = async (req, res) => {
       });
       return;
     }
+    // new_order_placed's own UPDATE never touches agent_email (see db.js) - only fresh/forced_rto
+    // need an attributing email.
+    if (view !== 'new_order_placed' && !callerEmail) {
+      res.status(400).json({ error: 'agent (an email) is required' });
+      return;
+    }
     try {
-      const results = await bulkDisposeDeliveryEscalationByAwb(clean, session.email, view);
+      const results = await bulkDisposeDeliveryEscalationByAwb(clean, callerEmail, view);
       res.status(200).json({ results });
     } catch (e) {
       console.error('api/delivery-escalation/record bulkDispose error:', e);
@@ -214,11 +216,15 @@ module.exports = async (req, res) => {
       res.status(400).json({ error: 'id is required' });
       return;
     }
+    if (!callerEmail) {
+      res.status(400).json({ error: 'agent (an email) is required' });
+      return;
+    }
     try {
       if (action === 'claim') {
-        await claimDeliveryEscalationTicketById(id, session.email);
+        await claimDeliveryEscalationTicketById(id, callerEmail);
       } else {
-        await disposeDeliveryEscalationTicketById(id, session.email, outcome, agentRemarks);
+        await disposeDeliveryEscalationTicketById(id, callerEmail, outcome, agentRemarks);
       }
       res.status(200).json({ ok: true });
     } catch (e) {
@@ -232,9 +238,13 @@ module.exports = async (req, res) => {
     res.status(400).json({ error: 'ticket.brand and ticket.orderId are required' });
     return;
   }
+  if (!callerEmail) {
+    res.status(400).json({ error: 'agent (an email) is required' });
+    return;
+  }
 
   try {
-    await disposeDeliveryEscalationTicket(ticket, session.email, outcome, agentRemarks);
+    await disposeDeliveryEscalationTicket(ticket, callerEmail, outcome, agentRemarks);
     res.status(200).json({ ok: true });
   } catch (e) {
     console.error('api/delivery-escalation/record error:', e);
