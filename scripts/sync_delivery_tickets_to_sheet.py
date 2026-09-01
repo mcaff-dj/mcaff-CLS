@@ -286,9 +286,71 @@ def fetch_pincode_by_awb(awbs):
     return pincode_by_awb
 
 
+GEO_LOOKBACK_DAYS = 3
+
+
+def heal_stale_geo_fields(tab):
+    """Re-attempts the City/Payment_Mode/State/Pincode lookup for this brand's own recent rows
+    that still have at least one of the four NULL - the ticket-number dedup means a ticket only
+    ever gets fetched from Flowcall once (inside its own incremental window), so if
+    Item_level_data hadn't synced that AWB's row yet at THAT exact moment (seen in practice: 25
+    of 26 tickets in one run mapped fine, one AWB's Item_level_data row landed minutes too late),
+    there's no later run that will ever revisit it - it just stays NULL forever. Since this runs
+    every 2h, checking the last GEO_LOOKBACK_DAYS days each time means a straggler like that
+    self-heals within a few hours instead of needing a manual backfill script re-run.
+
+    Scoped to `tab` (brand) and a short lookback window, not every row ever - same
+    batched-IN-on-indexed-Tracking_Number reasoning as the fetch_*_by_awb functions, just kept
+    cheap by only ever looking at a small, recent slice of Delivery_escalation.
+    Best-effort, same as auto-dispose/contact-stats below: a failure here must not fail a run
+    whose upsert already succeeded."""
+    rows = mysql_lib.query(
+        "SELECT DISTINCT awb_code FROM Delivery_escalation "
+        "WHERE brand = %s AND awb_code IS NOT NULL AND awb_code != '' "
+        "AND added_date >= (CURDATE() - INTERVAL %s DAY) "
+        "AND (Shipping_Address_City IS NULL OR Payment_Mode IS NULL "
+        "     OR Shipping_Address_State IS NULL OR Pincode IS NULL)",
+        (tab, GEO_LOOKBACK_DAYS), database="PEP_CLS",
+    )
+    awbs = [r[0] for r in (rows or [])]
+    if not awbs:
+        return 0
+    city_by_awb = fetch_city_by_awb(awbs)
+    payment_mode_by_awb = fetch_payment_mode_by_awb(awbs)
+    state_by_awb = fetch_state_by_awb(awbs)
+    pincode_by_awb = fetch_pincode_by_awb(awbs)
+    healed = 0
+    for awb in awbs:
+        city, payment_mode = city_by_awb.get(awb), payment_mode_by_awb.get(awb)
+        shipping_state, pincode = state_by_awb.get(awb), pincode_by_awb.get(awb)
+        if city is None and payment_mode is None and shipping_state is None and pincode is None:
+            continue  # still nothing new in Item_level_data for this AWB - nothing to write
+        n = mysql_lib.execute(
+            "UPDATE Delivery_escalation SET "
+            "Shipping_Address_City = COALESCE(Shipping_Address_City, %s), "
+            "Payment_Mode = COALESCE(Payment_Mode, %s), "
+            "Shipping_Address_State = COALESCE(Shipping_Address_State, %s), "
+            "Pincode = COALESCE(Pincode, %s) "
+            "WHERE brand = %s AND awb_code = %s",
+            (city, payment_mode, shipping_state, pincode, tab, awb), database="PEP_CLS",
+        )
+        healed += n or 0
+    return healed
+
+
 def parent_order_of(row):
     (_ticket_number, _subcategory, order_name, disposition_order, *_rest) = row
     return order_name or disposition_order or ""
+
+
+def has_valid_order_id(row):
+    """A ticket with no real order_id must never reach Delivery_escalation - order_id is what
+    every report/join in this table keys off, and Flowcall reports a bare 'N/A' (any casing) for
+    a ticket it never matched to an order at all, same as a genuinely blank order_name/
+    Disposition: Order. 'N/A' is worse than skipping the row outright: unlike NULL, it's a
+    value that silently joins/groups tickets from completely unrelated orders together."""
+    order_id = parent_order_of(row).strip()
+    return bool(order_id) and order_id.upper() != "N/A"
 
 
 def fill_missing_awb(rows):
@@ -464,6 +526,20 @@ def sync_tab(tab, dry_run, since=None, hours_back=2, api_token=None):
     rows = [list(r) for r in rows]
     fill_missing_awb(rows)
 
+    # Drop tickets with no real order_id (null/blank or Flowcall's own 'N/A') BEFORE any of the
+    # AWB lookups below - see has_valid_order_id. These must never reach Delivery_escalation.
+    before_count = len(rows)
+    rows = [r for r in rows if has_valid_order_id(r)]
+    skipped = before_count - len(rows)
+    if skipped:
+        print(f"  skipped {skipped} ticket(s) with no valid order id (null/N/A)")
+    if not rows:
+        if not since and not dry_run:
+            state = get_state()
+            state[tab] = end_str
+            save_state(state)
+        return
+
     city_by_awb = fetch_city_by_awb([r[4] for r in rows if r[4]])
     payment_mode_by_awb = fetch_payment_mode_by_awb([r[4] for r in rows if r[4]])
     state_by_awb = fetch_state_by_awb([r[4] for r in rows if r[4]])
@@ -485,6 +561,15 @@ def sync_tab(tab, dry_run, since=None, hours_back=2, api_token=None):
     upsert_delivery_escalation_rows(rows, tab, terminal_by_awb, city_by_awb, payment_mode_by_awb,
                                      state_by_awb, pincode_by_awb)
     print(f"  upserted {len(rows)} row(s) into MySQL Delivery_escalation")
+    # See heal_stale_geo_fields' own docstring: catches recent rows whose Item_level_data lookup
+    # missed by a timing race on THEIR OWN insert run, since ticket-number dedup means no future
+    # run would otherwise ever revisit them. Best-effort, same reasoning as auto-dispose below.
+    try:
+        n = heal_stale_geo_fields(tab)
+        if n:
+            print(f"  healed {n} row(s) with a previously-missed City/Payment_Mode/State/Pincode")
+    except Exception as e:
+        print(f"  WARNING: geo-field heal failed (stale NULLs left in place): {e}")
     # Categories whose outcome follows from the category alone never reach an agent - see
     # auto_dispose_de_categories.py. Runs after the upsert so tickets mirrored a moment ago are
     # included, and only ever touches blank-outcome rows, so it can't overwrite the
@@ -566,6 +651,16 @@ def self_check():
     assert fetch_pincode_by_awb([]) == {}
     assert parent_order_of(row) == "MCaff123"
     assert parent_order_of(row2) == "HYP999"
+    # has_valid_order_id: null/blank/'N/A' (any casing, either source column) all get skipped;
+    # a real order_id passes regardless of which of order_name/disposition_order supplied it.
+    assert has_valid_order_id(row) is True
+    assert has_valid_order_id(row2) is True
+    row_blank = ("TCK3", None, "", "", "AWB3", "BlueDart", None, None, None, "")
+    assert has_valid_order_id(row_blank) is False
+    row_na = ("TCK4", None, "N/A", "", "AWB4", "BlueDart", None, None, None, "")
+    assert has_valid_order_id(row_na) is False
+    row_na_lower = ("TCK5", None, "", "n/a", "AWB5", "BlueDart", None, None, None, "")
+    assert has_valid_order_id(row_na_lower) is False
     print("self-check ok")
 
 
