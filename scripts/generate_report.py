@@ -419,6 +419,7 @@ def main():
 
     ov.append(gen_weekly.build_weekly_overview_block(ctx))
     ov.append(build_insights_card_overview(ctx, uniq_class_month))
+    ov.append(f'<p class="note"><a href="https://main.d299hs9qnbrndj.amplifyapp.com/?brand={ctx.b["brand"]}&tab=overview" target="_blank" rel="noopener">View live Overview dashboard &rarr;</a></p>')
     ctx.overview_html = "".join(ov)
 
     gen_monthly.setup(ctx)
