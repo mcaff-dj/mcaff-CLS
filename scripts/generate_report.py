@@ -417,7 +417,6 @@ def main():
     ctx.class_dup = class_dup
     ctx.kpi_row = lambda cls, subset: kpi_row(ctx, cls, subset)
 
-    ov.append(gen_weekly.build_weekly_overview_block(ctx))
     ov.append(build_insights_card_overview(ctx, uniq_class_month))
     ov.append(build_business_kpi_insights_table(ctx))
     ctx.overview_html = "".join(ov)
