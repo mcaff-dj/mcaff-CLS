@@ -459,18 +459,35 @@ _BUSINESS_KPI_INSIGHTS = {
             "RTO + Cancellation at 13.20%, NDR Conversion down ~3% vs April.",
             "Warehouse hit by election manpower shortages (Kolkata, Guwahati) and Mumbai planning errors (6th &amp; 31st May).",
             "Elasticrun performance fell from ~96% to ~86% in the first two weeks (Mumbai, Ahmedabad, Jaipur worst-hit).",
+        ], [
+            ("Wk18 (27 Apr-3 May)", "1,01,095", "12.70%", "3.18", "87.77%", "88.20%"),
+            ("Wk19 (4-10 May)", "46,500", "12.00%", "3.29", "85.85%", "82.03%"),
+            ("Wk20 (11-17 May)", "86,087", "12.00%", "2.89", "92.64%", "92.70%"),
+            ("Wk21 (18-24 May)", "51,852", "14.10%", "2.79", "91.73%", "93.29%"),
+            ("Wk22 (25-31 May)", "91,378", "14.00%", "2.74", "96.54%", "98.64%"),
         ]),
         ("June 2026", [
             "O2D closed at 2.93d vs 2.88d target &mdash; weak first half (same SKU issue) recovered sharply from 11 June.",
             "RTO + Cancellation eased slightly to 12.10% from May's 13.20%, but FASR stayed below the 80% benchmark all month.",
             "Guwahati worst-performing warehouse all month (DTDC device/manifestation issue at pickup).",
             "Xpressbees (76.00% SLA) and Delhivery (81.30%) weakest couriers, both hit by monsoon in the southern belt.",
+        ], [
+            ("Wk23 (1-7 Jun)", "1,26,467", "13.70%", "3.18", "88.09%", "81.20%"),
+            ("Wk24 (8-14 Jun)", "41,074", "13.60%", "2.99", "86.60%", "87.00%"),
+            ("Wk25 (15-21 Jun)", "90,976", "11.70%", "2.76", "94.40%", "96.30%"),
+            ("Wk26 (22-28 Jun)", "53,312", "12.80%", "2.60", "94.50%", "93.70%"),
         ]),
         ("July 2026", [
             "O2D closed at 2.93d, marginally above the 2.91d target &mdash; Wk28 worst (Mumbai warehouse closed for waterlogging), recovered by Wk30.",
             "RU (90.80%) and SPCD&lt;3hrs (90.80%) both closed below target; Take-a-Dip Bodywash &amp; Hair Spray remained the SKU drivers.",
             "RTO + Cancellation rose to ~14.20%, NDR Conversion fell to 58.50% &mdash; COD NDRs increasingly converting to RTO.",
             "TAT+2% rose to 4.70%; Xpressbees the largest contributor despite remaining the preferred allocation partner (highest FASR).",
+        ], [
+            ("Wk27 (29 Jun-5 Jul)", "1,10,831", "13.80%", "2.94", "92.10%", "86.10%"),
+            ("Wk28 (6-12 Jul)", "53,556", "14.40%", "3.14", "86.80%", "83.70%"),
+            ("Wk29 (13-19 Jul)", "96,560", "13.30%", "2.86", "91.70%", "94.30%"),
+            ("Wk30 (20-26 Jul)", "35,850", "10.50%", "2.79", "91.80%", "95.10%"),
+            ("Wk31 (27 Jul-02 Aug)", "14,495", "2.80%", "2.84", "91.60%", "94.60%"),
         ]),
     ],
     "hyphen": [
@@ -479,34 +496,83 @@ _BUSINESS_KPI_INSIGHTS = {
             "RTO + Cancellation rose to 8.60% from 6.53% in April, driven by higher NDR%.",
             "Rapid Commerce launched in May (~50% of volume) but averaged only ~50% performance, limiting O2D gains.",
             "Warehouse impacted in Guwahati, Kolkata, Mumbai in Wk18-19 (elections + sale-period planning issues).",
+        ], [
+            ("Wk18 (27 Apr-3 May)", "1,35,286", "8.60%", "2.76", "95.71%", "97.20%"),
+            ("Wk19 (4-10 May)", "1,27,717", "8.20%", "2.79", "93.55%", "96.85%"),
+            ("Wk20 (11-17 May)", "48,824", "8.60%", "2.68", "95.23%", "97.26%"),
+            ("Wk21 (18-24 May)", "45,507", "8.60%", "2.52", "96.94%", "98.27%"),
+            ("Wk22 (25-31 May)", "48,259", "7.00%", "2.61", "96.33%", "96.88%"),
         ]),
         ("June 2026", [
             "O2D improved to 2.62d, beating the 2.68d target &mdash; RU delay nearly disappeared as the ADP Dual Phase issue resolved.",
             "RTO + Cancellation kept rising to 9.40% (from 8.60% in May) &mdash; the one metric moving the wrong way even as O2D improved.",
             "Total order volume dropped sharply to 2.16L vs 3.75L in May and 3.57L in April.",
             "Guwahati (94.20%) and Hyderabad (95.90%) remained the weakest warehouses, same drivers as Mcaffeine.",
+        ], [
+            ("Wk23 (1-7 Jun)", "53,460", "8.90%", "2.63", "94.40%", "98.00%"),
+            ("Wk24 (8-14 Jun)", "52,696", "9.00%", "2.61", "95.10%", "96.80%"),
+            ("Wk25 (15-21 Jun)", "45,688", "9.90%", "2.59", "96.80%", "96.30%"),
+            ("Wk26 (22-28 Jun)", "48,122", "10.40%", "2.52", "95.90%", "98.70%"),
+            ("29-30 Jun", "16,234", "1.50%", "1.43", "97.30%", "96.80%"),
         ]),
         ("July 2026", [
             "O2D on track at 2.65d, in line with the 2.63d target &mdash; delay tightly controlled across every component.",
             "RTO + Cancellation eased slightly to 9.10% from June's 9.40%; FASR improved marginally to 81.60%.",
             "RU (95.10%) and SPCD&lt;3hrs (96.40%) marginally below target &mdash; ADP Dual Phase SKU still the primary driver.",
             "Bangalore warehouse share rising fast to 23.00% &mdash; flagged as the key capacity watch item for August.",
+        ], [
+            ("Wk27 (29 Jun-5 Jul)", "56,623", "10.00%", "2.66", "97.20%", "96.50%"),
+            ("Wk28 (6-12 Jul)", "51,803", "10.50%", "2.73", "94.30%", "93.20%"),
+            ("Wk29 (13-19 Jul)", "50,106", "9.60%", "2.60", "95.10%", "97.30%"),
+            ("Wk30 (20-26 Jul)", "43,992", "9.50%", "2.39", "94.90%", "99.20%"),
+            ("Wk31 (27 Jul-2 Aug)", "1,61,460", "7.40%", "1.39", "93.70%", "98.00%"),
         ]),
     ],
 }
+
+
+_BIZ_KPI_STYLE = """<style>
+  .biz-kpi{background:var(--surface-card);border:1px solid var(--border);border-radius:14px;padding:18px clamp(14px,3vw,22px) 6px;margin:4px 0 32px;max-width:100%;}
+  .biz-kpi h3{font-size:12px;margin:0 0 14px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-secondary);font-weight:700;}
+  .biz-kpi-month{padding:14px 0;border-top:1px solid var(--border);}
+  .biz-kpi-month:first-of-type{border-top:none;padding-top:0;}
+  .biz-kpi-month summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:7px;margin-bottom:10px;}
+  .biz-kpi-month summary::-webkit-details-marker{display:none;}
+  .biz-kpi-month summary::marker{content:'';}
+  .biz-kpi-month-label{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.03em;color:var(--text-primary);background:var(--active-bg,rgba(74,58,167,.08));padding:3px 10px;border-radius:999px;}
+  .biz-kpi-chev{font-size:9px;color:var(--text-muted);transition:transform .15s ease;}
+  .biz-kpi-month[open] .biz-kpi-chev{transform:rotate(180deg);}
+  .biz-kpi-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px;}
+  .biz-kpi-list li{position:relative;padding-left:17px;font-size:13px;line-height:1.55;color:var(--text-secondary);}
+  .biz-kpi-list li::before{content:'';position:absolute;left:0;top:7px;width:6px;height:6px;border-radius:50%;background:var(--s1);}
+  .biz-week-scroll{display:flex;gap:10px;overflow-x:auto;margin:14px 0 4px;padding-bottom:6px;}
+  .biz-week-card{flex:0 0 138px;background:var(--page);border:1px solid var(--border);border-radius:10px;padding:10px 12px;}
+  .biz-week-hdr{font-size:10px;font-weight:700;color:var(--text-muted);margin-bottom:8px;white-space:nowrap;}
+  .biz-week-stat{display:flex;justify-content:space-between;gap:8px;font-size:11.5px;color:var(--text-secondary);padding:2px 0;}
+  .biz-week-stat b{color:var(--text-primary);font-weight:600;}
+</style>"""
+
+_WEEK_STAT_LABELS = ("Orders", "RTO+Canc", "O2D", "RU", "SPCD<3h")
 
 
 def build_business_kpi_insights_table(ctx):
     months = _BUSINESS_KPI_INSIGHTS.get(ctx.b["brand"])
     if not months:
         return ""
-    rows = []
-    for month, bullets in months:
+    blocks = []
+    for mi, (month, bullets, weeks) in enumerate(months):
         items = "".join(f"<li>{b}</li>" for b in bullets)
-        rows.append(f"<tr><td class='rowlabel'>{h_enc(month)}</td><td><ul class='ma-list'>{items}</ul></td></tr>")
-    return (f"<div class='pivot-wrap'><div class='pivot-title'>Business KPI Insights (D2C Monthly Report)</div>"
-            f"<div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner'>Month</th><th>Key Insights</th></tr></thead>"
-            f"<tbody>{''.join(rows)}</tbody></table></div></div>")
+        cards = []
+        for week_label, *stats in weeks:
+            stat_rows = "".join(f"<div class='biz-week-stat'><span>{lbl}</span><b>{h_enc(v)}</b></div>" for lbl, v in zip(_WEEK_STAT_LABELS, stats))
+            cards.append(f"<div class='biz-week-card'><div class='biz-week-hdr'>{h_enc(week_label)}</div>{stat_rows}</div>")
+        open_attr = " open" if mi == len(months) - 1 else ""
+        blocks.append(
+            f"<details class='biz-kpi-month'{open_attr}><summary><span class='biz-kpi-month-label'>{h_enc(month)}</span>"
+            f"<span class='biz-kpi-chev'>&#9662;</span></summary><ul class='biz-kpi-list'>{items}</ul>"
+            f"<div class='biz-week-scroll'>{''.join(cards)}</div></details>"
+        )
+    return f"<div class='biz-kpi'><h3>Business KPI Insights &mdash; D2C Monthly Report</h3>{''.join(blocks)}</div>{_BIZ_KPI_STYLE}"
 
 
 if __name__ == "__main__":
