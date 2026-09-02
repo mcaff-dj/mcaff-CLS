@@ -419,6 +419,7 @@ def main():
 
     ov.append(gen_weekly.build_weekly_overview_block(ctx))
     ov.append(build_insights_card_overview(ctx, uniq_class_month))
+    ov.append(build_business_kpi_insights_table(ctx))
     ctx.overview_html = "".join(ov)
 
     gen_monthly.setup(ctx)
@@ -445,6 +446,67 @@ def main():
 def build_insights_card_overview(ctx, uniq_class_month):
     from gen_insights import build_insights_card, get_overview_insight_items
     return build_insights_card("Insights &mdash; Overview", get_overview_insight_items(ctx, uniq_class_month))
+
+
+# Hand-curated from the "D2C Business Overview" monthly PDF decks (O2D/RTO/SPCD/warehouse/
+# logistics KPIs) - a separate manual deliverable, not derived from this report's own
+# ticket-sheet data, so there's no sheet column to compute these from. Update by hand each
+# month as a new deck comes in.
+_BUSINESS_KPI_INSIGHTS = {
+    "mcaffeine": [
+        ("May 2026", [
+            "O2D closed at 2.97d vs 2.84d target &mdash; SPCD/RU dip driven by Take-a-Dip Bodywash &amp; Hair Spray SKUs.",
+            "RTO + Cancellation at 13.20%, NDR Conversion down ~3% vs April.",
+            "Warehouse hit by election manpower shortages (Kolkata, Guwahati) and Mumbai planning errors (6th &amp; 31st May).",
+            "Elasticrun performance fell from ~96% to ~86% in the first two weeks (Mumbai, Ahmedabad, Jaipur worst-hit).",
+        ]),
+        ("June 2026", [
+            "O2D closed at 2.93d vs 2.88d target &mdash; weak first half (same SKU issue) recovered sharply from 11 June.",
+            "RTO + Cancellation eased slightly to 12.10% from May's 13.20%, but FASR stayed below the 80% benchmark all month.",
+            "Guwahati worst-performing warehouse all month (DTDC device/manifestation issue at pickup).",
+            "Xpressbees (76.00% SLA) and Delhivery (81.30%) weakest couriers, both hit by monsoon in the southern belt.",
+        ]),
+        ("July 2026", [
+            "O2D closed at 2.93d, marginally above the 2.91d target &mdash; Wk28 worst (Mumbai warehouse closed for waterlogging), recovered by Wk30.",
+            "RU (90.80%) and SPCD&lt;3hrs (90.80%) both closed below target; Take-a-Dip Bodywash &amp; Hair Spray remained the SKU drivers.",
+            "RTO + Cancellation rose to ~14.20%, NDR Conversion fell to 58.50% &mdash; COD NDRs increasingly converting to RTO.",
+            "TAT+2% rose to 4.70%; Xpressbees the largest contributor despite remaining the preferred allocation partner (highest FASR).",
+        ]),
+    ],
+    "hyphen": [
+        ("May 2026", [
+            "O2D closed at 2.72d vs 2.63d target &mdash; RU delay (+0.18d) driven by the ADP Dual Phase SKU.",
+            "RTO + Cancellation rose to 8.60% from 6.53% in April, driven by higher NDR%.",
+            "Rapid Commerce launched in May (~50% of volume) but averaged only ~50% performance, limiting O2D gains.",
+            "Warehouse impacted in Guwahati, Kolkata, Mumbai in Wk18-19 (elections + sale-period planning issues).",
+        ]),
+        ("June 2026", [
+            "O2D improved to 2.62d, beating the 2.68d target &mdash; RU delay nearly disappeared as the ADP Dual Phase issue resolved.",
+            "RTO + Cancellation kept rising to 9.40% (from 8.60% in May) &mdash; the one metric moving the wrong way even as O2D improved.",
+            "Total order volume dropped sharply to 2.16L vs 3.75L in May and 3.57L in April.",
+            "Guwahati (94.20%) and Hyderabad (95.90%) remained the weakest warehouses, same drivers as Mcaffeine.",
+        ]),
+        ("July 2026", [
+            "O2D on track at 2.65d, in line with the 2.63d target &mdash; delay tightly controlled across every component.",
+            "RTO + Cancellation eased slightly to 9.10% from June's 9.40%; FASR improved marginally to 81.60%.",
+            "RU (95.10%) and SPCD&lt;3hrs (96.40%) marginally below target &mdash; ADP Dual Phase SKU still the primary driver.",
+            "Bangalore warehouse share rising fast to 23.00% &mdash; flagged as the key capacity watch item for August.",
+        ]),
+    ],
+}
+
+
+def build_business_kpi_insights_table(ctx):
+    months = _BUSINESS_KPI_INSIGHTS.get(ctx.b["brand"])
+    if not months:
+        return ""
+    rows = []
+    for month, bullets in months:
+        items = "".join(f"<li>{b}</li>" for b in bullets)
+        rows.append(f"<tr><td class='rowlabel'>{h_enc(month)}</td><td><ul class='ma-list'>{items}</ul></td></tr>")
+    return (f"<div class='pivot-wrap'><div class='pivot-title'>Business KPI Insights (D2C Monthly Report)</div>"
+            f"<div class='pivot-scroll'><table class='pivot-table'><thead><tr><th class='corner'>Month</th><th>Key Insights</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div></div>")
 
 
 if __name__ == "__main__":
