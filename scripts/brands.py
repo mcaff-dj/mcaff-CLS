@@ -20,7 +20,7 @@ BRANDS = [
         # SELECT DISTINCT `month` on CLS_KYC_mCaff.
         "months": ["01_Jan'25", "02_Feb'25", "03_Mar'25", "04_Apr'25", "07_Jul'25", "08_Aug'25",
                    "09_Sep'25", "10_Oct'25", "11_Nov'25", "12_Dec'25", "1_Jan'26", "2_Feb'26",
-                   "3_Mar'26", "4_Apr'26", "5_May'26", "6_Jun'26", "7_Jul'26", "8_Aug'26"],
+                   "3_Mar'26", "4_Apr'26", "5_May'26", "6_Jun'26", "7_Jul'26", "8_Aug'26", "9_Sep'26"],
         "classes": [
             {"key": "Delivery", "id": "delivery", "label": "Delivery", "color": "var(--s1)"},
             {"key": "Warehouse", "id": "warehouse", "label": "Warehouse", "color": "var(--s2)"},
@@ -82,7 +82,7 @@ BRANDS = [
         # See the mcaffeine note above - last entry is the live/current month.
         "months": ["08_Aug'25", "09_Sep'25", "10_Oct'25", "11_Nov'25", "12_Dec'25", "1_Jan'26",
                    "2_Feb'26", "3_Mar'26", "4_Apr'26", "5_May'26", "6_Jun'26", "7_Jul'26",
-                   "8_Aug'26"],
+                   "8_Aug'26", "9_Sep'26"],
         "classes": [
             {"key": "Delivery", "id": "delivery", "label": "Delivery", "color": "var(--s1)"},
             {"key": "Warehouse", "id": "warehouse", "label": "Warehouse", "color": "var(--s2)"},
