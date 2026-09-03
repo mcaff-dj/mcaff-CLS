@@ -7,11 +7,17 @@ const { getOrderPunchJob, getOrderPunchJobRowsForExport } = require('../_lib/db'
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'exports';
+const SUB_TAB_KEY = 'order-punch';
 const COLUMNS = ['display_order_code', 'reason', 'facility_code', 'status', 'so_code', 'target_channel', 'error_message'];
 
+// isAdmin bypasses everything below, same as before this permission existed. A non-admin needs
+// 'order-punch' EXPLICITLY in their tab list - unlike every other sub-permission on this card,
+// being unrestricted/untouched does NOT imply Order Punch access (see api/_lib/tabs.js's own
+// comment on why: this creates real Unicommerce orders).
 function checkAccess(session) {
   if (!session) return 'Not authenticated';
-  if (!session.isAdmin) return 'Only admins can download Order Punch results.';
+  const hasOrderPunchTab = Array.isArray(session.tabPerms?.[CARD_KEY]) && session.tabPerms[CARD_KEY].includes(SUB_TAB_KEY);
+  if (!session.isAdmin && !hasOrderPunchTab) return 'Only admins (or an explicitly granted agent) can download Order Punch results.';
   if (!(session.perms || []).includes(CARD_KEY)) return 'You do not have access to Calling Team exports.';
   const tabs = session.tabPerms && session.tabPerms[CARD_KEY];
   if (Array.isArray(tabs) && tabs.length && !tabs.includes(TAB_KEY)) return 'You do not have access to Calling Team exports.';

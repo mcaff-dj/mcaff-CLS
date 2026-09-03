@@ -7,6 +7,7 @@ const { getOrderPunchSettings, upsertOrderPunchSetting } = require('../_lib/db')
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'exports';
+const SUB_TAB_KEY = 'order-punch';
 
 // Value type per key - a PUT with the wrong shape is rejected rather than silently stored and
 // breaking the Python worker's own reads (which trust these types without re-validating).
@@ -20,9 +21,14 @@ const SETTINGS_TYPES = {
   max_suffix: 'number',
 };
 
+// isAdmin bypasses everything below, same as before this permission existed. A non-admin needs
+// 'order-punch' EXPLICITLY in their tab list - unlike every other sub-permission on this card,
+// being unrestricted/untouched does NOT imply Order Punch access (see api/_lib/tabs.js's own
+// comment on why: this creates real Unicommerce orders).
 function checkAccess(session) {
   if (!session) return 'Not authenticated';
-  if (!session.isAdmin) return 'Only admins can view or change Order Punch settings.';
+  const hasOrderPunchTab = Array.isArray(session.tabPerms?.[CARD_KEY]) && session.tabPerms[CARD_KEY].includes(SUB_TAB_KEY);
+  if (!session.isAdmin && !hasOrderPunchTab) return 'Only admins (or an explicitly granted agent) can view or change Order Punch settings.';
   if (!(session.perms || []).includes(CARD_KEY)) return 'You do not have access to Calling Team exports.';
   const tabs = session.tabPerms && session.tabPerms[CARD_KEY];
   if (Array.isArray(tabs) && tabs.length && !tabs.includes(TAB_KEY)) return 'You do not have access to Calling Team exports.';

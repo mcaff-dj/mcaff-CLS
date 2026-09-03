@@ -1,8 +1,12 @@
 // GET /api/refund-export - Calling Team's "Exports" tab: a filtered CSV download of
 // PEP_CLS.refund_all_brands (see api/_lib/db.js's own comment above
-// getRefundExportCount/getRefundExportRows for what that table is). Gated the same way as
-// every other Calling desk endpoint. PII columns are decided from session.isAdmin ONLY - never
-// from anything the client sends, so there is no query param that can ask for them.
+// getRefundExportCount/getRefundExportRows for what that table is). PII columns are decided
+// from session.isAdmin ONLY - never from anything the client sends, so there is no query param
+// that can ask for them.
+//
+// Gated on 'exports' PLUS its own 'refund-export' tab permission - see api/_lib/tabs.js's own
+// comment on that entry. Also backs the standalone /refund-export route
+// (app/refund-export/RefundExportClient.js), so this same check applies there too.
 const { getSession } = require('./_lib/session');
 const { toCSV } = require('./_lib/csv');
 const {
@@ -12,13 +16,16 @@ const {
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'exports';
+const SUB_TAB_KEY = 'refund-export';
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function checkAccess(session) {
   if (!session) return 'Not authenticated';
   if (!(session.perms || []).includes(CARD_KEY)) return 'You do not have access to Calling Team exports.';
   const tabs = session.tabPerms && session.tabPerms[CARD_KEY];
-  if (Array.isArray(tabs) && tabs.length && !tabs.includes(TAB_KEY)) return 'You do not have access to Calling Team exports.';
+  if (Array.isArray(tabs) && tabs.length && (!tabs.includes(TAB_KEY) || !tabs.includes(SUB_TAB_KEY))) {
+    return 'You do not have access to Refund Export.';
+  }
   return null;
 }
 

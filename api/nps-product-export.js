@@ -1,20 +1,37 @@
 // GET /api/nps-product-export - filtered CSV download of PEP_CLS.nps_product (see
 // api/_lib/db.js's own comment above getNpsProductExportRows for what that table is).
 //
-// ponytail: NO AUTH CHECK, NO ROW CAP - deliberately public and unbounded, by explicit
-// request (2026-09-03), unlike every other Calling export (api/refund-export.js etc), which
-// require a logged-in session AND cap rows to stay under Lambda's ~6MB response ceiling.
-// Anyone with this URL can pull NPS survey responses (score/category/brand/product, no
-// name/phone/email though - see NPS_PRODUCT_EXPORT_COLUMNS in db.js), and a wide from/to can
-// fail with an opaque 500/502 past that ceiling instead of the clear 400 refund-export gives.
-// To re-gate/re-cap, see api/refund-export.js and REFUND_EXPORT_MAX_ROWS in db.js.
+// Session + tab-permission gated (2026-09-04) - reverses this endpoint's brief no-auth window
+// (2026-09-03): gated on 'exports' PLUS its own 'nps-product-export' tab permission, same
+// pattern as api/refund-export.js. The row cap is still deliberately absent though (a separate,
+// still-standing decision, not reversed here) - a wide from/to can still fail with an opaque
+// 500/502 past Lambda's ~6MB response ceiling instead of the clear 400 refund-export gives; see
+// REFUND_EXPORT_MAX_ROWS in db.js to add one back if that becomes a problem.
+const { getSession } = require('./_lib/session');
 const { toCSV } = require('./_lib/csv');
 const { NPS_PRODUCT_EXPORT_COLUMNS, getNpsProductExportRows } = require('./_lib/db');
 
+const CARD_KEY = 'calling';
+const TAB_KEY = 'exports';
+const SUB_TAB_KEY = 'nps-product-export';
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function checkAccess(session) {
+  if (!session) return 'Not authenticated';
+  if (!(session.perms || []).includes(CARD_KEY)) return 'You do not have access to Calling Team exports.';
+  const tabs = session.tabPerms && session.tabPerms[CARD_KEY];
+  if (Array.isArray(tabs) && tabs.length && (!tabs.includes(TAB_KEY) || !tabs.includes(SUB_TAB_KEY))) {
+    return 'You do not have access to Export Product NPS.';
+  }
+  return null;
+}
 
 module.exports = async (req, res) => {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+
+  const session = await getSession(req);
+  const denied = checkAccess(session);
+  if (denied) return res.status(session ? 403 : 401).json({ error: denied });
 
   const { from, to, brand } = req.query || {};
   if (!DATE_RE.test(from || '') || !DATE_RE.test(to || '')) {

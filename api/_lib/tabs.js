@@ -51,16 +51,27 @@ const CARD_TABS = {
   // report_tab_permissions (card 'calling', tab '<process key>') is what "this agent is
   // invited to this process" means - see that file's ACCESS note.
   //
-  // 'sales-pincode' is different from every entry above it: it's not a sidebar view of its
-  // own (index.html's CALLING_TEAM_SUBITEMS has no matching key, unlike 'exports') - it's a
-  // sub-permission INSIDE the Exports tab bar (app/exports/ExportsClient.js), checked there and
-  // by api/delivery-escalation/sales-pincode-import.js on top of 'exports' itself. A restricted
-  // user needs BOTH 'exports' (to reach the Exports sidebar page at all) AND 'sales-pincode'
-  // (to see/use that one sub-tab) checked in the admin's tab-customization checklist.
+  // 'sales-pincode'/'refund-export'/'order-punch'/'nps-product-export' are different from every
+  // entry above them: none is a sidebar view of its own (index.html's CALLING_TEAM_SUBITEMS has
+  // no matching key, unlike 'exports') - each is a sub-permission INSIDE the Exports tab bar
+  // (app/exports/ExportsClient.js), checked there and by that sub-tab's own API endpoint on top
+  // of 'exports' itself. A restricted user needs BOTH 'exports' (to reach the Exports sidebar
+  // page at all) AND the specific sub-tab key (to see/use that one sub-tab) checked in the
+  // admin's tab-customization checklist.
+  //
+  // 'order-punch' is the one exception to "empty tab list = unrestricted access to everything
+  // on this card": Order Punch creates real Unicommerce orders, so its own endpoints
+  // (api/order-punch/*.js) require this key EXPLICITLY present even for an otherwise-
+  // unrestricted non-admin - being untouched/unrestricted on 'calling' does not imply Order
+  // Punch access the way it does for every other sub-permission here. isAdmin still bypasses
+  // this entirely, same as before this permission existed.
   calling: [
     { key: 'overview', label: 'Overview' },
     ...require('./callingProcesses.json').processes.map(p => ({ key: p.key, label: p.label })),
     { key: 'exports', label: 'Exports' },
+    { key: 'refund-export', label: 'Exports: Refund Export' },
+    { key: 'order-punch', label: 'Exports: Order Punch' },
+    { key: 'nps-product-export', label: 'Exports: Export Product NPS' },
     { key: 'sales-pincode', label: 'Exports: Update Sales Pincode' },
   ],
   // Mirrors app/deepdive/DeepdiveClient.js's own TABS array (a React page, not a
