@@ -114,6 +114,7 @@ const BOOTSTRAP_TABLES = [
   'calling_agent_process', 'calling_teams', 'rto_csv_upload_jobs', 'order_punch_jobs',
   'order_punch_job_rows', 'order_punch_settings', 'delivery_escalation_partner_access',
   'delivery_escalation_sales_pincode_last_upload',
+  'delivery_escalation_query_category_access', 'delivery_escalation_user_role',
 ];
 
 // Fails open (false) on any error - a broken existence check must never be the reason schema
@@ -196,6 +197,34 @@ async function bootstrapSchema() {
       delivery_partner VARCHAR(128) NOT NULL,
       granted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (user_id, delivery_partner),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `;
+
+  // Same allowlist shape as delivery_escalation_partner_access above, keyed on query_category
+  // instead of delivery_partner - see getDeliveryEscalationQueryCategoryAccess/
+  // setDeliveryEscalationQueryCategoryAccess and deFilterSql's own allowedQueryCategories
+  // handling for where this is enforced. No rows = unrestricted, same convention.
+  await sql`
+    CREATE TABLE IF NOT EXISTS delivery_escalation_query_category_access (
+      user_id INT NOT NULL,
+      query_category VARCHAR(128) NOT NULL,
+      granted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, query_category),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `;
+
+  // Purely a label shown on the Delivery-Escalation admin picker (Agent/Partner/Team Leader) -
+  // does not itself gate access to anything (that's still report_tab_permissions +
+  // delivery_escalation_partner_access/delivery_escalation_query_category_access above). One row
+  // per user who has ever had a role set; no row = 'Agent' by convention (see
+  // getAllDeliveryEscalationUserRoles).
+  await sql`
+    CREATE TABLE IF NOT EXISTS delivery_escalation_user_role (
+      user_id INT NOT NULL PRIMARY KEY,
+      role VARCHAR(32) NOT NULL,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `;
@@ -712,6 +741,63 @@ async function getDeliveryEscalationPartnerOptions() {
       "SELECT DISTINCT delivery_partner FROM Delivery_escalation WHERE delivery_partner IS NOT NULL AND delivery_partner != '' ORDER BY delivery_partner");
     return rows.map((r) => r.delivery_partner);
   });
+}
+
+// Delivery-Escalation's own per-user Query Category allowlist - same shape and same "empty =
+// unrestricted" convention as getDeliveryPartnerAccess/setDeliveryPartnerAccess above, just keyed
+// on query_category instead of delivery_partner.
+async function getDeliveryEscalationQueryCategoryAccess(userId) {
+  await ensureSchema();
+  const { rows } = await sql`SELECT query_category FROM delivery_escalation_query_category_access WHERE user_id = ${userId}`;
+  return rows.map((r) => r.query_category);
+}
+
+async function getAllDeliveryEscalationQueryCategoryAccess() {
+  await ensureSchema();
+  const { rows } = await sql`SELECT user_id, query_category FROM delivery_escalation_query_category_access`;
+  const byUser = {};
+  for (const r of rows) {
+    (byUser[r.user_id] = byUser[r.user_id] || []).push(r.query_category);
+  }
+  return byUser;
+}
+
+async function setDeliveryEscalationQueryCategoryAccess(userId, categories) {
+  await ensureSchema();
+  await sql`DELETE FROM delivery_escalation_query_category_access WHERE user_id = ${userId}`;
+  for (const category of categories) {
+    await sql`INSERT IGNORE INTO delivery_escalation_query_category_access (user_id, query_category) VALUES (${userId}, ${category})`;
+  }
+}
+
+// Every distinct query_category value actually in the table - same cached-DISTINCT-scan
+// convention as getDeliveryEscalationPartnerOptions above.
+async function getDeliveryEscalationQueryCategoryOptions() {
+  return cachedRead('de-query-category-options', async () => {
+    const pool = await getPool();
+    const [rows] = await pool.execute(
+      "SELECT DISTINCT query_category FROM Delivery_escalation WHERE query_category IS NOT NULL AND query_category != '' ORDER BY query_category");
+    return rows.map((r) => r.query_category);
+  });
+}
+
+// Every user's own Delivery-Escalation role label at once, same "one query, group in JS" shape
+// as getAllDeliveryPartnerAccess - a user with no row is 'Agent' by convention (the default the
+// admin picker's own <select> starts on), not represented as a row here.
+async function getAllDeliveryEscalationUserRoles() {
+  await ensureSchema();
+  const { rows } = await sql`SELECT user_id, role FROM delivery_escalation_user_role`;
+  const byUser = {};
+  for (const r of rows) byUser[r.user_id] = r.role;
+  return byUser;
+}
+
+async function setDeliveryEscalationUserRole(userId, role) {
+  await ensureSchema();
+  await sql`
+    INSERT INTO delivery_escalation_user_role (user_id, role) VALUES (${userId}, ${role})
+    ON DUPLICATE KEY UPDATE role = VALUES(role)
+  `;
 }
 
 // Auto-provisions the very first admin(s) from ADMIN_EMAILS on their first successful
@@ -1930,7 +2016,7 @@ const DE_DAYWISE_DATE_FIELDS = { added_date: 'added_date', order_date: 'order_da
 // own comment describes. Applied here rather than as a separate step so every caller of
 // deWhere/deFilterSql (getDeliveryEscalationPage, getDeliveryEscalationStats,
 // getDeliveryEscalationExport) enforces it automatically, with no per-caller opt-in to forget.
-function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, allowedPartners } = {}) {
+function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, allowedPartners, allowedQueryCategories } = {}) {
   const clauses = [];
   const params = [];
   if (brand) { clauses.push('brand = ?'); params.push(brand); }
@@ -1947,6 +2033,12 @@ function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket,
   if (Array.isArray(allowedPartners) && allowedPartners.length) {
     clauses.push(`delivery_partner IN (${allowedPartners.map(() => '?').join(',')})`);
     params.push(...allowedPartners);
+  }
+  // allowedQueryCategories: the same access-floor convention as allowedPartners just above, see
+  // getDeliveryEscalationQueryCategoryAccess - empty/omitted means unrestricted.
+  if (Array.isArray(allowedQueryCategories) && allowedQueryCategories.length) {
+    clauses.push(`query_category IN (${allowedQueryCategories.map(() => '?').join(',')})`);
+    params.push(...allowedQueryCategories);
   }
   if (date) {
     const col = DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date';
@@ -2040,7 +2132,7 @@ const DE_OVERVIEW_CACHE_TTL_MS = 60000;
 
 function deCacheKey(name, parts) {
   const norm = { ...parts };
-  for (const k of ['allowedPartners', 'partner']) {
+  for (const k of ['allowedPartners', 'partner', 'allowedQueryCategories']) {
     if (Array.isArray(norm[k])) norm[k] = [...norm[k]].sort();
   }
   return `de-${name}:${JSON.stringify(norm)}`;
@@ -2094,17 +2186,23 @@ async function fetchDeliveryEscalationStats(opts = {}) {
 // turns every ${} into a bound parameter, which would send the predicate as a string literal
 // instead of SQL. Reusing the constant is the point - "unresolved" here is exactly what the
 // Fresh tab lists, so the two can never drift apart if that definition changes.
-async function getDeliveryEscalationRepeatStats(allowedPartners) {
+async function getDeliveryEscalationRepeatStats(allowedPartners, allowedQueryCategories) {
   return cachedRead(
-    deCacheKey('repeat', { allowedPartners }),
-    () => fetchDeliveryEscalationRepeatStats(allowedPartners),
+    deCacheKey('repeat', { allowedPartners, allowedQueryCategories }),
+    () => fetchDeliveryEscalationRepeatStats(allowedPartners, allowedQueryCategories),
     DE_OVERVIEW_CACHE_TTL_MS,
   );
 }
 
-async function fetchDeliveryEscalationRepeatStats(allowedPartners) {
-  const restricted = Array.isArray(allowedPartners) && allowedPartners.length > 0;
-  const partnerClause = restricted ? ` AND delivery_partner IN (${allowedPartners.map(() => '?').join(',')})` : '';
+async function fetchDeliveryEscalationRepeatStats(allowedPartners, allowedQueryCategories) {
+  const restrictedPartners = Array.isArray(allowedPartners) && allowedPartners.length > 0;
+  const restrictedCategories = Array.isArray(allowedQueryCategories) && allowedQueryCategories.length > 0;
+  const partnerClause = restrictedPartners ? ` AND delivery_partner IN (${allowedPartners.map(() => '?').join(',')})` : '';
+  const categoryClause = restrictedCategories ? ` AND query_category IN (${allowedQueryCategories.map(() => '?').join(',')})` : '';
+  const floorParams = [
+    ...(restrictedPartners ? allowedPartners : []),
+    ...(restrictedCategories ? allowedQueryCategories : []),
+  ];
   const pool = await getPool();
   const [rows] = await pool.execute(`
     SELECT /*+ MAX_EXECUTION_TIME(${DE_MAX_EXEC_MS}) */
@@ -2119,13 +2217,13 @@ async function fetchDeliveryEscalationRepeatStats(allowedPartners) {
              COUNT(*) AS times,
              MAX(${DE_FRESH_WHERE}) AS has_open
       FROM Delivery_escalation
-      WHERE awb_code IS NOT NULL AND awb_code <> ''${partnerClause}
+      WHERE awb_code IS NOT NULL AND awb_code <> ''${partnerClause}${categoryClause}
       GROUP BY awb_code
     ) per_awb
     WHERE has_open = 1
     GROUP BY bucket
     ORDER BY sort_key
-  `, restricted ? allowedPartners : []);
+  `, floorParams);
   return rows.map((r) => ({ bucket: r.bucket, customers: Number(r.customers) || 0 }));
 }
 
@@ -2161,7 +2259,7 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
 }
 
 async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
-  const { brand, agent, dateField, partner, paymentMode, allowedPartners, dateFrom, dateTo } = opts;
+  const { brand, agent, dateField, partner, paymentMode, allowedPartners, allowedQueryCategories, dateFrom, dateTo } = opts;
   const col = DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date';
   const extraClauses = [];
   const params = [];
@@ -2179,6 +2277,12 @@ async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
   if (Array.isArray(allowedPartners) && allowedPartners.length) {
     extraClauses.push(`delivery_partner IN (${allowedPartners.map(() => '?').join(',')})`);
     params.push(...allowedPartners);
+  }
+  // Same access-floor convention as allowedPartners just above - see
+  // getDeliveryEscalationQueryCategoryAccess.
+  if (Array.isArray(allowedQueryCategories) && allowedQueryCategories.length) {
+    extraClauses.push(`query_category IN (${allowedQueryCategories.map(() => '?').join(',')})`);
+    params.push(...allowedQueryCategories);
   }
   if (paymentMode) { extraClauses.push('Payment_Mode = ?'); params.push(paymentMode); }
   const extra = extraClauses.length ? ` AND ${extraClauses.join(' AND ')}` : '';
@@ -2300,7 +2404,7 @@ async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
 // Grouped by query_category same as everywhere else on this page, COUNT(DISTINCT awb_code) for
 // the same "how many parcels, not how many rows" reason getDeliveryEscalationDaywiseStats uses.
 async function getDeliveryEscalationGeoCategoryStats(opts = {}) {
-  const { brand, month, level, state, city, allowedPartners } = opts;
+  const { brand, month, level, state, city, allowedPartners, allowedQueryCategories } = opts;
   if (!month) return { categories: [], rows: [], grandTotal: {}, grandTotalAll: 0 };
   const geoCol = level === 'pincode' ? 'Pincode' : level === 'city' ? 'Shipping_Address_City' : 'Shipping_Address_State';
   const geoKey = level === 'pincode' ? 'pincode' : level === 'city' ? 'city' : 'state';
@@ -2315,6 +2419,10 @@ async function getDeliveryEscalationGeoCategoryStats(opts = {}) {
   if (Array.isArray(allowedPartners) && allowedPartners.length) {
     clauses.push(`delivery_partner IN (${allowedPartners.map(() => '?').join(',')})`);
     params.push(...allowedPartners);
+  }
+  if (Array.isArray(allowedQueryCategories) && allowedQueryCategories.length) {
+    clauses.push(`query_category IN (${allowedQueryCategories.map(() => '?').join(',')})`);
+    params.push(...allowedQueryCategories);
   }
   if (level === 'city' || level === 'pincode') {
     clauses.push("COALESCE(Shipping_Address_State, 'Unknown') = ?");
@@ -2378,13 +2486,15 @@ async function getDeliveryEscalationAgents() {
 // scoping disposeDeliveryEscalationTicketById's cascade already uses for "this AWB" - a bare
 // awb_code isn't guaranteed unique across both brands. No paging: contact_count (bounded, see
 // its own sync) keeps this a handful of rows, never the whole table.
-async function getDeliveryEscalationAwbHistory(awb, brand, allowedPartners) {
-  const restricted = Array.isArray(allowedPartners) && allowedPartners.length > 0;
-  const partnerClause = restricted ? ` AND delivery_partner IN (${allowedPartners.map(() => '?').join(',')})` : '';
+async function getDeliveryEscalationAwbHistory(awb, brand, allowedPartners, allowedQueryCategories) {
+  const restrictedPartners = Array.isArray(allowedPartners) && allowedPartners.length > 0;
+  const restrictedCategories = Array.isArray(allowedQueryCategories) && allowedQueryCategories.length > 0;
+  const partnerClause = restrictedPartners ? ` AND delivery_partner IN (${allowedPartners.map(() => '?').join(',')})` : '';
+  const categoryClause = restrictedCategories ? ` AND query_category IN (${allowedQueryCategories.map(() => '?').join(',')})` : '';
   const pool = await getPool();
   const [rows] = await pool.execute(
-    `SELECT ${DE_SELECT_COLUMNS} FROM Delivery_escalation WHERE awb_code = ? AND brand = ?${partnerClause} ORDER BY id DESC`,
-    restricted ? [awb, brand, ...allowedPartners] : [awb, brand]
+    `SELECT ${DE_SELECT_COLUMNS} FROM Delivery_escalation WHERE awb_code = ? AND brand = ?${partnerClause}${categoryClause} ORDER BY id DESC`,
+    [awb, brand, ...(restrictedPartners ? allowedPartners : []), ...(restrictedCategories ? allowedQueryCategories : [])]
   );
   return rows;
 }
@@ -4419,6 +4529,9 @@ module.exports = {
   getUserByEmail, getUserById, getUserPermissions, getUserTabPermissions, setTabPermissions,
   getDeliveryPartnerAccess, getAllDeliveryPartnerAccess, setDeliveryPartnerAccess,
   getDeliveryEscalationPartnerOptions,
+  getDeliveryEscalationQueryCategoryAccess, getAllDeliveryEscalationQueryCategoryAccess,
+  setDeliveryEscalationQueryCategoryAccess, getDeliveryEscalationQueryCategoryOptions,
+  getAllDeliveryEscalationUserRoles, setDeliveryEscalationUserRole,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
   getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow,

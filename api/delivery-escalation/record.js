@@ -38,6 +38,7 @@ const {
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
   getDeliveryEscalationDaywiseStats, getDeliveryEscalationAwbHistory,
   getDeliveryEscalationGeoCategoryStats, getDeliveryPartnerAccess,
+  getDeliveryEscalationQueryCategoryAccess,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
 } = require('../_lib/db');
@@ -62,6 +63,9 @@ module.exports = async (req, res) => {
   // Threaded through every read below so it enforces everywhere at once, not just the ticket
   // list - stats tiles, export, day-wise table, geo table, AWB history all narrow the same way.
   const allowedPartners = session ? await getDeliveryPartnerAccess(session.uid) : [];
+  // Query Category allowlist (see getDeliveryEscalationQueryCategoryAccess) - same convention
+  // and same "thread through every read" reasoning as allowedPartners just above.
+  const allowedQueryCategories = session ? await getDeliveryEscalationQueryCategoryAccess(session.uid) : [];
 
   if (req.method === 'GET') {
     const q = req.query || {};
@@ -86,6 +90,7 @@ module.exports = async (req, res) => {
       // allowedPartners: this is a user-chosen filter, that's the always-enforced access floor.
       partner: q.partner ? String(q.partner).split(',').filter(Boolean) : undefined,
       allowedPartners,
+      allowedQueryCategories,
     };
     try {
       if (q.op === 'stats') {
@@ -93,9 +98,9 @@ module.exports = async (req, res) => {
         // populates the Agent filter, which everyone with access now has (it is the only way to
         // get back the old "just my tickets" view).
         const [stats, agents, repeatStats] = await Promise.all([
-          getDeliveryEscalationStats({ allowedPartners }),
+          getDeliveryEscalationStats({ allowedPartners, allowedQueryCategories }),
           getDeliveryEscalationAgents(),
-          getDeliveryEscalationRepeatStats(allowedPartners),
+          getDeliveryEscalationRepeatStats(allowedPartners, allowedQueryCategories),
         ]);
         res.status(200).json({ stats, agents, repeatStats });
         return;
@@ -109,7 +114,7 @@ module.exports = async (req, res) => {
           res.status(400).json({ error: 'awb and brand are required' });
           return;
         }
-        const history = await getDeliveryEscalationAwbHistory(q.awb, q.brand, allowedPartners);
+        const history = await getDeliveryEscalationAwbHistory(q.awb, q.brand, allowedPartners, allowedQueryCategories);
         res.status(200).json({ rows: history });
         return;
       }
@@ -129,6 +134,7 @@ module.exports = async (req, res) => {
           paymentMode: q.paymentMode && q.paymentMode !== 'ALL' ? q.paymentMode : '',
           dateFrom: q.dateFrom || '', dateTo: q.dateTo || '',
           allowedPartners,
+          allowedQueryCategories,
         });
         res.status(200).json(daywise);
         return;
@@ -146,7 +152,8 @@ module.exports = async (req, res) => {
           return;
         }
         const geo = await getDeliveryEscalationGeoCategoryStats({
-          brand: filters.brand, month: q.month, level, state: q.state, city: q.city, allowedPartners,
+          brand: filters.brand, month: q.month, level, state: q.state, city: q.city,
+          allowedPartners, allowedQueryCategories,
         });
         res.status(200).json(geo);
         return;

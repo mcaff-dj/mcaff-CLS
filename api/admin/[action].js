@@ -57,7 +57,10 @@ const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser
   listCallingTeams, createCallingTeam, updateCallingTeam,
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions,
-  getAllDeliveryPartnerAccess, setDeliveryPartnerAccess, getDeliveryEscalationPartnerOptions } = require('../_lib/db');
+  getAllDeliveryPartnerAccess, setDeliveryPartnerAccess, getDeliveryEscalationPartnerOptions,
+  getAllDeliveryEscalationQueryCategoryAccess, setDeliveryEscalationQueryCategoryAccess,
+  getDeliveryEscalationQueryCategoryOptions,
+  getAllDeliveryEscalationUserRoles, setDeliveryEscalationUserRole } = require('../_lib/db');
 const { teamScopeFor, coerceTeamId } = require('../_lib/callingTeams');
 const { dispositionTeamFor } = require('../_lib/dispositionTrees');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
@@ -695,13 +698,21 @@ async function handleDispositions(req, res, session) {
 // here (this process has none, see DeliveryEscalationClient.js's own header comment), so unlike
 // handleCallingTeams there's no "which team's data" question to gate on.
 //
-// GET -> { users: [{id, email, name, deliveryPartners: [...]}], partners: [...every distinct
-//         delivery_partner value in Delivery_escalation] } - users is pre-filtered to whoever
-//         would actually see the deliveryescalation tab (full admin, or holds the 'calling' card
-//         with no tab restriction, or with deliveryescalation explicitly in their tab list) -
-//         configuring this for someone who can't open the tab at all wouldn't do anything.
-// PUT { userId, partners: [...] } -> replaces that user's own list entirely; [] removes the
-//         restriction (back to every partner).
+// GET -> { users: [{id, email, name, deliveryPartners: [...], queryCategories: [...], role}],
+//         partners: [...every distinct delivery_partner value in Delivery_escalation],
+//         queryCategories: [...every distinct query_category value in Delivery_escalation] } -
+//         users is pre-filtered to whoever would actually see the deliveryescalation tab (full
+//         admin, or holds the 'calling' card with no tab restriction, or with deliveryescalation
+//         explicitly in their tab list) - configuring this for someone who can't open the tab at
+//         all wouldn't do anything. role defaults to 'Agent' for a user with no row in
+//         delivery_escalation_user_role yet (see getAllDeliveryEscalationUserRoles).
+// PUT { userId, partners?: [...], queryCategories?: [...], role?: 'Agent'|'Partner'|'Team Leader' }
+//         -> applies whichever of partners/queryCategories/role is present in the body; each
+//         replaces that field entirely (partners/queryCategories: [] removes the restriction,
+//         back to every value). role is purely a label (see DELIVERY_ESCALATION_ROLES below) -
+//         it gates nothing on its own.
+const DELIVERY_ESCALATION_ROLES = ['Agent', 'Partner', 'Team Leader'];
+
 async function handleDeliveryPartnerAccess(req, res, session) {
   const isProcessAdmin = session.isAdmin || await isCallingProcessAdmin(session.email, 'deliveryescalation');
   if (!isProcessAdmin) {
@@ -722,20 +733,41 @@ async function handleDeliveryPartnerAccess(req, res, session) {
       const tabs = restrictedTabsByUser[u.id];
       return !tabs || tabs.length === 0 || tabs.includes('deliveryescalation');
     });
-    const [byUser, partners] = await Promise.all([
+    const [byUser, partners, categoriesByUser, queryCategories, rolesByUser] = await Promise.all([
       getAllDeliveryPartnerAccess(),
       getDeliveryEscalationPartnerOptions(),
+      getAllDeliveryEscalationQueryCategoryAccess(),
+      getDeliveryEscalationQueryCategoryOptions(),
+      getAllDeliveryEscalationUserRoles(),
     ]);
-    const result = eligible.map((u) => ({ id: u.id, email: u.email, name: u.name, deliveryPartners: byUser[u.id] || [] }));
-    res.status(200).json({ users: result, partners });
+    const result = eligible.map((u) => ({
+      id: u.id, email: u.email, name: u.name,
+      deliveryPartners: byUser[u.id] || [],
+      queryCategories: categoriesByUser[u.id] || [],
+      role: rolesByUser[u.id] || 'Agent',
+    }));
+    res.status(200).json({ users: result, partners, queryCategories });
     return;
   }
 
   if (req.method === 'PUT') {
     const body = parseBody(req);
     if (!body.userId) { res.status(400).json({ error: 'userId is required' }); return; }
-    const partners = Array.isArray(body.partners) ? body.partners.filter((p) => typeof p === 'string' && p) : [];
-    await setDeliveryPartnerAccess(body.userId, partners);
+    if (Array.isArray(body.partners)) {
+      const partners = body.partners.filter((p) => typeof p === 'string' && p);
+      await setDeliveryPartnerAccess(body.userId, partners);
+    }
+    if (Array.isArray(body.queryCategories)) {
+      const queryCategories = body.queryCategories.filter((c) => typeof c === 'string' && c);
+      await setDeliveryEscalationQueryCategoryAccess(body.userId, queryCategories);
+    }
+    if (body.role !== undefined) {
+      if (!DELIVERY_ESCALATION_ROLES.includes(body.role)) {
+        res.status(400).json({ error: `role must be one of: ${DELIVERY_ESCALATION_ROLES.join(', ')}` });
+        return;
+      }
+      await setDeliveryEscalationUserRole(body.userId, body.role);
+    }
     res.status(200).json({ ok: true });
     return;
   }

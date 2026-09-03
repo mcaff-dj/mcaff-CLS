@@ -32,6 +32,17 @@ const { cachedRead, invalidateCache, deCacheKey, DE_OVERVIEW_CACHE_TTL_MS } = re
     deCacheKey('daywise', { allowedPartners: [], brand: 'HYPHEN' }),
     deCacheKey('daywise', { allowedPartners: [] }),
   );
+
+  // 3b. allowedQueryCategories is its own access floor (see getDeliveryEscalationQueryCategoryAccess)
+  //     - same order-insensitive-but-must-differ-from-unrestricted behavior as allowedPartners above.
+  assert.notStrictEqual(
+    deCacheKey('stats', { allowedQueryCategories: [] }),
+    deCacheKey('stats', { allowedQueryCategories: ['Delivery Delay'] }),
+  );
+  assert.strictEqual(
+    deCacheKey('stats', { allowedQueryCategories: ['Delivery Delay', 'Damaged'] }),
+    deCacheKey('stats', { allowedQueryCategories: ['Damaged', 'Delivery Delay'] }),
+  );
   // ...and the two ops never collide with each other.
   assert.notStrictEqual(deCacheKey('stats', {}), deCacheKey('daywise', {}));
 

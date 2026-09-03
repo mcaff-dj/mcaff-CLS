@@ -1163,19 +1163,30 @@ function downloadNewOrderAwbSampleCsv() {
   URL.revokeObjectURL(url);
 }
 
-// Admin Panel card - per-user Delivery Partner allowlist (see api/admin/[action].js's
-// handleDeliveryPartnerAccess). Name | Access table, Access being the SAME MultiSelectDropdown
-// the RTO roster's own Priority Reasons column already uses (app/_calling/ui.js) - one control
-// language across the app instead of a new bespoke picker, and it already solves the actual
-// problem a flat wall of 50 chip buttons per row had: scanning, comparing rows at a glance, and
-// telling "selected" from "everything else" apart.
+// Admin Panel card - per-user Role label, Delivery Partner allowlist, and Query Category
+// allowlist (see api/admin/[action].js's handleDeliveryPartnerAccess). Partner/Query Category
+// use the SAME MultiSelectDropdown the RTO roster's own Priority Reasons column already uses
+// (app/_calling/ui.js) - one control language across the app instead of a new bespoke picker,
+// and it already solves the actual problem a flat wall of 50 chip buttons per row had: scanning,
+// comparing rows at a glance, and telling "selected" from "everything else" apart.
 //
-// Saves per row, debounced ~500ms after the last change to that row (not on every checkbox
-// click, not requiring a separate Save button) - a few quick clicks while narrowing someone's
-// access become one write, and the row's own "Saving…" label is the only feedback needed since
-// setDeliveryPartnerAccess already replaces the full list atomically.
+// Each of the three columns saves independently, keyed by its own field name so one column's
+// debounce never cancels another's (see saveTimers' per-field keys below). Partner/Query
+// Category are debounced ~500ms after the last change to that cell (not on every checkbox click,
+// not requiring a separate Save button) - a few quick clicks while narrowing someone's access
+// become one write. Role is a plain <select> and saves immediately on pick. The row's own
+// "Saving…" label is the only feedback needed either way, since each setter already replaces its
+// list/value atomically. Role itself gates nothing (see DELIVERY_ESCALATION_ROLES in
+// api/admin/[action].js's own comment) - it's a label only, for whoever's configuring the other
+// two columns.
+const DE_ROLE_OPTIONS = [
+  { value: 'Agent', label: 'Agent' },
+  { value: 'Partner', label: 'Partner' },
+  { value: 'Team Leader', label: 'Team Leader' },
+];
+
 function DeliveryPartnerAccessCard({ showToast }) {
-  const [state, setState] = useState({ status: 'loading', users: [], partners: [] });
+  const [state, setState] = useState({ status: 'loading', users: [], partners: [], queryCategories: [] });
   const [savingIds, setSavingIds] = useState(() => new Set());
   const saveTimers = useRef({});
 
@@ -1194,6 +1205,11 @@ function DeliveryPartnerAccessCard({ showToast }) {
     () => [...new Set(state.partners.map(mapPartnerName))].sort(),
     [state.partners],
   );
+  // Query Category has no canonical-name grouping (that problem - raw carrier-code sprawl - is
+  // specific to delivery_partner), so state.queryCategories (the LIVE distinct values, same
+  // "built from live data, not a static list" convention as canonicalPartnerOptions) is offered
+  // as-is.
+  const queryCategoryOptions = state.queryCategories;
 
   const load = useCallback(async () => {
     setState((s) => ({ ...s, status: 'loading' }));
@@ -1201,9 +1217,9 @@ function DeliveryPartnerAccessCard({ showToast }) {
       const r = await fetch('/api/admin/delivery-partner-access');
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `Load failed (${r.status})`);
-      setState({ status: 'loaded', users: d.users || [], partners: d.partners || [] });
+      setState({ status: 'loaded', users: d.users || [], partners: d.partners || [], queryCategories: d.queryCategories || [] });
     } catch (e) {
-      setState({ status: 'error', users: [], partners: [], error: e.message });
+      setState({ status: 'error', users: [], partners: [], queryCategories: [], error: e.message });
     }
   }, []);
 
@@ -1212,13 +1228,16 @@ function DeliveryPartnerAccessCard({ showToast }) {
   // unmounted card's stale closure after navigating away.
   useEffect(() => () => Object.values(saveTimers.current).forEach(clearTimeout), []);
 
-  const commitSave = async (userId, partners) => {
+  // patch carries whichever of partners/queryCategories/role changed - see the PUT shape in
+  // api/admin/[action].js's own handleDeliveryPartnerAccess comment. One save endpoint for all
+  // three columns, same as it already was for partners alone.
+  const commitSave = async (userId, patch) => {
     setSavingIds((prev) => new Set(prev).add(userId));
     try {
       const r = await fetch('/api/admin/delivery-partner-access', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, partners }),
+        body: JSON.stringify({ userId, ...patch }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `Save failed (${r.status})`);
@@ -1237,8 +1256,25 @@ function DeliveryPartnerAccessCard({ showToast }) {
   const handleCanonicalChange = (userId, canonicalList) => {
     const rawList = [...new Set(canonicalList.flatMap((c) => CANONICAL_TO_RAW_PARTNER[c] || [c]))];
     setState((s) => ({ ...s, users: s.users.map((u) => (u.id === userId ? { ...u, deliveryPartners: rawList } : u)) }));
-    clearTimeout(saveTimers.current[userId]);
-    saveTimers.current[userId] = setTimeout(() => commitSave(userId, rawList), 500);
+    const key = `partners:${userId}`;
+    clearTimeout(saveTimers.current[key]);
+    saveTimers.current[key] = setTimeout(() => commitSave(userId, { partners: rawList }), 500);
+  };
+
+  // Query Category has no canonical/raw distinction (unlike Delivery Partner above) - the
+  // dropdown's own values are exactly what's stored/enforced, so no expand/collapse step.
+  const handleQueryCategoryChange = (userId, next) => {
+    setState((s) => ({ ...s, users: s.users.map((u) => (u.id === userId ? { ...u, queryCategories: next } : u)) }));
+    const key = `queryCategories:${userId}`;
+    clearTimeout(saveTimers.current[key]);
+    saveTimers.current[key] = setTimeout(() => commitSave(userId, { queryCategories: next }), 500);
+  };
+
+  // Role saves immediately on pick (a <select>, not a debounced multi-select) - no separate
+  // timer key needed since it never fires more than once per click.
+  const handleRoleChange = (userId, role) => {
+    setState((s) => ({ ...s, users: s.users.map((u) => (u.id === userId ? { ...u, role } : u)) }));
+    commitSave(userId, { role });
   };
 
   if (state.status === 'loading') {
@@ -1262,9 +1298,9 @@ function DeliveryPartnerAccessCard({ showToast }) {
       <div className="flex items-center gap-3">
         <span className="h-9 w-9 rounded-lg bg-indigo-500/10 flex items-center justify-center text-lg">🚚</span>
         <div>
-          <h3 className="text-[15px] font-bold text-zinc-100">Delivery Partner Access</h3>
+          <h3 className="text-[15px] font-bold text-zinc-100">Delivery-Escalation Access</h3>
           <p className="text-[12px] text-zinc-500">
-            Restrict which Delivery Partners each agent may see - on top of their existing Delivery-Escalation access, not instead of it. No partners selected = sees every partner.
+            Role is a label only. Delivery Partner and Query Category restrict what each agent may see - on top of their existing Delivery-Escalation access, not instead of it. Nothing selected in either = sees every value.
           </p>
         </div>
       </div>
@@ -1276,7 +1312,9 @@ function DeliveryPartnerAccessCard({ showToast }) {
             <thead>
               <tr className="border-b border-zinc-800/80 text-zinc-500">
                 <th className="text-left font-medium py-2.5 px-4">Name</th>
-                <th className="text-left font-medium py-2.5 px-4">Access</th>
+                <th className="text-left font-medium py-2.5 px-4">Role</th>
+                <th className="text-left font-medium py-2.5 px-4">Delivery Partner Access</th>
+                <th className="text-left font-medium py-2.5 px-4">Query Category Access</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/50">
@@ -1284,11 +1322,19 @@ function DeliveryPartnerAccessCard({ showToast }) {
                 // Raw storage collapsed to canonical for display - multiple raw variants under
                 // one canonical name (e.g. every DELHIVERY_* row) always dedupe to one chip.
                 const canonicalSelected = [...new Set(u.deliveryPartners.map(mapPartnerName))];
+                const isSaving = savingIds.has(u.id);
                 return (
                 <tr key={u.id} className="hover:bg-zinc-800/20 transition-colors">
                   <td className="py-2.5 px-4">
                     <div className="text-zinc-200 font-semibold">{u.name || u.email}</div>
                     {u.name && <div className="text-[11px] text-zinc-500">{u.email}</div>}
+                  </td>
+                  <td className="py-2.5 px-4">
+                    <CustomSelect
+                      value={u.role}
+                      onChange={(role) => handleRoleChange(u.id, role)}
+                      options={DE_ROLE_OPTIONS}
+                    />
                   </td>
                   <td className="py-2.5 px-4">
                     <div className="flex items-center gap-2">
@@ -1299,7 +1345,19 @@ function DeliveryPartnerAccessCard({ showToast }) {
                         placeholder="All partners"
                         itemNoun="partners"
                       />
-                      {savingIds.has(u.id) && <span className="text-[11px] text-zinc-500">Saving…</span>}
+                      {isSaving && <span className="text-[11px] text-zinc-500">Saving…</span>}
+                    </div>
+                  </td>
+                  <td className="py-2.5 px-4">
+                    <div className="flex items-center gap-2">
+                      <MultiSelectDropdown
+                        value={u.queryCategories}
+                        onChange={(next) => handleQueryCategoryChange(u.id, next)}
+                        options={queryCategoryOptions}
+                        placeholder="All categories"
+                        itemNoun="categories"
+                      />
+                      {isSaving && <span className="text-[11px] text-zinc-500">Saving…</span>}
                     </div>
                   </td>
                 </tr>
