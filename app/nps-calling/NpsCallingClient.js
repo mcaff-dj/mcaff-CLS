@@ -8,7 +8,7 @@
 // sheet loop, no upload modal, and no team split (single shared queue/disposition tree for v1).
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { XIcon, CheckIcon, PhoneIcon, CustomSelect, Overlay, CalendarIcon } from '../_calling/ui';
-import { useCallingSession } from '../_calling/useCallingSession';
+import { useCallingSession, ROSTER_STATUS_OPTIONS, STATUS_OPTIONS } from '../_calling/useCallingSession';
 import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
 import { scopeToDateBounds } from '../_calling/util';
@@ -82,6 +82,7 @@ export default function NpsCallingClient() {
   useEffect(() => {
     if (tab === 'admin' && !canAdminTab) setTab('queue');
   }, [tab, canAdminTab]);
+  const [rosterStatusFilter, setRosterStatusFilter] = useState('All');
 
   // My tickets: everything CLS_NPS_calling holds for this agent, undisposed and disposed alike -
   // split client-side (queue vs disposed) rather than two separate fetches, since one agent's
@@ -213,6 +214,25 @@ export default function NpsCallingClient() {
   ];
 
   const hasAccess = sessionIsAdmin || !invitedProcessKeys || invitedProcessKeys.includes(PROCESS_KEY);
+
+  // Per-agent Assigned/Disposed/Connect % for the roster table below - computed from allTickets
+  // (every CLS_NPS_calling row, admin-only fetch) rather than a dedicated endpoint, same as RTO's
+  // own agentMetrics does against its Sheet-derived tickets array.
+  const agentMetrics = useMemo(() => {
+    const source = allTickets || [];
+    return (processAgents || []).map((a) => {
+      const mine = source.filter((t) => (t.agent_email || '').toLowerCase() === a.email.toLowerCase());
+      const disposed = mine.filter((t) => t.disposed_at);
+      const connected = disposed.filter((t) => t.connected === 'Yes');
+      return {
+        ...a,
+        assigned: mine.length,
+        disposed: disposed.length,
+        connectRate: disposed.length ? Math.round((connected.length / disposed.length) * 100) : 0,
+      };
+    });
+  }, [processAgents, allTickets]);
+  const visibleAgentMetrics = agentMetrics.filter((a) => rosterStatusFilter === 'All' || a.status === rosterStatusFilter);
 
   const renderTicketCard = (t, { showDisposeButton }) => (
     <div key={t.response_id} className="bg-zinc-900/90 border border-zinc-800/90 rounded-xl p-4 space-y-2.5">
@@ -375,35 +395,114 @@ export default function NpsCallingClient() {
                   <CallingHoursCard processKey={PROCESS_KEY} processLabel="NPS-Calling" hours={hours} />
                   <ProcessDispositionsCard processLabel="NPS-Calling" disp={disp} />
 
-                  <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl p-4 space-y-3">
-                    <h3 className="text-[13px] font-bold text-zinc-200">Agent Roster</h3>
-                    {!processAgents?.length && <p className="text-[12px] text-zinc-500">No agents invited yet - grant access from Admin → Permissions.</p>}
-                    {(processAgents || []).map((a) => (
-                      <div key={a.email} className="flex items-center justify-between gap-3 flex-wrap py-1.5 border-b border-zinc-800/60 last:border-0">
-                        <span className="text-[13px] text-zinc-200 truncate">{a.email}</span>
-                        <div className="flex items-center gap-2">
-                          <CustomSelect
-                            value={a.status}
-                            onChange={(val) => setStatusForAgent(a.email, val, a.email)}
-                            options={[
-                              { value: 'Online', label: 'Online', icon: '🟢' },
-                              { value: 'Busy', label: 'On Break', icon: '🟡' },
-                              { value: 'OnCall', label: 'Busy', icon: '🔴' },
-                              { value: 'Offline', label: 'Offline', icon: '⚪' },
-                            ]}
-                          />
-                          <input
-                            type="number"
-                            min="0"
-                            defaultValue={a.maxQuota ?? ''}
-                            placeholder="Quota"
-                            disabled={savingAgentEmail === a.email}
-                            onBlur={(e) => saveProcessAgent(a.email, { maxQuota: e.target.value === '' ? null : +e.target.value })}
-                            className="w-20 h-8 px-2 rounded-lg bg-zinc-900 border border-zinc-800 text-[12px] text-zinc-200"
-                          />
-                        </div>
+                  <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden">
+                    <div className="flex items-center justify-between flex-wrap gap-3 p-4 pb-3">
+                      <div>
+                        <h3 className="text-[15px] font-bold text-zinc-100">Team Roster</h3>
+                        <p className="text-[12px] text-zinc-500 mt-0.5">
+                          Manage agent status and lead capacity limits. New agents appear here
+                          automatically once granted NPS-Calling under Admin → Permissions.
+                        </p>
                       </div>
-                    ))}
+                      <div className="flex items-center gap-2">
+                        <CustomSelect
+                          value={rosterStatusFilter}
+                          onChange={setRosterStatusFilter}
+                          options={ROSTER_STATUS_OPTIONS}
+                          placeholder="Filter by status"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!window.confirm(`Mark all ${agentMetrics.length} agents Offline? This updates each agent's live status on the server.`)) return;
+                            agentMetrics.forEach((a) => setStatusForAgent(a.email, 'Offline', a.email));
+                            showToast('⚪ All agents marked Offline');
+                          }}
+                          className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 text-[12px] font-bold transition-all shadow-xs shrink-0"
+                          title="Set every agent's status to Offline (syncs to the server for each row)"
+                        >
+                          ⚪ Mark All Offline
+                        </button>
+                      </div>
+                    </div>
+
+                    {!agentMetrics.length && (
+                      <p className="text-[12px] text-zinc-500 px-4 pb-4">No agents invited yet - grant access from Admin → Permissions.</p>
+                    )}
+
+                    {!!agentMetrics.length && (
+                      <div className="overflow-x-auto custom-scroll">
+                        <table className="w-full text-[13px]">
+                          <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
+                            <th className="py-3 px-4 text-left font-medium">Agent</th>
+                            <th className="py-3 px-4 text-left font-medium">Status</th>
+                            <th className="py-3 px-4 text-center font-medium">Assigned</th>
+                            <th className="py-3 px-4 text-center font-medium">Disposed</th>
+                            <th className="py-3 px-4 text-center font-medium">Connect %</th>
+                            <th className="py-3 px-4 text-left font-medium">Quota</th>
+                            <th className="py-3 px-4 text-center font-medium" title="Can manage this process's roster and calling hours - nothing else">Process admin</th>
+                          </tr></thead>
+                          <tbody className="divide-y divide-zinc-800/50">
+                            {visibleAgentMetrics.map((a) => (
+                              <tr key={a.email} className="hover:bg-zinc-800/30 transition-colors">
+                                <td className="py-3 px-4">
+                                  <div className="flex items-center gap-2.5">
+                                    <div className="relative">
+                                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-600 to-violet-700 flex items-center justify-center text-white font-bold text-[11px] shadow">
+                                        {a.name.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2)}
+                                      </div>
+                                      <span className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-zinc-900 ${a.status === 'Online' ? 'bg-emerald-500' : a.status === 'Busy' ? 'bg-amber-400' : a.status === 'OnCall' ? 'bg-rose-500' : 'bg-zinc-500'}`}></span>
+                                    </div>
+                                    <div className="min-w-0">
+                                      <p className="font-semibold text-zinc-100 truncate">{a.name}</p>
+                                      <p className="text-zinc-500 text-[11px] font-mono truncate">{a.email}</p>
+                                    </div>
+                                  </div>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <CustomSelect
+                                    value={a.status}
+                                    onChange={(val) => setStatusForAgent(a.email, val, a.email)}
+                                    options={STATUS_OPTIONS}
+                                  />
+                                </td>
+                                <td className="py-3 px-4 text-center font-bold text-zinc-100 tabular-nums">{a.assigned}</td>
+                                <td className="py-3 px-4 text-center font-bold text-indigo-400 tabular-nums">{a.disposed}</td>
+                                <td className="py-3 px-4 text-center font-bold text-emerald-400 tabular-nums">{a.connectRate}%</td>
+                                <td className="py-3 px-4">
+                                  <CustomSelect
+                                    value={a.maxQuota ?? ''}
+                                    onChange={(val) => saveProcessAgent(a.email, { maxQuota: val === '' ? null : +val })}
+                                    options={[
+                                      { value: '', label: 'Default (15)' },
+                                      { value: 5, label: '5 leads' },
+                                      { value: 10, label: '10 leads' },
+                                      { value: 15, label: '15 leads' },
+                                      { value: 20, label: '20 leads' },
+                                      { value: 30, label: '30 leads' },
+                                    ]}
+                                  />
+                                </td>
+                                <td className="py-3 px-4 text-center">
+                                  {a.isAdmin ? (
+                                    <span className="text-[11px] text-zinc-500" title="Company-wide admin - already administers every process">all</span>
+                                  ) : (
+                                    <input
+                                      type="checkbox"
+                                      checked={!!a.isProcessAdmin}
+                                      disabled={!sessionIsAdmin || savingAgentEmail === a.email}
+                                      onChange={(e) => saveProcessAgent(a.email, { isProcessAdmin: e.target.checked })}
+                                      className="accent-emerald-500"
+                                      title={sessionIsAdmin ? 'Let this person manage this process' : 'Only a full admin can change this'}
+                                    />
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
