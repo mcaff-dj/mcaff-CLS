@@ -320,6 +320,56 @@ async function bootstrapSchema() {
       UNIQUE KEY ndr_lead_assignments_live_awb_key (live_awb_number)
     )
   `;
+  // NPS-Calling's ("detractor" process key - see api/_lib/callingProcesses.json) own lead +
+  // assignment + disposition table. Unlike ndr_lead_assignments above, this is NOT a parallel
+  // mirror of some other live store - there is no Sheet and nps_delivery is a read-only external
+  // table this app doesn't own, so this table is the only place a lead's calling state lives.
+  // Populated copy-on-assign: getNextDetractorLead() snapshots the fields an agent needs off one
+  // unclaimed nps_delivery row (nps_category='Detractor') into a fresh row here at the moment
+  // it's handed to an agent - nps_delivery itself is only ever read, never joined again after
+  // that. live_response_id is the same live-cycle trick as CLS_RTO_calling's live_order_id
+  // (NULL once reassigned_away_at is set, so MySQL's UNIQUE-ignores-NULL lets a retired cycle
+  // and its replacement coexist) - a plain UNIQUE on response_id would additionally block a
+  // lead ever being reassigned, which live_response_id alone doesn't prevent.
+  await sql`
+    CREATE TABLE IF NOT EXISTS CLS_NPS_calling (
+      id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      response_id VARCHAR(64) NOT NULL,
+      brand VARCHAR(20),
+      channel_order_id VARCHAR(64),
+      customer_name VARCHAR(255),
+      customer_phone VARCHAR(32),
+      customer_email VARCHAR(255),
+      address_city VARCHAR(100),
+      address_state VARCHAR(100),
+      address_pincode VARCHAR(20),
+      nps_score VARCHAR(10),
+      nps_category VARCHAR(20),
+      category VARCHAR(100),
+      sub_category VARCHAR(100),
+      delivery_detractor_reason TEXT,
+      delivery_detractor_openend TEXT,
+      cs_detractor_reason TEXT,
+      cs_detractor_openend TEXT,
+      product_packaging_detractor_reason TEXT,
+      product_packaging_detractor_openend TEXT,
+      platform_detractor_reason TEXT,
+      platform_detractor_openend TEXT,
+      additional_feedback TEXT,
+      submitted_date VARCHAR(20),
+      agent_email VARCHAR(320) NOT NULL,
+      assigned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      reassigned_away_at TIMESTAMP NULL,
+      disposed_at TIMESTAMP NULL,
+      disposition VARCHAR(255),
+      agent_remarks TEXT,
+      connected VARCHAR(10),
+      attempt INT,
+      live_response_id VARCHAR(64) GENERATED ALWAYS AS
+        (IF(reassigned_away_at IS NULL, response_id, NULL)) VIRTUAL,
+      UNIQUE KEY cls_nps_calling_live_response_key (live_response_id)
+    )
+  `;
   // A process's own admin-defined disposition list - moved here from Postgres (see
   // migrate_calling_process_dispositions_to_mysql.py). parent_id is self-referencing
   // (arbitrary nesting depth - see getProcessDispositions), ON DELETE CASCADE so removing a
@@ -1437,6 +1487,126 @@ async function disposeNdrLead(awbNumber, disposition, agentRemarks, email) {
     `;
   }
   invalidateCache('calling:ndrLeadDates');
+}
+
+// NPS-Calling ("detractor" process key) equivalents of getRtoAgentQuota/getRtoAgentAvailability
+// above - same fail-open (quota)/fail-closed (availability) contract, just against process_key
+// 'detractor' instead of 'rto'.
+async function getDetractorAgentQuota(email) {
+  try {
+    await ensureSchema();
+    const { rows } = await sql`
+      SELECT max_quota FROM calling_agent_process
+      WHERE process_key = 'detractor' AND LOWER(email) = LOWER(${email})
+    `;
+    return rows.length && rows[0].max_quota != null ? rows[0].max_quota : null;
+  } catch (e) {
+    console.error('getDetractorAgentQuota: calling_agent_process unavailable, using default quota:', e.message);
+    return null;
+  }
+}
+
+async function getDetractorAgentAvailability(email) {
+  try {
+    await ensureSchema();
+    const { rows } = await sql`
+      SELECT status FROM calling_agent_process
+      WHERE process_key = 'detractor' AND LOWER(email) = LOWER(${email})
+    `;
+    return rows.length ? rows[0].status : 'Offline';
+  } catch (e) {
+    console.error('getDetractorAgentAvailability: calling_agent_process unavailable:', e.message);
+    return null;
+  }
+}
+
+// Undisposed leads this agent currently holds - unlike RTO's getLoadByAgent (which has to scan
+// a Sheet because CLS_RTO_calling can't be trusted alone), CLS_NPS_calling IS the only place
+// this state lives, so a plain COUNT is authoritative.
+async function getDetractorLoadByAgent(email) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT COUNT(*) AS n FROM CLS_NPS_calling
+    WHERE LOWER(agent_email) = LOWER(${email}) AND live_response_id IS NOT NULL AND disposed_at IS NULL
+  `;
+  return Number(rows[0].n) || 0;
+}
+
+// Hands one fresh nps_delivery Detractor row to `email`, copying the fields the agent needs into
+// CLS_NPS_calling in the same INSERT that assigns it - see that table's own comment for why this
+// is copy-on-assign rather than a live join. Returns the new ticket row, or null if there is
+// nothing left unclaimed. nps_delivery is read-only here: this function never writes to it.
+async function getNextDetractorLead(email) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT d.response_id, d.brand, d.channel_order_id, d.customer_name, d.customer_phone,
+           d.customer_email, d.address_city, d.address_state, d.address_pincode, d.nps_score,
+           d.nps_category, d.category, d.sub_category,
+           d.delivery_detractor_reason, d.delivery_detractor_openend,
+           d.cs_detractor_reason, d.cs_detractor_openend,
+           d.product_packaging_detractor_reason, d.product_packaging_detractor_openend,
+           d.platform_detractor_reason, d.platform_detractor_openend,
+           d.additional_feedback, d.submitted_date
+    FROM nps_delivery d
+    LEFT JOIN CLS_NPS_calling c ON c.response_id = d.response_id
+    WHERE d.nps_category = 'Detractor' AND c.response_id IS NULL
+    ORDER BY d.submitted_date ASC
+    LIMIT 1
+  `;
+  if (!rows.length) return null;
+  const lead = rows[0];
+  await sql`
+    INSERT INTO CLS_NPS_calling (
+      response_id, brand, channel_order_id, customer_name, customer_phone, customer_email,
+      address_city, address_state, address_pincode, nps_score, nps_category, category, sub_category,
+      delivery_detractor_reason, delivery_detractor_openend, cs_detractor_reason, cs_detractor_openend,
+      product_packaging_detractor_reason, product_packaging_detractor_openend,
+      platform_detractor_reason, platform_detractor_openend, additional_feedback, submitted_date,
+      agent_email, assigned_at
+    ) VALUES (
+      ${lead.response_id}, ${lead.brand}, ${lead.channel_order_id}, ${lead.customer_name}, ${lead.customer_phone},
+      ${lead.customer_email}, ${lead.address_city}, ${lead.address_state}, ${lead.address_pincode},
+      ${lead.nps_score}, ${lead.nps_category}, ${lead.category}, ${lead.sub_category},
+      ${lead.delivery_detractor_reason}, ${lead.delivery_detractor_openend},
+      ${lead.cs_detractor_reason}, ${lead.cs_detractor_openend},
+      ${lead.product_packaging_detractor_reason}, ${lead.product_packaging_detractor_openend},
+      ${lead.platform_detractor_reason}, ${lead.platform_detractor_openend},
+      ${lead.additional_feedback}, ${lead.submitted_date}, ${email}, NOW()
+    )
+  `;
+  return lead;
+}
+
+// Records the outcome of a call against the live cycle getNextDetractorLead opened. Ownership +
+// not-already-disposed are enforced in the WHERE clause itself (agent_email must match, and a
+// second dispose of the same lead is a no-op) - no self-heal insert like disposeNdrLead's,
+// because unlike NDR there is no Sheet that could have the claim while this table doesn't; the
+// row from getNextDetractorLead's own INSERT always exists first.
+async function disposeDetractorLead(responseId, disposition, agentRemarks, connected, attempt, email) {
+  await ensureSchema();
+  await sql`
+    UPDATE CLS_NPS_calling
+    SET disposed_at = NOW(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null},
+        connected = ${connected || null}, attempt = ${attempt || null}
+    WHERE response_id = ${responseId} AND LOWER(agent_email) = LOWER(${email}) AND disposed_at IS NULL
+  `;
+  invalidateCache('calling:detractorLeadDates');
+}
+
+// This agent's own tickets (assigned and/or disposed), newest first - "My Queue"/"Disposed" tabs.
+async function getDetractorTicketsForAgent(email) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT * FROM CLS_NPS_calling WHERE LOWER(agent_email) = LOWER(${email}) ORDER BY assigned_at DESC
+  `;
+  return rows;
+}
+
+// Every ticket, any agent - admin/process-admin "Overview"/roster views.
+async function getAllDetractorTickets() {
+  await ensureSchema();
+  const { rows } = await sql`SELECT * FROM CLS_NPS_calling ORDER BY assigned_at DESC`;
+  return rows;
 }
 
 // Delivery-Escalation's own durable record on MySQL (see
@@ -4124,6 +4294,8 @@ module.exports = {
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions,
   claimNdrLead, disposeNdrLead, getLiveNdrLeadEmail, getDeliveredAwbNumbers,
+  getDetractorAgentQuota, getDetractorAgentAvailability, getDetractorLoadByAgent,
+  getNextDetractorLead, disposeDetractorLead, getDetractorTicketsForAgent, getAllDetractorTickets,
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,

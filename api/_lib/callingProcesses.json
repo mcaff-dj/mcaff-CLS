@@ -92,10 +92,10 @@
     },
     {
       "key": "detractor",
-      "label": "Detractor Calling",
+      "label": "NPS-Calling",
       "icon": "📉",
-      "implemented": false,
-      "blurb": "NPS detractors to call back. Source would be mcaff_dwh.nps_delivery / nps_product (already used by the NPS charts), keyed on response_id with the survey's own score and verbatim feedback rather than an order/AWB.",
+      "implemented": true,
+      "blurb": "NPS detractors called back, worked from its own page at /nps-calling (app/nps-calling/NpsCallingClient.js). Leads are copy-on-assign from mcaff_dwh.nps_delivery (nps_category='Detractor') into CLS_NPS_calling, keyed on response_id with the survey's own score and verbatim feedback rather than an order/AWB. nps_delivery is read-only - never written back to.",
       "businessHours": {
         "timezone": "IST",
         "days": ["mon", "tue", "wed", "thu", "fri", "sat"],

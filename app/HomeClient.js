@@ -74,6 +74,10 @@ var CALLING_TEAM_SUBITEMS = {
   ndr: { label: 'NDR-Calling', text: 'NDR Calling Agent Portal', url: '/ndr-calling' },
   escalation: { label: 'Escalation', text: 'Escalation Agent Portal', url: '/escalation' },
   deliveryescalation: { label: 'Delivery-Escalation', text: 'Delivery-Escalation Agent Portal', url: '/delivery-escalation' },
+  // Key is 'detractor' (the process key from api/_lib/callingProcesses.json), not 'nps' - this
+  // object's keys double as tab_key values checked against userTabPerms.calling, so it must match
+  // the process key exactly even though the user-facing label is "NPS-Calling".
+  detractor: { label: 'NPS-Calling', text: 'NPS Detractor Calling Agent Portal', url: '/nps-calling' },
   exports: { label: 'Exports', text: 'Exports', url: '/exports' }
 };
 
