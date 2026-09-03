@@ -10,11 +10,13 @@ import { useEffect, useState } from 'react';
 import RefundExportClient from '../refund-export/RefundExportClient';
 import OrderPunchClient from './OrderPunchClient';
 import NpsProductExportClient from './NpsProductExportClient';
+import SalesPincodeImportClient from './SalesPincodeImportClient';
 
 const TABS = [
   { key: 'refund', label: 'Refund Export' },
   { key: 'order-punch', label: 'Order Punch' },
   { key: 'nps-product', label: 'Export Product NPS' },
+  { key: 'sales-pincode', label: 'Update Sales Pincode' },
 ];
 
 export default function ExportsClient() {
@@ -60,6 +62,7 @@ export default function ExportsClient() {
         )
       )}
       {tab === 'nps-product' && <NpsProductExportClient />}
+      {tab === 'sales-pincode' && <SalesPincodeImportClient />}
     </div>
   );
 }

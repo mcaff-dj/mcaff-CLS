@@ -2554,6 +2554,39 @@ async function bulkDisposeDeliveryEscalationByAwb(rows, email, view) {
   return results;
 }
 
+// Exports tab's "Update Sales Pincode" CSV upload - manual per-(pincode, brand, order date,
+// delivery partner) override of what scripts/backfill_delivery_escalation_sales_pincode.py
+// otherwise computes from Item_level_data. Same chunked-concurrent-update shape as
+// bulkDisposeDeliveryEscalationByAwb above (BULK_CHUNK_SIZE, matched-count-per-row), reused
+// rather than duplicated with its own constant.
+//
+// brand/deliveryPartner are matched case-insensitively (UPPER() both sides) - unlike
+// deFilterSql's plain `brand = ?` above, which is safe because its brand values come from this
+// app's own UI dropdowns, never free-typed CSV text. A CSV-typed 'hyphen' vs the stored
+// 'HYPHEN' (see backfill_delivery_escalation_sales_pincode.py's own comment on that value)
+// silently matching zero rows would be far worse than a same-named different-case row - this
+// table's rows are already disambiguated by day/pincode/partner, not by brand casing.
+// pincode/orderDate are compared exactly - Pincode is a plain VARCHAR digit string and
+// order_date a DATE column, neither has a casing or format-drift problem to guard against.
+async function bulkUpdateDeliveryEscalationSalesPincode(rows) {
+  const pool = await getPool();
+  const results = [];
+  for (let i = 0; i < rows.length; i += BULK_CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + BULK_CHUNK_SIZE);
+    const chunkResults = await Promise.all(chunk.map(async ({ pincode, brand, orderDate, deliveryPartner, salesPincode }) => {
+      const [result] = await pool.execute(`
+        UPDATE Delivery_escalation
+        SET sales_Pincode = ?
+        WHERE Pincode = ? AND UPPER(brand) = UPPER(?) AND order_date = ? AND UPPER(delivery_partner) = UPPER(?)
+      `, [salesPincode, pincode, brand, orderDate, deliveryPartner]);
+      return { pincode, brand, orderDate, deliveryPartner, salesPincode, matched: result.affectedRows || 0 };
+    }));
+    results.push(...chunkResults);
+  }
+  invalidateCache('de-');
+  return results;
+}
+
 // dateFrom/dateTo are inclusive "YYYY-MM-DD" strings (or null for unbounded), interpreted
 // as IST calendar days (+05:30, matching the hour-of-day bucketing above and the rest of
 // this app's IST convention) rather than UTC days - otherwise "Today"/"Yesterday" would be
@@ -3901,10 +3934,6 @@ const NPS_PRODUCT_EXPORT_COLUMNS = [
   'response_id', 'product_slot', 'brand', 'product_name', 'product_nps',
   'overall_nps_score', 'nps_category', 'submitted_date', 'packaging',
 ];
-// No row-size measurement for this table (unlike REFUND_EXPORT_MAX_ROWS above) - reusing the
-// same conservative cap since it's a similarly-shaped flat CSV export.
-const NPS_PRODUCT_EXPORT_MAX_ROWS = 10000;
-
 function buildNpsProductExportWhere({ from, to, brand }) {
   if (!from || !to) throw new Error('from and to are required');
   const clauses = [
@@ -3920,19 +3949,16 @@ function buildNpsProductExportWhere({ from, to, brand }) {
   return { where: clauses.join(' AND '), params };
 }
 
-async function getNpsProductExportCount(filters) {
-  const { where, params } = buildNpsProductExportWhere(filters);
-  const pool = await getPool();
-  const [rows] = await pool.execute(`SELECT COUNT(*) AS n FROM nps_product WHERE ${where}`, params);
-  return rows[0].n;
-}
-
+// ponytail: no LIMIT, by explicit request (2026-09-03) - unlike getRefundExportRows above,
+// which caps at REFUND_EXPORT_MAX_ROWS to stay under Lambda's ~6MB response ceiling (see that
+// constant's own comment). A wide enough from/to on this endpoint can still hit that ceiling
+// and fail with an opaque 500/502, since nothing here chunks or streams the response.
 async function getNpsProductExportRows(filters) {
   const { where, params } = buildNpsProductExportWhere(filters);
   const columnList = NPS_PRODUCT_EXPORT_COLUMNS.map((c) => `\`${c}\``).join(', ');
   const pool = await getPool();
   const [rows] = await pool.execute(
-    `SELECT ${columnList} FROM nps_product WHERE ${where} ORDER BY ${NPS_PRODUCT_SUBMITTED_DATE_EXPR} LIMIT ${NPS_PRODUCT_EXPORT_MAX_ROWS}`,
+    `SELECT ${columnList} FROM nps_product WHERE ${where} ORDER BY ${NPS_PRODUCT_SUBMITTED_DATE_EXPR}`,
     params
   );
   return rows;
@@ -4354,10 +4380,10 @@ module.exports = {
   getDeliveryEscalationGeoCategoryStats,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
+  bulkUpdateDeliveryEscalationSalesPincode,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,
-  NPS_PRODUCT_EXPORT_MAX_ROWS, NPS_PRODUCT_EXPORT_COLUMNS,
-  getNpsProductExportCount, getNpsProductExportRows,
+  NPS_PRODUCT_EXPORT_COLUMNS, getNpsProductExportRows,
   // Exported for api/_lib/db.npsProductExport.test.js only - nothing in the app calls this directly.
   buildNpsProductExportWhere,
   // Exported for api/_lib/db.cache.test.js, db.refundExport.test.js and
