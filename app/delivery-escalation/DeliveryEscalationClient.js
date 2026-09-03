@@ -53,6 +53,23 @@ const DATE_RANGE_PRESET_OPTIONS = [
 ];
 const CARD_KEY = 'calling';
 const TAB_KEY = 'deliveryescalation';
+// report_tab_permissions card_key for the Tab Access column (see api/admin/[action].js's own
+// DE_TAB_CARD_KEY comment) - deliberately its own card_key, never TAB_KEY above, so it can't
+// collide with the deliveryescalation PROCESS grant that already lives under CARD_KEY='calling'.
+const DE_TAB_CARD_KEY = 'deliveryescalation-tabs';
+// MultiSelectDropdown (app/_calling/ui.js) renders its options AS its stored values - no
+// separate {value,label} shape, unlike CustomSelect - so the admin picker below shows/picks
+// these display labels and expands back to the plain tab_key on save (DE_TAB_LABEL_TO_KEY),
+// same expand-on-save/collapse-on-load convention canonicalPartnerOptions already uses.
+const DE_TAB_LABELS = {
+  overview: '📊 Overview',
+  fresh: '⚡ Fresh',
+  forced_rto: '↩️ Forced RTO',
+  resolved: '✅ Resolved',
+  new_order_placed: '🆕 New Order Placed',
+};
+const DE_TAB_LABEL_TO_KEY = Object.fromEntries(Object.entries(DE_TAB_LABELS).map(([k, v]) => [v, k]));
+const DE_TAB_OPTIONS = Object.values(DE_TAB_LABELS);
 
 // One shared mapping for both tabs - the same SELECT backs Fresh and Resolved (see db.js's
 // DE_SELECT_COLUMNS), so there's no reason for two row shapes. readOnly is the only thing that
@@ -1277,6 +1294,17 @@ function DeliveryPartnerAccessCard({ showToast }) {
     commitSave(userId, { role });
   };
 
+  // labelList is what the dropdown hands back (display labels, e.g. '⚡ Fresh') - resolve back
+  // to plain tab_keys before storing/sending, same shape handleCanonicalChange's own
+  // canonical -> raw expansion uses for Delivery Partner.
+  const handleTabAccessChange = (userId, labelList) => {
+    const tabAccess = labelList.map((l) => DE_TAB_LABEL_TO_KEY[l]).filter(Boolean);
+    setState((s) => ({ ...s, users: s.users.map((u) => (u.id === userId ? { ...u, tabAccess } : u)) }));
+    const key = `tabAccess:${userId}`;
+    clearTimeout(saveTimers.current[key]);
+    saveTimers.current[key] = setTimeout(() => commitSave(userId, { tabAccess }), 500);
+  };
+
   if (state.status === 'loading') {
     return (
       <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5">
@@ -1300,7 +1328,7 @@ function DeliveryPartnerAccessCard({ showToast }) {
         <div>
           <h3 className="text-[15px] font-bold text-zinc-100">Delivery-Escalation Access</h3>
           <p className="text-[12px] text-zinc-500">
-            Role is a label only. Delivery Partner and Query Category restrict what each agent may see - on top of their existing Delivery-Escalation access, not instead of it. Nothing selected in either = sees every value.
+            Role is a label only. Delivery Partner and Query Category restrict which tickets each agent may see; Tab Access restricts which of this page's own tabs they may open - all on top of their existing Delivery-Escalation access, not instead of it. Nothing selected in any of the three = sees every value/tab.
           </p>
         </div>
       </div>
@@ -1315,6 +1343,7 @@ function DeliveryPartnerAccessCard({ showToast }) {
                 <th className="text-left font-medium py-2.5 px-4">Role</th>
                 <th className="text-left font-medium py-2.5 px-4">Delivery Partner Access</th>
                 <th className="text-left font-medium py-2.5 px-4">Query Category Access</th>
+                <th className="text-left font-medium py-2.5 px-4">Tab Access</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/50">
@@ -1360,6 +1389,18 @@ function DeliveryPartnerAccessCard({ showToast }) {
                       {isSaving && <span className="text-[11px] text-zinc-500">Saving…</span>}
                     </div>
                   </td>
+                  <td className="py-2.5 px-4">
+                    <div className="flex items-center gap-2">
+                      <MultiSelectDropdown
+                        value={u.tabAccess.map((k) => DE_TAB_LABELS[k]).filter(Boolean)}
+                        onChange={(next) => handleTabAccessChange(u.id, next)}
+                        options={DE_TAB_OPTIONS}
+                        placeholder="All tabs"
+                        itemNoun="tabs"
+                      />
+                      {isSaving && <span className="text-[11px] text-zinc-500">Saving…</span>}
+                    </div>
+                  </td>
                 </tr>
                 );
               })}
@@ -1385,6 +1426,12 @@ export default function DeliveryEscalationClient() {
   const [googleUser, setGoogleUser] = useState(null);
   const [sessionIsAdmin, setSessionIsAdmin] = useState(false);
   const [invitedProcessKeys, setInvitedProcessKeys] = useState(null);
+  // Which of THIS PAGE'S OWN tabs (Overview/Fresh/Forced RTO/Resolved/New Order Placed) this
+  // session may open - the admin panel's own Tab Access column (see DeliveryPartnerAccessCard),
+  // separate from invitedProcessKeys above (that's whether this account can open the
+  // deliveryescalation process AT ALL among sibling Calling processes). null = unrestricted,
+  // same convention as invitedProcessKeys.
+  const [allowedDeTabs, setAllowedDeTabs] = useState(null);
   const [authLoaded, setAuthLoaded] = useState(false);
   useEffect(() => {
     fetch('/api/auth/me').then(r => r.json()).then(d => {
@@ -1393,6 +1440,8 @@ export default function DeliveryEscalationClient() {
         setSessionIsAdmin(!!d.isAdmin);
         const tabs = (d.tabPerms && d.tabPerms[CARD_KEY]) || null;
         setInvitedProcessKeys(Array.isArray(tabs) && tabs.length ? tabs : null);
+        const deTabs = (d.tabPerms && d.tabPerms[DE_TAB_CARD_KEY]) || null;
+        setAllowedDeTabs(Array.isArray(deTabs) && deTabs.length ? deTabs : null);
       }
       setAuthLoaded(true);
     }).catch(() => setAuthLoaded(true));
@@ -1410,6 +1459,14 @@ export default function DeliveryEscalationClient() {
   const { processDispositions } = disp;
 
   const [tab, setTab] = useState('overview');
+  // If the signed-in agent's own Tab Access restriction excludes the default/current tab (e.g.
+  // Overview isn't in their allowlist), land them on the first tab they actually have - never on
+  // a nav item that isn't even rendered for them (see tabsList's own filter below).
+  useEffect(() => {
+    if (allowedDeTabs && allowedDeTabs.length && !allowedDeTabs.includes(tab)) {
+      setTab(allowedDeTabs[0]);
+    }
+  }, [allowedDeTabs]);
   const [search, setSearch] = useState('');
   const [brandFilter, setBrandFilter] = useState(() => safeStorage.getItem('de_brand_filter') || 'ALL');
   // Daywise-table-only filters (unlike brandFilter/agentFilter below, these don't touch the
@@ -2042,6 +2099,9 @@ export default function DeliveryEscalationClient() {
   // No per-process admin here (that concept comes from the roster this process doesn't have) -
   // only a company-wide admin manages the disposition list, same bar api/admin/[action].js's
   // handleDispositions enforces for POST/PUT/DELETE.
+  // Filtered by this session's own Tab Access restriction (allowedDeTabs; null/empty =
+  // unrestricted, same convention as invitedProcessKeys above) - 'admin' is never filtered by it,
+  // that's gated by sessionIsAdmin alone (it's the panel THAT configures this restriction).
   const tabsList = [
     { key: 'overview', label: '📊 Overview', count: stats.total },
     { key: 'fresh', label: '⚡ Fresh', count: stats.fresh },
@@ -2049,7 +2109,7 @@ export default function DeliveryEscalationClient() {
     { key: 'resolved', label: '✅ Resolved', count: stats.resolved },
     { key: 'new_order_placed', label: '🆕 New Order Placed', count: stats.newOrderPlaced },
     ...(sessionIsAdmin ? [{ key: 'admin', label: '🛡️ Admin Panel', count: (processDispositions || []).length }] : []),
-  ];
+  ].filter((t) => t.key === 'admin' || !allowedDeTabs || allowedDeTabs.includes(t.key));
 
   return (
     <div className="min-h-screen flex flex-col bg-[#09090b]">

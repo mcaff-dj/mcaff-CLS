@@ -43,12 +43,17 @@
 //                                        FULL ADMIN ONLY (see handleCallingTeams for why).
 //   PUT    /api/admin/calling-teams   -> update: { id, name?, sheetId?, sheetTab?, active? }
 //                                        FULL ADMIN ONLY (see handleCallingTeams for why).
-//   GET    /api/admin/delivery-partner-access -> { users: [{id,email,name,deliveryPartners}],
-//                                        partners: [...] } - Delivery-Escalation's own per-user
-//                                        Delivery Partner allowlist, on top of the
-//                                        deliveryescalation tab grant, not instead of it.
-//   PUT    /api/admin/delivery-partner-access -> { userId, partners: [...] } - replaces that
-//                                        user's own list; [] removes the restriction.
+//   GET    /api/admin/delivery-partner-access -> { users: [{id,email,name,deliveryPartners,
+//                                        queryCategories,role,tabAccess}], partners: [...],
+//                                        queryCategories: [...] } - Delivery-Escalation's own
+//                                        per-user Delivery Partner / Query Category allowlists
+//                                        and page-tab (Overview/Fresh/Forced RTO/Resolved/New
+//                                        Order Placed) allowlist, on top of the deliveryescalation
+//                                        tab grant itself, not instead of it. role is a label only.
+//   PUT    /api/admin/delivery-partner-access -> { userId, partners?, queryCategories?,
+//                                        tabAccess?, role? } - applies whichever field is
+//                                        present; partners/queryCategories/tabAccess: [] removes
+//                                        that restriction.
 const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser,
   getUserByEmail, getUserTabPermissions,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours, logEvent,
@@ -698,20 +703,34 @@ async function handleDispositions(req, res, session) {
 // here (this process has none, see DeliveryEscalationClient.js's own header comment), so unlike
 // handleCallingTeams there's no "which team's data" question to gate on.
 //
-// GET -> { users: [{id, email, name, deliveryPartners: [...], queryCategories: [...], role}],
-//         partners: [...every distinct delivery_partner value in Delivery_escalation],
-//         queryCategories: [...every distinct query_category value in Delivery_escalation] } -
-//         users is pre-filtered to whoever would actually see the deliveryescalation tab (full
-//         admin, or holds the 'calling' card with no tab restriction, or with deliveryescalation
-//         explicitly in their tab list) - configuring this for someone who can't open the tab at
-//         all wouldn't do anything. role defaults to 'Agent' for a user with no row in
-//         delivery_escalation_user_role yet (see getAllDeliveryEscalationUserRoles).
-// PUT { userId, partners?: [...], queryCategories?: [...], role?: 'Agent'|'Partner'|'Team Leader' }
-//         -> applies whichever of partners/queryCategories/role is present in the body; each
-//         replaces that field entirely (partners/queryCategories: [] removes the restriction,
-//         back to every value). role is purely a label (see DELIVERY_ESCALATION_ROLES below) -
-//         it gates nothing on its own.
+// GET -> { users: [{id, email, name, deliveryPartners: [...], queryCategories: [...], role,
+//         tabAccess: [...]}], partners: [...every distinct delivery_partner value in
+//         Delivery_escalation], queryCategories: [...every distinct query_category value in
+//         Delivery_escalation] } - users is pre-filtered to whoever would actually see the
+//         deliveryescalation tab (full admin, or holds the 'calling' card with no tab
+//         restriction, or with deliveryescalation explicitly in their tab list) - configuring
+//         this for someone who can't open the tab at all wouldn't do anything. role defaults to
+//         'Agent' for a user with no row in delivery_escalation_user_role yet (see
+//         getAllDeliveryEscalationUserRoles).
+// PUT { userId, partners?: [...], queryCategories?: [...], tabAccess?: [...],
+//         role?: 'Agent'|'Partner'|'Team Leader' } -> applies whichever field is present in the
+//         body; partners/queryCategories/tabAccess each replace that field entirely ([] removes
+//         the restriction, back to every value/tab). role is purely a label (see
+//         DELIVERY_ESCALATION_ROLES below) - it gates nothing on its own.
+//
+// tabAccess restricts which of THIS PAGE'S OWN tabs (Overview/Fresh/Forced RTO/Resolved/New
+// Order Placed - the `tab` state in DeliveryEscalationClient.js) an agent may open - reuses
+// report_tab_permissions (getUserTabPermissions/setTabPermissions), same table the
+// deliveryescalation tab grant itself lives in, just under its OWN card_key
+// (DE_TAB_CARD_KEY) so it can never collide with that or any other card's tab_key namespace.
+// Same "no rows = unrestricted" convention as every other allowlist here - see
+// api/delivery-escalation/record.js's own allowedTabs check for where the ticket-list reads
+// (view=fresh/resolved/forced_rto/new_order_placed, and op=export) enforce this; op=stats/
+// daywise/geoCategory/awbHistory describe the whole desk regardless of which tab is open, so
+// they're deliberately NOT gated by it.
 const DELIVERY_ESCALATION_ROLES = ['Agent', 'Partner', 'Team Leader'];
+const DE_TAB_CARD_KEY = 'deliveryescalation-tabs';
+const DE_TAB_KEYS = ['overview', 'fresh', 'forced_rto', 'resolved', 'new_order_placed'];
 
 async function handleDeliveryPartnerAccess(req, res, session) {
   const isProcessAdmin = session.isAdmin || await isCallingProcessAdmin(session.email, 'deliveryescalation');
@@ -733,18 +752,22 @@ async function handleDeliveryPartnerAccess(req, res, session) {
       const tabs = restrictedTabsByUser[u.id];
       return !tabs || tabs.length === 0 || tabs.includes('deliveryescalation');
     });
-    const [byUser, partners, categoriesByUser, queryCategories, rolesByUser] = await Promise.all([
+    const [byUser, partners, categoriesByUser, queryCategories, rolesByUser, tabPermRows] = await Promise.all([
       getAllDeliveryPartnerAccess(),
       getDeliveryEscalationPartnerOptions(),
       getAllDeliveryEscalationQueryCategoryAccess(),
       getDeliveryEscalationQueryCategoryOptions(),
       getAllDeliveryEscalationUserRoles(),
+      sql`SELECT user_id, tab_key FROM report_tab_permissions WHERE card_key = ${DE_TAB_CARD_KEY}`,
     ]);
+    const tabAccessByUser = {};
+    tabPermRows.rows.forEach((t) => { (tabAccessByUser[t.user_id] = tabAccessByUser[t.user_id] || []).push(t.tab_key); });
     const result = eligible.map((u) => ({
       id: u.id, email: u.email, name: u.name,
       deliveryPartners: byUser[u.id] || [],
       queryCategories: categoriesByUser[u.id] || [],
       role: rolesByUser[u.id] || 'Agent',
+      tabAccess: tabAccessByUser[u.id] || [],
     }));
     res.status(200).json({ users: result, partners, queryCategories });
     return;
@@ -760,6 +783,10 @@ async function handleDeliveryPartnerAccess(req, res, session) {
     if (Array.isArray(body.queryCategories)) {
       const queryCategories = body.queryCategories.filter((c) => typeof c === 'string' && c);
       await setDeliveryEscalationQueryCategoryAccess(body.userId, queryCategories);
+    }
+    if (Array.isArray(body.tabAccess)) {
+      const tabAccess = body.tabAccess.filter((t) => DE_TAB_KEYS.includes(t));
+      await setTabPermissions(body.userId, DE_TAB_CARD_KEY, tabAccess);
     }
     if (body.role !== undefined) {
       if (!DELIVERY_ESCALATION_ROLES.includes(body.role)) {

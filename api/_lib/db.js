@@ -800,6 +800,47 @@ async function setDeliveryEscalationUserRole(userId, role) {
   `;
 }
 
+// One user's own role, keyed by email rather than user_id - the dispose path (see
+// applyRtoMbpOverride below) only ever has the disposing agent's email (callerEmail in
+// record.js, not a user id: the no-auth path has no session/user row to look one up from), so
+// this joins through users itself instead of asking every caller to resolve an id first. 'Agent'
+// (the same default the admin picker's own <select> starts on) for anyone with no row, or no
+// matching user at all (e.g. a no-auth caller's free-typed `agent` email with no account here).
+async function getDeliveryEscalationUserRoleByEmail(email) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT r.role FROM delivery_escalation_user_role r
+    JOIN users u ON u.id = r.user_id
+    WHERE u.email = ${email}
+  `;
+  return rows[0]?.role || 'Agent';
+}
+
+// Partner-role agents dispose an RTO under their own outcome value, not the shared 'RTO' one -
+// distinguishing "RTO the partner itself marked" from "RTO everyone else marks" downstream
+// (Overview tiles, exports, ...) without touching every existing 'RTO' row or reader. Only the
+// OUTCOME'S OWN ROOT segment is swapped (outcome may be a ' > '-joined disposition path, e.g.
+// 'RTO > Refused Delivery' - see outgoingRoot elsewhere in this file); everything after stays
+// untouched. Pure/sync so bulkDisposeDeliveryEscalationByAwb can look the role up ONCE for a
+// whole upload and reuse it per row, instead of one query per row.
+function rtoMbpOutcome(outcome, role) {
+  if (!outcome || role !== 'Partner') return outcome;
+  const parts = outcome.split(' > ');
+  if (parts[0] !== 'RTO') return outcome;
+  return ['RTO_MBP', ...parts.slice(1)].join(' > ');
+}
+
+// Single-dispose path's own entry point - looks up the role itself since it only ever handles
+// one email at a time. Applied at the two actual write sites
+// (disposeDeliveryEscalationTicketById, bulkDisposeDeliveryEscalationByAwb) rather than in
+// record.js, so a no-auth API/script caller gets the same override a browser dispose does -
+// there is no separate enforcement path to keep in sync.
+async function applyRtoMbpOverride(outcome, email) {
+  if (!outcome || outcome.split(' > ')[0] !== 'RTO') return outcome;
+  const role = await getDeliveryEscalationUserRoleByEmail(email);
+  return rtoMbpOutcome(outcome, role);
+}
+
 // Auto-provisions the very first admin(s) from ADMIN_EMAILS on their first successful
 // Google login, since there's no self-serve signup - someone has to be admin #1.
 async function bootstrapAdminIfNeeded(email, name) {
@@ -2579,6 +2620,12 @@ async function disposeDeliveryEscalationTicketById(id, email, outcome, agentRema
     throw new Error('AWB number is required to dispose a ticket with no AWB on file - enter the AWB you can see for this order.');
   }
 
+  // Every validation above reads outgoingRoot off the ORIGINAL outcome ('RTO' as the UI/CSV
+  // actually sends it) - the override below only relabels what gets WRITTEN, so those checks
+  // (and anything else keyed on a plain 'RTO') stay correct regardless of the disposing agent's
+  // role.
+  outcome = await applyRtoMbpOverride(outcome, email);
+
   await pool.execute(`
     UPDATE Delivery_escalation
     SET outcome = ?, agent_remarks = ?, disposed_at = NOW(),
@@ -2647,10 +2694,14 @@ async function bulkDisposeDeliveryEscalationByAwb(rows, email, view) {
   }
   const where = DE_VIEW_WHERE[view];
   const pool = await getPool();
+  // One role lookup for the whole upload (see rtoMbpOutcome's own comment) - every row shares
+  // the same uploading email/role, unlike outcome which varies per row.
+  const role = await getDeliveryEscalationUserRoleByEmail(email);
   const results = [];
   for (let i = 0; i < rows.length; i += BULK_CHUNK_SIZE) {
     const chunk = rows.slice(i, i + BULK_CHUNK_SIZE);
-    const chunkResults = await Promise.all(chunk.map(async ({ awb, outcome, remarks, newOrderAwb }) => {
+    const chunkResults = await Promise.all(chunk.map(async ({ awb, outcome: rawOutcome, remarks, newOrderAwb }) => {
+      const outcome = rtoMbpOutcome(rawOutcome, role);
       // New Order Placed tab: every row this view's WHERE matches is already
       // 'Escalated > New order placed' (DE_NEW_ORDER_PLACED_WHERE), so a bulk row here EITHER
       // just fills in the reshipped order's own AWB (outcome omitted - unchanged from before),
@@ -4531,7 +4582,7 @@ module.exports = {
   getDeliveryEscalationPartnerOptions,
   getDeliveryEscalationQueryCategoryAccess, getAllDeliveryEscalationQueryCategoryAccess,
   setDeliveryEscalationQueryCategoryAccess, getDeliveryEscalationQueryCategoryOptions,
-  getAllDeliveryEscalationUserRoles, setDeliveryEscalationUserRole,
+  getAllDeliveryEscalationUserRoles, setDeliveryEscalationUserRole, rtoMbpOutcome,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
   getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow,

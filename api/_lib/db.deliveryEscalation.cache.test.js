@@ -8,9 +8,19 @@
 // per-session access floor (see deFilterSql), so a key that ignores it would serve a partner-
 // restricted agent another caller's whole-desk numbers. Case 1 is that check.
 const assert = require('assert');
-const { cachedRead, invalidateCache, deCacheKey, DE_OVERVIEW_CACHE_TTL_MS } = require('./db');
+const { cachedRead, invalidateCache, deCacheKey, DE_OVERVIEW_CACHE_TTL_MS, rtoMbpOutcome } = require('./db');
 
 (async () => {
+  // 0. rtoMbpOutcome: a Partner-role RTO dispose is relabeled to RTO_MBP, preserving any
+  //    ' > '-joined sub-reason; every other role/outcome combination passes through untouched.
+  assert.strictEqual(rtoMbpOutcome('RTO', 'Partner'), 'RTO_MBP');
+  assert.strictEqual(rtoMbpOutcome('RTO > Refused Delivery', 'Partner'), 'RTO_MBP > Refused Delivery');
+  assert.strictEqual(rtoMbpOutcome('RTO', 'Agent'), 'RTO', 'non-Partner roles must not be relabeled');
+  assert.strictEqual(rtoMbpOutcome('RTO', 'Team Leader'), 'RTO');
+  assert.strictEqual(rtoMbpOutcome('Delivered', 'Partner'), 'Delivered', 'only an RTO root is relabeled');
+  assert.strictEqual(rtoMbpOutcome('', 'Partner'), '', 'a blank/omitted outcome must pass through as-is');
+  assert.strictEqual(rtoMbpOutcome(null, 'Partner'), null);
+
   // 1. Different access floors NEVER share a cache entry, and an unrestricted caller is
   //    distinct from a restricted one.
   const wide = deCacheKey('stats', { allowedPartners: [] });

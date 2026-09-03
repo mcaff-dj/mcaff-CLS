@@ -76,6 +76,18 @@ module.exports = async (req, res) => {
       res.status(400).json({ error: `Unknown view: ${view}` });
       return;
     }
+    // Tab Access (see api/admin/[action].js's own DE_TAB_CARD_KEY comment) - restricts which of
+    // THIS PAGE'S OWN tabs an agent may open, on top of the deliveryescalation card grant itself.
+    // Only gates the ticket-list reads below (this `view`, and its own op=export) - op=stats/
+    // daywise/geoCategory/awbHistory describe the whole desk regardless of which tab is
+    // currently open, so they're deliberately left unrestricted here. Same "no rows/empty =
+    // unrestricted" convention as allowedPartners/allowedQueryCategories above.
+    const allowedTabs = session?.tabPerms?.['deliveryescalation-tabs'];
+    if (Array.isArray(allowedTabs) && allowedTabs.length && !allowedTabs.includes(view)
+        && (q.op === undefined || q.op === 'export')) {
+      res.status(403).json({ error: `You do not have access to the ${view} tab` });
+      return;
+    }
     const filters = {
       search: q.search || '',
       brand: q.brand && q.brand !== 'ALL' ? q.brand : '',
