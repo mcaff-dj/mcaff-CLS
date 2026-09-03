@@ -9,10 +9,12 @@
 import { useEffect, useState } from 'react';
 import RefundExportClient from '../refund-export/RefundExportClient';
 import OrderPunchClient from './OrderPunchClient';
+import NpsProductExportClient from './NpsProductExportClient';
 
 const TABS = [
   { key: 'refund', label: 'Refund Export' },
   { key: 'order-punch', label: 'Order Punch' },
+  { key: 'nps-product', label: 'Export Product NPS' },
 ];
 
 export default function ExportsClient() {
@@ -57,6 +59,7 @@ export default function ExportsClient() {
           <div style={{ padding: 24, color: '#666' }}>Order Punch is admin-only.</div>
         )
       )}
+      {tab === 'nps-product' && <NpsProductExportClient />}
     </div>
   );
 }

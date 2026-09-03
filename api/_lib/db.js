@@ -3887,6 +3887,57 @@ async function getRefundExportRows(filters, { includePii } = {}) {
   return rows;
 }
 
+// Calling Team's "Export Product NPS" tab: CSV download of PEP_CLS.nps_product (the same
+// table scripts/nps_source.py reads for the main report's "NPS - Product" trend - see that
+// file's module docstring for how the table is shaped: one row per (response_id,
+// product_slot), up to 4 slots per survey response, no index besides the primary key).
+// Column list is deliberately the confirmed subset scripts/nps_source.py actually queries -
+// nothing here has verified the table via DESCRIBE the way that file's docstring says it did,
+// so this doesn't SELECT * and guess at what else might be in there.
+//
+// submitted_date is stored as text 'DD/MM/YYYY', same STR_TO_DATE handling as nps_source.py.
+const NPS_PRODUCT_SUBMITTED_DATE_EXPR = "STR_TO_DATE(submitted_date, '%d/%m/%Y')";
+const NPS_PRODUCT_EXPORT_COLUMNS = [
+  'response_id', 'product_slot', 'brand', 'product_name', 'product_nps',
+  'overall_nps_score', 'nps_category', 'submitted_date', 'packaging',
+];
+// No row-size measurement for this table (unlike REFUND_EXPORT_MAX_ROWS above) - reusing the
+// same conservative cap since it's a similarly-shaped flat CSV export.
+const NPS_PRODUCT_EXPORT_MAX_ROWS = 10000;
+
+function buildNpsProductExportWhere({ from, to, brand }) {
+  if (!from || !to) throw new Error('from and to are required');
+  const clauses = [
+    `${NPS_PRODUCT_SUBMITTED_DATE_EXPR} >= ?`,
+    `${NPS_PRODUCT_SUBMITTED_DATE_EXPR} < DATE_ADD(?, INTERVAL 1 DAY)`,
+  ];
+  const params = [from, to];
+  const brands = splitRefundExportFilterList(brand);
+  if (brands.length) {
+    clauses.push(`brand IN (${brands.map(() => '?').join(',')})`);
+    params.push(...brands);
+  }
+  return { where: clauses.join(' AND '), params };
+}
+
+async function getNpsProductExportCount(filters) {
+  const { where, params } = buildNpsProductExportWhere(filters);
+  const pool = await getPool();
+  const [rows] = await pool.execute(`SELECT COUNT(*) AS n FROM nps_product WHERE ${where}`, params);
+  return rows[0].n;
+}
+
+async function getNpsProductExportRows(filters) {
+  const { where, params } = buildNpsProductExportWhere(filters);
+  const columnList = NPS_PRODUCT_EXPORT_COLUMNS.map((c) => `\`${c}\``).join(', ');
+  const pool = await getPool();
+  const [rows] = await pool.execute(
+    `SELECT ${columnList} FROM nps_product WHERE ${where} ORDER BY ${NPS_PRODUCT_SUBMITTED_DATE_EXPR} LIMIT ${NPS_PRODUCT_EXPORT_MAX_ROWS}`,
+    params
+  );
+  return rows;
+}
+
 // Pure - given a board's statuses and the key being deleted, returns the status_key that
 // orphaned tasks should move to (the remaining status with the lowest `position`). Throws
 // rather than silently no-op'ing: deleting an unknown key or a board's last status are both
@@ -4305,6 +4356,10 @@ module.exports = {
   bulkDisposeDeliveryEscalationByAwb,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,
+  NPS_PRODUCT_EXPORT_MAX_ROWS, NPS_PRODUCT_EXPORT_COLUMNS,
+  getNpsProductExportCount, getNpsProductExportRows,
+  // Exported for api/_lib/db.npsProductExport.test.js only - nothing in the app calls this directly.
+  buildNpsProductExportWhere,
   // Exported for api/_lib/db.cache.test.js, db.refundExport.test.js and
   // db.deliveryEscalation.test.js only - nothing in the app calls these directly.
   deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS,
