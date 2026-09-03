@@ -113,6 +113,7 @@ const BOOTSTRAP_TABLES = [
   'report_cell_comments', 'ndr_lead_assignments', 'calling_process_dispositions', 'calling_business_hours',
   'calling_agent_process', 'calling_teams', 'rto_csv_upload_jobs', 'order_punch_jobs',
   'order_punch_job_rows', 'order_punch_settings', 'delivery_escalation_partner_access',
+  'delivery_escalation_sales_pincode_last_upload',
 ];
 
 // Fails open (false) on any error - a broken existence check must never be the reason schema
@@ -571,6 +572,28 @@ async function bootstrapSchema() {
       ('cooldown_days', '3', 'system'),
       ('max_suffix', '2', 'system')
     ON DUPLICATE KEY UPDATE \`key\` = \`key\`
+  `;
+  // Single row (id always 1) tracking the Exports tab's "Update Sales Pincode" most recent
+  // upload - shown on that tab (who/when/how many groups) and re-downloadable, plus used to
+  // reject an exact re-upload of the same file (see bulkUpdateDeliveryEscalationSalesPincode's
+  // own comment on why that additive update is not idempotent). content_hash is a SHA-256 of
+  // the RAW uploaded file's bytes, computed client-side (Web Crypto SubtleCrypto, not a new
+  // dependency) - csv_content is NOT that raw file, though: it's the already-grouped
+  // (pincode, brand, order_date, delivery_partner, sales_pincode) rows actually applied,
+  // rebuilt via toCSV - storing the original raw file (up to the tab's own 20MB cap) as a
+  // LONGTEXT row was avoidable complexity for what "download last file" needs, which is "what
+  // did we actually apply", not a byte-exact copy of the source export.
+  await sql`
+    CREATE TABLE IF NOT EXISTS delivery_escalation_sales_pincode_last_upload (
+      id TINYINT PRIMARY KEY,
+      uploaded_by VARCHAR(320) NOT NULL,
+      uploaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      file_name VARCHAR(255) NOT NULL,
+      file_size INT NOT NULL,
+      group_count INT NOT NULL,
+      content_hash CHAR(64) NOT NULL,
+      csv_content LONGTEXT NOT NULL
+    )
   `;
   schemaReady = true;
 }
@@ -2568,6 +2591,14 @@ async function bulkDisposeDeliveryEscalationByAwb(rows, email, view) {
 // table's rows are already disambiguated by day/pincode/partner, not by brand casing.
 // pincode/orderDate are compared exactly - Pincode is a plain VARCHAR digit string and
 // order_date a DATE column, neither has a casing or format-drift problem to guard against.
+//
+// ADDITIVE, not overwrite: an existing sales_Pincode for this exact (pincode, brand,
+// order_date, delivery_partner) is ADDED to, not replaced, by explicit request (2026-09-04) -
+// COALESCE(sales_Pincode, 0) + ? so a never-set (NULL) row still lands on the plain uploaded
+// count instead of NULL + n. This is NOT idempotent: re-uploading the same CSV twice (or two
+// CSVs covering overlapping rows) double-counts, unlike a plain overwrite - there is
+// deliberately no dedup/idempotency key here, since the caller is expected not to re-upload
+// the same data twice.
 async function bulkUpdateDeliveryEscalationSalesPincode(rows) {
   const pool = await getPool();
   const results = [];
@@ -2576,7 +2607,7 @@ async function bulkUpdateDeliveryEscalationSalesPincode(rows) {
     const chunkResults = await Promise.all(chunk.map(async ({ pincode, brand, orderDate, deliveryPartner, salesPincode }) => {
       const [result] = await pool.execute(`
         UPDATE Delivery_escalation
-        SET sales_Pincode = ?
+        SET sales_Pincode = COALESCE(sales_Pincode, 0) + ?
         WHERE Pincode = ? AND UPPER(brand) = UPPER(?) AND order_date = ? AND UPPER(delivery_partner) = UPPER(?)
       `, [salesPincode, pincode, brand, orderDate, deliveryPartner]);
       return { pincode, brand, orderDate, deliveryPartner, salesPincode, matched: result.affectedRows || 0 };
@@ -2585,6 +2616,41 @@ async function bulkUpdateDeliveryEscalationSalesPincode(rows) {
   }
   invalidateCache('de-');
   return results;
+}
+
+// Metadata only (no csv_content - that can be tens of MB, this is for the tab's "last
+// uploaded" display) - null if no upload has ever been recorded.
+async function getLastSalesPincodeUpload() {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT uploaded_by, uploaded_at, file_name, file_size, group_count, content_hash
+    FROM delivery_escalation_sales_pincode_last_upload WHERE id = 1
+  `;
+  return rows[0] || null;
+}
+
+// The last upload's own applied-rows CSV (see the table's own comment on why this is the
+// grouped/applied data, not the original raw file) - null if none recorded yet.
+async function getLastSalesPincodeUploadCsv() {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT file_name, csv_content FROM delivery_escalation_sales_pincode_last_upload WHERE id = 1
+  `;
+  return rows[0] || null;
+}
+
+// Single row, always id=1 - each successful upload overwrites the previous one, since only
+// "the last upload" is ever shown/compared against.
+async function recordSalesPincodeUpload({ uploadedBy, fileName, fileSize, groupCount, contentHash, csvContent }) {
+  await ensureSchema();
+  await sql`
+    INSERT INTO delivery_escalation_sales_pincode_last_upload
+      (id, uploaded_by, file_name, file_size, group_count, content_hash, csv_content)
+    VALUES (1, ${uploadedBy}, ${fileName}, ${fileSize}, ${groupCount}, ${contentHash}, ${csvContent})
+    ON DUPLICATE KEY UPDATE
+      uploaded_by = ${uploadedBy}, uploaded_at = NOW(), file_name = ${fileName}, file_size = ${fileSize},
+      group_count = ${groupCount}, content_hash = ${contentHash}, csv_content = ${csvContent}
+  `;
 }
 
 // dateFrom/dateTo are inclusive "YYYY-MM-DD" strings (or null for unbounded), interpreted
@@ -4381,6 +4447,7 @@ module.exports = {
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
   bulkUpdateDeliveryEscalationSalesPincode,
+  getLastSalesPincodeUpload, getLastSalesPincodeUploadCsv, recordSalesPincodeUpload,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,
   NPS_PRODUCT_EXPORT_COLUMNS, getNpsProductExportRows,

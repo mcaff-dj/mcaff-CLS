@@ -32,6 +32,12 @@ A combo with no matching CSV row is left untouched (NULL if never set before) ra
 forced to 0 - same "can't compute, don't guess" reasoning as the existing backfill script's own
 docstring gives for the identical choice.
 
+ADDITIVE, not overwrite: a combo that already has a sales_Pincode gets this run's count ADDED
+to it (`sales_Pincode = COALESCE(sales_Pincode, 0) + count`), by explicit request (2026-09-04).
+This is NOT idempotent - re-running this script against the same CSV, or against two CSVs whose
+date ranges overlap, double-counts the overlap. There is deliberately no run-tracking/dedup
+here; re-running with overlapping data is the caller's responsibility to avoid.
+
 Dry-run by default; --apply performs the writes. Streams the CSV once with csv.DictReader -
 never loads the full file into memory - safe for files far larger than the ~90k rows this
 table itself has.
@@ -282,7 +288,7 @@ def main():
                 for (pincode, brand, order_date, delivery_partner), count in chunk:
                     execute_with_watchdog(
                         conn, cur,
-                        f"UPDATE `{TABLE}` SET sales_Pincode = %s "
+                        f"UPDATE `{TABLE}` SET sales_Pincode = COALESCE(sales_Pincode, 0) + %s "
                         f"WHERE Pincode = %s AND brand = %s AND order_date = %s AND delivery_partner = %s",
                         (count, pincode, brand, order_date, delivery_partner),
                     )

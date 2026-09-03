@@ -15,7 +15,7 @@
 // exact matches there; the file's own 'Final Couriers' column (e.g. 'Pikndel Rapid', space not
 // underscore) is NOT - it's a display label, not the stored value, and would silently
 // zero-match every row if used instead.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 const RAW_HEADERS = {
   pincode: 'delivery_pincode',
@@ -73,16 +73,67 @@ function parseCsvRows(text) {
 // the right tool for a file this big, not this tab.
 const MAX_FILE_MB = 20;
 
+// Native Web Crypto (SubtleCrypto) - no library needed. Hashes the RAW file bytes, before any
+// CSV parsing/grouping, so "the same file uploaded twice" is detected regardless of how it
+// happens to parse - the server compares this against the last upload's stored hash and
+// rejects an exact match outright (see sales-pincode-import.js).
+async function sha256Hex(file) {
+  const buf = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function formatBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
+  return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`;
+}
+
 export default function SalesPincodeImportClient() {
   const [fileName, setFileName] = useState('');
+  const [fileSize, setFileSize] = useState(0);
+  const [contentHash, setContentHash] = useState('');
   const [rows, setRows] = useState([]);
   const [skippedCount, setSkippedCount] = useState(0);
   const [parseError, setParseError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [results, setResults] = useState(null);
   const [error, setError] = useState('');
+  const [lastUpload, setLastUpload] = useState(); // undefined until loaded, null if none yet
+  const [downloading, setDownloading] = useState(false);
 
-  function readCsvFile(f) {
+  function loadLastUpload() {
+    fetch('/api/delivery-escalation/sales-pincode-import?op=meta')
+      .then((r) => r.json())
+      .then((d) => setLastUpload(d.last || null))
+      .catch(() => setLastUpload(null));
+  }
+
+  useEffect(loadLastUpload, []);
+
+  async function handleDownloadLast() {
+    setDownloading(true);
+    try {
+      const res = await fetch('/api/delivery-escalation/sales-pincode-import?op=download');
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Download failed');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = lastUpload?.file_name || 'sales-pincode-upload.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  async function readCsvFile(f) {
     if (!f) return;
     setResults(null);
     setError('');
@@ -95,6 +146,9 @@ export default function SalesPincodeImportClient() {
       );
       return;
     }
+    setFileName(f.name);
+    setFileSize(f.size);
+    setContentHash(await sha256Hex(f));
     const reader = new FileReader();
     reader.onload = () => {
       const { rows: parsed, missingHeaders, skipped } = parseCsvRows(String(reader.result || ''));
@@ -106,7 +160,6 @@ export default function SalesPincodeImportClient() {
         setSkippedCount(skipped);
         setParseError(parsed.length ? '' : 'No usable rows found in CSV.');
       }
-      setFileName(f.name);
     };
     reader.readAsText(f);
   }
@@ -119,11 +172,12 @@ export default function SalesPincodeImportClient() {
       const res = await fetch('/api/delivery-escalation/sales-pincode-import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows }),
+        body: JSON.stringify({ rows, fileName, fileSize, contentHash }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Update failed');
       setResults(data);
+      loadLastUpload();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -136,14 +190,38 @@ export default function SalesPincodeImportClient() {
   return (
     <div style={{ padding: 24, maxWidth: 720, fontFamily: 'system-ui, sans-serif' }}>
       <h1 style={{ fontSize: 20, marginBottom: 8 }}>Update Sales Pincode</h1>
+
+      <div style={{ background: '#f7f7f7', border: '1px solid #eee', borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 13 }}>
+        {lastUpload === undefined ? (
+          <span style={{ color: '#666' }}>Loading last upload…</span>
+        ) : lastUpload === null ? (
+          <span style={{ color: '#666' }}>No upload recorded yet.</span>
+        ) : (
+          <>
+            <strong>Last upload:</strong> {lastUpload.file_name} ({formatBytes(lastUpload.file_size)}, {lastUpload.group_count} group(s))
+            <br />
+            by {lastUpload.uploaded_by} on {new Date(lastUpload.uploaded_at).toLocaleString()}
+            {' - '}
+            <button
+              onClick={handleDownloadLast}
+              disabled={downloading}
+              style={{ fontSize: 13, padding: 0, border: 'none', background: 'none', color: '#1a73e8', cursor: 'pointer', textDecoration: 'underline' }}
+            >
+              {downloading ? 'Preparing…' : 'Download CSV'}
+            </button>
+          </>
+        )}
+      </div>
+
       <p style={{ fontSize: 13, color: '#666', marginBottom: 16 }}>
         Upload a raw per-shipment export (e.g. a day or few days of "Delivered_Base_File") - one row per order,
         up to {MAX_FILE_MB}MB. Needs columns <code>Delivery_Pincode</code>, <code>Brand Name</code>,{' '}
         <code>order_date</code>, <code>Courier ctso</code>. Rows are grouped by pincode + brand + order date +
-        courier, and each group's order count is written to every Delivery_escalation ticket matching all four.
-        For a full multi-week export (bigger than {MAX_FILE_MB}MB), use{' '}
-        <code>scripts/backfill_delivery_escalation_sales_pincode_from_file.py</code> instead - same matching logic,
-        no size limit.
+        courier, and each group's order count is ADDED to every Delivery_escalation ticket's existing Sales Pincode
+        matching all four (not replaced) - re-uploading the same file, or two files covering overlapping dates,
+        will double-count. For a full multi-week export (bigger than {MAX_FILE_MB}MB), use{' '}
+        <code>scripts/backfill_delivery_escalation_sales_pincode_from_file.py</code> instead - same matching and
+        additive logic, no size limit.
       </p>
 
       <input
