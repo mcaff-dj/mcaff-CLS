@@ -22,11 +22,18 @@ const TABS = [
 export default function ExportsClient() {
   const [tab, setTab] = useState('refund');
   const [isAdmin, setIsAdmin] = useState(null); // null = not yet known
+  const [canSalesPincode, setCanSalesPincode] = useState(null); // null = not yet known
 
   useEffect(() => {
     fetch('/api/auth/me').then((r) => r.json()).then((d) => {
       setIsAdmin(!!(d && d.authenticated && d.isAdmin));
-    }).catch(() => setIsAdmin(false));
+      // Unrestricted (tabPerms.calling absent/empty) = every tab, same convention
+      // api/delivery-escalation/sales-pincode-import.js's own checkAccess uses server-side -
+      // see api/_lib/tabs.js's comment on the 'sales-pincode' entry for why this is checked
+      // separately from plain Exports access.
+      const callingTabs = d?.tabPerms?.calling;
+      setCanSalesPincode(!Array.isArray(callingTabs) || !callingTabs.length || callingTabs.includes('sales-pincode'));
+    }).catch(() => { setIsAdmin(false); setCanSalesPincode(false); });
   }, []);
 
   return (
@@ -62,7 +69,15 @@ export default function ExportsClient() {
         )
       )}
       {tab === 'nps-product' && <NpsProductExportClient />}
-      {tab === 'sales-pincode' && <SalesPincodeImportClient />}
+      {tab === 'sales-pincode' && (
+        canSalesPincode === null ? (
+          <div style={{ padding: 24 }}>Loading…</div>
+        ) : canSalesPincode ? (
+          <SalesPincodeImportClient />
+        ) : (
+          <div style={{ padding: 24, color: '#666' }}>You do not have access to Update Sales Pincode.</div>
+        )
+      )}
     </div>
   );
 }

@@ -11,9 +11,11 @@
 //                     exact match is rejected outright, since the additive update in db.js is
 //                     not idempotent and a repeat upload would silently double-count.
 //
-// Gated like api/refund-export.js (session + 'calling'/'exports' access) - unlike
-// api/delivery-escalation/record.js's own endpoints, which are deliberately open for external
-// callers. This one writes on nothing but the caller's own say-so (no per-row identity check
+// Gated like api/refund-export.js (session + 'calling'/'exports' access), PLUS its own
+// 'sales-pincode' tab permission on top - see api/_lib/tabs.js's own comment on that entry for
+// why it's a separate checkbox from 'exports' in the admin's per-user tab-customization list.
+// Unlike api/delivery-escalation/record.js's own endpoints (deliberately open for external
+// callers), this one writes on nothing but the caller's own say-so (no per-row identity check
 // beyond the match key), so it stays behind a login.
 const { getSession } = require('../_lib/session');
 const { toCSV } = require('../_lib/csv');
@@ -24,6 +26,7 @@ const {
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'exports';
+const SUB_TAB_KEY = 'sales-pincode';
 // Same ceiling and same reasoning as record.js's own MAX_BULK_ROWS - one request must finish
 // inside API Gateway's ~29s integration ceiling.
 const MAX_BULK_ROWS = 10000;
@@ -34,7 +37,9 @@ function checkAccess(session) {
   if (!session) return 'Not authenticated';
   if (!(session.perms || []).includes(CARD_KEY)) return 'You do not have access to Calling Team exports.';
   const tabs = session.tabPerms && session.tabPerms[CARD_KEY];
-  if (Array.isArray(tabs) && tabs.length && !tabs.includes(TAB_KEY)) return 'You do not have access to Calling Team exports.';
+  if (Array.isArray(tabs) && tabs.length && (!tabs.includes(TAB_KEY) || !tabs.includes(SUB_TAB_KEY))) {
+    return 'You do not have access to Update Sales Pincode.';
+  }
   return null;
 }
 

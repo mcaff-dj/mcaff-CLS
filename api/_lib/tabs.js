@@ -50,10 +50,18 @@ const CARD_TABS = {
   // process here and the CRM's own Process switcher can't drift apart. A row in
   // report_tab_permissions (card 'calling', tab '<process key>') is what "this agent is
   // invited to this process" means - see that file's ACCESS note.
+  //
+  // 'sales-pincode' is different from every entry above it: it's not a sidebar view of its
+  // own (index.html's CALLING_TEAM_SUBITEMS has no matching key, unlike 'exports') - it's a
+  // sub-permission INSIDE the Exports tab bar (app/exports/ExportsClient.js), checked there and
+  // by api/delivery-escalation/sales-pincode-import.js on top of 'exports' itself. A restricted
+  // user needs BOTH 'exports' (to reach the Exports sidebar page at all) AND 'sales-pincode'
+  // (to see/use that one sub-tab) checked in the admin's tab-customization checklist.
   calling: [
     { key: 'overview', label: 'Overview' },
     ...require('./callingProcesses.json').processes.map(p => ({ key: p.key, label: p.label })),
     { key: 'exports', label: 'Exports' },
+    { key: 'sales-pincode', label: 'Exports: Update Sales Pincode' },
   ],
   // Mirrors app/deepdive/DeepdiveClient.js's own TABS array (a React page, not a
   // gen_panels.py-generated tab bar) - keep those two in sync by hand.
