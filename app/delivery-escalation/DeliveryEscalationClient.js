@@ -110,7 +110,7 @@ function mapRow(row, readOnly) {
 // Every column after Brand, for one ticket row - shared between a group's parent row and its
 // collapsed timeline children (see groupedTicketRows) so the two can never drift out of sync
 // with each other or with the column headers above them.
-function ticketRowCells(t, tab, openAction, isChild, onTagsChange) {
+function ticketRowCells(t, tab, openAction, isChild, onTagsChange, canEditTags) {
   return (
     <>
       <td className="py-3 px-4 text-zinc-300 font-mono text-[12px]">{t.orderId}</td>
@@ -144,6 +144,7 @@ function ticketRowCells(t, tab, openAction, isChild, onTagsChange) {
             options={DE_ESCALATION_TAGS}
             placeholder="No tags"
             itemNoun="tags"
+            disabled={!canEditTags}
           />
         ) : <span className="text-zinc-600 text-[12px]">—</span>}
       </td>
@@ -1491,6 +1492,9 @@ export default function DeliveryEscalationClient() {
   // deliveryescalation process AT ALL among sibling Calling processes). null = unrestricted,
   // same convention as invitedProcessKeys.
   const [allowedDeTabs, setAllowedDeTabs] = useState(null);
+  // Escalation Tags column is Team Leader-only to edit (Admin included) - see handleMe in
+  // api/auth/[action].js, which resolves this from delivery_escalation_user_role.
+  const [canEditTags, setCanEditTags] = useState(false);
   const [authLoaded, setAuthLoaded] = useState(false);
   useEffect(() => {
     fetch('/api/auth/me').then(r => r.json()).then(d => {
@@ -1501,6 +1505,7 @@ export default function DeliveryEscalationClient() {
         setInvitedProcessKeys(Array.isArray(tabs) && tabs.length ? tabs : null);
         const deTabs = (d.tabPerms && d.tabPerms[DE_TAB_CARD_KEY]) || null;
         setAllowedDeTabs(Array.isArray(deTabs) && deTabs.length ? deTabs : null);
+        setCanEditTags(d.deRole === 'Team Leader' || d.deRole === 'Admin');
       }
       setAuthLoaded(true);
     }).catch(() => setAuthLoaded(true));
@@ -2839,7 +2844,7 @@ export default function DeliveryEscalationClient() {
                                       <span className="ml-1.5 text-[11px] tracking-wide text-amber-400 font-semibold tabular-nums">×{parent.contactCount}</span>
                                     )}
                                   </td>
-                                  {ticketRowCells(parent, tab, openAction, false, handleTagsChange)}
+                                  {ticketRowCells(parent, tab, openAction, false, handleTagsChange, canEditTags)}
                                 </tr>
                                 {isOpen && history?.status === 'loading' && (
                                   <tr className="animate-fadeIn"><td colSpan={colSpan} className="py-2 px-4 pl-8 text-zinc-500 text-[12px] border-l-2 border-indigo-500/20">
@@ -2857,7 +2862,7 @@ export default function DeliveryEscalationClient() {
                                 {isOpen && childRows.map((t) => (
                                   <tr key={t.id} className="bg-zinc-950/30 hover:bg-zinc-800/30 transition-colors animate-fadeIn">
                                     <td className="py-3 px-4 pl-8 text-zinc-500 text-[12px] whitespace-nowrap border-l-2 border-indigo-500/20">↳ {t.brand}</td>
-                                    {ticketRowCells(t, tab, openAction, true, handleTagsChange)}
+                                    {ticketRowCells(t, tab, openAction, true, handleTagsChange, canEditTags)}
                                   </tr>
                                 ))}
                               </Fragment>

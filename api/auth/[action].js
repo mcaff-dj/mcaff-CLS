@@ -2,7 +2,7 @@
 // file to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells
 // us which logical route was hit; URLs are unchanged.
 const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
-  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent, isCallingProcessAdmin, resolveCallerTeam } = require('../_lib/db');
+  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent, isCallingProcessAdmin, resolveCallerTeam, getDeliveryEscalationUserRoleByEmail } = require('../_lib/db');
 const { teamScopeFor } = require('../_lib/callingTeams');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
@@ -102,6 +102,10 @@ async function handleMe(req, res) {
     res.status(200).json({ authenticated: false });
     return;
   }
+  // Delivery-Escalation's own role label (Agent/Team Leader/...) - only that page's Tag column
+  // reads this today, gating who may edit it (see DeliveryEscalationClient.js), same "admin
+  // bypasses everything" convention as isAdmin elsewhere on this response.
+  const deRole = session.isAdmin ? 'Admin' : await getDeliveryEscalationUserRoleByEmail(session.email);
   res.status(200).json({
     authenticated: true,
     email: session.email,
@@ -109,6 +113,7 @@ async function handleMe(req, res) {
     isAdmin: !!session.isAdmin,
     cards: (session.perms || []).map((k) => ({ key: k, label: CARD_LABELS[k] || k })),
     tabPerms: session.tabPerms || {},
+    deRole,
   });
 }
 

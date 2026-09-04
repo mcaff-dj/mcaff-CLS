@@ -84,7 +84,7 @@ export function CustomSelect({ value, onChange, options, icon: IconComponent, pl
 // build_assignment_queue substring-matches against - a category name would match nothing.
 // groupOrder (optional): category names in display order; any category not listed follows, in
 // first-seen order, so a new keyword bucket can never silently vanish from the list.
-export function MultiSelectDropdown({ value, onChange, options, placeholder = 'None', groupBy, groupOrder, itemNoun = 'reasons' }) {
+export function MultiSelectDropdown({ value, onChange, options, placeholder = 'None', groupBy, groupOrder, itemNoun = 'reasons', disabled = false }) {
   const [isOpen, setIsOpen] = useState(false);
   const ref = useRef(null);
 
@@ -127,9 +127,10 @@ export function MultiSelectDropdown({ value, onChange, options, placeholder = 'N
     <div className="relative inline-block w-44" ref={ref}>
       <button
         type="button"
+        disabled={disabled}
         onClick={() => setIsOpen(!isOpen)}
-        title={selected.join(', ')}
-        className="w-full h-8 px-3 py-1 bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 rounded-lg text-[13px] font-medium text-zinc-200 flex items-center justify-between gap-2 transition-all shadow-xs focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+        title={disabled ? 'Only a Team Leader can edit tags' : selected.join(', ')}
+        className={`w-full h-8 px-3 py-1 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[13px] font-medium text-zinc-200 flex items-center justify-between gap-2 transition-all shadow-xs focus:outline-none focus:ring-1 focus:ring-indigo-500/40 ${disabled ? 'opacity-50 cursor-not-allowed' : 'hover:bg-zinc-800 hover:border-zinc-700'}`}
       >
         <span className="truncate">{label}</span>
         <ChevronDown className={`text-zinc-500 shrink-0 transition-transform duration-200 ${isOpen ? 'rotate-180 text-indigo-400' : ''}`} />

@@ -4743,7 +4743,7 @@ module.exports = {
   getDeliveryEscalationPartnerOptions,
   getDeliveryEscalationQueryCategoryAccess, getAllDeliveryEscalationQueryCategoryAccess,
   setDeliveryEscalationQueryCategoryAccess, getDeliveryEscalationQueryCategoryOptions,
-  getAllDeliveryEscalationUserRoles, setDeliveryEscalationUserRole, rtoMbpOutcome,
+  getAllDeliveryEscalationUserRoles, setDeliveryEscalationUserRole, getDeliveryEscalationUserRoleByEmail, rtoMbpOutcome,
   DE_ESCALATION_TAGS, setDeliveryEscalationTicketTags, diffEscalationTags,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
   getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
