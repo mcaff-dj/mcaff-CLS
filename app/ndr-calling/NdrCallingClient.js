@@ -170,6 +170,23 @@ const ndrFiltersCoverLead = (agent, lead) =>
   && ndrPaymentModeCovers(agent, lead.paymentMode)
   && ndrBrandCovers(agent, lead.brand);
 
+// STALE_MINUTES in scripts/assign_ndr_leads.py - an agent_presence row older than this is not
+// "at their desk" as far as the robot is concerned, no matter what their roster status says.
+const NDR_PRESENCE_STALE_MINUTES = 10;
+
+// True when the roster says Online but agent_presence says otherwise - the second of the two
+// gates the robot checks, and the one with no visible symptom: the row reads "Online", the agent
+// sees an empty queue, and the run's own "marked Online but none are heartbeat-fresh" line goes
+// to CloudWatch, which this app's IAM user cannot read. Missing presence counts as stale: no
+// heartbeat at all is exactly the case the robot excludes.
+const ndrPresenceIsStale = (presence) => {
+  const raw = presence && presence.updatedAt;
+  if (!raw) return true;
+  const seen = new Date(raw).getTime();
+  if (Number.isNaN(seen)) return true;
+  return Date.now() - seen > NDR_PRESENCE_STALE_MINUTES * 60 * 1000;
+};
+
 // processAgents row -> the normalized filter shape the covers helpers above expect. '' / absent
 // means unrestricted throughout, matching assign_ndr_leads.py's "absent means no restriction".
 const ndrAgentFilters = (a) => ({
@@ -667,7 +684,21 @@ export default function NdrCallingClient() {
       needed.set(best.email, needed.get(best.email) - 1);
       if (needed.get(best.email) <= 0) remaining = remaining.filter(a => a !== best);
     }
-    return { rows, onlineAgents };
+
+    // Per-agent outcome of the projection above, so the roster can say WHY an online agent is
+    // getting nothing. The robot prints the same three reasons per run, but that output lands in
+    // CloudWatch, which the app's own IAM user cannot read (logs:FilterLogEvents is denied) - so
+    // the log alone cannot answer "why is this agent idle?" for the people who actually ask it.
+    // Everything needed to answer it is already on this page.
+    const predictedCount = new Map();
+    for (const r of rows) predictedCount.set(r.predictedAgent, (predictedCount.get(r.predictedAgent) || 0) + 1);
+    const perAgent = new Map(onlineAgents.map(a => [a.email, {
+      predicted: predictedCount.get(a.email) || 0,
+      openLoad: openLoad.get(a.email.trim().toLowerCase()) || 0,
+      quota: a.quota,
+      supply: supply.get(a.email) || 0,
+    }]));
+    return { rows, onlineAgents, perAgent };
   }, [ndrTickets, processAgents]);
 
   // How many of the currently-unassigned leads each roster agent's HARD filters could ever
@@ -854,6 +885,19 @@ export default function NdrCallingClient() {
                     </td>
                     <td className="py-3 px-4">
                       {(() => {
+                        // Gate 1 of 2, and it outranks everything below: an agent the robot does
+                        // not consider present gets nothing regardless of filters or quota, so
+                        // saying anything about their filter coverage first would be misleading.
+                        if (a.status === 'Online' && ndrPresenceIsStale(serverPresence[a.email.toLowerCase()])) {
+                          return (
+                            <span
+                              className="inline-block px-2 py-0.5 rounded-md bg-rose-500/15 text-rose-300 border border-rose-500/30 text-[11px] font-semibold"
+                              title={`Marked Online here, but no agent_presence heartbeat in the last ${NDR_PRESENCE_STALE_MINUTES} minutes - the robot treats this agent as away and will assign them nothing. The heartbeat only runs while they have the CRM open.`}
+                            >
+                              no heartbeat · robot skips
+                            </span>
+                          );
+                        }
                         const n = ndrFilterMatchCounts.byEmail.get(a.email);
                         const total = ndrFilterMatchCounts.poolSize;
                         // Nothing is waiting for anyone - a 0 here says nothing about this
@@ -870,9 +914,26 @@ export default function NdrCallingClient() {
                             </span>
                           );
                         }
+                        // Filters DO match leads, so a complaint of "I'm getting nothing" is not
+                        // about the filter - it is quota or queue position, and those are the two
+                        // remaining answers. Only shown for Online agents: perAgent is keyed off
+                        // the projection, which only considers who is online.
+                        const p = ndrPredicted.perAgent && ndrPredicted.perAgent.get(a.email);
                         return (
                           <span className="text-[12px] text-zinc-300" title={`${n} of the ${total} unassigned leads waiting can reach this agent (quota not considered).`}>
                             {n} <span className="text-zinc-500">of {total}</span>
+                            {p && p.predicted === 0 && (
+                              <span
+                                className="block mt-1 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-semibold"
+                                title={p.openLoad >= p.quota
+                                  ? `Quota is a cap on CONCURRENT work: this agent holds ${p.openLoad} assigned-but-undisposed lead(s) against a quota of ${p.quota}, so the robot will hand them nothing until some are disposed.`
+                                  : `The robot serves the most narrowly-filtered agent first, then whoever has the most quota left. On this pool, every lead this agent could take goes to someone else before them.`}
+                              >
+                                {p.openLoad >= p.quota
+                                  ? `at quota · ${p.openLoad}/${p.quota} open`
+                                  : 'others served first'}
+                              </span>
+                            )}
                           </span>
                         );
                       })()}
