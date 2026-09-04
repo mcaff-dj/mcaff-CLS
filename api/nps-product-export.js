@@ -9,8 +9,14 @@
 // it is now PURELY COSMETIC: this endpoint itself enforces nothing, so anyone with the URL can
 // call it directly regardless of that checkbox. To re-gate it, restore the getSession/
 // checkAccess block api/refund-export.js still uses (or see this file's own git history).
+//
+// Headers are derived from the first returned row's own keys, not a fixed list - getNpsProduct
+// ExportRows now does SELECT * (by explicit request 2026-09-04, see its own comment), so the
+// exact column set is whatever mysql2 hands back, unknown until a real row exists. A date range
+// matching zero rows produces a headerless empty CSV (nothing to derive columns from) - a rarer
+// edge than it sounds, since 'brand' alone already means at least one match almost always.
 const { toCSV } = require('./_lib/csv');
-const { NPS_PRODUCT_EXPORT_COLUMNS, getNpsProductExportRows } = require('./_lib/db');
+const { getNpsProductExportRows } = require('./_lib/db');
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -29,10 +35,11 @@ module.exports = async (req, res) => {
 
   try {
     const rows = await getNpsProductExportRows(filters);
+    const headers = rows.length ? Object.keys(rows[0]) : [];
     const filename = `nps-product-export_${from}_to_${to}.csv`;
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return res.status(200).send(toCSV(rows, NPS_PRODUCT_EXPORT_COLUMNS));
+    return res.status(200).send(toCSV(rows, headers));
   } catch (e) {
     console.error('api/nps-product-export error:', e);
     return res.status(500).json({ error: e.message || 'Export failed' });

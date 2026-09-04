@@ -4312,16 +4312,17 @@ async function getRefundExportRows(filters, { includePii } = {}) {
 // table scripts/nps_source.py reads for the main report's "NPS - Product" trend - see that
 // file's module docstring for how the table is shaped: one row per (response_id,
 // product_slot), up to 4 slots per survey response, no index besides the primary key).
-// Column list is deliberately the confirmed subset scripts/nps_source.py actually queries -
-// nothing here has verified the table via DESCRIBE the way that file's docstring says it did,
-// so this doesn't SELECT * and guess at what else might be in there.
+//
+// SELECT * by explicit request (2026-09-04) - was previously a fixed allowlist (response_id,
+// product_slot, brand, product_name, product_nps, overall_nps_score, nps_category,
+// submitted_date, packaging: the confirmed subset scripts/nps_source.py's own queries use),
+// deliberately not SELECT * because nothing here had verified the table's FULL column list via
+// DESCRIBE. Whatever else the table actually has (still never DESCRIBE'd from this codebase)
+// now comes along too - see api/nps-product-export.js's own comment on how the CSV header row
+// is derived from the first returned row instead of a fixed list.
 //
 // submitted_date is stored as text 'DD/MM/YYYY', same STR_TO_DATE handling as nps_source.py.
 const NPS_PRODUCT_SUBMITTED_DATE_EXPR = "STR_TO_DATE(submitted_date, '%d/%m/%Y')";
-const NPS_PRODUCT_EXPORT_COLUMNS = [
-  'response_id', 'product_slot', 'brand', 'product_name', 'product_nps',
-  'overall_nps_score', 'nps_category', 'submitted_date', 'packaging',
-];
 function buildNpsProductExportWhere({ from, to, brand }) {
   if (!from || !to) throw new Error('from and to are required');
   const clauses = [
@@ -4343,10 +4344,9 @@ function buildNpsProductExportWhere({ from, to, brand }) {
 // and fail with an opaque 500/502, since nothing here chunks or streams the response.
 async function getNpsProductExportRows(filters) {
   const { where, params } = buildNpsProductExportWhere(filters);
-  const columnList = NPS_PRODUCT_EXPORT_COLUMNS.map((c) => `\`${c}\``).join(', ');
   const pool = await getPool();
   const [rows] = await pool.execute(
-    `SELECT ${columnList} FROM nps_product WHERE ${where} ORDER BY ${NPS_PRODUCT_SUBMITTED_DATE_EXPR}`,
+    `SELECT * FROM nps_product WHERE ${where} ORDER BY ${NPS_PRODUCT_SUBMITTED_DATE_EXPR}`,
     params
   );
   return rows;
@@ -4776,7 +4776,7 @@ module.exports = {
   getLastSalesPincodeUpload, getLastSalesPincodeUploadCsv, recordSalesPincodeUpload,
   REFUND_EXPORT_MAX_ROWS, REFUND_EXPORT_BASE_COLUMNS, REFUND_EXPORT_PII_COLUMNS,
   getRefundExportCount, getRefundExportRows,
-  NPS_PRODUCT_EXPORT_COLUMNS, getNpsProductExportRows,
+  getNpsProductExportRows,
   // Exported for api/_lib/db.npsProductExport.test.js only - nothing in the app calls this directly.
   buildNpsProductExportWhere,
   // Exported for api/_lib/db.cache.test.js, db.refundExport.test.js and
