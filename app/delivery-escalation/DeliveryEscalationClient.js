@@ -71,6 +71,23 @@ const DE_TAB_LABELS = {
 const DE_TAB_LABEL_TO_KEY = Object.fromEntries(Object.entries(DE_TAB_LABELS).map(([k, v]) => [v, k]));
 const DE_TAB_OPTIONS = Object.values(DE_TAB_LABELS);
 
+// Table Access column - one level DEEPER than Tab Access: which of the Overview tab's OWN
+// sections an agent may see (see api/admin/[action].js's own DE_OVERVIEW_TABLE_CARD_KEY
+// comment). Its own card_key, never DE_TAB_CARD_KEY, so a 'daywise' table_key here can't
+// collide with that card's 'overview' tab_key. Same label/expand convention as DE_TAB_LABELS.
+const DE_OVERVIEW_TABLE_CARD_KEY = 'deliveryescalation-overview-tables';
+const DE_OVERVIEW_TABLE_LABELS = {
+  summary: '🔢 Summary Tiles',
+  daywise: '📅 TAT by Query Date',
+  partnerwise: '🚚 TAT by Delivery Partner',
+  query_class: '🏷️ TAT by Query Class',
+  contact_bucket: '🔁 TAT by Repeat Contacts',
+  geo_category: '📍 Query Category by Location',
+  repeat_offenders: '♻️ Repeat Contacts Strip',
+};
+const DE_OVERVIEW_TABLE_LABEL_TO_KEY = Object.fromEntries(Object.entries(DE_OVERVIEW_TABLE_LABELS).map(([k, v]) => [v, k]));
+const DE_OVERVIEW_TABLE_OPTIONS = Object.values(DE_OVERVIEW_TABLE_LABELS);
+
 // Escalation Tags column's own fixed options - mirrors api/_lib/db.js's DE_ESCALATION_TAGS
 // verbatim (the server whitelists against its own copy independently; this is only what the
 // dropdown offers). Update both if this list ever changes.
@@ -1359,6 +1376,15 @@ function DeliveryPartnerAccessCard({ showToast }) {
     saveTimers.current[key] = setTimeout(() => commitSave(userId, { tabAccess }), 500);
   };
 
+  // Same shape as handleTabAccessChange, one level deeper - see DE_OVERVIEW_TABLE_LABEL_TO_KEY.
+  const handleTableAccessChange = (userId, labelList) => {
+    const tableAccess = labelList.map((l) => DE_OVERVIEW_TABLE_LABEL_TO_KEY[l]).filter(Boolean);
+    setState((s) => ({ ...s, users: s.users.map((u) => (u.id === userId ? { ...u, tableAccess } : u)) }));
+    const key = `tableAccess:${userId}`;
+    clearTimeout(saveTimers.current[key]);
+    saveTimers.current[key] = setTimeout(() => commitSave(userId, { tableAccess }), 500);
+  };
+
   if (state.status === 'loading') {
     return (
       <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5">
@@ -1404,6 +1430,7 @@ function DeliveryPartnerAccessCard({ showToast }) {
                 <th className="text-left font-medium py-2.5 px-4">Delivery Partner Access</th>
                 <th className="text-left font-medium py-2.5 px-4">Query Category Access</th>
                 <th className="text-left font-medium py-2.5 px-4">Tab Access</th>
+                <th className="text-left font-medium py-2.5 px-4">Table Access</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/50">
@@ -1461,6 +1488,18 @@ function DeliveryPartnerAccessCard({ showToast }) {
                       {isSaving && <span className="text-[11px] text-zinc-500">Saving…</span>}
                     </div>
                   </td>
+                  <td className="py-2.5 px-4">
+                    <div className="flex items-center gap-2">
+                      <MultiSelectDropdown
+                        value={u.tableAccess.map((k) => DE_OVERVIEW_TABLE_LABELS[k]).filter(Boolean)}
+                        onChange={(next) => handleTableAccessChange(u.id, next)}
+                        options={DE_OVERVIEW_TABLE_OPTIONS}
+                        placeholder="All tables"
+                        itemNoun="tables"
+                      />
+                      {isSaving && <span className="text-[11px] text-zinc-500">Saving…</span>}
+                    </div>
+                  </td>
                 </tr>
                 );
               })}
@@ -1492,6 +1531,10 @@ export default function DeliveryEscalationClient() {
   // deliveryescalation process AT ALL among sibling Calling processes). null = unrestricted,
   // same convention as invitedProcessKeys.
   const [allowedDeTabs, setAllowedDeTabs] = useState(null);
+  // Which of the Overview tab's OWN sections (see DE_OVERVIEW_TABLE_LABELS) this session may
+  // see - one level deeper than allowedDeTabs above (that's whether Overview itself is open at
+  // all). null/empty = unrestricted, same convention.
+  const [allowedOverviewTables, setAllowedOverviewTables] = useState(null);
   // Escalation Tags column is Team Leader-only to edit (Admin included) - see handleMe in
   // api/auth/[action].js, which resolves this from delivery_escalation_user_role.
   const [canEditTags, setCanEditTags] = useState(false);
@@ -1505,6 +1548,8 @@ export default function DeliveryEscalationClient() {
         setInvitedProcessKeys(Array.isArray(tabs) && tabs.length ? tabs : null);
         const deTabs = (d.tabPerms && d.tabPerms[DE_TAB_CARD_KEY]) || null;
         setAllowedDeTabs(Array.isArray(deTabs) && deTabs.length ? deTabs : null);
+        const overviewTables = (d.tabPerms && d.tabPerms[DE_OVERVIEW_TABLE_CARD_KEY]) || null;
+        setAllowedOverviewTables(Array.isArray(overviewTables) && overviewTables.length ? overviewTables : null);
         setCanEditTags(d.deRole === 'Team Leader' || d.deRole === 'Admin');
       }
       setAuthLoaded(true);
@@ -2216,6 +2261,11 @@ export default function DeliveryEscalationClient() {
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
+  // Filtered by this session's own Table Access restriction (allowedOverviewTables; null/empty =
+  // unrestricted, same convention as allowedDeTabs) - gates each Overview section individually,
+  // one level deeper than allowedDeTabs' own "is Overview open at all".
+  const showOverviewTable = (key) => !allowedOverviewTables || allowedOverviewTables.includes(key);
+
   // No per-process admin here (that concept comes from the roster this process doesn't have) -
   // only a company-wide admin manages the disposition list, same bar api/admin/[action].js's
   // handleDispositions enforces for POST/PUT/DELETE.
@@ -2334,7 +2384,7 @@ export default function DeliveryEscalationClient() {
                 </div>
               )}
 
-              {tab === 'overview' && (
+              {tab === 'overview' && showOverviewTable('summary') && (
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
                   <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
                     <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Total Tickets</p>
@@ -2360,7 +2410,7 @@ export default function DeliveryEscalationClient() {
                 </div>
               )}
 
-              {tab === 'overview' && (
+              {tab === 'overview' && showOverviewTable('daywise') && (
                 <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
                   <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
                     <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500">
@@ -2556,7 +2606,7 @@ export default function DeliveryEscalationClient() {
                 </div>
               )}
 
-              {tab === 'overview' && (
+              {tab === 'overview' && showOverviewTable('partnerwise') && (
                 <TatBreakdownTable
                   title="TAT by Delivery Partner"
                   description={`Same ${daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} Date buckets as above, grouped by delivery partner instead of by date.`}
@@ -2576,7 +2626,7 @@ export default function DeliveryEscalationClient() {
                 />
               )}
 
-              {tab === 'overview' && (
+              {tab === 'overview' && showOverviewTable('query_class') && (
                 <TatBreakdownTable
                   title="TAT by Query Class"
                   description={`Same ${daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} Date buckets as above, grouped by query class instead of by date.`}
@@ -2596,7 +2646,7 @@ export default function DeliveryEscalationClient() {
                 />
               )}
 
-              {tab === 'overview' && (
+              {tab === 'overview' && showOverviewTable('contact_bucket') && (
                 <TatBreakdownTable
                   title="TAT by Repeat Contacts"
                   description={`Same ${daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} Date buckets as above, grouped by how many times the customer came instead of by date.`}
@@ -2619,7 +2669,7 @@ export default function DeliveryEscalationClient() {
                 />
               )}
 
-              {tab === 'overview' && (
+              {tab === 'overview' && showOverviewTable('geo_category') && (
                 <GeoCategoryTable
                   month={geoMonth}
                   monthOptions={geoMonthOptions}
@@ -2634,7 +2684,7 @@ export default function DeliveryEscalationClient() {
                 />
               )}
 
-              {tab === 'overview' && repeatStats.length > 0 && (
+              {tab === 'overview' && showOverviewTable('repeat_offenders') && repeatStats.length > 0 && (
                 <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
                   <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1">
                     Repeat contacts on unresolved complaints
