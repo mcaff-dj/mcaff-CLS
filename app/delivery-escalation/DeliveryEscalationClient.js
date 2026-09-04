@@ -394,6 +394,22 @@ const CANONICAL_TO_RAW_PARTNER = Object.entries(PARTNER_NAME_MAP).reduce((m, [ra
 }, {});
 const PARTNER_FILTER_OPTIONS = [...new Set(Object.values(PARTNER_NAME_MAP))].sort();
 
+// Ticket list's Outcome filter - the fixed set of outcome ROOTS this page's own WHERE-clause
+// constants already organize around (DE_FRESH_WHERE/DE_FORCED_RTO_WHERE/DE_RESOLVED_WHERE in
+// api/_lib/db.js), not a live-distinct-values list: 'RTO > Refused Delivery' and
+// 'RTO > Address Issue' are both just "RTO" here, same reasoning Brand's own small fixed list
+// uses over a DB query. 'RTO (Partner)' is RTO_MBP (see rtoMbpOutcome) - a Partner-role agent's
+// own RTO dispose, kept as its own option rather than folded into plain RTO since that's the
+// whole point of the distinction.
+const OUTCOME_FILTER_OPTIONS = [
+  { value: 'ALL', label: 'All Outcomes' },
+  { value: 'RTO', label: 'RTO' },
+  { value: 'RTO_MBP', label: 'RTO (Partner)' },
+  { value: 'Delivered', label: 'Delivered' },
+  { value: 'Escalated', label: 'Escalated' },
+  { value: 'Resolved', label: 'Resolved' },
+];
+
 // Several raw couriers can fold into the same final partner (see PARTNER_NAME_MAP) - if two of
 // them fire on the same date, sums them into one row per date rather than leaving two rows that
 // would collide on the same React key when the day level renders.
@@ -875,7 +891,7 @@ function GeoCategoryTable({
   );
 }
 
-function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner }) {
+function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome }) {
   const p = new URLSearchParams();
   if (view) p.set('view', view);
   if (search) p.set('search', search);
@@ -890,12 +906,15 @@ function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatB
   // CANONICAL_TO_RAW_PARTNER convention fetchDaywiseStats already uses - the server only ever
   // filters the raw column, never learns what "canonical" means.
   if (partner && partner !== 'ALL') p.set('partner', (CANONICAL_TO_RAW_PARTNER[partner] || [partner]).join(','));
+  // Outcome ROOT (see OUTCOME_FILTER_OPTIONS's own comment) - the server matches this against
+  // outcome's own root the same way DE_RTO_ROOT_SQL already does for RTO/RTO_MBP.
+  if (outcome && outcome !== 'ALL') p.set('outcome', outcome);
   return p;
 }
 
 // One page of whichever tab is open, with the current filters applied server-side.
-async function fetchPage({ view, page, perPage, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner }) {
-  const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner });
+async function fetchPage({ view, page, perPage, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome }) {
+  const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome });
   p.set('page', String(page));
   p.set('perPage', String(perPage));
   const d = await getJson(`/api/delivery-escalation/record?${p}`);
@@ -1111,10 +1130,10 @@ const EXPORT_COLUMNS = [
 // db.js/record.js); this walks page 1, 2, 3... until a chunk comes back short, then builds one
 // CSV from everything collected. onChunk reports progress for a long export.
 // ﻿ prefix: without a BOM Excel reads a UTF-8 CSV as ANSI and mangles non-ASCII text.
-async function downloadCsv({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner }, onChunk) {
+async function downloadCsv({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome }, onChunk) {
   const rows = [];
   for (let page = 1; ; page++) {
-    const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner });
+    const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome });
     p.set('op', 'export');
     p.set('page', String(page));
     const d = await getJson(`/api/delivery-escalation/record?${p}`);
@@ -1534,6 +1553,12 @@ export default function DeliveryEscalationClient() {
   // never shown as a filter) - this one narrows further, same relationship
   // getDeliveryEscalationDaywiseStats' own partner/allowedPartners pair already has.
   const [partnerFilter, setPartnerFilter] = useState(() => safeStorage.getItem('de_partner_filter') || 'ALL');
+  // Ticket list's own Outcome filter (all list tabs share this one bar, same as partnerFilter
+  // above) - matches the outcome ROOT (see OUTCOME_FILTER_OPTIONS's own comment), not the full
+  // ' > '-joined path - Child Disposition is already its own column/filter-free display for the
+  // sub-level, so this stays at the same granularity Fresh/Forced RTO/Resolved/New Order Placed
+  // are already split by.
+  const [outcomeFilter, setOutcomeFilter] = useState(() => safeStorage.getItem('de_outcome_filter') || 'ALL');
   // dateFilter/dateFilterTo are the actual from/to bounds sent to the server (see
   // effectiveFilters below) - dateRangePreset is purely a UI convenience that fills them in.
   // 'custom' leaves them for the agent to type by hand; any other preset (over)writes both from
@@ -1775,7 +1800,7 @@ export default function DeliveryEscalationClient() {
 
   // Any change to what's being asked for restarts at page 1 - staying on page 12 of a filter
   // that now has 3 pages would just show an empty table.
-  useEffect(() => { setPage(1); }, [tab, debouncedSearch, brandFilter, agentFilter, partnerFilter, dateFilter, dateFilterTo, dateFilterBasis, dateDrill, contactBucketFilter, perPage]);
+  useEffect(() => { setPage(1); }, [tab, debouncedSearch, brandFilter, agentFilter, partnerFilter, outcomeFilter, dateFilter, dateFilterTo, dateFilterBasis, dateDrill, contactBucketFilter, perPage]);
 
   // Picking a preset (over)writes both dateFilter/dateFilterTo; 'custom' leaves them for the
   // agent to type; 'all' clears them (there's no preset that means "no filter" to compute a
@@ -1809,7 +1834,7 @@ export default function DeliveryEscalationClient() {
     try {
       const res = await fetchPage({
         view: tab, page, perPage, search: debouncedSearch, brand: brandFilter, agent: agentFilter,
-        contactBucket: contactBucketFilter, partner: partnerFilter, ...effectiveDateFilter,
+        contactBucket: contactBucketFilter, partner: partnerFilter, outcome: outcomeFilter, ...effectiveDateFilter,
       });
       if (reqId !== reqIdRef.current) return;
       setRows(res.rows);
@@ -1826,7 +1851,7 @@ export default function DeliveryEscalationClient() {
     } finally {
       if (reqId === reqIdRef.current) setSyncing(false);
     }
-  }, [listTab, tab, page, perPage, debouncedSearch, brandFilter, agentFilter, contactBucketFilter, partnerFilter, effectiveDateFilter, showToast]);
+  }, [listTab, tab, page, perPage, debouncedSearch, brandFilter, agentFilter, contactBucketFilter, partnerFilter, outcomeFilter, effectiveDateFilter, showToast]);
 
   const loadStats = useCallback(async () => {
     try {
@@ -2109,7 +2134,7 @@ export default function DeliveryEscalationClient() {
     setExporting(true);
     try {
       const { count } = await downloadCsv(
-        { view: tab, search: debouncedSearch, brand: brandFilter, agent: agentFilter, contactBucket: contactBucketFilter, partner: partnerFilter, ...effectiveDateFilter },
+        { view: tab, search: debouncedSearch, brand: brandFilter, agent: agentFilter, contactBucket: contactBucketFilter, partner: partnerFilter, outcome: outcomeFilter, ...effectiveDateFilter },
         (soFar) => showToast(`Exporting… ${soFar.toLocaleString('en-IN')} rows so far`),
       );
       showToast(`Downloaded ${count.toLocaleString('en-IN')} rows`);
@@ -2645,6 +2670,12 @@ export default function DeliveryEscalationClient() {
                         onChange={(v) => { setPartnerFilter(v); safeStorage.setItem('de_partner_filter', v); }}
                         options={[{ value: 'ALL', label: 'All Partners' }, ...PARTNER_FILTER_OPTIONS.map(p => ({ value: p, label: p }))]}
                         placeholder="Partner"
+                      />
+                      <CustomSelect
+                        value={outcomeFilter}
+                        onChange={(v) => { setOutcomeFilter(v); safeStorage.setItem('de_outcome_filter', v); }}
+                        options={OUTCOME_FILTER_OPTIONS}
+                        placeholder="Outcome"
                       />
                       {dateDrill ? (
                         // Set by clicking a day-wise bucket cell - a range plus a TAT bucket, which

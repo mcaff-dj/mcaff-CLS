@@ -105,6 +105,10 @@ module.exports = async (req, res) => {
       // resolved canonical -> raw - see DeliveryEscalationClient.js's filterQuery). Distinct from
       // allowedPartners: this is a user-chosen filter, that's the always-enforced access floor.
       partner: q.partner ? String(q.partner).split(',').filter(Boolean) : undefined,
+      // The ticket list's own Outcome filter (see deFilterSql's own outcomeRoot comment) - a
+      // plain bound parameter, so an unrecognized value just matches zero rows rather than
+      // needing server-side whitelisting the way a WRITE (e.g. setTags) does.
+      outcomeRoot: q.outcome && q.outcome !== 'ALL' ? q.outcome : '',
       allowedPartners,
       allowedQueryCategories,
     };

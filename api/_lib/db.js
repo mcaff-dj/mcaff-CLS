@@ -2093,11 +2093,16 @@ const DE_DAYWISE_DATE_FIELDS = { added_date: 'added_date', order_date: 'order_da
 // own comment describes. Applied here rather than as a separate step so every caller of
 // deWhere/deFilterSql (getDeliveryEscalationPage, getDeliveryEscalationStats,
 // getDeliveryEscalationExport) enforces it automatically, with no per-caller opt-in to forget.
-function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, allowedPartners, allowedQueryCategories } = {}) {
+function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcomeRoot, allowedPartners, allowedQueryCategories } = {}) {
   const clauses = [];
   const params = [];
   if (brand) { clauses.push('brand = ?'); params.push(brand); }
   if (agent) { clauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
+  // outcomeRoot: the ticket list's own Outcome filter (see DeliveryEscalationClient.js's
+  // OUTCOME_FILTER_OPTIONS) - matches outcome's own ROOT (before any ' > <sub-reason>'), same
+  // shape DE_RTO_ROOT_SQL already uses for RTO/RTO_MBP specifically, just parameterized for
+  // whichever root the agent picked.
+  if (outcomeRoot) { clauses.push('(outcome = ? OR outcome LIKE ?)'); params.push(outcomeRoot, `${outcomeRoot} > %`); }
   // partner is the ticket list's OWN Delivery Partner filter (a list of raw values, already
   // resolved from canonical - PARTNER_NAME_MAP in DeliveryEscalationClient.js), same
   // relationship to allowedPartners (the access floor) that getDeliveryEscalationDaywiseStats'
