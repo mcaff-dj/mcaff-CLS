@@ -65,6 +65,13 @@ const CARD_TABS = {
   // unrestricted non-admin - being untouched/unrestricted on 'calling' does not imply Order
   // Punch access the way it does for every other sub-permission here. isAdmin still bypasses
   // this entirely, same as before this permission existed.
+  //
+  // 'nps-product-export' is the other exception, in the opposite direction: api/nps-product-
+  // export.js is deliberately public (no auth at all, by explicit request 2026-09-04) - this
+  // checkbox is PURELY COSMETIC for it, controlling only whether ExportsClient.js shows the
+  // "Export Product NPS" button in-app. The API itself enforces nothing, so unchecking it for a
+  // user does not actually block them (or anyone else with the URL) from calling the endpoint
+  // directly.
   calling: [
     { key: 'overview', label: 'Overview' },
     ...require('./callingProcesses.json').processes.map(p => ({ key: p.key, label: p.label })),
