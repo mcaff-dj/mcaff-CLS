@@ -1335,7 +1335,13 @@ function DeliveryPartnerAccessCard({ showToast }) {
       {state.users.length === 0 ? (
         <p className="text-[12px] text-zinc-500">No one has Delivery-Escalation access yet.</p>
       ) : (
-        <div className="border border-zinc-800 rounded-xl overflow-hidden">
+        /* No overflow-hidden here (unlike most other tables in this app) - Role/Partner/Query
+           Category/Tab Access are all popovers that open DOWNWARD from their own row, and for a
+           row near the bottom of the table overflow-hidden was clipping the popover's own lower
+           options off (see RtoCrmClient.js's own overflow-x-auto comment for the sibling bug
+           this table doesn't have: no column here is wide enough to need horizontal scroll, so
+           there's no overflow-x-auto trade-off to make either). */
+        <div className="border border-zinc-800 rounded-xl">
           <table className="w-full text-[13px]">
             <thead>
               <tr className="border-b border-zinc-800/80 text-zinc-500">
