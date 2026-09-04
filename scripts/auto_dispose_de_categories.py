@@ -88,11 +88,12 @@ CATEGORY_DISPOSITION = {
     "others": "Resolved",
 }
 
-# Kept byte-identical to DE_FORCED_RTO_WHERE in api/_lib/db.js. The `IS NOT NULL` guards are
-# load-bearing, not defensive noise: `NULL = 'RTO'` is NULL, and this sits under a NOT(), where
-# NOT(NULL) is also NULL and silently matches nothing - the exact bug db.js's comment records
-# dropping Fresh from ~3645 rows to 2. Doubled %% because mysql_lib passes params to pymysql,
-# which %-formats the statement.
+# Kept byte-identical to DE_FORCED_RTO_WHERE in api/_lib/db.js (which itself now builds this
+# from DE_RTO_ROOT_SQL - RTO_MBP is the Partner-role variant of the same disposal, see
+# rtoMbpOutcome's own comment there). The `IS NOT NULL` guards are load-bearing, not defensive
+# noise: `NULL = 'RTO'` is NULL, and this sits under a NOT(), where NOT(NULL) is also NULL and
+# silently matches nothing - the exact bug db.js's comment records dropping Fresh from ~3645 rows
+# to 2. Doubled %% because mysql_lib passes params to pymysql, which %-formats the statement.
 #
 # Functions rather than constants only so the delivered rule's multi-table UPDATE can get a
 # `d.`-qualified copy from this one source. Unqualified would happen to work today
@@ -104,7 +105,8 @@ def forced_rto_where(prefix=""):
     return (
         f"(({prefix}tat IS NOT NULL AND {prefix}tat = 'Forced to be marked as RTO') "
         f"OR ({prefix}outcome IS NOT NULL AND "
-        f"({prefix}outcome = 'RTO' OR {prefix}outcome LIKE 'RTO > %%')))"
+        f"({prefix}outcome = 'RTO' OR {prefix}outcome LIKE 'RTO > %%' "
+        f"OR {prefix}outcome = 'RTO_MBP' OR {prefix}outcome LIKE 'RTO_MBP > %%')))"
     )
 
 

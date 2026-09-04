@@ -1899,7 +1899,16 @@ const DE_MISSING_AWB_WHERE = `(awb_code IS NULL OR awb_code = '' OR UPPER(awb_co
 // AWBs found live) made this whole OR evaluate to NULL instead of FALSE, which poisoned
 // NOT(FORCED) the same way, silently dropping those rows out of Fresh, Forced RTO, AND
 // Resolved - visible nowhere except the unconditional `total` tile.
-const DE_FORCED_RTO_WHERE = `((tat IS NOT NULL AND tat = 'Forced to be marked as RTO') OR (outcome IS NOT NULL AND (outcome = 'RTO' OR outcome LIKE 'RTO > %')))`;
+// Matches an RTO-family outcome ROOT: plain 'RTO', or the Partner-role variant 'RTO_MBP'
+// (rtoMbpOutcome) written for the exact same disposal - both are "this parcel is going back",
+// just tagged by who marked it. Every place below that treats a bare 'RTO' as this ticket's
+// terminal-but-reopenable state must treat 'RTO_MBP' identically, or a Partner's RTO dispose
+// matches neither Fresh nor Forced RTO and silently disappears from every tab - caught live
+// (MCaff9336483: disposed RTO by a Partner-role agent, wrote 'RTO_MBP', showed nowhere but the
+// Overview's own unconditional total).
+const DE_RTO_ROOT_SQL = `(outcome = 'RTO' OR outcome LIKE 'RTO > %' OR outcome = 'RTO_MBP' OR outcome LIKE 'RTO_MBP > %')`;
+
+const DE_FORCED_RTO_WHERE = `((tat IS NOT NULL AND tat = 'Forced to be marked as RTO') OR (outcome IS NOT NULL AND ${DE_RTO_ROOT_SQL}))`;
 
 // A ticket is Fresh while its outcome is blank (never disposed), RTO (an RTO'd order can still
 // be re-shipped and later delivered, so it isn't terminal), or Escalated (still waiting on the
@@ -1910,7 +1919,7 @@ const DE_FORCED_RTO_WHERE = `((tat IS NOT NULL AND tat = 'Forced to be marked as
 // it's still a DISPOSED, terminal state with its own tab (DE_NEW_ORDER_PLACED_WHERE), not an
 // open Fresh ticket, even though it sits under the same 'Escalated' root as a genuinely-open one.
 const DE_FRESH_WHERE = `((outcome IS NULL OR outcome = ''
-   OR outcome = 'RTO' OR outcome LIKE 'RTO > %'
+   OR ${DE_RTO_ROOT_SQL}
    OR (outcome = 'Escalated' OR (outcome LIKE 'Escalated > %' AND outcome <> 'Escalated > New order placed')))
    AND NOT (${DE_FORCED_RTO_WHERE}))`;
 // 'Resolved' is scripts/auto_dispose_de_categories.py's own root: query categories whose
