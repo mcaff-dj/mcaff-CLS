@@ -25,7 +25,7 @@
 // everyone invited to this process sees the whole shared desk, admin or not, since tickets are
 // self-claimed from a common unassigned pool - the Agent filter narrows the view by choice.
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from 'react';
-import { CustomSelect, MultiSelectDropdown, CheckIcon, XIcon, RefreshIcon, Overlay } from '../_calling/ui';
+import { CustomSelect, MultiSelectDropdown, CheckIcon, XIcon, RefreshIcon, Overlay, ThFilter } from '../_calling/ui';
 import { useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { safeStorage } from '../_calling/util';
 
@@ -92,6 +92,11 @@ const DE_OVERVIEW_TABLE_OPTIONS = Object.values(DE_OVERVIEW_TABLE_LABELS);
 // verbatim (the server whitelists against its own copy independently; this is only what the
 // dropdown offers). Update both if this list ever changes.
 const DE_ESCALATION_TAGS = ['Founder escalation', 'Highly Aggressive', 'Social Media'];
+
+// TAT column's own header filter - mirrors api/_lib/db.js's DE_TAT_BUCKET_SQL verbatim (the only
+// six values that CASE expression can ever produce for one row). Fixed list, not live-distinct,
+// same reasoning DE_ESCALATION_TAGS above already documents.
+const DE_TAT_BUCKET_OPTIONS = ['unresolved', 'Within 48 hrs', 'Within 2-4 days', '4-8 days', '8-10 days', 'Greater than 10 days'];
 
 // One shared mapping for both tabs - the same SELECT backs Fresh and Resolved (see db.js's
 // DE_SELECT_COLUMNS), so there's no reason for two row shapes. readOnly is the only thing that
@@ -906,7 +911,7 @@ function GeoCategoryTable({
   );
 }
 
-function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome }) {
+function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags }) {
   const p = new URLSearchParams();
   if (view) p.set('view', view);
   if (search) p.set('search', search);
@@ -924,12 +929,18 @@ function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatB
   // Outcome ROOT (see OUTCOME_FILTER_OPTIONS's own comment) - the server matches this against
   // outcome's own root the same way DE_RTO_ROOT_SQL already does for RTO/RTO_MBP.
   if (outcome && outcome !== 'ALL') p.set('outcome', outcome);
+  // Header-filter columns (see deFilterSql's own comment) - queryCategory/childDisposition are
+  // single-picked in the UI but sent as a one-element list, same shape the server already
+  // expects for partner; tags is genuinely multi-select.
+  if (queryCategory && queryCategory !== 'ALL') p.set('queryCategory', queryCategory);
+  if (childDisposition && childDisposition !== 'ALL') p.set('childDisposition', childDisposition);
+  if (Array.isArray(tags) && tags.length) p.set('tags', tags.join(','));
   return p;
 }
 
 // One page of whichever tab is open, with the current filters applied server-side.
-async function fetchPage({ view, page, perPage, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome }) {
-  const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome });
+async function fetchPage({ view, page, perPage, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags }) {
+  const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags });
   p.set('page', String(page));
   p.set('perPage', String(perPage));
   const d = await getJson(`/api/delivery-escalation/record?${p}`);
@@ -971,6 +982,10 @@ async function fetchStats() {
     stats: d.stats || { total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0, newOrderPlaced: 0 },
     agents: d.agents || [],
     repeatStats: d.repeatStats || [],
+    // Ticket list's own Query Category/Child Disposition header-filter options - live distinct
+    // values, same convention as agents above.
+    queryCategories: d.queryCategories || [],
+    childDispositions: d.childDispositions || [],
   };
 }
 
@@ -1145,10 +1160,10 @@ const EXPORT_COLUMNS = [
 // db.js/record.js); this walks page 1, 2, 3... until a chunk comes back short, then builds one
 // CSV from everything collected. onChunk reports progress for a long export.
 // ﻿ prefix: without a BOM Excel reads a UTF-8 CSV as ANSI and mangles non-ASCII text.
-async function downloadCsv({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome }, onChunk) {
+async function downloadCsv({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags }, onChunk) {
   const rows = [];
   for (let page = 1; ; page++) {
-    const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome });
+    const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags });
     p.set('op', 'export');
     p.set('page', String(page));
     const d = await getJson(`/api/delivery-escalation/record?${p}`);
@@ -1602,10 +1617,18 @@ export default function DeliveryEscalationClient() {
   const [partnerFilter, setPartnerFilter] = useState(() => safeStorage.getItem('de_partner_filter') || 'ALL');
   // Ticket list's own Outcome filter (all list tabs share this one bar, same as partnerFilter
   // above) - matches the outcome ROOT (see OUTCOME_FILTER_OPTIONS's own comment), not the full
-  // ' > '-joined path - Child Disposition is already its own column/filter-free display for the
-  // sub-level, so this stays at the same granularity Fresh/Forced RTO/Resolved/New Order Placed
-  // are already split by.
+  // ' > '-joined path - childDispositionFilter below is the sub-level's own filter, at the same
+  // granularity Fresh/Forced RTO/Resolved/New Order Placed are already split by.
   const [outcomeFilter, setOutcomeFilter] = useState(() => safeStorage.getItem('de_outcome_filter') || 'ALL');
+  // Per-column header filters (the small funnel icon next to each <th> label) - Delivery
+  // Partner/Agent/Outcome/Times Contacted/dates reuse the filters above (their funnel just opens
+  // the SAME control, not a second one); these four have no other filter yet. tagFilter is
+  // multi-select (matches the ticket-row Tag picker's own convention); the rest are single, same
+  // as every other CustomSelect-driven filter on this page.
+  const [queryCategoryFilter, setQueryCategoryFilter] = useState('ALL');
+  const [tatFilter, setTatFilter] = useState('ALL');
+  const [childDispositionFilter, setChildDispositionFilter] = useState('ALL');
+  const [tagFilter, setTagFilter] = useState(() => []);
   // dateFilter/dateFilterTo are the actual from/to bounds sent to the server (see
   // effectiveFilters below) - dateRangePreset is purely a UI convenience that fills them in.
   // 'custom' leaves them for the agent to type by hand; any other preset (over)writes both from
@@ -1630,6 +1653,10 @@ export default function DeliveryEscalationClient() {
   const [stats, setStats] = useState({ total: 0, assigned: 0, resolved: 0, fresh: 0, forcedRto: 0, newOrderPlaced: 0 });
   const [agents, setAgents] = useState([]);
   const [repeatStats, setRepeatStats] = useState([]);
+  // Ticket list's own header-filter option lists - Query Category/Child Disposition columns'
+  // filter icons pick from these (see fetchStats).
+  const [queryCategoryOptions, setQueryCategoryOptions] = useState([]);
+  const [childDispositionOptions, setChildDispositionOptions] = useState([]);
   const [daywise, setDaywise] = useState({ buckets: [], rows: [], grandTotal: {}, grandTotalAll: 0, missingDateCount: 0 });
   const [daywiseLoading, setDaywiseLoading] = useState(false);
   // Collapsed by default at every level - a flat list of every individual day was the whole
@@ -1856,14 +1883,18 @@ export default function DeliveryEscalationClient() {
   // just recomputed inline, so its identity is stable across renders it doesn't actually change
   // on - loadPage below depends on it, and an unstable identity would refire that effect (and
   // therefore refetch) on every render, not just on an actual filter change.
+  // tatBucket: dateDrill (clicking an Overview bucket cell) wins when active - it carries its
+  // OWN date range alongside the bucket, a different shape than a plain column pick. Otherwise
+  // falls back to the TAT header filter (tatFilter) - same underlying match
+  // (DE_TAT_BUCKET_SQL = ?), just a second entry point onto it.
   const effectiveDateFilter = useMemo(() => (dateDrill
     ? { date: dateDrill.dateFrom, dateTo: dateDrill.dateTo, dateField: dateDrill.dateField, tatBucket: dateDrill.tatBucket }
-    : { date: dateFilter, dateTo: dateFilterTo, dateField: dateFilterBasis, tatBucket: '' }
-  ), [dateDrill, dateFilter, dateFilterTo, dateFilterBasis]);
+    : { date: dateFilter, dateTo: dateFilterTo, dateField: dateFilterBasis, tatBucket: tatFilter !== 'ALL' ? tatFilter : '' }
+  ), [dateDrill, dateFilter, dateFilterTo, dateFilterBasis, tatFilter]);
 
   // Any change to what's being asked for restarts at page 1 - staying on page 12 of a filter
   // that now has 3 pages would just show an empty table.
-  useEffect(() => { setPage(1); }, [tab, debouncedSearch, brandFilter, agentFilter, partnerFilter, outcomeFilter, dateFilter, dateFilterTo, dateFilterBasis, dateDrill, contactBucketFilter, perPage]);
+  useEffect(() => { setPage(1); }, [tab, debouncedSearch, brandFilter, agentFilter, partnerFilter, outcomeFilter, dateFilter, dateFilterTo, dateFilterBasis, dateDrill, contactBucketFilter, queryCategoryFilter, tatFilter, childDispositionFilter, tagFilter, perPage]);
 
   // Picking a preset (over)writes both dateFilter/dateFilterTo; 'custom' leaves them for the
   // agent to type; 'all' clears them (there's no preset that means "no filter" to compute a
@@ -1897,7 +1928,9 @@ export default function DeliveryEscalationClient() {
     try {
       const res = await fetchPage({
         view: tab, page, perPage, search: debouncedSearch, brand: brandFilter, agent: agentFilter,
-        contactBucket: contactBucketFilter, partner: partnerFilter, outcome: outcomeFilter, ...effectiveDateFilter,
+        contactBucket: contactBucketFilter, partner: partnerFilter, outcome: outcomeFilter,
+        queryCategory: queryCategoryFilter, childDisposition: childDispositionFilter, tags: tagFilter,
+        ...effectiveDateFilter,
       });
       if (reqId !== reqIdRef.current) return;
       setRows(res.rows);
@@ -1914,14 +1947,16 @@ export default function DeliveryEscalationClient() {
     } finally {
       if (reqId === reqIdRef.current) setSyncing(false);
     }
-  }, [listTab, tab, page, perPage, debouncedSearch, brandFilter, agentFilter, contactBucketFilter, partnerFilter, outcomeFilter, effectiveDateFilter, showToast]);
+  }, [listTab, tab, page, perPage, debouncedSearch, brandFilter, agentFilter, contactBucketFilter, partnerFilter, outcomeFilter, queryCategoryFilter, childDispositionFilter, tagFilter, effectiveDateFilter, showToast]);
 
   const loadStats = useCallback(async () => {
     try {
-      const { stats: s, agents: a, repeatStats: rs } = await fetchStats();
+      const { stats: s, agents: a, repeatStats: rs, queryCategories: qc, childDispositions: cd } = await fetchStats();
       setStats(s);
       setAgents(a);
       setRepeatStats(rs);
+      setQueryCategoryOptions(qc);
+      setChildDispositionOptions(cd);
     } catch (e) {
       console.error('Delivery-Escalation stats failed:', e);
       setSyncError(e.message || 'Stats failed');
@@ -2197,7 +2232,12 @@ export default function DeliveryEscalationClient() {
     setExporting(true);
     try {
       const { count } = await downloadCsv(
-        { view: tab, search: debouncedSearch, brand: brandFilter, agent: agentFilter, contactBucket: contactBucketFilter, partner: partnerFilter, outcome: outcomeFilter, ...effectiveDateFilter },
+        {
+          view: tab, search: debouncedSearch, brand: brandFilter, agent: agentFilter, contactBucket: contactBucketFilter,
+          partner: partnerFilter, outcome: outcomeFilter,
+          queryCategory: queryCategoryFilter, childDisposition: childDispositionFilter, tags: tagFilter,
+          ...effectiveDateFilter,
+        },
         (soFar) => showToast(`Exporting… ${soFar.toLocaleString('en-IN')} rows so far`),
       );
       showToast(`Downloaded ${count.toLocaleString('en-IN')} rows`);
@@ -2853,17 +2893,106 @@ export default function DeliveryEscalationClient() {
                           <th className="py-3 px-4 text-left font-medium">Order ID</th>
                           <th className="py-3 px-4 text-left font-medium">AWB</th>
                           {tab === 'new_order_placed' && <th className="py-3 px-4 text-left font-medium">New Order AWB</th>}
-                          <th className="py-3 px-4 text-left font-medium">Delivery Partner</th>
-                          <th className="py-3 px-4 text-left font-medium">Query Category</th>
-                          <th className="py-3 px-4 text-left font-medium">Added Date</th>
-                          <th className="py-3 px-4 text-left font-medium">Order Date</th>
-                          <th className="py-3 px-4 text-left font-medium">TAT</th>
-                          <th className="py-3 px-4 text-left font-medium">Times Contacted</th>
+                          <th className="py-3 px-4 text-left font-medium">
+                            Delivery Partner
+                            <ThFilter active={partnerFilter !== 'ALL'}>
+                              <CustomSelect
+                                value={partnerFilter}
+                                onChange={(v) => { setPartnerFilter(v); safeStorage.setItem('de_partner_filter', v); }}
+                                options={[{ value: 'ALL', label: 'All Partners' }, ...PARTNER_FILTER_OPTIONS.map(p => ({ value: p, label: p }))]}
+                                placeholder="Partner"
+                              />
+                            </ThFilter>
+                          </th>
+                          <th className="py-3 px-4 text-left font-medium">
+                            Query Category
+                            <ThFilter active={queryCategoryFilter !== 'ALL'}>
+                              <CustomSelect
+                                value={queryCategoryFilter}
+                                onChange={setQueryCategoryFilter}
+                                options={[{ value: 'ALL', label: 'All Categories' }, ...queryCategoryOptions.map(c => ({ value: c, label: c }))]}
+                                placeholder="Query Category"
+                              />
+                            </ThFilter>
+                          </th>
+                          <th className="py-3 px-4 text-left font-medium">
+                            Added Date
+                            {/* Reuses the SAME date-range state as Order Date's own filter below and
+                                the top filter bar's own Date Range control - picking a preset here
+                                also points dateFilterBasis at this column, same "one control, more
+                                entry points" convention Partner/Agent/Outcome above already use. */}
+                            <ThFilter active={dateFilterBasis === 'added_date' && dateRangePreset !== 'all'}>
+                              <CustomSelect
+                                value={dateFilterBasis === 'added_date' ? dateRangePreset : 'all'}
+                                onChange={(v) => { setDateFilterBasis('added_date'); handleDateRangePreset(v); }}
+                                options={DATE_RANGE_PRESET_OPTIONS}
+                                placeholder="Added Date"
+                              />
+                            </ThFilter>
+                          </th>
+                          <th className="py-3 px-4 text-left font-medium">
+                            Order Date
+                            <ThFilter active={dateFilterBasis === 'order_date' && dateRangePreset !== 'all'}>
+                              <CustomSelect
+                                value={dateFilterBasis === 'order_date' ? dateRangePreset : 'all'}
+                                onChange={(v) => { setDateFilterBasis('order_date'); handleDateRangePreset(v); }}
+                                options={DATE_RANGE_PRESET_OPTIONS}
+                                placeholder="Order Date"
+                              />
+                            </ThFilter>
+                          </th>
+                          <th className="py-3 px-4 text-left font-medium">
+                            TAT
+                            <ThFilter active={tatFilter !== 'ALL'}>
+                              <CustomSelect
+                                value={tatFilter}
+                                onChange={setTatFilter}
+                                options={[{ value: 'ALL', label: 'All TAT' }, ...DE_TAT_BUCKET_OPTIONS.map(b => ({ value: b, label: b }))]}
+                                placeholder="TAT"
+                              />
+                            </ThFilter>
+                          </th>
+                          <th className="py-3 px-4 text-left font-medium">
+                            Times Contacted
+                            <ThFilter active={contactBucketFilter !== 'ALL'}>
+                              <CustomSelect value={contactBucketFilter} onChange={setContactBucketFilter} options={CONTACT_BUCKET_OPTIONS} placeholder="Total times user came" />
+                            </ThFilter>
+                          </th>
                           <th className="py-3 px-4 text-left font-medium">First Contact</th>
-                          <th className="py-3 px-4 text-left font-medium">Agent Name</th>
-                          <th className="py-3 px-4 text-left font-medium">Outcome</th>
-                          <th className="py-3 px-4 text-left font-medium">Child Disposition</th>
-                          <th className="py-3 px-4 text-left font-medium">Tag</th>
+                          <th className="py-3 px-4 text-left font-medium">
+                            Agent Name
+                            <ThFilter active={agentFilter !== 'ALL'}>
+                              <CustomSelect value={agentFilter} onChange={setAgentFilter} options={agentOptions} placeholder="Agent" />
+                            </ThFilter>
+                          </th>
+                          <th className="py-3 px-4 text-left font-medium">
+                            Outcome
+                            <ThFilter active={outcomeFilter !== 'ALL'} align="right">
+                              <CustomSelect
+                                value={outcomeFilter}
+                                onChange={(v) => { setOutcomeFilter(v); safeStorage.setItem('de_outcome_filter', v); }}
+                                options={OUTCOME_FILTER_OPTIONS}
+                                placeholder="Outcome"
+                              />
+                            </ThFilter>
+                          </th>
+                          <th className="py-3 px-4 text-left font-medium">
+                            Child Disposition
+                            <ThFilter active={childDispositionFilter !== 'ALL'} align="right">
+                              <CustomSelect
+                                value={childDispositionFilter}
+                                onChange={setChildDispositionFilter}
+                                options={[{ value: 'ALL', label: 'All Child Dispositions' }, ...childDispositionOptions.map(c => ({ value: c, label: c }))]}
+                                placeholder="Child Disposition"
+                              />
+                            </ThFilter>
+                          </th>
+                          <th className="py-3 px-4 text-left font-medium">
+                            Tag
+                            <ThFilter active={tagFilter.length > 0} align="right">
+                              <MultiSelectDropdown value={tagFilter} onChange={setTagFilter} options={DE_ESCALATION_TAGS} placeholder="All tags" itemNoun="tags" />
+                            </ThFilter>
+                          </th>
                           {(tab === 'resolved' || tab === 'new_order_placed') && <th className="py-3 px-4 text-left font-medium">Action Date</th>}
                           {(tab === 'resolved' || tab === 'new_order_placed') && <th className="py-3 px-4 text-left font-medium">Remarks</th>}
                           {(tab === 'resolved' || tab === 'new_order_placed') && <th className="py-3 px-4 text-left font-medium">TAT Bucket</th>}

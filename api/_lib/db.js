@@ -2169,6 +2169,29 @@ function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket,
     clauses.push(`query_category IN (${allowedQueryCategories.map(() => '?').join(',')})`);
     params.push(...allowedQueryCategories);
   }
+  // queryCategory/childDisposition: the ticket list's own header-filter columns, same
+  // user-chosen-narrowing-on-top-of-the-floor relationship partner/allowedPartners already has.
+  if (Array.isArray(queryCategory) && queryCategory.length) {
+    clauses.push(`query_category IN (${queryCategory.map(() => '?').join(',')})`);
+    params.push(...queryCategory);
+  }
+  if (Array.isArray(childDisposition) && childDisposition.length) {
+    clauses.push(`child_disposition IN (${childDisposition.map(() => '?').join(',')})`);
+    params.push(...childDisposition);
+  }
+  // tags: matches a ticket whose PARCEL (brand+awb_code, not this row's own id - see
+  // setDeliveryEscalationTags's own comment on why tags are keyed that way) carries ANY of the
+  // selected tags. Correlated EXISTS, not a plain IN() on a subquery's flat column list, because
+  // the match is on the PAIR (brand, awb_code) together - a plain "awb_code IN (subquery)" would
+  // ignore brand and could match a same-numbered AWB under the other brand.
+  if (Array.isArray(tags) && tags.length) {
+    clauses.push(`EXISTS (
+      SELECT 1 FROM delivery_escalation_tags dt
+      WHERE dt.brand = Delivery_escalation.brand AND dt.awb_code = Delivery_escalation.awb_code
+        AND dt.tag IN (${tags.map(() => '?').join(',')})
+    )`);
+    params.push(...tags);
+  }
   if (date) {
     const col = DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date';
     if (dateTo) { clauses.push(`DATE(${col}) BETWEEN ? AND ?`); params.push(date, dateTo); }
@@ -4790,6 +4813,7 @@ module.exports = {
   getDeliveryEscalationPartnerOptions,
   getDeliveryEscalationQueryCategoryAccess, getAllDeliveryEscalationQueryCategoryAccess,
   setDeliveryEscalationQueryCategoryAccess, getDeliveryEscalationQueryCategoryOptions,
+  getDeliveryEscalationChildDispositionOptions,
   getAllDeliveryEscalationUserRoles, setDeliveryEscalationUserRole, getDeliveryEscalationUserRoleByEmail, rtoMbpOutcome,
   DE_ESCALATION_TAGS, setDeliveryEscalationTicketTags, diffEscalationTags,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,

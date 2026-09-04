@@ -10,12 +10,14 @@
 //
 // GET serves three shapes, all paged/filtered in SQL (see db.js's own header comment on
 // why - Lambda's 6MB response cap):
-//   ?view=fresh|resolved&page&perPage&search&brand&agent&date&contactBucket -> { rows, total, page, perPage }
-//   ?op=stats                                            -> { stats, agents }
+//   ?view=fresh|resolved&page&perPage&search&brand&agent&date&contactBucket&outcome&partner
+//        &queryCategory&childDisposition&tags&tatBucket        -> { rows, total, page, perPage }
+//   ?op=stats                                            -> { stats, agents, repeatStats,
+//                                                       queryCategories, childDispositions }
 //   ?op=export&view=...(+ same filters)                  -> { rows, capped }
 //   ?op=awbHistory&awb&brand                             -> { rows } (every ticket for that parcel)
 //   ?op=geoCategory&month&level=state|city|pincode(&state)(&city)(&brand)(&agent)(&partner)(&paymentMode)
-//                                                       -> { categories, rows, grandTotal, grandTotalAll, grandSales, grandComplaintPct }
+//                                                       -> { categories, rows, grandTotal, grandTotalAll }
 //
 // POST action 'claim'/'dispose' is the Fresh tab's own claim/resolve, and 'bulkDispose' its CSV
 // upload - all MySQL-only, no sheet write, same model as CLS_RTO_calling's own claim/dispose.
@@ -43,6 +45,7 @@ const {
   getDeliveryEscalationDaywiseStats, getDeliveryEscalationAwbHistory,
   getDeliveryEscalationGeoCategoryStats, getDeliveryPartnerAccess,
   getDeliveryEscalationQueryCategoryAccess,
+  getDeliveryEscalationQueryCategoryOptions, getDeliveryEscalationChildDispositionOptions,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
   DE_ESCALATION_TAGS, setDeliveryEscalationTicketTags,
@@ -110,6 +113,12 @@ module.exports = async (req, res) => {
       // plain bound parameter, so an unrecognized value just matches zero rows rather than
       // needing server-side whitelisting the way a WRITE (e.g. setTags) does.
       outcomeRoot: q.outcome && q.outcome !== 'ALL' ? q.outcome : '',
+      // Header-filter columns (see deFilterSql's own comment) - same comma-joined-list shape as
+      // partner above, same "plain bound parameter, no server whitelist needed" reasoning as
+      // outcomeRoot above for the single-value ones.
+      queryCategory: q.queryCategory ? String(q.queryCategory).split(',').filter(Boolean) : undefined,
+      childDisposition: q.childDisposition ? String(q.childDisposition).split(',').filter(Boolean) : undefined,
+      tags: q.tags ? String(q.tags).split(',').filter(Boolean) : undefined,
       allowedPartners,
       allowedQueryCategories,
     };
@@ -117,13 +126,17 @@ module.exports = async (req, res) => {
       if (q.op === 'stats') {
         // Tiles describe the whole desk (whole = everything THIS caller may see); agents
         // populates the Agent filter, which everyone with access now has (it is the only way to
-        // get back the old "just my tickets" view).
-        const [stats, agents, repeatStats] = await Promise.all([
+        // get back the old "just my tickets" view). queryCategories/childDispositions populate
+        // the ticket list's own header filters for those two columns - same live-distinct-values
+        // convention as agents, not a fixed list.
+        const [stats, agents, repeatStats, queryCategories, childDispositions] = await Promise.all([
           getDeliveryEscalationStats({ allowedPartners, allowedQueryCategories }),
           getDeliveryEscalationAgents(),
           getDeliveryEscalationRepeatStats(allowedPartners, allowedQueryCategories),
+          getDeliveryEscalationQueryCategoryOptions(),
+          getDeliveryEscalationChildDispositionOptions(),
         ]);
-        res.status(200).json({ stats, agents, repeatStats });
+        res.status(200).json({ stats, agents, repeatStats, queryCategories, childDispositions });
         return;
       }
 

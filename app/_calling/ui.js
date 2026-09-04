@@ -7,6 +7,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 
 export const SearchIcon = (p) => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>;
+export const FilterIcon = (p) => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>;
 export const XIcon = (p) => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>;
 export const CheckIcon = (p) => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M20 6 9 17l-5-5"/></svg>;
 export const PhoneIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.76.32 1.54.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c1.27.38 2.05.58 2.81.7A2 2 0 0 1 22 16.92z"/></svg>;
@@ -201,6 +202,44 @@ export function MultiSelectDropdown({ value, onChange, options, placeholder = 'N
         </div>
       )}
     </div>
+  );
+}
+
+// Small filter-icon-in-header wrapper for a table column - click opens a popover anchored under
+// the icon, closes on outside click or its own Escape. `active` tints the icon so a column with
+// a filter already applied stands out without opening the popover. Content is whatever the
+// caller renders inside (a CustomSelect, a MultiSelectDropdown, ...) - this component only owns
+// the click-to-open/close mechanics and the icon's own affordance, never what's being filtered
+// or how - a <th> that already has a top-bar equivalent (Partner, Agent, Outcome, ...) can wrap
+// that SAME control here rather than building a second one, so there is still only one place
+// that owns each filter's state.
+export function ThFilter({ active, align = 'left', children }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    const onClick = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, []);
+  return (
+    <span className="relative inline-block ml-1 align-middle" ref={ref}>
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+        className={`p-0.5 rounded transition-colors ${active ? 'text-indigo-400' : 'text-zinc-600 hover:text-zinc-300'}`}
+        title="Filter"
+      >
+        <FilterIcon />
+      </button>
+      {open && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className={`absolute ${align === 'right' ? 'right-0' : 'left-0'} top-full mt-1.5 z-50 bg-[#141417] border border-zinc-800/90 rounded-xl shadow-2xl p-2`}
+        >
+          {children}
+        </div>
+      )}
+    </span>
   );
 }
 
