@@ -767,7 +767,10 @@ function GeoCategoryTable({
   loading, onToggleState, onToggleCity,
 }) {
   const pendingLabel = (status) => (status === 'error' ? 'Error' : 'Loading…');
-  const colSpan = categories.length + 2;
+  // +2 for Sales/Complain % (pincode rows only - see below), on top of the label + Grand Total +
+  // one column per category.
+  const colSpan = categories.length + 4;
+  const fmtPct = (pct) => (pct == null ? '—' : `${pct}%`);
 
   return (
     <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
@@ -780,6 +783,7 @@ function GeoCategoryTable({
       </div>
       <p className="text-[12px] text-zinc-500 mb-3">
         Unique ticket count (distinct AWB) per query category, by Query Date. Click a State to see its Cities, click a City to see its Pincodes.
+        Pincodes carry their own Sales (uploaded via the Exports tab, same month by Order Date) and Complain % = complaints ÷ sales - that's what pincode rows sort by, highest rate first, not raw complaint count.
       </p>
       <div className="rounded-xl border border-zinc-800/80 overflow-hidden">
         <div className="overflow-x-auto custom-scroll">
@@ -797,9 +801,14 @@ function GeoCategoryTable({
               <tr className="border-b border-zinc-800/80">
                 <th className="sticky left-0 z-10 bg-zinc-900 py-2.5 px-3 text-left font-semibold text-zinc-400 whitespace-nowrap">State / City / Pincode</th>
                 {/* Grand Total right after the label, not after every category - it's the sort
-                    key every row below is ordered by (highest first), so it needs to be visible
-                    without scrolling past the whole category breakdown to confirm the order. */}
+                    key State/City rows are ordered by (Complain % takes over at Pincode depth,
+                    see that column's own note), so it needs to be visible without scrolling past
+                    the whole category breakdown to confirm the order. */}
                 <th className="py-2.5 px-3 text-right font-semibold text-zinc-300 border-l border-zinc-800/80 whitespace-nowrap">Grand Total</th>
+                {/* Pincode rows only - see this card's own subtitle. State/City rows show '—':
+                    sales isn't rolled up to those levels, only ever computed per pincode. */}
+                <th className="py-2.5 px-3 text-right font-semibold text-zinc-400 whitespace-nowrap">Sales</th>
+                <th className="py-2.5 px-3 text-right font-semibold text-zinc-300 whitespace-nowrap">Complain %</th>
                 {categories.map((cat) => (
                   <th key={cat} className="py-2.5 px-3 text-right font-semibold text-zinc-400 whitespace-nowrap">{cat}</th>
                 ))}
@@ -815,6 +824,8 @@ function GeoCategoryTable({
                     <td className="py-2.5 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/80">
                       {(s.total || 0).toLocaleString('en-IN')}
                     </td>
+                    <td className="py-2.5 px-3 text-right text-zinc-600 tabular-nums">—</td>
+                    <td className="py-2.5 px-3 text-right text-zinc-600 tabular-nums">—</td>
                     {categories.map((cat) => (
                       <td key={cat} className="py-2.5 px-3 text-right text-zinc-100 tabular-nums">
                         {(s.counts[cat] || 0).toLocaleString('en-IN')}
@@ -835,6 +846,8 @@ function GeoCategoryTable({
                           <td className="py-2 px-3 text-right text-zinc-100 font-medium tabular-nums border-l border-zinc-800/80">
                             {(c.total || 0).toLocaleString('en-IN')}
                           </td>
+                          <td className="py-2 px-3 text-right text-zinc-600 tabular-nums">—</td>
+                          <td className="py-2 px-3 text-right text-zinc-600 tabular-nums">—</td>
                           {categories.map((cat) => (
                             <td key={cat} className="py-2 px-3 text-right text-zinc-100 tabular-nums">
                               {(c.counts[cat] || 0).toLocaleString('en-IN')}
@@ -851,6 +864,16 @@ function GeoCategoryTable({
                               <td className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 pl-16 text-zinc-400 text-[12px] whitespace-nowrap">↳ {p.pincode}</td>
                               <td className="py-2 px-3 text-right text-zinc-200 tabular-nums text-[12px] border-l border-zinc-800/80">
                                 {(p.total || 0).toLocaleString('en-IN')}
+                              </td>
+                              <td className="py-2 px-3 text-right text-zinc-400 tabular-nums text-[12px]">
+                                {p.sales != null ? p.sales.toLocaleString('en-IN') : '—'}
+                              </td>
+                              {/* >=20% is a rough "worth a look" line, not a validated threshold -
+                                  just enough to make the worst rows scannable at a glance. */}
+                              <td className={`py-2 px-3 text-right tabular-nums text-[12px] font-semibold ${
+                                p.complaintPct == null ? 'text-zinc-600' : p.complaintPct >= 20 ? 'text-rose-400' : 'text-zinc-200'
+                              }`}>
+                                {fmtPct(p.complaintPct)}
                               </td>
                               {categories.map((cat) => (
                                 <td key={cat} className="py-2 px-3 text-right text-zinc-200 tabular-nums text-[12px]">
@@ -876,6 +899,11 @@ function GeoCategoryTable({
                 <tr className="border-t border-zinc-800/80 bg-zinc-950 font-semibold">
                   <td className="sticky left-0 z-10 bg-zinc-950 py-2.5 px-3 text-zinc-100 whitespace-nowrap">Grand Total</td>
                   <td className="py-2.5 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/80">{grandTotalAll.toLocaleString('en-IN')}</td>
+                  {/* Sales/Complain % are a pincode-only overlay - a state-tree-wide total would
+                      mix Sales' own order_date basis with this footer's added_date one, so it's
+                      left blank rather than computed. */}
+                  <td className="py-2.5 px-3 text-right text-zinc-600 tabular-nums">—</td>
+                  <td className="py-2.5 px-3 text-right text-zinc-600 tabular-nums">—</td>
                   {categories.map((cat) => (
                     <td key={cat} className="py-2.5 px-3 text-right text-zinc-100 tabular-nums">
                       {(grandTotal[cat] || 0).toLocaleString('en-IN')}

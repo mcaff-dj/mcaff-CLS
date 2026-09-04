@@ -2632,7 +2632,57 @@ async function getDeliveryEscalationGeoCategoryStats(opts = {}) {
   const categories = [...categoryTotals.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([category]) => category);
-  const rows = [...byGeo.values()].sort((a, b) => b.total - a.total || String(a[geoKey]).localeCompare(String(b[geoKey])));
+
+  // Pincode level only: overlay each pincode's own uploaded sales (see
+  // bulkUpdateDeliveryEscalationSalesPincode) and Complain % = complaints / sales * 100, so this
+  // table can surface which pincodes complain disproportionately to their own order volume, not
+  // just which have the most RAW complaints. sales_Pincode is additive-uploaded PER ROW and
+  // duplicated across every ticket sharing its own (Pincode, brand, order_date, delivery_partner)
+  // key (see that function's own comment) - summing it directly here would multiply-count by
+  // however many tickets happen to share a key, so this dedupes to one row per key FIRST via a
+  // derived table, then sums. Sales are scoped to order_date within the SAME calendar month as
+  // the complaint count's own added_date (Query Date) filter above, and the same brand/state/
+  // city/allowedPartners floor - NOT allowedQueryCategories, since a sale isn't a property of
+  // any one query category, just data that happens to sit on whichever escalation row matched
+  // the upload's own key.
+  if (level === 'pincode') {
+    const salesClauses = ['order_date IS NOT NULL', 'order_date >= ?', 'order_date < DATE_ADD(?, INTERVAL 1 MONTH)', 'sales_Pincode IS NOT NULL'];
+    const salesParams = [monthStart, monthStart];
+    if (brand) { salesClauses.push('brand = ?'); salesParams.push(brand); }
+    if (Array.isArray(allowedPartners) && allowedPartners.length) {
+      salesClauses.push(`delivery_partner IN (${allowedPartners.map(() => '?').join(',')})`);
+      salesParams.push(...allowedPartners);
+    }
+    salesClauses.push("COALESCE(Shipping_Address_State, 'Unknown') = ?", "COALESCE(Shipping_Address_City, 'Unknown') = ?");
+    salesParams.push(state || 'Unknown', city || 'Unknown');
+    const [salesRows] = await pool.execute(`
+      SELECT Pincode AS geo, SUM(sales) AS total_sales FROM (
+        SELECT DISTINCT Pincode, brand, order_date, delivery_partner, sales_Pincode AS sales
+        FROM Delivery_escalation
+        WHERE ${salesClauses.join(' AND ')}
+      ) dedup
+      GROUP BY Pincode
+    `, salesParams);
+    const salesByPincode = new Map(salesRows.map((r) => [r.geo, Number(r.total_sales) || 0]));
+    for (const entry of byGeo.values()) {
+      const sales = salesByPincode.get(entry.pincode);
+      entry.sales = sales ?? null;
+      // One decimal place - complaint rates on a handful of orders swing wildly (1/3 = 33.3%),
+      // rounding to a whole number would make several different pincodes read identically.
+      entry.complaintPct = sales ? Math.round((entry.total / sales) * 1000) / 10 : null;
+    }
+  }
+
+  const rows = [...byGeo.values()].sort((a, b) => {
+    if (level !== 'pincode') return b.total - a.total || String(a[geoKey]).localeCompare(String(b[geoKey]));
+    // Highest complaint RATE first, per this table's whole point at pincode depth - a pincode
+    // with no sales on file (nothing to divide by) sorts after every pincode that has a rate,
+    // not spliced in at whatever position a null vs. number comparison would otherwise land it.
+    if (a.complaintPct == null && b.complaintPct == null) return b.total - a.total;
+    if (a.complaintPct == null) return 1;
+    if (b.complaintPct == null) return -1;
+    return b.complaintPct - a.complaintPct || b.total - a.total;
+  });
   const grandTotal = Object.fromEntries(categories.map((cat) => [cat, categoryTotals.get(cat) || 0]));
   const grandTotalAll = [...categoryTotals.values()].reduce((sum, v) => sum + v, 0);
   return { categories, rows, grandTotal, grandTotalAll };
