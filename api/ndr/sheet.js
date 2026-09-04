@@ -231,3 +231,9 @@ module.exports = async (req, res) => {
 // staying in sync. Attached to the handler export the same way api/rto/upload-start.js attaches
 // its own pure helpers (sheetsRequest, isRateLimited, ...) for its test file.
 module.exports.PRE_SPLIT_TEAM = PRE_SPLIT_TEAM;
+// Shared with api/ndr/next-lead.js, which must land its Agent Name writes on exactly the sheet
+// this route would READ for the same caller. Re-deriving that there is the one mistake that
+// cannot be caught by testing either file alone: a second resolver that drifts by one branch
+// writes real assignments into another team's live spreadsheet.
+module.exports.resolveSheetFor = resolveSheetFor;
+module.exports.checkAccess = checkAccess;

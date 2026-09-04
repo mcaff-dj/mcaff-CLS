@@ -800,6 +800,20 @@ async function getDeliveryEscalationQueryCategoryOptions() {
   });
 }
 
+// Every distinct child_disposition value actually in the table - same cached-DISTINCT-scan
+// convention as getDeliveryEscalationQueryCategoryOptions/getDeliveryEscalationPartnerOptions
+// above. child_disposition is the GENERATED sub-level of outcome (see DE_SELECT_COLUMNS' own
+// comment) - a ticket with no ' > ' in its outcome (a bare 'RTO', say) has none, so this only
+// ever lists rows that actually went a level deeper.
+async function getDeliveryEscalationChildDispositionOptions() {
+  return cachedRead('de-child-disposition-options', async () => {
+    const pool = await getPool();
+    const [rows] = await pool.execute(
+      "SELECT DISTINCT child_disposition FROM Delivery_escalation WHERE child_disposition IS NOT NULL AND child_disposition != '' ORDER BY child_disposition");
+    return rows.map((r) => r.child_disposition);
+  });
+}
+
 // Every user's own Delivery-Escalation role label at once, same "one query, group in JS" shape
 // as getAllDeliveryPartnerAccess - a user with no row is 'Agent' by convention (the default the
 // admin picker's own <select> starts on), not represented as a row here.
@@ -1377,6 +1391,39 @@ async function getRtoAgentAvailability(email) {
     // conservative direction scripts/assign_leads.py takes when its own online-agents query
     // errors (fails to an EMPTY eligible set, not to "everyone is eligible").
     console.error('getRtoAgentAvailability: calling_agent_process unavailable:', e.message);
+    return null;
+  }
+}
+
+// The NDR twin of getRtoAgentAvailability/getRtoAgentQuota above, as ONE row: api/ndr/next-lead.js
+// needs this agent's per-process status, quota AND all four hard filters, and they all live in the
+// same calling_agent_process row - so splitting them into separate getters the way RTO's did would
+// cost three round trips inside an interactive request for no benefit. Not routed through
+// getCallingProcessAgents either: that answers a different question (the whole roster, joined
+// against users/permissions) and is far too much work for "what may this one caller receive?".
+//
+// Returns null ONLY when the query itself failed. A MISSING row resolves to status 'Offline' -
+// the same "no row means Offline, not no-restriction" convention getRtoAgentAvailability documents
+// above - so the caller's eligibility gate refuses it without needing a special case. Null is
+// likewise refused (isEligibleNow in api/_lib/ndrAssignment.js treats a null per-process status as
+// "cannot verify -> do not assign"), matching the fail-CLOSED direction
+// scripts/assign_ndr_leads.py's fetch_online_ndr_agents takes when this same table errors.
+//
+// The filter columns come back raw (comma-joined strings, possibly null) and are normalized by
+// normalizeAgentFilters in api/_lib/ndrAssignment.js - the one place that shape is defined.
+async function getNdrAgentAssignmentConfig(email) {
+  try {
+    await ensureSchema();
+    const { rows } = await sql`
+      SELECT status, max_quota, attempt_count_filter, ndr_reason_filter,
+             ndr_payment_mode_filter, ndr_brand_filter
+      FROM calling_agent_process
+      WHERE process_key = 'ndr' AND LOWER(email) = LOWER(${email})
+    `;
+    if (!rows.length) return { status: 'Offline' };
+    return rows[0];
+  } catch (e) {
+    console.error('getNdrAgentAssignmentConfig: calling_agent_process unavailable:', e.message);
     return null;
   }
 }
@@ -2093,7 +2140,7 @@ const DE_DAYWISE_DATE_FIELDS = { added_date: 'added_date', order_date: 'order_da
 // own comment describes. Applied here rather than as a separate step so every caller of
 // deWhere/deFilterSql (getDeliveryEscalationPage, getDeliveryEscalationStats,
 // getDeliveryEscalationExport) enforces it automatically, with no per-caller opt-in to forget.
-function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcomeRoot, allowedPartners, allowedQueryCategories } = {}) {
+function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcomeRoot, queryCategory, childDisposition, tags, allowedPartners, allowedQueryCategories } = {}) {
   const clauses = [];
   const params = [];
   if (brand) { clauses.push('brand = ?'); params.push(brand); }
@@ -4763,6 +4810,7 @@ module.exports = {
   getProcessDispositions, addProcessDisposition, updateProcessDisposition,
   deleteProcessDisposition, reorderProcessDispositions,
   claimNdrLead, disposeNdrLead, getLiveNdrLeadEmail, getDeliveredAwbNumbers,
+  getNdrAgentAssignmentConfig,
   getDetractorAgentQuota, getDetractorAgentAvailability, getDetractorLoadByAgent,
   getNextDetractorLead, disposeDetractorLead, getDetractorTicketsForAgent, getAllDetractorTickets,
   disposeDeliveryEscalationTicket,

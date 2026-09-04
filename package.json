@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "test": "node --test \"api/_lib/**/*.test.js\""
+    "test": "node --test \"api/**/*.test.js\""
   },
   "dependencies": {
     "@aws-sdk/client-lambda": "^3.1109.0",

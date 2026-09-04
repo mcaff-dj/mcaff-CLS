@@ -20,6 +20,9 @@ import { useBusinessHours, CallingHoursCard, useProcessDispositions, ProcessDisp
 import { CallingShell } from '../_calling/CallingShell';
 import NdrUploadModal from './NdrUploadModal';
 import {
+  brandOf, filtersCoverLead, normalizeAgentFilters, STALE_MINUTES as NDR_STALE_MINUTES,
+} from '../../api/_lib/ndrAssignment';
+import {
   safeStorage, parseDate, isDateInScope, isLeadDateInScope, scopeToDateBounds, normalizeOrderKey,
   istMinutesSinceMidnightClient, istDayKeyClient, formatTimeOfDay, formatBreakMinutes, formatFrt, formatPct,
 } from '../_calling/util';
@@ -121,64 +124,23 @@ async function fetchNdrSheet(team) {
   return { rows, startRow, totalRows };
 }
 
-// Brand isn't its own sheet column - it's derived from Order ID, same rule
-// scripts/assign_ndr_leads.py's brand_of uses: an order ID starting with "HYP" is Hyphen,
-// everything else (including a blank/unreadable one) is mCaffeine.
-const brandOf = (orderId) => (String(orderId || '').toUpperCase().startsWith('HYP') ? 'Hyphen' : 'mCaffeine');
-
-// The four HARD filters scripts/assign_ndr_leads.py applies to decide whether a given lead may
-// reach a given agent, ported field-for-field from that script (attempt_bucket, _covers,
-// reason_covers, payment_mode_covers, brand_covers). At module scope rather than inside a
-// single useMemo's closure because TWO things need them now: the Next-to-Assign prediction
-// (ndrPredicted) and the roster's per-agent match count (ndrFilterMatchCounts). Hoisting
-// beats duplicating - a second hand-written copy is exactly how a filter rule silently drifts
-// from what the cron actually does.
+// NDR's assignment rule - brand derivation, the four hard filters, the roster row -> filter
+// normalization, and the presence-freshness window - all come from api/_lib/ndrAssignment.js
+// rather than being re-derived here. This file used to carry its own hand-written copy of every
+// one of them, and that is precisely how the Predicted tab drifted from the robot twice in one
+// week (its own pointer round-robin after the robot moved off it; ignoring open load while the
+// robot subtracted it). Same api/-module-shared-with-app/ arrangement leadQuota.js already uses.
 //
-// `agent` here is the normalized shape ndrAgentFilters builds, NOT a raw processAgents row.
-const ndrBucketOf = (raw) => {
-  const n = parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return n <= 3 ? String(n) : 'More than 3';
-};
-const ndrAttemptCovers = (agent, bucket) =>
-  !agent.filter.length || bucket === null || agent.filter.includes(bucket);
-// Case-insensitive substring match against the lead's own latestNdrReason - an agent with no
-// reasonFilter values is unrestricted (fails open); an agent WITH filter values excludes any
-// reason that doesn't contain one of them, including a blank/unreadable reason (this one does
-// not fail open the way an unparseable attempt bucket does above).
-const ndrReasonCovers = (agent, latestNdrReason) => {
-  if (!agent.reasonFilter.length) return true;
-  const reason = (latestNdrReason || '').toLowerCase();
-  return agent.reasonFilter.some(r => reason.includes(r.toLowerCase()));
-};
-// Exact, case-insensitive match - a fixed value set ('Prepaid'/'COD'), unlike reasonCovers'
-// free-text substrings above.
-const ndrPaymentModeCovers = (agent, paymentMode) =>
-  !agent.paymentModeFilter
-  || String(paymentMode || '').trim().toLowerCase() === agent.paymentModeFilter.toLowerCase();
-// brand is already normalized to exactly 'Hyphen'/'mCaffeine' by brandOf, same as brandFilter
-// itself (the roster CustomSelect only ever writes those two strings or ''), so a plain
-// equality check is enough - no case-folding needed.
-const ndrBrandCovers = (agent, brand) => !agent.brandFilter || brand === agent.brandFilter;
-
-// All four at once: can this lead EVER reach this agent? Quota and round-robin position are
-// deliberately not consulted - this answers "is this agent's filter set satisfiable at all",
-// which is what a 0 here means and why it is worth showing in the roster.
-const ndrFiltersCoverLead = (agent, lead) =>
-  ndrAttemptCovers(agent, ndrBucketOf(lead.attempts))
-  && ndrReasonCovers(agent, lead.latestNdrReason)
-  && ndrPaymentModeCovers(agent, lead.paymentMode)
-  && ndrBrandCovers(agent, lead.brand);
-
-// STALE_MINUTES in scripts/assign_ndr_leads.py - an agent_presence row older than this is not
-// "at their desk" as far as the robot is concerned, no matter what their roster status says.
-const NDR_PRESENCE_STALE_MINUTES = 10;
+// STALE_MINUTES is re-exported under a local name only because it reads better at the call site.
+const NDR_PRESENCE_STALE_MINUTES = NDR_STALE_MINUTES;
 
 // True when the roster says Online but agent_presence says otherwise - the second of the two
 // gates the robot checks, and the one with no visible symptom: the row reads "Online", the agent
 // sees an empty queue, and the run's own "marked Online but none are heartbeat-fresh" line goes
 // to CloudWatch, which this app's IAM user cannot read. Missing presence counts as stale: no
-// heartbeat at all is exactly the case the robot excludes.
+// heartbeat at all is exactly the case the robot excludes. isEligibleNow in ndrAssignment.js is
+// the same rule from the other direction (it also requires the per-process Online this caller
+// already has in hand), so it is not reused here.
 const ndrPresenceIsStale = (presence) => {
   const raw = presence && presence.updatedAt;
   if (!raw) return true;
@@ -186,17 +148,6 @@ const ndrPresenceIsStale = (presence) => {
   if (Number.isNaN(seen)) return true;
   return Date.now() - seen > NDR_PRESENCE_STALE_MINUTES * 60 * 1000;
 };
-
-// processAgents row -> the normalized filter shape the covers helpers above expect. '' / absent
-// means unrestricted throughout, matching assign_ndr_leads.py's "absent means no restriction".
-const ndrAgentFilters = (a) => ({
-  email: a.email,
-  quota: a.maxQuota != null ? a.maxQuota : 20, // DEFAULT_QUOTA in assign_ndr_leads.py
-  filter: (a.attemptCountFilter || '').split(',').map(s => s.trim()).filter(Boolean),
-  reasonFilter: (a.ndrReasonFilter || '').split(',').map(s => s.trim()).filter(Boolean),
-  paymentModeFilter: a.ndrPaymentModeFilter || '',
-  brandFilter: a.ndrBrandFilter || '',
-});
 
 // Fixed positional layout, not fuzzy header matching - this sheet's own columns are stable
 // (it's someone else's existing, long-running process), so a column-index map is simpler and
@@ -236,6 +187,30 @@ async function writeNdrCells(ranges, team) {
     }),
   });
   if (!r.ok) throw new Error(`Sheets write ${r.status}`);
+  return r.json();
+}
+
+// Tops this agent back up toward their quota RIGHT NOW, rather than at the assignment robot's
+// next 5-minute tick (see api/ndr/next-lead.js). Called after a disposal succeeds, which is the
+// moment an agent's queue has just gone shorter - the same trigger point RTO's own fill uses.
+//
+// Best-effort, exactly like recordNdrLeadAssignment below: the disposal it follows has already
+// fully succeeded, so a failure here must never surface as a failed save. The robot's periodic
+// sweep remains the safety net for anything this misses.
+async function requestNdrNextLead(team) {
+  const r = await fetch('/api/ndr/next-lead', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    // Same team as the disposal that triggered this - the endpoint resolves the sheet from the
+    // caller's own team row and only honors this field for a full admin (who has no team row of
+    // their own), matching api/ndr/sheet.js's resolveSheetFor.
+    body: JSON.stringify(team ? { teamId: team.id } : {}),
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    console.error('requestNdrNextLead failed:', d.error || r.status);
+    return null;
+  }
   return r.json();
 }
 
@@ -532,6 +507,18 @@ export default function NdrCallingClient() {
         : x));
       showToast('Disposition saved');
       setNdrDetailTkt(null);
+      // AFTER the modal has closed and the save is reported: the agent is not waiting on this,
+      // and it must not be able to turn a successful disposal into an error toast. Awaited (not
+      // fired and forgotten) only so the sheet re-read below sees the leads it just handed out.
+      try {
+        const filled = await requestNdrNextLead(ndrSheetTeam);
+        if (filled && filled.assigned) {
+          showToast(`${filled.count} fresh lead${filled.count === 1 ? '' : 's'} added to your box`);
+          await syncNdr(true);
+        }
+      } catch (e) {
+        console.error('NDR top-up after disposal failed:', e);
+      }
     } catch (e) {
       showToast(`⚠️ Could not save disposition: ${e.message}`);
     } finally {
@@ -617,7 +604,7 @@ export default function NdrCallingClient() {
   const ndrPredicted = useMemo(() => {
     const onlineAgents = (processAgents || [])
       .filter(a => a.status === 'Online')
-      .map(ndrAgentFilters);
+      .map(normalizeAgentFilters);
     if (!onlineAgents.length) return { rows: [], onlineAgents: [] };
 
     // "DD-MM-YYYY" -> a sortable number, undated leads sort last (same convention as
@@ -645,7 +632,7 @@ export default function NdrCallingClient() {
     // the only one who needed - worst of all under the oldest-first ordering right above, which
     // puts her leads at the front of the queue.
     const supply = new Map(onlineAgents.map(a => [
-      a.email, pool.reduce((n, t) => n + (ndrFiltersCoverLead(a, t) ? 1 : 0), 0),
+      a.email, pool.reduce((n, t) => n + (filtersCoverLead(a, t) ? 1 : 0), 0),
     ]));
 
     // Quota is a CONCURRENT-workload cap, not a lifetime total, so what is left of it is
@@ -672,7 +659,7 @@ export default function NdrCallingClient() {
       // round-robin - and it respects unequal quotas, which the pointer did not.
       let best = null;
       for (const a of remaining) {
-        if (!ndrFiltersCoverLead(a, t)) continue;
+        if (!filtersCoverLead(a, t)) continue;
         if (!best) { best = a; continue; }
         const rank = (supply.get(a.email) - supply.get(best.email))
           || (needed.get(best.email) - needed.get(a.email))
@@ -717,8 +704,8 @@ export default function NdrCallingClient() {
     const pool = ndrTickets.filter(t => !t.assignedAgent && !t.connected);
     const byEmail = new Map();
     for (const a of (processAgents || [])) {
-      const filters = ndrAgentFilters(a);
-      byEmail.set(a.email, pool.reduce((n, t) => n + (ndrFiltersCoverLead(filters, t) ? 1 : 0), 0));
+      const filters = normalizeAgentFilters(a);
+      byEmail.set(a.email, pool.reduce((n, t) => n + (filtersCoverLead(filters, t) ? 1 : 0), 0));
     }
     return { poolSize: pool.length, byEmail };
   }, [ndrTickets, processAgents]);
