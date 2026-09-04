@@ -509,6 +509,136 @@ def test_main_isolation_off_below_two_active_teams():
         f"active teams, got {assigned_emails!r}"
 
 
+
+
+def _lead_row(awb, reason="", date="01-01-2026", agent=""):
+    """One unassigned NDR sheet row carrying a Latest NDR Reason and Latest NDR Date, wide
+    enough to reach COL_CONNECTED - the shape assign_for_run's own filter/sort path reads."""
+    row = _sheet_row(awb, agent)
+    row[assign_ndr_leads.COL_LATEST_NDR_DATE] = date
+    row[assign_ndr_leads.COL_LATEST_NDR_REASON] = reason
+    return row
+
+
+def test_assign_for_run_does_not_starve_a_filtered_agent():
+    """THE starvation test. One agent with a narrow reason filter alongside four unrestricted
+    agents, and only four leads in the whole queue that her filter covers - sorted to the FRONT
+    of the queue, since oldest-first is exactly the order that used to hand them away.
+
+    The old pointer round-robin took the first agent from `idx` forward whose filters covered
+    the lead, so an unrestricted agent absorbed leads only the filtered agent needed and she
+    landed 1 of her 4. She must get all 4: nobody else is short of work, and those are the only
+    leads she can ever be given."""
+    orig_get_values = assign_ndr_leads.lib.get_sheet_values
+    orig_set_values = assign_ndr_leads.lib.set_sheet_values_batch
+    orig_record = assign_ndr_leads.record_new_assignments
+
+    # 4 oldest leads carry her reason; 16 fresher ones nobody is restricted to.
+    rows = [_lead_row(f"AWB-M{i}", reason="Address Issue - incomplete", date="01-01-2026") for i in range(4)]
+    rows += [_lead_row(f"AWB-X{i}", reason="Customer not available", date="02-01-2026") for i in range(16)]
+
+    writes = []
+    assign_ndr_leads.lib.get_sheet_values = lambda spreadsheet_id, range_, **kw: rows
+    assign_ndr_leads.lib.set_sheet_values_batch = lambda spreadsheet_id, updates: writes.extend(updates)
+    assign_ndr_leads.record_new_assignments = lambda new_assignments: True
+
+    agents = ["rasika@x.com", "u1@x.com", "u2@x.com", "u3@x.com", "u4@x.com"]
+    try:
+        assign_ndr_leads.assign_for_run(
+            {"id": 1, "name": "NDR", "sheet_id": "SHEET_A", "sheet_tab": "Tab"},
+            agents,
+            {e: 20 for e in agents},          # quotas - nobody is near their cap
+            {},                                # attempt filters - none
+            {"rasika@x.com": ["address issue"]},  # already lowercased, as fetch_online_ndr_agents returns it
+            {}, {},                            # payment-mode / brand filters - none
+        )
+    finally:
+        assign_ndr_leads.lib.get_sheet_values = orig_get_values
+        assign_ndr_leads.lib.set_sheet_values_batch = orig_set_values
+        assign_ndr_leads.record_new_assignments = orig_record
+
+    got = {}
+    for u in writes:
+        got[u["values"][0][0]] = got.get(u["values"][0][0], 0) + 1
+    assert got.get("rasika@x.com") == 4, (
+        f"filtered agent starved: expected all 4 leads her filter covers, got "
+        f"{got.get('rasika@x.com', 0)} - full split {got!r}"
+    )
+    assert len(writes) == 20, f"every lead was coverable by someone - expected 20 writes, got {len(writes)}"
+
+
+def test_assign_for_run_spreads_evenly_when_nobody_is_filtered():
+    """Regression guard on the fairness the pointer round-robin used to provide: with no filters
+    anywhere and equal quotas, 20 leads across 4 agents must still be 5 each, not 20 to whoever
+    sorts first."""
+    orig_get_values = assign_ndr_leads.lib.get_sheet_values
+    orig_set_values = assign_ndr_leads.lib.set_sheet_values_batch
+    orig_record = assign_ndr_leads.record_new_assignments
+
+    rows = [_lead_row(f"AWB-{i}") for i in range(20)]
+    writes = []
+    assign_ndr_leads.lib.get_sheet_values = lambda spreadsheet_id, range_, **kw: rows
+    assign_ndr_leads.lib.set_sheet_values_batch = lambda spreadsheet_id, updates: writes.extend(updates)
+    assign_ndr_leads.record_new_assignments = lambda new_assignments: True
+
+    agents = ["a@x.com", "b@x.com", "c@x.com", "d@x.com"]
+    try:
+        assign_ndr_leads.assign_for_run(
+            {"id": None, "name": "NDR", "sheet_id": "SHEET_A", "sheet_tab": "Tab"},
+            agents, {e: 20 for e in agents}, {}, {}, {}, {},
+        )
+    finally:
+        assign_ndr_leads.lib.get_sheet_values = orig_get_values
+        assign_ndr_leads.lib.set_sheet_values_batch = orig_set_values
+        assign_ndr_leads.record_new_assignments = orig_record
+
+    got = {}
+    for u in writes:
+        got[u["values"][0][0]] = got.get(u["values"][0][0], 0) + 1
+    assert sorted(got.values()) == [5, 5, 5, 5], f"expected an even 5-way split, got {got!r}"
+
+
+def test_main_names_the_agents_excluded_for_having_no_team(capsys=None):
+    """An online agent with team_id None gets nothing once isolation is on - correct, but it
+    used to happen with no log line at all, which is how 'why am I getting no leads?' became
+    unanswerable. main() must name them."""
+    import io
+    from contextlib import redirect_stdout
+
+    orig_fetch_teams = assign_ndr_leads.fetch_active_ndr_teams
+    orig_fetch_agents = assign_ndr_leads.fetch_online_ndr_agents
+    orig_get_values = assign_ndr_leads.lib.get_sheet_values
+    orig_set_values = assign_ndr_leads.lib.set_sheet_values_batch
+    orig_record = assign_ndr_leads.record_new_assignments
+
+    assign_ndr_leads.fetch_active_ndr_teams = lambda: [
+        {"id": 1, "name": "Team A", "sheet_id": "SHEET_A", "sheet_tab": "Tab"},
+        {"id": 2, "name": "Team B", "sheet_id": "SHEET_B", "sheet_tab": "Tab"},
+    ]
+    assign_ndr_leads.fetch_online_ndr_agents = lambda: (
+        ["rasika@x.com", "b@x.com"], {}, {}, {}, {}, {},
+        {"rasika@x.com": None, "b@x.com": 2},
+    )
+    assign_ndr_leads.lib.get_sheet_values = lambda spreadsheet_id, range_, **kw: [_lead_row("AWB-B")]
+    assign_ndr_leads.lib.set_sheet_values_batch = lambda spreadsheet_id, updates: None
+    assign_ndr_leads.record_new_assignments = lambda new_assignments: True
+
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            assign_ndr_leads.main()
+    finally:
+        assign_ndr_leads.fetch_active_ndr_teams = orig_fetch_teams
+        assign_ndr_leads.fetch_online_ndr_agents = orig_fetch_agents
+        assign_ndr_leads.lib.get_sheet_values = orig_get_values
+        assign_ndr_leads.lib.set_sheet_values_batch = orig_set_values
+        assign_ndr_leads.record_new_assignments = orig_record
+
+    out = buf.getvalue()
+    assert "rasika@x.com" in out and "no team" in out.lower(), \
+        f"an agent excluded for having no team must be named in the run output, got:\n{out}"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

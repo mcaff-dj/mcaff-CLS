@@ -1,6 +1,7 @@
-"""Step 2 of NDR Calling: round-robins unassigned NDR leads across agents who are online for
-NDR specifically, up to each agent's own NDR quota and respecting each agent's attempt-count
-filter (see agent_attempt_filter below).
+"""Step 2 of NDR Calling: spreads unassigned NDR leads across agents who are online for NDR
+specifically, up to each agent's own NDR quota and respecting each agent's attempt-count filter
+(see agent_attempt_filter below). Selection is scarcest-supply-first, then least-loaded - NOT a
+pointer round-robin, which starved narrowly-filtered agents; see assign_for_run.
 
 The lead source is NOT ours - it's an already-existing, actively-used spreadsheet ("NDR
 Calling - June") that some other CS/ops process already reads and writes (Agent Name,
@@ -404,31 +405,55 @@ def assign_for_run(run, online_agents, quotas, attempt_filters, reason_filters,
         filt = attempt_filters.get(email)
         return not filt or bucket is None or bucket in filt
 
+    def _eligible(email, bucket, reason, payment_mode, brand):
+        """Can this lead be given to this agent at all - all four filters at once. Mirrors
+        ndrFiltersCoverLead in app/ndr-calling/NdrCallingClient.js, which the roster's own
+        "how many leads does this filter even cover" number is computed with."""
+        return (_covers(email, bucket)
+                and reason_covers(reason_filters.get(email), reason)
+                and payment_mode_covers(payment_mode_filters.get(email), payment_mode)
+                and brand_covers(brand_filters.get(email), brand))
+
+    # supply[email] = how many of THIS run's unassigned leads that agent's filters cover at all.
+    # This is what makes the selection below starvation-free, and it is why the old pointer
+    # round-robin had to go: it took the first agent from a rotating index whose filters covered
+    # the lead, so an unrestricted agent absorbed leads that a narrowly-filtered agent was the
+    # only one who actually needed them. With oldest-first ordering putting a filtered agent's
+    # leads at the FRONT of the queue, that reliably handed them away before the pointer ever
+    # reached her - an agent with a reason filter covering 4 of 20 leads landed 1 of them
+    # alongside four unrestricted colleagues (see test_assign_for_run_does_not_starve_a_filtered
+    # _agent). Nobody could see it happening either: the run only ever printed who DID get leads.
+    supply = {email: 0 for email in online_agents}
+    for _, _, bucket, reason, payment_mode, brand, _ in unassigned:
+        for email in online_agents:
+            if _eligible(email, bucket, reason, payment_mode, brand):
+                supply[email] += 1
+
     value_ranges = []
     new_assignments = []  # (awb_number, email) - mirrored into Postgres after the sheet write
     assigned_count = {}
     no_agent_for_bucket = 0
-    idx = 0
     for row_num, _, bucket, reason, payment_mode, brand, awb in unassigned:
         if not remaining_agents:
             break
-        n = len(remaining_agents)
-        chosen = None
-        for step in range(n):
-            cand_idx = (idx + step) % n
-            candidate = remaining_agents[cand_idx]
-            if (_covers(candidate, bucket) and reason_covers(reason_filters.get(candidate), reason)
-                    and payment_mode_covers(payment_mode_filters.get(candidate), payment_mode)
-                    and brand_covers(brand_filters.get(candidate), brand)):
-                chosen = cand_idx
-                break
-        if chosen is None:
+        candidates = [e for e in remaining_agents
+                      if _eligible(e, bucket, reason, payment_mode, brand)]
+        if not candidates:
             # Every currently-eligible agent's attempt/reason/payment-mode/brand filter excludes
             # this lead - hard filter, so it's left unassigned rather than forced onto someone
             # (same contract as RTO's reassign_payment_mode).
             no_agent_for_bucket += 1
             continue
-        email = remaining_agents[chosen]
+        # Scarcest supply first, then least-loaded, then email for a stable tie-break. The
+        # second key is what replaces the pointer: with nobody filtered, every candidate has the
+        # same supply, so "most remaining quota wins" IS round-robin (and respects unequal
+        # quotas, which the pointer did not) - see
+        # test_assign_for_run_spreads_evenly_when_nobody_is_filtered.
+        # ponytail: greedy scarcest-first, not an optimal bipartite matching. It cannot starve
+        # anyone the way the pointer did, but a pathological overlap of several narrow filters
+        # can still leave a lead unassigned that a full matching would have placed. Revisit only
+        # if that ever shows up as a real leftover count.
+        email = min(candidates, key=lambda e: (supply[e], -needed[e], e))
         value_ranges.append({
             "range": f"'{sheet_tab}'!{COL_AGENT_LETTER}{row_num}",
             "values": [[email]],
@@ -437,10 +462,7 @@ def assign_for_run(run, online_agents, quotas, attempt_filters, reason_filters,
         assigned_count[email] = assigned_count.get(email, 0) + 1
         needed[email] -= 1
         if needed[email] <= 0:
-            remaining_agents.pop(chosen)  # next lead lands on whoever shifted into this slot
-            idx = chosen % max(len(remaining_agents), 1)
-        else:
-            idx = (chosen + 1) % len(remaining_agents)
+            remaining_agents.remove(email)
 
     if not value_ranges:
         print(f"[{label}] {len(unassigned)} unassigned lead(s) found, but none could be assigned "
@@ -459,6 +481,21 @@ def assign_for_run(run, online_agents, quotas, attempt_filters, reason_filters,
     print(f"[{label}] Assigned {len(value_ranges)} lead(s):")
     for email, count in sorted(assigned_count.items()):
         print(f"  {email}: +{count}")
+    # Every online agent who got NOTHING, with the reason - the run used to print only who did
+    # get leads, so "why am I not being assigned anything?" had no answer anywhere in the logs
+    # and each report cost a manual dig through calling_agent_process and the sheet.
+    for email in sorted(online_agents):
+        if assigned_count.get(email):
+            continue
+        if supply[email] == 0:
+            why = "no unassigned lead in this run matches this agent's filters"
+        elif needed[email] <= 0:
+            why = (f"already at quota - {current_load.get(email, 0)} open (undisposed) lead(s) "
+                   f"vs a quota of {quotas.get(email, DEFAULT_QUOTA)}")
+        else:
+            why = (f"the {supply[email]} coverable lead(s) all went to agents with a narrower "
+                   f"filter or less work")
+        print(f"  {email}: +0 - {why}")
     quota_skipped = len(unassigned) - len(value_ranges) - no_agent_for_bucket
     if quota_skipped > 0:
         print(f"  ({quota_skipped} unassigned lead(s) left over - all eligible agents at quota)")
@@ -510,6 +547,14 @@ def main():
         runs = [teams[0]]
     else:
         runs = teams
+
+    if isolation_on:
+        # Correct (see the fail-closed note below), but it used to happen in total silence:
+        # the agent simply never appeared in any team's run and no line said why.
+        orphans = [e for e in online_agents if team_ids.get(e) is None]
+        if orphans:
+            print(f"  {len(orphans)} online agent(s) have no team assigned and so get nothing "
+                  f"while {len(teams)} teams are active: {', '.join(sorted(orphans))}")
 
     failures = []
     for run in runs:
