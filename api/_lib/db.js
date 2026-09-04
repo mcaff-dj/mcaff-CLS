@@ -115,6 +115,7 @@ const BOOTSTRAP_TABLES = [
   'order_punch_job_rows', 'order_punch_settings', 'delivery_escalation_partner_access',
   'delivery_escalation_sales_pincode_last_upload',
   'delivery_escalation_query_category_access', 'delivery_escalation_user_role',
+  'delivery_escalation_tags',
 ];
 
 // Fails open (false) on any error - a broken existence check must never be the reason schema
@@ -226,6 +227,24 @@ async function bootstrapSchema() {
       role VARCHAR(32) NOT NULL,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `;
+
+  // Escalation tags (Founder escalation, Highly Aggressive, ...) an agent can multi-select on a
+  // ticket - see DE_ESCALATION_TAGS/setDeliveryEscalationTags for the full picture. Keyed by
+  // (brand, awb_code) - the PARCEL, not any one ticket's own id - so every ticket sharing that
+  // AWB (a repeat-contact row, or the very one being edited) reads/writes the exact same set with
+  // no separate cascade step to keep in sync: there is only ever one tag set per parcel. No FK to
+  // Delivery_escalation - awb_code isn't unique there by design (that's the whole reason this is
+  // keyed by parcel instead of id), so there is no single row to reference.
+  await sql`
+    CREATE TABLE IF NOT EXISTS delivery_escalation_tags (
+      brand VARCHAR(32) NOT NULL,
+      awb_code VARCHAR(64) NOT NULL,
+      tag VARCHAR(64) NOT NULL,
+      added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      added_by VARCHAR(255) NULL,
+      PRIMARY KEY (brand, awb_code, tag)
     )
   `;
 
@@ -1946,6 +1965,14 @@ const DE_VIEW_WHERE = {
   new_order_placed: DE_NEW_ORDER_PLACED_WHERE,
 };
 
+// Escalation tags: a small, fixed set of urgency/severity labels an agent multi-selects on a
+// ticket - orthogonal to Outcome (doesn't change which tab a ticket is in), just extra triage
+// signal. Fixed list (not a live-distinct-values picker like Delivery Partner/Query Category
+// elsewhere in this file) since these are curated labels, not values already present in the
+// data. Mirrored verbatim in DeliveryEscalationClient.js's own DE_ESCALATION_TAGS - update both
+// if this list ever changes.
+const DE_ESCALATION_TAGS = ['Founder escalation', 'Highly Aggressive', 'Social Media'];
+
 // Days-to-deliver (disposed_at, when the agent actually marked it Delivered, minus added_date)
 // bucketed into the same 6 names the sheet's own column P formula uses for ITS metric - that
 // one is "logistics-fed Delivered Date minus Query Date", this one is the agent's own dispose
@@ -2135,6 +2162,98 @@ function deOrderBy(view) {
   return (view === 'resolved' || view === 'new_order_placed') ? 'disposed_at DESC, id DESC' : 'id DESC';
 }
 
+// One tag set per (brand, awb_code) - see delivery_escalation_tags' own bootstrapSchema comment
+// for why parcel-keyed rather than ticket-keyed. Ordered by added_at so the earliest-added tag
+// (if display ever wants "primary tag") is first.
+async function getDeliveryEscalationTags(brand, awbCode) {
+  if (!awbCode) return [];
+  const pool = await getPool();
+  const [rows] = await pool.execute(
+    'SELECT tag, added_at FROM delivery_escalation_tags WHERE brand = ? AND awb_code = ? ORDER BY added_at',
+    [brand, awbCode]);
+  return rows.map((r) => ({ tag: r.tag, addedAt: r.added_at }));
+}
+
+// Batch form for a page of ticket-list rows - one query for every DISTINCT parcel on the page at
+// once (same "one query, group in JS" shape getAllDeliveryPartnerAccess uses for its own per-user
+// batch), rather than one query per row. Keys the returned map by the same `${brand}::${awbCode}`
+// string attachDeliveryEscalationTags below builds per row, so every row sharing a parcel reads
+// the identical tag array with no per-row divergence possible.
+async function getDeliveryEscalationTagsForRows(rows) {
+  const pairs = [...new Set(rows.filter((r) => r.awb_code).map((r) => `${r.brand}::${r.awb_code}`))];
+  if (!pairs.length) return {};
+  const pool = await getPool();
+  const clauses = pairs.map(() => '(brand = ? AND awb_code = ?)').join(' OR ');
+  const params = pairs.flatMap((p) => p.split('::'));
+  const [rows_] = await pool.execute(
+    `SELECT brand, awb_code, tag, added_at FROM delivery_escalation_tags WHERE ${clauses}`, params);
+  const byKey = {};
+  for (const r of rows_) {
+    const key = `${r.brand}::${r.awb_code}`;
+    (byKey[key] = byKey[key] || []).push({ tag: r.tag, addedAt: r.added_at });
+  }
+  return byKey;
+}
+
+// Attaches each row's own `tags` array (see getDeliveryEscalationTagsForRows) - the shared step
+// every ticket-list read (getDeliveryEscalationPage today) runs before returning rows to the
+// caller, so a new caller that also wants tags is one call to this, not a re-implementation.
+async function attachDeliveryEscalationTags(rows) {
+  const byKey = await getDeliveryEscalationTagsForRows(rows);
+  return rows.map((r) => ({ ...r, tags: byKey[`${r.brand}::${r.awb_code}`] || [] }));
+}
+
+// Pure reconciliation step for setDeliveryEscalationTags below - which tags need INSERTing
+// (newly selected, not already present) and which need DELETEing (present but no longer
+// selected). Split out so it's independently testable with no DB (see
+// db.deliveryEscalation.cache.test.js's own tag cases) - the SQL side is then just "do what this
+// says", nothing left to get wrong there.
+function diffEscalationTags(current, nextTags) {
+  const currentSet = new Set(current.map((t) => t.tag));
+  const nextSet = new Set(nextTags);
+  return {
+    toAdd: nextTags.filter((t) => !currentSet.has(t)),
+    toRemove: current.filter((t) => !nextSet.has(t.tag)).map((t) => t.tag),
+  };
+}
+
+// Replaces the tag set for a parcel (brand+awb_code) - inserts what's newly selected (fresh
+// added_at, the FIRST time this parcel carried that tag), deletes what's deselected, leaves an
+// already-present tag's own added_at untouched (re-selecting an already-set tag is a no-op, not
+// a date reset). Keyed by parcel rather than one ticket's own id, so this automatically applies
+// to EVERY ticket sharing that AWB (Fresh/Resolved/Forced RTO/New Order Placed alike, and any
+// future ticket for the same repeat-contact AWB) with no separate cascade step - there is only
+// one tag set per parcel to begin with. Unlike the Outcome cascade
+// (disposeDeliveryEscalationTicketById), this is NOT restricted to still-open tickets: a tag
+// describes the CUSTOMER/case, not one episode's own disposal.
+async function setDeliveryEscalationTags(brand, awbCode, tags, addedBy) {
+  const pool = await getPool();
+  const current = await getDeliveryEscalationTags(brand, awbCode);
+  const { toAdd, toRemove } = diffEscalationTags(current, tags);
+  for (const tag of toAdd) {
+    await pool.execute(
+      'INSERT IGNORE INTO delivery_escalation_tags (brand, awb_code, tag, added_by) VALUES (?, ?, ?, ?)',
+      [brand, awbCode, tag, addedBy || null]);
+  }
+  if (toRemove.length) {
+    await pool.execute(
+      `DELETE FROM delivery_escalation_tags WHERE brand = ? AND awb_code = ? AND tag IN (${toRemove.map(() => '?').join(',')})`,
+      [brand, awbCode, ...toRemove]);
+  }
+  return getDeliveryEscalationTags(brand, awbCode);
+}
+
+// Ticket-list's own entry point (api/delivery-escalation/record.js's 'setTags' action) - looks
+// up this ONE ticket's own (brand, awb_code) and delegates to setDeliveryEscalationTags, which is
+// what actually applies to every ticket sharing that parcel.
+async function setDeliveryEscalationTicketTags(id, tags, addedBy) {
+  const pool = await getPool();
+  const [[current]] = await pool.execute('SELECT brand, awb_code FROM Delivery_escalation WHERE id = ?', [id]);
+  if (!current) throw new Error('Ticket not found');
+  if (!current.awb_code) throw new Error('This ticket has no AWB on file yet - tags need a parcel to key off');
+  return setDeliveryEscalationTags(current.brand, current.awb_code, tags, addedBy);
+}
+
 // One page of a tab, plus the total matching that same filter - the client needs the total to
 // render page counts, and it must reflect the filters, not the whole table.
 async function getDeliveryEscalationPage(view, opts = {}) {
@@ -2146,7 +2265,7 @@ async function getDeliveryEscalationPage(view, opts = {}) {
   const [rows] = await pool.execute(
     `SELECT ${DE_SELECT_COLUMNS} FROM Delivery_escalation WHERE ${where}
      ORDER BY ${deOrderBy(view)} LIMIT ${perPage} OFFSET ${offset}`, params);
-  return { rows, total: Number(countRows[0]?.total) || 0, page, perPage };
+  return { rows: await attachDeliveryEscalationTags(rows), total: Number(countRows[0]?.total) || 0, page, perPage };
 }
 
 // Overview's tiles. Counted in SQL rather than by measuring an already-fetched list, so they
@@ -2546,7 +2665,10 @@ async function getDeliveryEscalationAwbHistory(awb, brand, allowedPartners, allo
     `SELECT ${DE_SELECT_COLUMNS} FROM Delivery_escalation WHERE awb_code = ? AND brand = ?${partnerClause}${categoryClause} ORDER BY id DESC`,
     [awb, brand, ...(restrictedPartners ? allowedPartners : []), ...(restrictedCategories ? allowedQueryCategories : [])]
   );
-  return rows;
+  // Every row here already shares one (brand, awb) - the whole point of this query - so they'd
+  // all get the identical tags array back regardless; still routed through the shared helper
+  // rather than hand-building it, so there's exactly one place that knows how to attach tags.
+  return attachDeliveryEscalationTags(rows);
 }
 
 // One CHUNK of a CSV export - current filter/scope, ordered, LIMIT/OFFSET by opts.page (1-based).
@@ -4592,6 +4714,7 @@ module.exports = {
   getDeliveryEscalationQueryCategoryAccess, getAllDeliveryEscalationQueryCategoryAccess,
   setDeliveryEscalationQueryCategoryAccess, getDeliveryEscalationQueryCategoryOptions,
   getAllDeliveryEscalationUserRoles, setDeliveryEscalationUserRole, rtoMbpOutcome,
+  DE_ESCALATION_TAGS, setDeliveryEscalationTicketTags, diffEscalationTags,
   bootstrapAdminIfNeeded, logAccess, logEvent, deleteUser, upsertAgentPresence,
   getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   claimRtoLead, getRtoAgentQuota, getRtoAgentAvailability, getAgentPresenceRow,

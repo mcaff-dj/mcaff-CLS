@@ -18,8 +18,11 @@
 //
 // POST action 'claim'/'dispose' is the Fresh tab's own claim/resolve, and 'bulkDispose' its CSV
 // upload - all MySQL-only, no sheet write, same model as CLS_RTO_calling's own claim/dispose.
-// Any other POST body falls through to the older ticket-snapshot dispose
-// (disposeDeliveryEscalationTicket), kept as a fallback though the client no longer calls it.
+// 'setTags' { id, tags: [...] } sets a ticket's Escalation Tags (DE_ESCALATION_TAGS) - applies
+// to every ticket sharing that ticket's own AWB, see setDeliveryEscalationTicketTags's own
+// comment for why that's automatic rather than a separate cascade step. Any other POST body
+// falls through to the older ticket-snapshot dispose (disposeDeliveryEscalationTicket), kept as
+// a fallback though the client no longer calls it.
 //
 // There is deliberately no per-agent row scoping: this is one shared desk whose tickets are
 // self-claimed from a common unassigned pool, so hiding unclaimed rows from one caller left a
@@ -41,6 +44,7 @@ const {
   getDeliveryEscalationQueryCategoryAccess,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
+  DE_ESCALATION_TAGS, setDeliveryEscalationTicketTags,
 } = require('../_lib/db');
 
 // Backstop against a request that can never finish, not an arbitrary business limit:
@@ -259,6 +263,25 @@ module.exports = async (req, res) => {
     } catch (e) {
       console.error('api/delivery-escalation/record bulkDispose error:', e);
       res.status(500).json({ error: e.message || 'Bulk upload failed' });
+    }
+    return;
+  }
+
+  // Escalation Tags column, any list-tab - see setDeliveryEscalationTicketTags's own comment for
+  // why this one call already covers every ticket sharing this ticket's AWB. Whitelisted against
+  // DE_ESCALATION_TAGS server-side (not just trusted from the client's own fixed dropdown
+  // options), same posture claim/dispose already take toward every other write on this endpoint.
+  if (action === 'setTags') {
+    if (!id) { res.status(400).json({ error: 'id is required' }); return; }
+    if (!callerEmail) { res.status(400).json({ error: 'agent (an email) is required' }); return; }
+    const tags = Array.isArray(req.body?.tags)
+      ? [...new Set(req.body.tags.filter((t) => DE_ESCALATION_TAGS.includes(t)))] : [];
+    try {
+      const saved = await setDeliveryEscalationTicketTags(id, tags, callerEmail);
+      res.status(200).json({ ok: true, tags: saved });
+    } catch (e) {
+      console.error('api/delivery-escalation/record setTags error:', e);
+      res.status(400).json({ error: e.message || 'Could not save tags' });
     }
     return;
   }

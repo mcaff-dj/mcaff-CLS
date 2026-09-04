@@ -8,7 +8,7 @@
 // per-session access floor (see deFilterSql), so a key that ignores it would serve a partner-
 // restricted agent another caller's whole-desk numbers. Case 1 is that check.
 const assert = require('assert');
-const { cachedRead, invalidateCache, deCacheKey, DE_OVERVIEW_CACHE_TTL_MS, rtoMbpOutcome } = require('./db');
+const { cachedRead, invalidateCache, deCacheKey, DE_OVERVIEW_CACHE_TTL_MS, rtoMbpOutcome, diffEscalationTags } = require('./db');
 
 (async () => {
   // 0. rtoMbpOutcome: a Partner-role RTO dispose is relabeled to RTO_MBP, preserving any
@@ -20,6 +20,27 @@ const { cachedRead, invalidateCache, deCacheKey, DE_OVERVIEW_CACHE_TTL_MS, rtoMb
   assert.strictEqual(rtoMbpOutcome('Delivered', 'Partner'), 'Delivered', 'only an RTO root is relabeled');
   assert.strictEqual(rtoMbpOutcome('', 'Partner'), '', 'a blank/omitted outcome must pass through as-is');
   assert.strictEqual(rtoMbpOutcome(null, 'Partner'), null);
+
+  // 0b. diffEscalationTags: newly-selected tags go to toAdd, deselected ones to toRemove, and an
+  //     already-present-and-still-selected tag appears in NEITHER (its own added_at must survive
+  //     untouched, not get re-inserted or deleted).
+  {
+    const current = [{ tag: 'Founder escalation', addedAt: '2026-09-01' }];
+    const { toAdd, toRemove } = diffEscalationTags(current, ['Founder escalation', 'Highly Aggressive']);
+    assert.deepStrictEqual(toAdd, ['Highly Aggressive']);
+    assert.deepStrictEqual(toRemove, []);
+  }
+  {
+    const current = [{ tag: 'Founder escalation', addedAt: '2026-09-01' }, { tag: 'Highly Aggressive', addedAt: '2026-09-02' }];
+    const { toAdd, toRemove } = diffEscalationTags(current, ['Founder escalation']);
+    assert.deepStrictEqual(toAdd, []);
+    assert.deepStrictEqual(toRemove, ['Highly Aggressive']);
+  }
+  {
+    const { toAdd, toRemove } = diffEscalationTags([], []);
+    assert.deepStrictEqual(toAdd, []);
+    assert.deepStrictEqual(toRemove, [], 'no tags selected, none previously set - nothing to do');
+  }
 
   // 1. Different access floors NEVER share a cache entry, and an unrestricted caller is
   //    distinct from a restricted one.

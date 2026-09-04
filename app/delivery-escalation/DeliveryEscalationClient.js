@@ -71,6 +71,11 @@ const DE_TAB_LABELS = {
 const DE_TAB_LABEL_TO_KEY = Object.fromEntries(Object.entries(DE_TAB_LABELS).map(([k, v]) => [v, k]));
 const DE_TAB_OPTIONS = Object.values(DE_TAB_LABELS);
 
+// Escalation Tags column's own fixed options - mirrors api/_lib/db.js's DE_ESCALATION_TAGS
+// verbatim (the server whitelists against its own copy independently; this is only what the
+// dropdown offers). Update both if this list ever changes.
+const DE_ESCALATION_TAGS = ['Founder escalation', 'Highly Aggressive', 'Social Media'];
+
 // One shared mapping for both tabs - the same SELECT backs Fresh and Resolved (see db.js's
 // DE_SELECT_COLUMNS), so there's no reason for two row shapes. readOnly is the only thing that
 // differs: a Resolved ticket is already Delivered, so there's nothing left to action on it.
@@ -95,13 +100,17 @@ function mapRow(row, readOnly) {
     firstContactDate: row.first_added_date ? new Date(row.first_added_date).toLocaleDateString('en-GB') : '',
     // Reshipped order's own AWB - New Order Placed tab only (see its own bulk-upload note below).
     newOrderAwb: row.new_order_awb || '',
+    // [{tag, addedAt}] - one set per (brand, awb) PARCEL, not per ticket row (see db.js's
+    // attachDeliveryEscalationTags/setDeliveryEscalationTags), so every ticket sharing this AWB
+    // already carries the identical array straight from the server - no client-side merging.
+    tags: Array.isArray(row.tags) ? row.tags : [],
   };
 }
 
 // Every column after Brand, for one ticket row - shared between a group's parent row and its
 // collapsed timeline children (see groupedTicketRows) so the two can never drift out of sync
 // with each other or with the column headers above them.
-function ticketRowCells(t, tab, openAction, isChild) {
+function ticketRowCells(t, tab, openAction, isChild, onTagsChange) {
   return (
     <>
       <td className="py-3 px-4 text-zinc-300 font-mono text-[12px]">{t.orderId}</td>
@@ -123,6 +132,21 @@ function ticketRowCells(t, tab, openAction, isChild) {
       <td className="py-3 px-4 text-zinc-400 text-[12px]">{t.assignedAgent ? t.assignedAgent.split('@')[0] : '—'}</td>
       <td className="py-3 px-4 text-zinc-400">{t.outcome || '—'}</td>
       <td className="py-3 px-4 text-zinc-400">{t.childDisposition || '—'}</td>
+      {/* One tag set per AWB (see db.js's setDeliveryEscalationTags) - editable from any row
+          sharing that parcel, parent or expanded child alike, since every one of them resolves
+          to the identical write. No AWB on file yet -> nothing to key the write off (same guard
+          setDeliveryEscalationTicketTags itself enforces server-side). */}
+      <td className="py-3 px-4">
+        {t.awb ? (
+          <MultiSelectDropdown
+            value={t.tags.map((x) => x.tag)}
+            onChange={(next) => onTagsChange(t, next)}
+            options={DE_ESCALATION_TAGS}
+            placeholder="No tags"
+            itemNoun="tags"
+          />
+        ) : <span className="text-zinc-600 text-[12px]">—</span>}
+      </td>
       {(tab === 'resolved' || tab === 'new_order_placed') && <td className="py-3 px-4 text-zinc-400">{t.actionDate}</td>}
       {(tab === 'resolved' || tab === 'new_order_placed') && <td className="py-3 px-4 text-zinc-400 max-w-xs truncate" title={t.remarks}>{t.remarks}</td>}
       {(tab === 'resolved' || tab === 'new_order_placed') && <td className="py-3 px-4 text-zinc-400">{t.tatBucket}</td>}
@@ -964,6 +988,19 @@ async function disposeMysqlTicket(id, outcome, agentRemarks, newOrderAwb, oldAwb
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: 'dispose', id, outcome, agentRemarks, newOrderAwb, oldAwb }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `Save failed (${r.status})`);
+}
+
+// Escalation Tags column's own save (see api/_lib/db.js's setDeliveryEscalationTicketTags) -
+// applies to every ticket sharing this ticket's own AWB on the server side; the caller here just
+// resyncs afterward (see handleTagsChange) rather than trying to patch every sibling row locally.
+async function setTicketTagsMysql(id, tags) {
+  const r = await fetch('/api/delivery-escalation/record', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'setTags', id, tags }),
   });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error || `Save failed (${r.status})`);
@@ -1992,6 +2029,40 @@ export default function DeliveryEscalationClient() {
     }
   };
 
+  // Escalation Tags column - debounced per AWB (not per ticket id: two rows sharing a parcel
+  // toggling around the same time should collapse onto one save, same reasoning the admin
+  // picker's own per-field debounce already uses), so a few quick clicks become one write.
+  const tagSaveTimers = useRef({});
+  useEffect(() => () => Object.values(tagSaveTimers.current).forEach(clearTimeout), []);
+  const commitTagsSave = async (t, tags) => {
+    try {
+      await setTicketTagsMysql(t.mysqlId, tags);
+      // setDeliveryEscalationTags applies to every ticket sharing this AWB (see its own
+      // comment) - if that AWB's timeline is cached, it's now stale, same refetch saveAction
+      // already does after a cascaded outcome/remarks change.
+      if (t.awb && t.contactCount > 1) {
+        const key = `${t.brand}|${t.awb}`;
+        fetchAwbHistory(t.awb, t.brand)
+          .then(rows => setAwbHistory(prev => new Map(prev).set(key, { status: 'loaded', rows })))
+          .catch(() => setAwbHistory(prev => { const next = new Map(prev); next.delete(key); return next; }));
+      }
+      refresh(true);
+    } catch (e) {
+      if (isSessionExpired(e)) setSessionExpired(true);
+      else showToast(`⚠️ Could not save tags: ${e.message}`);
+      refresh(true); // revert this row (and every sibling) to the server's own truth
+    }
+  };
+  const handleTagsChange = (t, nextTags) => {
+    // Optimistic, applied to every currently-loaded row sharing this parcel - matches what the
+    // server is about to do (setDeliveryEscalationTags is keyed by brand+awb, not ticket id), so
+    // a repeat-contact AWB's other visible row doesn't sit stale until the refresh() above lands.
+    setRows(prev => prev.map(r => (r.brand === t.brand && r.awb === t.awb)
+      ? { ...r, tags: nextTags.map(tag => ({ tag, addedAt: null })) } : r));
+    clearTimeout(tagSaveTimers.current[t.awb]);
+    tagSaveTimers.current[t.awb] = setTimeout(() => commitTagsSave(t, nextTags), 500);
+  };
+
   // Fresh AND Forced RTO tabs' bulk outcome upload, AND New Order Placed's own bulk
   // `new_order_AWB` fill-in - parses client-side (so a header/column mistake shows up
   // immediately, before any network call) then sends the whole batch in one request, scoped
@@ -2693,6 +2764,7 @@ export default function DeliveryEscalationClient() {
                           <th className="py-3 px-4 text-left font-medium">Agent Name</th>
                           <th className="py-3 px-4 text-left font-medium">Outcome</th>
                           <th className="py-3 px-4 text-left font-medium">Child Disposition</th>
+                          <th className="py-3 px-4 text-left font-medium">Tag</th>
                           {(tab === 'resolved' || tab === 'new_order_placed') && <th className="py-3 px-4 text-left font-medium">Action Date</th>}
                           {(tab === 'resolved' || tab === 'new_order_placed') && <th className="py-3 px-4 text-left font-medium">Remarks</th>}
                           {(tab === 'resolved' || tab === 'new_order_placed') && <th className="py-3 px-4 text-left font-medium">TAT Bucket</th>}
@@ -2705,7 +2777,7 @@ export default function DeliveryEscalationClient() {
                             const history = hasRepeat ? awbHistory.get(`${parent.brand}|${parent.awb}`) : null;
                             const childRows = history?.status === 'loaded'
                               ? history.rows.filter((t) => t.id !== parent.id) : [];
-                            const colSpan = tab === 'new_order_placed' ? 18 : (tab === 'resolved' ? 17 : 14);
+                            const colSpan = tab === 'new_order_placed' ? 19 : (tab === 'resolved' ? 18 : 15);
                             return (
                               <Fragment key={parent.id}>
                                 <tr
@@ -2723,7 +2795,7 @@ export default function DeliveryEscalationClient() {
                                       <span className="ml-1.5 text-[11px] tracking-wide text-amber-400 font-semibold tabular-nums">×{parent.contactCount}</span>
                                     )}
                                   </td>
-                                  {ticketRowCells(parent, tab, openAction)}
+                                  {ticketRowCells(parent, tab, openAction, false, handleTagsChange)}
                                 </tr>
                                 {isOpen && history?.status === 'loading' && (
                                   <tr className="animate-fadeIn"><td colSpan={colSpan} className="py-2 px-4 pl-8 text-zinc-500 text-[12px] border-l-2 border-indigo-500/20">
@@ -2741,14 +2813,14 @@ export default function DeliveryEscalationClient() {
                                 {isOpen && childRows.map((t) => (
                                   <tr key={t.id} className="bg-zinc-950/30 hover:bg-zinc-800/30 transition-colors animate-fadeIn">
                                     <td className="py-3 px-4 pl-8 text-zinc-500 text-[12px] whitespace-nowrap border-l-2 border-indigo-500/20">↳ {t.brand}</td>
-                                    {ticketRowCells(t, tab, openAction, true)}
+                                    {ticketRowCells(t, tab, openAction, true, handleTagsChange)}
                                   </tr>
                                 ))}
                               </Fragment>
                             );
                           })}
                           {groupedTicketRows.length === 0 && (
-                            <tr><td colSpan={tab === 'new_order_placed' ? 18 : (tab === 'resolved' ? 17 : 14)} className="py-8 text-center text-zinc-500">
+                            <tr><td colSpan={tab === 'new_order_placed' ? 19 : (tab === 'resolved' ? 18 : 15)} className="py-8 text-center text-zinc-500">
                               {syncing ? 'Loading…' : 'No tickets in this view.'}
                             </td></tr>
                           )}
