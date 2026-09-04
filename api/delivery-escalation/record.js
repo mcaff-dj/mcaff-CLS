@@ -14,7 +14,7 @@
 //   ?op=stats                                            -> { stats, agents }
 //   ?op=export&view=...(+ same filters)                  -> { rows, capped }
 //   ?op=awbHistory&awb&brand                             -> { rows } (every ticket for that parcel)
-//   ?op=geoCategory&month&level=state|city|pincode(&state)(&city)(&brand)(&agent)(&partner)(&outcome)
+//   ?op=geoCategory&month&level=state|city|pincode(&state)(&city)(&brand)(&agent)(&partner)(&paymentMode)
 //                                                       -> { categories, rows, grandTotal, grandTotalAll, grandSales, grandComplaintPct }
 //
 // POST action 'claim'/'dispose' is the Fresh tab's own claim/resolve, and 'bulkDispose' its CSV
@@ -174,7 +174,8 @@ module.exports = async (req, res) => {
         }
         const geo = await getDeliveryEscalationGeoCategoryStats({
           brand: filters.brand, month: q.month, level, state: q.state, city: q.city,
-          agent: filters.agent, partner: filters.partner, outcomeRoot: filters.outcomeRoot,
+          agent: filters.agent, partner: filters.partner,
+          paymentMode: q.paymentMode && q.paymentMode !== 'ALL' ? q.paymentMode : '',
           allowedPartners, allowedQueryCategories,
         });
         res.status(200).json(geo);

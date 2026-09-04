@@ -764,13 +764,10 @@ function TatBreakdownTable({
 // responses plus which rows are currently expanded.
 function GeoCategoryTable({
   month, monthOptions, onMonthChange, tree, categories, grandTotal, grandTotalAll,
-  grandSales, grandComplaintPct, loading, onToggleState, onToggleCity,
+  loading, onToggleState, onToggleCity,
 }) {
   const pendingLabel = (status) => (status === 'error' ? 'Error' : 'Loading…');
-  // +2 for Sales/Complain % (pincode rows only - see below), on top of the label + Grand Total +
-  // one column per category.
-  const colSpan = categories.length + 4;
-  const fmtPct = (pct) => (pct == null ? '—' : `${pct}%`);
+  const colSpan = categories.length + 2;
 
   return (
     <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
@@ -783,7 +780,6 @@ function GeoCategoryTable({
       </div>
       <p className="text-[12px] text-zinc-500 mb-3">
         Unique ticket count (distinct AWB) per query category, by Query Date. Click a State to see its Cities, click a City to see its Pincodes.
-        Every row also carries its own Sales (uploaded via the Exports tab, same month by Order Date) and Complain % = complaints ÷ sales - that's what every level sorts by, highest rate first, not raw complaint count.
       </p>
       <div className="rounded-xl border border-zinc-800/80 overflow-hidden">
         <div className="overflow-x-auto custom-scroll">
@@ -801,10 +797,6 @@ function GeoCategoryTable({
               <tr className="border-b border-zinc-800/80">
                 <th className="sticky left-0 z-10 bg-zinc-900 py-2.5 px-3 text-left font-semibold text-zinc-400 whitespace-nowrap">State / City / Pincode</th>
                 <th className="py-2.5 px-3 text-right font-semibold text-zinc-300 border-l border-zinc-800/80 whitespace-nowrap">Grand Total</th>
-                {/* Complain % (not Grand Total) is what every level sorts by, highest rate first -
-                    see this card's own subtitle. */}
-                <th className="py-2.5 px-3 text-right font-semibold text-zinc-400 whitespace-nowrap">Sales</th>
-                <th className="py-2.5 px-3 text-right font-semibold text-zinc-300 whitespace-nowrap">Complain %</th>
                 {categories.map((cat) => (
                   <th key={cat} className="py-2.5 px-3 text-right font-semibold text-zinc-400 whitespace-nowrap">{cat}</th>
                 ))}
@@ -819,14 +811,6 @@ function GeoCategoryTable({
                     </td>
                     <td className="py-2.5 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/80">
                       {(s.total || 0).toLocaleString('en-IN')}
-                    </td>
-                    <td className="py-2.5 px-3 text-right text-zinc-400 tabular-nums">
-                      {s.sales != null ? s.sales.toLocaleString('en-IN') : '—'}
-                    </td>
-                    <td className={`py-2.5 px-3 text-right tabular-nums font-semibold ${
-                      s.complaintPct == null ? 'text-zinc-600' : s.complaintPct >= 20 ? 'text-rose-400' : 'text-zinc-100'
-                    }`}>
-                      {fmtPct(s.complaintPct)}
                     </td>
                     {categories.map((cat) => (
                       <td key={cat} className="py-2.5 px-3 text-right text-zinc-100 tabular-nums">
@@ -848,14 +832,6 @@ function GeoCategoryTable({
                           <td className="py-2 px-3 text-right text-zinc-100 font-medium tabular-nums border-l border-zinc-800/80">
                             {(c.total || 0).toLocaleString('en-IN')}
                           </td>
-                          <td className="py-2 px-3 text-right text-zinc-400 tabular-nums">
-                            {c.sales != null ? c.sales.toLocaleString('en-IN') : '—'}
-                          </td>
-                          <td className={`py-2 px-3 text-right tabular-nums font-medium ${
-                            c.complaintPct == null ? 'text-zinc-600' : c.complaintPct >= 20 ? 'text-rose-400' : 'text-zinc-100'
-                          }`}>
-                            {fmtPct(c.complaintPct)}
-                          </td>
                           {categories.map((cat) => (
                             <td key={cat} className="py-2 px-3 text-right text-zinc-100 tabular-nums">
                               {(c.counts[cat] || 0).toLocaleString('en-IN')}
@@ -872,16 +848,6 @@ function GeoCategoryTable({
                               <td className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 pl-16 text-zinc-400 text-[12px] whitespace-nowrap">↳ {p.pincode}</td>
                               <td className="py-2 px-3 text-right text-zinc-200 tabular-nums text-[12px] border-l border-zinc-800/80">
                                 {(p.total || 0).toLocaleString('en-IN')}
-                              </td>
-                              <td className="py-2 px-3 text-right text-zinc-400 tabular-nums text-[12px]">
-                                {p.sales != null ? p.sales.toLocaleString('en-IN') : '—'}
-                              </td>
-                              {/* >=20% is a rough "worth a look" line, not a validated threshold -
-                                  just enough to make the worst rows scannable at a glance. */}
-                              <td className={`py-2 px-3 text-right tabular-nums text-[12px] font-semibold ${
-                                p.complaintPct == null ? 'text-zinc-600' : p.complaintPct >= 20 ? 'text-rose-400' : 'text-zinc-200'
-                              }`}>
-                                {fmtPct(p.complaintPct)}
                               </td>
                               {categories.map((cat) => (
                                 <td key={cat} className="py-2 px-3 text-right text-zinc-200 tabular-nums text-[12px]">
@@ -907,10 +873,6 @@ function GeoCategoryTable({
                 <tr className="border-t border-zinc-800/80 bg-zinc-950 font-semibold">
                   <td className="sticky left-0 z-10 bg-zinc-950 py-2.5 px-3 text-zinc-100 whitespace-nowrap">Grand Total</td>
                   <td className="py-2.5 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/80">{grandTotalAll.toLocaleString('en-IN')}</td>
-                  <td className="py-2.5 px-3 text-right text-zinc-300 tabular-nums">
-                    {grandSales != null ? grandSales.toLocaleString('en-IN') : '—'}
-                  </td>
-                  <td className="py-2.5 px-3 text-right text-zinc-100 tabular-nums">{fmtPct(grandComplaintPct)}</td>
                   {categories.map((cat) => (
                     <td key={cat} className="py-2.5 px-3 text-right text-zinc-100 tabular-nums">
                       {(grandTotal[cat] || 0).toLocaleString('en-IN')}
@@ -1701,7 +1663,7 @@ export default function DeliveryEscalationClient() {
   // cached by key so re-collapsing and re-expanding the same column doesn't refetch, same
   // pattern as awbHistory.
   const [geoMonth, setGeoMonth] = useState('');
-  const [geoData, setGeoData] = useState({ categories: [], rows: [], grandTotal: {}, grandTotalAll: 0, grandSales: null, grandComplaintPct: null });
+  const [geoData, setGeoData] = useState({ categories: [], rows: [], grandTotal: {}, grandTotalAll: 0 });
   const [geoLoading, setGeoLoading] = useState(false);
   const [expandedGeoStates, setExpandedGeoStates] = useState(() => new Set());
   const [expandedGeoCities, setExpandedGeoCities] = useState(() => new Set());
@@ -1715,19 +1677,24 @@ export default function DeliveryEscalationClient() {
     if (!geoMonth && geoMonthOptions.length) setGeoMonth(geoMonthOptions[geoMonthOptions.length - 1].value);
   }, [geoMonth, geoMonthOptions]);
 
-  // Query Category by Location's own filters - the SAME top-level Brand/Agent/Partner/Outcome
-  // filters the ticket list uses (never its date range: this table has its own Month picker
-  // instead of Query Date bounds). Partner resolves canonical -> raw the same way the ticket
-  // list's own filterQuery does. Shared by all three fetch levels below so a filter change is
-  // guaranteed to affect them identically - no risk of one level's fetch forgetting a param the
-  // others remembered.
+  // Query Category by Location's own filters - the Overview tab's OWN visible filter row (Brand/
+  // Partner/Payment Mode, above the TAT-by-date table), NOT the ticket list's Partner/Outcome
+  // filters: those controls live on a different tab entirely (Fresh/Resolved/...) and aren't
+  // even rendered while this table is on screen, so wiring THOSE in (an earlier pass here did)
+  // changed nothing a viewer of this tab could ever actually trigger. brandFilter/agentFilter are
+  // shared with loadDaywise below (agentFilter has no dedicated Overview control either, same
+  // existing gap loadDaywise already has); daywisePartnerFilter/daywisePaymentModeFilter are this
+  // tab's own state, same ones the "All Partners"/"All Payment Modes" dropdowns already set.
+  // Partner resolves canonical -> raw the same way the ticket list's own filterQuery does. Shared
+  // by all three fetch levels below so a filter change is guaranteed to affect them identically -
+  // no risk of one level's fetch forgetting a param the others remembered.
   const geoFilterParams = useCallback((p) => {
     if (brandFilter !== 'ALL') p.set('brand', brandFilter);
     if (agentFilter !== 'ALL') p.set('agent', agentFilter);
-    if (partnerFilter !== 'ALL') p.set('partner', (CANONICAL_TO_RAW_PARTNER[partnerFilter] || [partnerFilter]).join(','));
-    if (outcomeFilter !== 'ALL') p.set('outcome', outcomeFilter);
+    if (daywisePartnerFilter !== 'ALL') p.set('partner', (CANONICAL_TO_RAW_PARTNER[daywisePartnerFilter] || [daywisePartnerFilter]).join(','));
+    if (daywisePaymentModeFilter !== 'ALL') p.set('paymentMode', daywisePaymentModeFilter);
     return p;
-  }, [brandFilter, agentFilter, partnerFilter, outcomeFilter]);
+  }, [brandFilter, agentFilter, daywisePartnerFilter, daywisePaymentModeFilter]);
 
   useEffect(() => {
     if (!geoMonth) return;
@@ -1742,7 +1709,7 @@ export default function DeliveryEscalationClient() {
       .then((d) => { if (!cancelled) setGeoData(d); })
       .catch((e) => {
         if (cancelled) return;
-        setGeoData({ categories: [], rows: [], grandTotal: {}, grandTotalAll: 0, grandSales: null, grandComplaintPct: null });
+        setGeoData({ categories: [], rows: [], grandTotal: {}, grandTotalAll: 0 });
         if (isSessionExpired(e)) setSessionExpired(true);
       })
       .finally(() => { if (!cancelled) setGeoLoading(false); });
@@ -2656,8 +2623,6 @@ export default function DeliveryEscalationClient() {
                   categories={geoData.categories}
                   grandTotal={geoData.grandTotal}
                   grandTotalAll={geoData.grandTotalAll}
-                  grandSales={geoData.grandSales}
-                  grandComplaintPct={geoData.grandComplaintPct}
                   loading={geoLoading}
                   onToggleState={toggleGeoState}
                   onToggleCity={toggleGeoCity}
