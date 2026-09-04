@@ -764,7 +764,7 @@ function TatBreakdownTable({
 // responses plus which rows are currently expanded.
 function GeoCategoryTable({
   month, monthOptions, onMonthChange, tree, categories, grandTotal, grandTotalAll,
-  loading, onToggleState, onToggleCity,
+  grandSales, grandComplaintPct, loading, onToggleState, onToggleCity,
 }) {
   const pendingLabel = (status) => (status === 'error' ? 'Error' : 'Loading…');
   // +2 for Sales/Complain % (pincode rows only - see below), on top of the label + Grand Total +
@@ -783,7 +783,7 @@ function GeoCategoryTable({
       </div>
       <p className="text-[12px] text-zinc-500 mb-3">
         Unique ticket count (distinct AWB) per query category, by Query Date. Click a State to see its Cities, click a City to see its Pincodes.
-        Pincodes carry their own Sales (uploaded via the Exports tab, same month by Order Date) and Complain % = complaints ÷ sales - that's what pincode rows sort by, highest rate first, not raw complaint count.
+        Every row also carries its own Sales (uploaded via the Exports tab, same month by Order Date) and Complain % = complaints ÷ sales - that's what every level sorts by, highest rate first, not raw complaint count.
       </p>
       <div className="rounded-xl border border-zinc-800/80 overflow-hidden">
         <div className="overflow-x-auto custom-scroll">
@@ -800,13 +800,9 @@ function GeoCategoryTable({
             <thead>
               <tr className="border-b border-zinc-800/80">
                 <th className="sticky left-0 z-10 bg-zinc-900 py-2.5 px-3 text-left font-semibold text-zinc-400 whitespace-nowrap">State / City / Pincode</th>
-                {/* Grand Total right after the label, not after every category - it's the sort
-                    key State/City rows are ordered by (Complain % takes over at Pincode depth,
-                    see that column's own note), so it needs to be visible without scrolling past
-                    the whole category breakdown to confirm the order. */}
                 <th className="py-2.5 px-3 text-right font-semibold text-zinc-300 border-l border-zinc-800/80 whitespace-nowrap">Grand Total</th>
-                {/* Pincode rows only - see this card's own subtitle. State/City rows show '—':
-                    sales isn't rolled up to those levels, only ever computed per pincode. */}
+                {/* Complain % (not Grand Total) is what every level sorts by, highest rate first -
+                    see this card's own subtitle. */}
                 <th className="py-2.5 px-3 text-right font-semibold text-zinc-400 whitespace-nowrap">Sales</th>
                 <th className="py-2.5 px-3 text-right font-semibold text-zinc-300 whitespace-nowrap">Complain %</th>
                 {categories.map((cat) => (
@@ -824,8 +820,14 @@ function GeoCategoryTable({
                     <td className="py-2.5 px-3 text-right text-zinc-100 font-semibold tabular-nums border-l border-zinc-800/80">
                       {(s.total || 0).toLocaleString('en-IN')}
                     </td>
-                    <td className="py-2.5 px-3 text-right text-zinc-600 tabular-nums">—</td>
-                    <td className="py-2.5 px-3 text-right text-zinc-600 tabular-nums">—</td>
+                    <td className="py-2.5 px-3 text-right text-zinc-400 tabular-nums">
+                      {s.sales != null ? s.sales.toLocaleString('en-IN') : '—'}
+                    </td>
+                    <td className={`py-2.5 px-3 text-right tabular-nums font-semibold ${
+                      s.complaintPct == null ? 'text-zinc-600' : s.complaintPct >= 20 ? 'text-rose-400' : 'text-zinc-100'
+                    }`}>
+                      {fmtPct(s.complaintPct)}
+                    </td>
                     {categories.map((cat) => (
                       <td key={cat} className="py-2.5 px-3 text-right text-zinc-100 tabular-nums">
                         {(s.counts[cat] || 0).toLocaleString('en-IN')}
@@ -846,8 +848,14 @@ function GeoCategoryTable({
                           <td className="py-2 px-3 text-right text-zinc-100 font-medium tabular-nums border-l border-zinc-800/80">
                             {(c.total || 0).toLocaleString('en-IN')}
                           </td>
-                          <td className="py-2 px-3 text-right text-zinc-600 tabular-nums">—</td>
-                          <td className="py-2 px-3 text-right text-zinc-600 tabular-nums">—</td>
+                          <td className="py-2 px-3 text-right text-zinc-400 tabular-nums">
+                            {c.sales != null ? c.sales.toLocaleString('en-IN') : '—'}
+                          </td>
+                          <td className={`py-2 px-3 text-right tabular-nums font-medium ${
+                            c.complaintPct == null ? 'text-zinc-600' : c.complaintPct >= 20 ? 'text-rose-400' : 'text-zinc-100'
+                          }`}>
+                            {fmtPct(c.complaintPct)}
+                          </td>
                           {categories.map((cat) => (
                             <td key={cat} className="py-2 px-3 text-right text-zinc-100 tabular-nums">
                               {(c.counts[cat] || 0).toLocaleString('en-IN')}
@@ -899,11 +907,10 @@ function GeoCategoryTable({
                 <tr className="border-t border-zinc-800/80 bg-zinc-950 font-semibold">
                   <td className="sticky left-0 z-10 bg-zinc-950 py-2.5 px-3 text-zinc-100 whitespace-nowrap">Grand Total</td>
                   <td className="py-2.5 px-3 text-right text-zinc-100 tabular-nums border-l border-zinc-800/80">{grandTotalAll.toLocaleString('en-IN')}</td>
-                  {/* Sales/Complain % are a pincode-only overlay - a state-tree-wide total would
-                      mix Sales' own order_date basis with this footer's added_date one, so it's
-                      left blank rather than computed. */}
-                  <td className="py-2.5 px-3 text-right text-zinc-600 tabular-nums">—</td>
-                  <td className="py-2.5 px-3 text-right text-zinc-600 tabular-nums">—</td>
+                  <td className="py-2.5 px-3 text-right text-zinc-300 tabular-nums">
+                    {grandSales != null ? grandSales.toLocaleString('en-IN') : '—'}
+                  </td>
+                  <td className="py-2.5 px-3 text-right text-zinc-100 tabular-nums">{fmtPct(grandComplaintPct)}</td>
                   {categories.map((cat) => (
                     <td key={cat} className="py-2.5 px-3 text-right text-zinc-100 tabular-nums">
                       {(grandTotal[cat] || 0).toLocaleString('en-IN')}
@@ -1694,7 +1701,7 @@ export default function DeliveryEscalationClient() {
   // cached by key so re-collapsing and re-expanding the same column doesn't refetch, same
   // pattern as awbHistory.
   const [geoMonth, setGeoMonth] = useState('');
-  const [geoData, setGeoData] = useState({ categories: [], rows: [], grandTotal: {}, grandTotalAll: 0 });
+  const [geoData, setGeoData] = useState({ categories: [], rows: [], grandTotal: {}, grandTotalAll: 0, grandSales: null, grandComplaintPct: null });
   const [geoLoading, setGeoLoading] = useState(false);
   const [expandedGeoStates, setExpandedGeoStates] = useState(() => new Set());
   const [expandedGeoCities, setExpandedGeoCities] = useState(() => new Set());
@@ -1708,6 +1715,20 @@ export default function DeliveryEscalationClient() {
     if (!geoMonth && geoMonthOptions.length) setGeoMonth(geoMonthOptions[geoMonthOptions.length - 1].value);
   }, [geoMonth, geoMonthOptions]);
 
+  // Query Category by Location's own filters - the SAME top-level Brand/Agent/Partner/Outcome
+  // filters the ticket list uses (never its date range: this table has its own Month picker
+  // instead of Query Date bounds). Partner resolves canonical -> raw the same way the ticket
+  // list's own filterQuery does. Shared by all three fetch levels below so a filter change is
+  // guaranteed to affect them identically - no risk of one level's fetch forgetting a param the
+  // others remembered.
+  const geoFilterParams = useCallback((p) => {
+    if (brandFilter !== 'ALL') p.set('brand', brandFilter);
+    if (agentFilter !== 'ALL') p.set('agent', agentFilter);
+    if (partnerFilter !== 'ALL') p.set('partner', (CANONICAL_TO_RAW_PARTNER[partnerFilter] || [partnerFilter]).join(','));
+    if (outcomeFilter !== 'ALL') p.set('outcome', outcomeFilter);
+    return p;
+  }, [brandFilter, agentFilter, partnerFilter, outcomeFilter]);
+
   useEffect(() => {
     if (!geoMonth) return;
     let cancelled = false;
@@ -1716,18 +1737,17 @@ export default function DeliveryEscalationClient() {
     setExpandedGeoCities(new Set());
     setGeoCities(new Map());
     setGeoPincodes(new Map());
-    const p = new URLSearchParams({ op: 'geoCategory', level: 'state', month: geoMonth });
-    if (brandFilter !== 'ALL') p.set('brand', brandFilter);
+    const p = geoFilterParams(new URLSearchParams({ op: 'geoCategory', level: 'state', month: geoMonth }));
     getJson(`/api/delivery-escalation/record?${p.toString()}`)
       .then((d) => { if (!cancelled) setGeoData(d); })
       .catch((e) => {
         if (cancelled) return;
-        setGeoData({ categories: [], rows: [], grandTotal: {}, grandTotalAll: 0 });
+        setGeoData({ categories: [], rows: [], grandTotal: {}, grandTotalAll: 0, grandSales: null, grandComplaintPct: null });
         if (isSessionExpired(e)) setSessionExpired(true);
       })
       .finally(() => { if (!cancelled) setGeoLoading(false); });
     return () => { cancelled = true; };
-  }, [geoMonth, brandFilter]);
+  }, [geoMonth, geoFilterParams]);
 
   const toggleGeoState = useCallback((stateName) => {
     setExpandedGeoStates((prev) => {
@@ -1737,8 +1757,7 @@ export default function DeliveryEscalationClient() {
     });
     setGeoCities((prev) => {
       if (prev.has(stateName)) return prev;
-      const p = new URLSearchParams({ op: 'geoCategory', level: 'city', month: geoMonth, state: stateName });
-      if (brandFilter !== 'ALL') p.set('brand', brandFilter);
+      const p = geoFilterParams(new URLSearchParams({ op: 'geoCategory', level: 'city', month: geoMonth, state: stateName }));
       getJson(`/api/delivery-escalation/record?${p.toString()}`)
         .then((d) => setGeoCities((m) => new Map(m).set(stateName, { status: 'loaded', rows: d.rows })))
         .catch((e) => {
@@ -1747,7 +1766,7 @@ export default function DeliveryEscalationClient() {
         });
       return new Map(prev).set(stateName, { status: 'loading', rows: [] });
     });
-  }, [geoMonth, brandFilter]);
+  }, [geoMonth, geoFilterParams]);
 
   const toggleGeoCity = useCallback((stateName, cityName) => {
     const key = `${stateName}::${cityName}`;
@@ -1758,8 +1777,7 @@ export default function DeliveryEscalationClient() {
     });
     setGeoPincodes((prev) => {
       if (prev.has(key)) return prev;
-      const p = new URLSearchParams({ op: 'geoCategory', level: 'pincode', month: geoMonth, state: stateName, city: cityName });
-      if (brandFilter !== 'ALL') p.set('brand', brandFilter);
+      const p = geoFilterParams(new URLSearchParams({ op: 'geoCategory', level: 'pincode', month: geoMonth, state: stateName, city: cityName }));
       getJson(`/api/delivery-escalation/record?${p.toString()}`)
         .then((d) => setGeoPincodes((m) => new Map(m).set(key, { status: 'loaded', rows: d.rows })))
         .catch((e) => {
@@ -1768,7 +1786,7 @@ export default function DeliveryEscalationClient() {
         });
       return new Map(prev).set(key, { status: 'loading', rows: [] });
     });
-  }, [geoMonth, brandFilter]);
+  }, [geoMonth, geoFilterParams]);
 
   // Builds the State -> City -> Pincode row tree the table actually renders from the raw
   // per-level responses plus which rows are currently expanded - a level not (yet) expanded
@@ -2638,6 +2656,8 @@ export default function DeliveryEscalationClient() {
                   categories={geoData.categories}
                   grandTotal={geoData.grandTotal}
                   grandTotalAll={geoData.grandTotalAll}
+                  grandSales={geoData.grandSales}
+                  grandComplaintPct={geoData.grandComplaintPct}
                   loading={geoLoading}
                   onToggleState={toggleGeoState}
                   onToggleCity={toggleGeoCity}

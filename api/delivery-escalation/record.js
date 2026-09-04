@@ -14,7 +14,8 @@
 //   ?op=stats                                            -> { stats, agents }
 //   ?op=export&view=...(+ same filters)                  -> { rows, capped }
 //   ?op=awbHistory&awb&brand                             -> { rows } (every ticket for that parcel)
-//   ?op=geoCategory&month&level=state|city|pincode(&state)(&city) -> { categories, rows, grandTotal, grandTotalAll }
+//   ?op=geoCategory&month&level=state|city|pincode(&state)(&city)(&brand)(&agent)(&partner)(&outcome)
+//                                                       -> { categories, rows, grandTotal, grandTotalAll, grandSales, grandComplaintPct }
 //
 // POST action 'claim'/'dispose' is the Fresh tab's own claim/resolve, and 'bulkDispose' its CSV
 // upload - all MySQL-only, no sheet write, same model as CLS_RTO_calling's own claim/dispose.
@@ -173,6 +174,7 @@ module.exports = async (req, res) => {
         }
         const geo = await getDeliveryEscalationGeoCategoryStats({
           brand: filters.brand, month: q.month, level, state: q.state, city: q.city,
+          agent: filters.agent, partner: filters.partner, outcomeRoot: filters.outcomeRoot,
           allowedPartners, allowedQueryCategories,
         });
         res.status(200).json(geo);

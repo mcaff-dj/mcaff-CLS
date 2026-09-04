@@ -2578,7 +2578,7 @@ async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
 // Grouped by query_category same as everywhere else on this page, COUNT(DISTINCT awb_code) for
 // the same "how many parcels, not how many rows" reason getDeliveryEscalationDaywiseStats uses.
 async function getDeliveryEscalationGeoCategoryStats(opts = {}) {
-  const { brand, month, level, state, city, allowedPartners, allowedQueryCategories } = opts;
+  const { brand, month, level, state, city, agent, partner, outcomeRoot, allowedPartners, allowedQueryCategories } = opts;
   if (!month) return { categories: [], rows: [], grandTotal: {}, grandTotalAll: 0 };
   const geoCol = level === 'pincode' ? 'Pincode' : level === 'city' ? 'Shipping_Address_City' : 'Shipping_Address_State';
   const geoKey = level === 'pincode' ? 'pincode' : level === 'city' ? 'city' : 'state';
@@ -2590,6 +2590,18 @@ async function getDeliveryEscalationGeoCategoryStats(opts = {}) {
   const clauses = ['added_date IS NOT NULL', 'added_date >= ?', 'added_date < DATE_ADD(?, INTERVAL 1 MONTH)'];
   const params = [monthStart, monthStart];
   if (brand) { clauses.push('brand = ?'); params.push(brand); }
+  // agent/partner/outcomeRoot: the SAME top-level ticket-list filters (agentFilter/partnerFilter/
+  // outcomeFilter in DeliveryEscalationClient.js) as everywhere else on this page - this table
+  // used to only ever honor Brand, silently ignoring the rest whenever they were set. partner is
+  // the user's own chosen narrowing, separate from allowedPartners (the access floor) just below
+  // - both are plain IN()s, ANDed, same relationship deFilterSql's own partner/allowedPartners
+  // pair already has.
+  if (agent) { clauses.push('LOWER(agent_email) = ?'); params.push(String(agent).toLowerCase()); }
+  if (Array.isArray(partner) && partner.length) {
+    clauses.push(`delivery_partner IN (${partner.map(() => '?').join(',')})`);
+    params.push(...partner);
+  }
+  if (outcomeRoot) { clauses.push('(outcome = ? OR outcome LIKE ?)'); params.push(outcomeRoot, `${outcomeRoot} > %`); }
   if (Array.isArray(allowedPartners) && allowedPartners.length) {
     clauses.push(`delivery_partner IN (${allowedPartners.map(() => '?').join(',')})`);
     params.push(...allowedPartners);
@@ -2633,59 +2645,79 @@ async function getDeliveryEscalationGeoCategoryStats(opts = {}) {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([category]) => category);
 
-  // Pincode level only: overlay each pincode's own uploaded sales (see
-  // bulkUpdateDeliveryEscalationSalesPincode) and Complain % = complaints / sales * 100, so this
-  // table can surface which pincodes complain disproportionately to their own order volume, not
-  // just which have the most RAW complaints. sales_Pincode is additive-uploaded PER ROW and
+  // Overlay each row's own uploaded sales (see bulkUpdateDeliveryEscalationSalesPincode) and
+  // Complain % = complaints / sales * 100, at EVERY level (State/City/Pincode) - so this table
+  // can surface which state/city/pincode complains disproportionately to its own order volume,
+  // not just which has the most RAW complaints. sales_Pincode is additive-uploaded PER ROW and
   // duplicated across every ticket sharing its own (Pincode, brand, order_date, delivery_partner)
-  // key (see that function's own comment) - summing it directly here would multiply-count by
-  // however many tickets happen to share a key, so this dedupes to one row per key FIRST via a
-  // derived table, then sums. Sales are scoped to order_date within the SAME calendar month as
-  // the complaint count's own added_date (Query Date) filter above, and the same brand/state/
-  // city/allowedPartners floor - NOT allowedQueryCategories, since a sale isn't a property of
-  // any one query category, just data that happens to sit on whichever escalation row matched
-  // the upload's own key.
-  if (level === 'pincode') {
+  // key - the true PINCODE-level grain sales data actually has, regardless of which level this
+  // call is rolling up to (see that function's own comment) - summing it directly here would
+  // multiply-count by however many tickets happen to share a key, so this dedupes to one row per
+  // key FIRST via a derived table, carrying along the SAME geo column (geoCol) the complaint
+  // query above grouped by, then sums PER GEO VALUE, not per pincode, when level is state/city.
+  // Sales are scoped to order_date within the SAME calendar month as the complaint count's own
+  // added_date (Query Date) filter above, and the same brand/state/city/allowedPartners floor -
+  // NOT allowedQueryCategories, since a sale isn't a property of any one query category, just
+  // data that happens to sit on whichever escalation row matched the upload's own key.
+  {
     const salesClauses = ['order_date IS NOT NULL', 'order_date >= ?', 'order_date < DATE_ADD(?, INTERVAL 1 MONTH)', 'sales_Pincode IS NOT NULL'];
     const salesParams = [monthStart, monthStart];
     if (brand) { salesClauses.push('brand = ?'); salesParams.push(brand); }
+    // Partner applies here too - sales_Pincode rows carry delivery_partner just like ticket
+    // rows do - but NOT agent/outcomeRoot, neither of which is a property of a sale.
+    if (Array.isArray(partner) && partner.length) {
+      salesClauses.push(`delivery_partner IN (${partner.map(() => '?').join(',')})`);
+      salesParams.push(...partner);
+    }
     if (Array.isArray(allowedPartners) && allowedPartners.length) {
       salesClauses.push(`delivery_partner IN (${allowedPartners.map(() => '?').join(',')})`);
       salesParams.push(...allowedPartners);
     }
-    salesClauses.push("COALESCE(Shipping_Address_State, 'Unknown') = ?", "COALESCE(Shipping_Address_City, 'Unknown') = ?");
-    salesParams.push(state || 'Unknown', city || 'Unknown');
+    if (level === 'city' || level === 'pincode') {
+      salesClauses.push("COALESCE(Shipping_Address_State, 'Unknown') = ?");
+      salesParams.push(state || 'Unknown');
+    }
+    if (level === 'pincode') {
+      salesClauses.push("COALESCE(Shipping_Address_City, 'Unknown') = ?");
+      salesParams.push(city || 'Unknown');
+    }
     const [salesRows] = await pool.execute(`
-      SELECT Pincode AS geo, SUM(sales) AS total_sales FROM (
-        SELECT DISTINCT Pincode, brand, order_date, delivery_partner, sales_Pincode AS sales
+      SELECT geo, SUM(sales) AS total_sales FROM (
+        SELECT DISTINCT Pincode, brand, order_date, delivery_partner, sales_Pincode AS sales,
+               COALESCE(${geoCol}, 'Unknown') AS geo
         FROM Delivery_escalation
         WHERE ${salesClauses.join(' AND ')}
       ) dedup
-      GROUP BY Pincode
+      GROUP BY geo
     `, salesParams);
-    const salesByPincode = new Map(salesRows.map((r) => [r.geo, Number(r.total_sales) || 0]));
+    const salesByGeo = new Map(salesRows.map((r) => [r.geo, Number(r.total_sales) || 0]));
     for (const entry of byGeo.values()) {
-      const sales = salesByPincode.get(entry.pincode);
+      const sales = salesByGeo.get(entry[geoKey]);
       entry.sales = sales ?? null;
       // One decimal place - complaint rates on a handful of orders swing wildly (1/3 = 33.3%),
-      // rounding to a whole number would make several different pincodes read identically.
+      // rounding to a whole number would make several different rows read identically.
       entry.complaintPct = sales ? Math.round((entry.total / sales) * 1000) / 10 : null;
     }
   }
 
   const rows = [...byGeo.values()].sort((a, b) => {
-    if (level !== 'pincode') return b.total - a.total || String(a[geoKey]).localeCompare(String(b[geoKey]));
-    // Highest complaint RATE first, per this table's whole point at pincode depth - a pincode
-    // with no sales on file (nothing to divide by) sorts after every pincode that has a rate,
-    // not spliced in at whatever position a null vs. number comparison would otherwise land it.
-    if (a.complaintPct == null && b.complaintPct == null) return b.total - a.total;
+    // Highest complaint RATE first, per this table's whole point - a row with no sales on file
+    // (nothing to divide by) sorts after every row that has a rate, not spliced in at whatever
+    // position a null vs. number comparison would otherwise land it.
+    if (a.complaintPct == null && b.complaintPct == null) return b.total - a.total || String(a[geoKey]).localeCompare(String(b[geoKey]));
     if (a.complaintPct == null) return 1;
     if (b.complaintPct == null) return -1;
     return b.complaintPct - a.complaintPct || b.total - a.total;
   });
   const grandTotal = Object.fromEntries(categories.map((cat) => [cat, categoryTotals.get(cat) || 0]));
   const grandTotalAll = [...categoryTotals.values()].reduce((sum, v) => sum + v, 0);
-  return { categories, rows, grandTotal, grandTotalAll };
+  // Footer's own Sales/Complain % - summed straight from `rows` (already fetched above) rather
+  // than a second query, since every row's own sales figure is already an exact, non-overlapping
+  // slice of this same list (one state/city/pincode each) - summing them can't double-count the
+  // way summing raw sales_Pincode across ticket ROWS would.
+  const grandSales = rows.reduce((sum, r) => sum + (r.sales || 0), 0) || null;
+  const grandComplaintPct = grandSales ? Math.round((grandTotalAll / grandSales) * 1000) / 10 : null;
+  return { categories, rows, grandTotal, grandTotalAll, grandSales, grandComplaintPct };
 }
 
 async function getDeliveryEscalationAgents() {
