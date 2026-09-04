@@ -593,9 +593,10 @@ export default function NdrCallingClient() {
     }
   }
 
-  // Live round-robin PREDICTION of what scripts/assign_ndr_leads.py would assign next -
-  // read-only, writes nothing. Ported field-for-field from that script: attempt_bucket()/
-  // _covers()/the pop-when-exhausted cursor.
+  // Live PREDICTION of what scripts/assign_ndr_leads.py would assign next - read-only, writes
+  // nothing. Ported field-for-field from that script: attempt_bucket()/_covers()/its
+  // scarcest-supply-first selection. Keep the two in step: this table's whole value is that it
+  // agrees with the robot, so a divergence here is worse than no table.
   const ndrPredicted = useMemo(() => {
     const onlineAgents = (processAgents || [])
       .filter(a => a.status === 'Online')
@@ -609,32 +610,62 @@ export default function NdrCallingClient() {
       return m ? new Date(+m[3], +m[2] - 1, +m[1]).getTime() : Infinity;
     };
 
+    // t.awb is required because assign_for_run skips an AWB-less row outright - it is the key
+    // the ndr_lead_assignments mirror is written under, so there is nothing to hand out.
+    // (One known divergence left deliberately: the robot treats "Agent Name blank" as
+    // unassigned regardless of Connected, while this pool also requires Connected blank. A row
+    // some OTHER CS process disposed without claiming it is therefore predicted here as
+    // untouchable but would in fact be assigned. Aligning that means changing what the robot
+    // hands out, not what this table draws, so it is left for a deliberate decision.)
     const pool = ndrTickets
-      .filter(t => !t.assignedAgent && !t.connected)
+      .filter(t => !t.assignedAgent && !t.connected && t.awb)
       .sort((a, b) => parseLatestNdrDate(a.latestNdrDate) - parseLatestNdrDate(b.latestNdrDate));
 
-    const needed = new Map(onlineAgents.map(a => [a.email, a.quota]));
+    // How many of this pool each agent's filters cover at all - the scarcity signal that makes
+    // the selection below starvation-free, same as supply[] in assign_for_run. The pointer
+    // round-robin this replaces took the first agent from a rotating index whose filters
+    // covered the lead, so an unrestricted agent absorbed leads a narrowly-filtered agent was
+    // the only one who needed - worst of all under the oldest-first ordering right above, which
+    // puts her leads at the front of the queue.
+    const supply = new Map(onlineAgents.map(a => [
+      a.email, pool.reduce((n, t) => n + (ndrFiltersCoverLead(a, t) ? 1 : 0), 0),
+    ]));
+
+    // Quota is a CONCURRENT-workload cap, not a lifetime total, so what is left of it is
+    // quota minus the agent's OPEN (assigned but undisposed) leads - exactly current_load in
+    // assign_for_run, counted off the same sheet rows and keyed the same lowercased way.
+    // Without this the table predicted a full quota for an agent who is already at their cap
+    // and would really be handed nothing - the single most common reason a real run gives
+    // someone zero, and the one this table most needed to show.
+    const openLoad = new Map();
+    for (const t of ndrTickets) {
+      if (!t.assignedAgent || t.connected) continue;
+      const key = t.assignedAgent.trim().toLowerCase();
+      openLoad.set(key, (openLoad.get(key) || 0) + 1);
+    }
+    const needed = new Map(onlineAgents.map(a => [
+      a.email, Math.max(0, a.quota - (openLoad.get(a.email.trim().toLowerCase()) || 0)),
+    ]));
     let remaining = onlineAgents.filter(a => needed.get(a.email) > 0);
     const rows = [];
-    let idx = 0;
     for (const t of pool) {
       if (!remaining.length) break;
-      const n = remaining.length;
-      let chosen = -1;
-      for (let step = 0; step < n; step++) {
-        const cand = (idx + step) % n;
-        if (ndrFiltersCoverLead(remaining[cand], t)) { chosen = cand; break; }
+      // Scarcest supply first, then least-loaded, then email for a stable tie-break. With
+      // nobody filtered every candidate has the same supply, so "most remaining quota wins" IS
+      // round-robin - and it respects unequal quotas, which the pointer did not.
+      let best = null;
+      for (const a of remaining) {
+        if (!ndrFiltersCoverLead(a, t)) continue;
+        if (!best) { best = a; continue; }
+        const rank = (supply.get(a.email) - supply.get(best.email))
+          || (needed.get(best.email) - needed.get(a.email))
+          || a.email.localeCompare(best.email);
+        if (rank < 0) best = a;
       }
-      if (chosen === -1) continue; // no online agent's filter covers this lead's bucket
-      const agent = remaining[chosen];
-      rows.push({ ...t, predictedAgent: agent.email });
-      needed.set(agent.email, needed.get(agent.email) - 1);
-      if (needed.get(agent.email) <= 0) {
-        remaining = remaining.filter((_, i) => i !== chosen);
-        idx = remaining.length ? chosen % remaining.length : 0;
-      } else {
-        idx = (chosen + 1) % remaining.length;
-      }
+      if (!best) continue; // no online agent's filters cover this lead
+      rows.push({ ...t, predictedAgent: best.email });
+      needed.set(best.email, needed.get(best.email) - 1);
+      if (needed.get(best.email) <= 0) remaining = remaining.filter(a => a !== best);
     }
     return { rows, onlineAgents };
   }, [ndrTickets, processAgents]);
