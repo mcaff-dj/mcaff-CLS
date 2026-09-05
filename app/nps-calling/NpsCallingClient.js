@@ -268,6 +268,7 @@ export default function NpsCallingClient() {
           <p className="text-[14px] font-bold text-zinc-100 truncate">{t.customer_name || 'Unknown customer'}</p>
           <p className="text-[12px] text-zinc-500 flex items-center gap-1.5 flex-wrap">
             {t.customer_phone && <span className="flex items-center gap-1"><PhoneIcon /> {t.customer_phone}</span>}
+            {t.customer_email && <span>{t.customer_email}</span>}
             {t.brand && <span className="uppercase">{t.brand}</span>}
             {t.channel_order_id && <span>Order {t.channel_order_id}</span>}
           </p>
@@ -302,8 +303,8 @@ export default function NpsCallingClient() {
         )}
       </div>
 
-      {(t.address_city || t.address_state) && (
-        <p className="text-[11px] text-zinc-500">{[t.address_city, t.address_state].filter(Boolean).join(', ')}</p>
+      {(t.address_city || t.address_state || t.address_pincode) && (
+        <p className="text-[11px] text-zinc-500">{[t.address_city, t.address_state, t.address_pincode].filter(Boolean).join(', ')}</p>
       )}
 
       {t.disposed_at ? (
