@@ -63,14 +63,18 @@ module.exports = async (req, res) => {
     // Re-checks availability and quota now, not just whatever they were at dispose time - the
     // agent may have gone Offline, or an admin may have lowered their quota, in between.
     let assignedLeads = [];
-    if (!isOverrideOntoSomeoneElse) {
-      const stillOnline = (await getDetractorAgentAvailability(session.email)) === 'Online';
-      if (stillOnline) {
-        const { quota, load } = await getDetractorQuotaAndLoad(session.email);
-        if (load < quota) {
-          assignedLeads = await assignDetractorLeadsToAgent(session.email, 1);
+    try {
+      if (!isOverrideOntoSomeoneElse) {
+        const stillOnline = (await getDetractorAgentAvailability(session.email)) === 'Online';
+        if (stillOnline) {
+          const { quota, load } = await getDetractorQuotaAndLoad(session.email);
+          if (load < quota) {
+            assignedLeads = await assignDetractorLeadsToAgent(session.email, 1);
+          }
         }
       }
+    } catch (e) {
+      console.error('api/detractor/lead-assignment: self-refill failed:', e.message || e);
     }
     res.status(200).json({ ok: true, assignedLeads });
   } catch (e) {
