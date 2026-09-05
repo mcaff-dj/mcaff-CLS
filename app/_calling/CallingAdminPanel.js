@@ -184,6 +184,108 @@ export function CallingHoursCard({ processKey, processLabel, hours }) {
   );
 }
 
+// Admin-editable default quota for a process (calling_process_settings, via
+// /api/admin/default-quota) - the cap next-lead.js/claim.js falls back to for any agent with no
+// per-agent max_quota override in the Team Roster table. Same lazy-load-on-open pattern as
+// useBusinessHours: agents never see this card, so most sessions never make the call.
+export function useDefaultQuota(processKey, { userRole, isProcessAdmin, showToast } = {}) {
+  const [quota, setQuota] = useState(null);       // server value: number, or null = never set
+  const [loaded, setLoaded] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const loadQuota = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/admin/default-quota?process=${encodeURIComponent(processKey)}`);
+      if (!r.ok) return;
+      const d = await r.json();
+      setQuota(d.quota != null ? d.quota : null);
+      setDraft(d.quota != null ? String(d.quota) : '');
+      setLoaded(true);
+    } catch { /* leave unloaded - the card just won't render */ }
+  }, [processKey]);
+
+  useEffect(() => {
+    if ((userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin) && !loaded) {
+      loadQuota();
+    }
+  }, [userRole, isProcessAdmin, loaded, loadQuota]);
+
+  const saveQuota = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      const r = await fetch('/api/admin/default-quota', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ processKey, quota: draft === '' ? null : Number(draft) }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setError(d.error || `Could not save (${r.status})`);
+        return;
+      }
+      setQuota(d.quota != null ? d.quota : null);
+      if (showToast) showToast('🎯 Default quota saved');
+    } catch (e) {
+      setError(e.message || 'Could not save default quota');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return { quota, loaded, draft, setDraft, saving, error, saveQuota };
+}
+
+// quota = a useDefaultQuota() return value; processLabel = display name (e.g. "NPS-Calling");
+// fallback = the hardcoded value the server itself falls back to when quota.quota is null (keep
+// in sync with that endpoint's own FALLBACK_QUOTA - shown so an admin knows what's in effect).
+export function DefaultQuotaCard({ processLabel, fallback, quota }) {
+  const { loaded, draft, setDraft, saving, error, saveQuota } = quota;
+  if (!loaded) return null;
+  return (
+    <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
+      <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
+        <div className="flex items-start gap-3">
+          <span className="h-9 w-9 shrink-0 rounded-xl bg-indigo-950/60 border border-indigo-800/60 flex items-center justify-center text-indigo-300">🎯</span>
+          <div>
+            <h2 className="text-lg font-bold text-zinc-100">
+              Default Quota &mdash; {processLabel}
+            </h2>
+            <p className="text-[13px] text-zinc-500">
+              Max undisposed leads an agent may hold with no per-agent override set below in
+              Team Roster. Blank uses this process&apos;s built-in fallback of {fallback}.
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            min="1"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={String(fallback)}
+            className="w-24 h-8 px-2 rounded-lg bg-zinc-950 border border-zinc-800 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+          />
+          <button
+            onClick={saveQuota}
+            disabled={saving}
+            className="h-8 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+      {error && (
+        <p className="mt-3 text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // Per-process TEAM registry (see calling_teams) - the self-serve half of NDR's per-team
 // isolation feature (docs/superpowers/specs/2026-08-26-ndr-per-team-isolation-design.md). A
 // team is a dimension INSIDE a process, not a process of its own: two NDR teams share this

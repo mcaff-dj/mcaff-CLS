@@ -111,7 +111,7 @@ const BOOTSTRAP_TABLES = [
   'users', 'permissions', 'audit_log', 'report_tab_permissions',
   'mom_boards', 'mom_board_members', 'mom_statuses', 'mom_columns', 'mom_tasks', 'mom_task_field_values',
   'report_cell_comments', 'ndr_lead_assignments', 'calling_process_dispositions', 'calling_business_hours',
-  'calling_agent_process', 'calling_teams', 'rto_csv_upload_jobs', 'order_punch_jobs',
+  'calling_agent_process', 'calling_teams', 'calling_process_settings', 'rto_csv_upload_jobs', 'order_punch_jobs',
   'order_punch_job_rows', 'order_punch_settings', 'delivery_escalation_partner_access',
   'delivery_escalation_sales_pincode_last_upload',
   'delivery_escalation_query_category_access', 'delivery_escalation_user_role',
@@ -455,6 +455,19 @@ async function bootstrapSchema() {
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_by VARCHAR(320),
       PRIMARY KEY (process_key, day)
+    )
+  `;
+  // Per-process default quota (max undisposed leads an agent may hold with no per-agent
+  // override) - admin-editable, so a process's cap can change without a code deploy. Read by
+  // whichever process's own next-lead endpoint falls back to it when calling_agent_process.
+  // max_quota is NULL for that agent; a missing row here means "use that endpoint's own
+  // hardcoded fallback", same NULL-means-unset contract as max_quota itself.
+  await sql`
+    CREATE TABLE IF NOT EXISTS calling_process_settings (
+      process_key VARCHAR(64) NOT NULL PRIMARY KEY,
+      default_quota INT,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_by VARCHAR(320)
     )
   `;
   // Per-process availability/capacity/filters for one agent - moved here from Postgres (same
@@ -3399,6 +3412,34 @@ async function setCallingBusinessHours(processKey, week, updatedBy) {
   return getCallingBusinessHours();
 }
 
+// Admin-set default quota for a process, or null when never set (caller falls back to its own
+// hardcoded default - see api/detractor/next-lead.js's DEFAULT_QUOTA).
+async function getCallingDefaultQuota(processKey) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT default_quota FROM calling_process_settings WHERE process_key = ${processKey}
+  `;
+  return rows.length && rows[0].default_quota != null ? rows[0].default_quota : null;
+}
+
+async function setCallingDefaultQuota(processKey, quota, updatedBy) {
+  await ensureSchema();
+  if (!processKey) throw new Error('processKey is required');
+  const value = quota === null || quota === '' ? null : Number(quota);
+  if (value != null && (!Number.isInteger(value) || value < 1)) {
+    throw new Error('Default quota must be a positive whole number, or blank to clear it');
+  }
+  await sql`
+    INSERT INTO calling_process_settings (process_key, default_quota, updated_at, updated_by)
+    VALUES (${processKey}, ${value}, NOW(), ${updatedBy || null})
+    ON DUPLICATE KEY UPDATE
+      default_quota = VALUES(default_quota),
+      updated_at = VALUES(updated_at),
+      updated_by = VALUES(updated_by)
+  `;
+  return value;
+}
+
 // ── Per-process calling roster ─────────────────────────────────────────────────────────
 // 'Busy' (UI label "On Break") predates this file's own naming conventions - kept as-is
 // rather than renamed, since it's already load-bearing history in agent_presence_log and
@@ -4828,6 +4869,7 @@ module.exports = {
   getOrderPunchJobRowsForExport, getOrderPunchSettings, upsertOrderPunchSetting,
   getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
+  getCallingDefaultQuota, setCallingDefaultQuota,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
   isCallingProcessAdmin, getAdministeredProcesses,
   listCallingTeams, getCallingTeam, createCallingTeam, updateCallingTeam, resolveCallerTeam,

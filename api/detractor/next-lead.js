@@ -5,17 +5,18 @@
 const { getSession } = require('../_lib/session');
 const {
   getDetractorAgentAvailability, getDetractorAgentQuota, getDetractorLoadByAgent,
-  getNextDetractorLead,
+  getNextDetractorLead, getCallingDefaultQuota,
 } = require('../_lib/db');
 
 const CARD_KEY = 'calling';
 const TAB_KEY = 'detractor';
 
-// No admin override on this default (unlike RTO's leadAssignmentRules.json) - NPS-Calling has
-// no comparable shared config file yet, and 15 is a deliberately conservative starting cap for
-// a brand-new process. Raise via calling_agent_process.max_quota per-agent if it's too low,
-// same as every other process's per-agent override already works.
-const DEFAULT_QUOTA = 15;
+// Falls back to this only when no admin has ever set calling_process_settings.default_quota for
+// 'detractor' (Admin Panel's Default Quota card) - a deliberately conservative starting cap.
+// Raise via calling_agent_process.max_quota for one agent's own override, or the admin-set
+// default for everyone with no override, same as every other process's per-agent override
+// already works.
+const FALLBACK_QUOTA = 15;
 
 function checkAccess(session) {
   if (!session) return 'Not authenticated';
@@ -47,7 +48,8 @@ module.exports = async (req, res) => {
     }
 
     const quotaOverride = await getDetractorAgentQuota(session.email);
-    const quota = quotaOverride != null ? quotaOverride : DEFAULT_QUOTA;
+    const processDefault = await getCallingDefaultQuota(TAB_KEY);
+    const quota = quotaOverride != null ? quotaOverride : (processDefault != null ? processDefault : FALLBACK_QUOTA);
     const load = await getDetractorLoadByAgent(session.email);
     if (load >= quota) {
       res.status(200).json({
