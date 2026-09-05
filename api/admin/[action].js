@@ -557,6 +557,7 @@ async function handleCallingAgents(req, res, session) {
           ndrReasonFilter: body.ndrReasonFilter,
           ndrPaymentModeFilter: body.ndrPaymentModeFilter,
           ndrBrandFilter: body.ndrBrandFilter,
+          detractorBrandFilter: body.detractorBrandFilter,
           teamId: body.teamId,
         },
         session.email,
