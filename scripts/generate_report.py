@@ -454,7 +454,7 @@ def build_insights_card_overview(ctx, uniq_class_month):
 _BUSINESS_KPI_INSIGHTS = {
     "mcaffeine": [
         ("May 2026", [
-            "O2D closed at 2.97d vs 2.84d target &mdash; SPCD/RU dip driven by Take-a-Dip Bodywash &amp; Hair Spray SKUs.",
+            "O2D closed at 2.97d &mdash; SPCD/RU dip driven by Take-a-Dip Bodywash &amp; Hair Spray SKUs.",
             "RTO + Cancellation at 13.20%, NDR Conversion down ~3% vs April.",
             "Warehouse hit by election manpower shortages (Kolkata, Guwahati) and Mumbai planning errors (6th &amp; 31st May).",
             "Elasticrun performance fell from ~96% to ~86% in the first two weeks (Mumbai, Ahmedabad, Jaipur worst-hit).",
@@ -466,7 +466,7 @@ _BUSINESS_KPI_INSIGHTS = {
             ("Wk22 (25-31 May)", "91,378", "14.00%", "2.74", "96.54%", "98.64%"),
         ]),
         ("June 2026", [
-            "O2D closed at 2.93d vs 2.88d target &mdash; weak first half (same SKU issue) recovered sharply from 11 June.",
+            "O2D closed at 2.93d &mdash; weak first half (same SKU issue) recovered sharply from 11 June.",
             "RTO + Cancellation eased slightly to 12.10% from May's 13.20%, but FASR stayed below the 80% benchmark all month.",
             "Guwahati worst-performing warehouse all month (DTDC device/manifestation issue at pickup).",
             "Xpressbees (76.00% SLA) and Delhivery (81.30%) weakest couriers, both hit by monsoon in the southern belt.",
@@ -477,8 +477,8 @@ _BUSINESS_KPI_INSIGHTS = {
             ("Wk26 (22-28 Jun)", "53,312", "12.80%", "2.60", "94.50%", "93.70%"),
         ]),
         ("July 2026", [
-            "O2D closed at 2.93d, marginally above the 2.91d target &mdash; Wk28 worst (Mumbai warehouse closed for waterlogging), recovered by Wk30.",
-            "RU (90.80%) and SPCD&lt;3hrs (90.80%) both closed below target; Take-a-Dip Bodywash &amp; Hair Spray remained the SKU drivers.",
+            "O2D closed at 2.93d &mdash; Wk28 worst (Mumbai warehouse closed for waterlogging), recovered by Wk30.",
+            "RU (90.80%) and SPCD&lt;3hrs (90.80%) both dipped; Take-a-Dip Bodywash &amp; Hair Spray remained the SKU drivers.",
             "RTO + Cancellation rose to ~14.20%, NDR Conversion fell to 58.50% &mdash; COD NDRs increasingly converting to RTO.",
             "TAT+2% rose to 4.70%; Xpressbees the largest contributor despite remaining the preferred allocation partner (highest FASR).",
         ], [
@@ -491,7 +491,7 @@ _BUSINESS_KPI_INSIGHTS = {
     ],
     "hyphen": [
         ("May 2026", [
-            "O2D closed at 2.72d vs 2.63d target &mdash; RU delay (+0.18d) driven by the ADP Dual Phase SKU.",
+            "O2D closed at 2.72d &mdash; RU delay (+0.18d) driven by the ADP Dual Phase SKU.",
             "RTO + Cancellation rose to 8.60% from 6.53% in April, driven by higher NDR%.",
             "Rapid Commerce launched in May (~50% of volume) but averaged only ~50% performance, limiting O2D gains.",
             "Warehouse impacted in Guwahati, Kolkata, Mumbai in Wk18-19 (elections + sale-period planning issues).",
@@ -503,7 +503,7 @@ _BUSINESS_KPI_INSIGHTS = {
             ("Wk22 (25-31 May)", "48,259", "7.00%", "2.61", "96.33%", "96.88%"),
         ]),
         ("June 2026", [
-            "O2D improved to 2.62d, beating the 2.68d target &mdash; RU delay nearly disappeared as the ADP Dual Phase issue resolved.",
+            "O2D improved to 2.62d &mdash; RU delay nearly disappeared as the ADP Dual Phase issue resolved.",
             "RTO + Cancellation kept rising to 9.40% (from 8.60% in May) &mdash; the one metric moving the wrong way even as O2D improved.",
             "Total order volume dropped sharply to 2.16L vs 3.75L in May and 3.57L in April.",
             "Guwahati (94.20%) and Hyderabad (95.90%) remained the weakest warehouses, same drivers as Mcaffeine.",
@@ -515,9 +515,9 @@ _BUSINESS_KPI_INSIGHTS = {
             ("29-30 Jun", "16,234", "1.50%", "1.43", "97.30%", "96.80%"),
         ]),
         ("July 2026", [
-            "O2D on track at 2.65d, in line with the 2.63d target &mdash; delay tightly controlled across every component.",
+            "O2D on track at 2.65d &mdash; delay tightly controlled across every component.",
             "RTO + Cancellation eased slightly to 9.10% from June's 9.40%; FASR improved marginally to 81.60%.",
-            "RU (95.10%) and SPCD&lt;3hrs (96.40%) marginally below target &mdash; ADP Dual Phase SKU still the primary driver.",
+            "RU (95.10%) and SPCD&lt;3hrs (96.40%) dipped slightly &mdash; ADP Dual Phase SKU still the primary driver.",
             "Bangalore warehouse share rising fast to 23.00% &mdash; flagged as the key capacity watch item for August.",
         ], [
             ("Wk27 (29 Jun-5 Jul)", "56,623", "10.00%", "2.66", "97.20%", "96.50%"),
