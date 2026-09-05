@@ -14,7 +14,7 @@ import { CallingShell } from '../_calling/CallingShell';
 import { scopeToDateBounds } from '../_calling/util';
 
 const PROCESS_KEY = 'detractor';
-// Keep in sync with api/detractor/next-lead.js's own FALLBACK_QUOTA - shown in the admin card so
+// Keep in sync with api/_lib/db.js's own DETRACTOR_FALLBACK_QUOTA - shown in the admin card so
 // "blank" reads as a real number instead of an unexplained empty field.
 const FALLBACK_QUOTA = 15;
 
@@ -358,22 +358,6 @@ export default function NpsCallingClient() {
     })();
   }, [tab, canAdminTab, predictedLeads]);
 
-  const [pulling, setPulling] = useState(false);
-  const pullNextLead = async () => {
-    setPulling(true);
-    try {
-      const r = await fetch('/api/detractor/next-lead', { method: 'POST' });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) { showToast(`⚠️ ${d.error || 'Could not pull a lead'}`); return; }
-      if (!d.assigned) { showToast(d.reason || 'No lead available right now.'); return; }
-      setTickets((prev) => [{ ...d.lead, agent_email: googleUser?.email, assigned_at: new Date().toISOString() }, ...prev]);
-      showToast(`New lead: ${d.lead.customer_name || d.lead.response_id}`);
-    } catch (e) {
-      showToast(`⚠️ ${e.message}`);
-    } finally {
-      setPulling(false);
-    }
-  };
 
   // Disposition modal state
   const [detailTkt, setDetailTkt] = useState(null);
@@ -502,7 +486,19 @@ export default function NpsCallingClient() {
       // Leads tables, not just this agent's own tickets array) - patch allTickets too so the
       // admin table reflects it without a refetch.
       setAllTickets((prev) => (prev ? prev.map(patch) : prev));
-      showToast('Disposition saved');
+      // Self-refill (api/detractor/lead-assignment.js): 0 or 1 freshly-claimed lead for THIS
+      // agent, replacing the one just disposed. Absent for an admin-override dispose onto
+      // someone else's lead - see that endpoint's own isOverrideOntoSomeoneElse check.
+      if (Array.isArray(d.assignedLeads) && d.assignedLeads.length) {
+        const now = new Date().toISOString();
+        setTickets((prev) => [
+          ...d.assignedLeads.map((lead) => ({ ...lead, agent_email: googleUser?.email, assigned_at: now })),
+          ...prev,
+        ]);
+        showToast(`Disposition saved. New lead: ${d.assignedLeads[0].customer_name || d.assignedLeads[0].response_id}`);
+      } else {
+        showToast('Disposition saved');
+      }
       closeDispose();
     } catch (e) {
       showToast(`⚠️ ${e.message}`);
@@ -731,16 +727,6 @@ export default function NpsCallingClient() {
         syncError={null}
         onSync={() => fetchMyTickets()}
         session={session}
-        rightSlot={
-          <button
-            type="button"
-            onClick={pullNextLead}
-            disabled={pulling}
-            className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-[13px] font-bold text-white transition-colors shrink-0"
-          >
-            {pulling ? 'Pulling…' : '📞 Pull Next Lead'}
-          </button>
-        }
       />
 
       <main className="flex-1 max-w-[1440px] w-full mx-auto px-5 py-5 space-y-5">
@@ -800,7 +786,7 @@ export default function NpsCallingClient() {
                   <div className="space-y-3">
                     {ticketsLoading && <p className="text-[13px] text-zinc-500">Loading…</p>}
                     {!ticketsLoading && !pendingTickets.length && (
-                      <p className="text-[13px] text-zinc-500">No leads in your queue. Click Pull Next Lead above.</p>
+                      <p className="text-[13px] text-zinc-500">No leads in your queue. Go Online to get assigned automatically.</p>
                     )}
                     {pendingTickets.map((t) => renderTicketCard(t, { showDisposeButton: true }))}
                   </div>
@@ -954,7 +940,7 @@ export default function NpsCallingClient() {
                             <th className="py-3 px-4 text-center font-medium">Disposed</th>
                             <th className="py-3 px-4 text-center font-medium">Connect %</th>
                             <th className="py-3 px-4 text-left font-medium">Quota</th>
-                            <th className="py-3 px-4 text-left font-medium" title="Which brand's leads pullNextLead will hand this agent - All Brands means no restriction">Brand</th>
+                            <th className="py-3 px-4 text-left font-medium" title="Brand restriction for lead assignment - All Brands means no restriction">Brand</th>
                             <th className="py-3 px-4 text-center font-medium" title="Can manage this process's roster and calling hours - nothing else">Process admin</th>
                           </tr></thead>
                           <tbody className="divide-y divide-zinc-800/50">
