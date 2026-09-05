@@ -2,7 +2,8 @@
 // file to stay under Vercel Hobby's 12-serverless-function cap. req.query.action tells
 // us which logical route was hit; URLs are unchanged.
 const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
-  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent, isCallingProcessAdmin, resolveCallerTeam, getDeliveryEscalationUserRoleByEmail } = require('../_lib/db');
+  CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent, isCallingProcessAdmin, resolveCallerTeam, getDeliveryEscalationUserRoleByEmail,
+  getDetractorQuotaAndLoad, assignDetractorLeadsToAgent } = require('../_lib/db');
 const { teamScopeFor } = require('../_lib/callingTeams');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
@@ -553,6 +554,19 @@ async function handleProcessPresence(req, res) {
     triggerImmediateLambdaAssignment(PROCESS_ASSIGN_LAMBDA[body.processKey]).catch(() => {});
   } else if (body.status === 'Online' && PROCESS_ASSIGN_WORKFLOW[body.processKey]) {
     triggerImmediateAssignment(PROCESS_ASSIGN_WORKFLOW[body.processKey]).catch(() => {});
+  } else if (body.status === 'Online' && body.processKey === 'detractor') {
+    // No Sheet, no GoKwik, no cron/Lambda for this process (see the 2026-09-05 auto-assignment
+    // design spec) - going Online batch-fills the agent up to quota with a plain inline MySQL
+    // call instead, fire-and-forget same as the two branches above so a slow/failed fill never
+    // blocks the presence-toggle response the agent is waiting on.
+    (async () => {
+      try {
+        const { quota, load } = await getDetractorQuotaAndLoad(session.email);
+        await assignDetractorLeadsToAgent(session.email, Math.max(0, quota - load));
+      } catch (e) {
+        console.error('handleProcessPresence: detractor auto-fill failed:', e.message || e);
+      }
+    })();
   }
   res.status(200).json({ ok: true, processKey: body.processKey, status: body.status });
 }
