@@ -76,6 +76,15 @@ function hasValue(v) {
   return !!v && v !== 'NA';
 }
 
+// AI-classified sentiment of additional_feedback (see api/_lib/sentiment.js) - null on leads
+// assigned before this shipped, or whenever ANTHROPIC_API_KEY isn't configured; the badge just
+// doesn't render then (hasValue gate at the call site).
+const SENTIMENT_BADGE = {
+  Positive: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+  Neutral: 'bg-zinc-500/15 text-zinc-300 border-zinc-500/30',
+  Negative: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
+};
+
 // product_name_list is comma-separated between products, but at least one product's own name
 // ALSO embeds a comma before its size (e.g. "Naked Raw Coffee Face Wash, 100 ml" sits right next
 // to "Naked Raw Coffee Face Scrub100g", which has no comma at all before its own size) - the
@@ -555,6 +564,14 @@ export default function NpsCallingClient() {
           <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30">
             NPS {t.nps_score ?? '—'} · {t.nps_category}
           </span>
+          {hasValue(t.sentiment) && (
+            <span
+              title={t.sentiment_reason || ''}
+              className={`px-2 py-0.5 rounded-md text-[11px] font-bold border ${SENTIMENT_BADGE[t.sentiment] || SENTIMENT_BADGE.Neutral}`}
+            >
+              {t.sentiment}
+            </span>
+          )}
           {t.submitted_date && (
             <span className="text-[11px] text-zinc-500 flex items-center gap-1"><CalendarIcon /> {t.submitted_date}</span>
           )}
@@ -652,6 +669,7 @@ export default function NpsCallingClient() {
                     <th className="py-2.5 px-4 text-left font-medium">Customer</th>
                     <th className="py-2.5 px-4 text-left font-medium">Order</th>
                     <th className="py-2.5 px-4 text-left font-medium">NPS</th>
+                    <th className="py-2.5 px-4 text-left font-medium">Sentiment</th>
                     <th className="py-2.5 px-4 text-left font-medium">Agent</th>
                     <th className="py-2.5 px-4 text-left font-medium">Submitted</th>
                     <th className="py-2.5 px-4 text-left font-medium">Assigned</th>
@@ -666,6 +684,11 @@ export default function NpsCallingClient() {
                         <td className="py-2.5 px-4 text-zinc-200">{t.customer_name || '—'}</td>
                         <td className="py-2.5 px-4 text-zinc-400">{[t.brand, t.channel_order_id].filter(Boolean).join(' · ') || '—'}</td>
                         <td className="py-2.5 px-4 text-zinc-400">{t.nps_score ?? '—'} · {t.nps_category || '—'}</td>
+                        <td className="py-2.5 px-4">
+                          {hasValue(t.sentiment)
+                            ? <span title={t.sentiment_reason || ''} className={`px-2 py-0.5 rounded-md text-[11px] font-bold border ${SENTIMENT_BADGE[t.sentiment] || SENTIMENT_BADGE.Neutral}`}>{t.sentiment}</span>
+                            : <span className="text-zinc-600">—</span>}
+                        </td>
                         <td className="py-2.5 px-4 text-zinc-400 font-mono text-[11px]">{t.agent_email || '—'}</td>
                         <td className="py-2.5 px-4 text-zinc-500 text-[11px]">{t.submitted_date || '—'}</td>
                         <td className="py-2.5 px-4 text-zinc-500 text-[11px]">{t.assigned_at ? new Date(t.assigned_at).toLocaleString() : '—'}</td>
