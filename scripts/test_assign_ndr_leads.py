@@ -288,7 +288,9 @@ def test_record_new_assignments_absorbs_live_key_collision_per_row():
     assert ok is True
     updates = [p for sql, p in cursor.statements
                if sql.startswith("UPDATE") and isinstance(p, tuple)]
-    assert any(p[2] == "AWB1" for p in updates), "collided AWB must fall back to an UPDATE"
+    # awb is always the last param (it's the WHERE clause value) regardless of how many lead-
+    # attribute columns sit in the SET clause ahead of it.
+    assert any(p[-1] == "AWB1" for p in updates), "collided AWB must fall back to an UPDATE"
     inserts = [p for sql, p in cursor.statements if "INSERT" in sql]
     assert any(p[0] == "AWB2" for p in inserts), "the other lead must still be inserted"
 
@@ -415,7 +417,9 @@ def test_main_isolates_two_teams_no_cross_assignment():
     assert by_sheet["SHEET_B"][0]["values"] == [["b@x.com"]], \
         f"Team B's lead must go to b@x.com on SHEET_B, got {by_sheet['SHEET_B']!r}"
 
-    all_mirrored = [pair for batch in mirrored_batches for pair in batch]
+    # Each mirrored item is (awb, email, courier, reason, payment_mode, brand) now - compare only
+    # the (awb, email) prefix, which is all this test cares about.
+    all_mirrored = [pair[:2] for batch in mirrored_batches for pair in batch]
     assert ("AWB-A", "a@x.com") in all_mirrored and ("AWB-B", "b@x.com") in all_mirrored
     assert ("AWB-A", "b@x.com") not in all_mirrored, "team A's AWB must never mirror to team B's agent"
     assert ("AWB-B", "a@x.com") not in all_mirrored, "team B's AWB must never mirror to team A's agent"
@@ -637,6 +641,25 @@ def test_main_names_the_agents_excluded_for_having_no_team(capsys=None):
     out = buf.getvalue()
     assert "rasika@x.com" in out and "no team" in out.lower(), \
         f"an agent excluded for having no team must be named in the run output, got:\n{out}"
+
+
+def test_record_new_assignments_writes_lead_attributes_when_given():
+    ok, cursor, _fake = _run_record(
+        [("AWB1", "a@x.com", "Delhivery", "Customer refused", "COD", "mCaffeine")])
+    assert ok is True
+    inserts = [p for sql, p in cursor.statements if "INSERT" in sql]
+    assert len(inserts) == 1
+    awb, email, now, courier, reason, payment_mode, brand = inserts[0]
+    assert (courier, reason, payment_mode, brand) == ("Delhivery", "Customer refused", "COD", "mCaffeine")
+
+
+def test_record_new_assignments_still_accepts_plain_two_tuples():
+    # assign_for_run is the only real caller of the longer form; every other existing caller in
+    # this test file (and any future one) must keep working with the original (awb, email) shape.
+    ok, cursor, _fake = _run_record([("AWB2", "b@x.com")])
+    assert ok is True
+    inserts = [p for sql, p in cursor.statements if "INSERT" in sql]
+    assert inserts[0][3:] == (None, None, None, None)
 
 
 if __name__ == "__main__":

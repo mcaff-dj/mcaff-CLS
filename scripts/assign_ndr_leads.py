@@ -56,6 +56,7 @@ SHEET_TAB = "Latest NDR "  # trailing space is part of the real tab name - do no
 # else's existing sheet, not ours, so these are fixed positions, not derived from a source
 # schema. Only COL_AGENT is ever written by this script.
 COL_ORDER_ID = 0             # A - source for brand_of (no dedicated Brand column exists)
+COL_COURIER = 5              # F - "Courier Company" / sheet header "Partner name"
 COL_AWB = 4                  # E
 COL_PAYMENT_MODE = 11        # L - "Prepaid"/"COD", matched by agent_payment_mode_filter
 COL_ATTEMPTS = 14            # O - Attempt Count
@@ -302,9 +303,20 @@ def record_new_assignments(new_assignments):
         print("  (MYSQL_* credentials not configured - skipping ndr_lead_assignments write)")
         return True
     now = datetime.now(timezone.utc).replace(tzinfo=None)  # see fetch_current_assignment_times: stored naive-but-UTC
+    # Each item is (awb, email) or (awb, email, courier, reason, payment_mode, brand) - accept
+    # both so every existing 2-tuple caller (scripts/test_assign_ndr_leads.py's many fakes) keeps
+    # working unchanged; only assign_for_run's own new_assignments passes the longer form.
+    def _unpack(item):
+        awb, email, *rest = item
+        courier, reason, payment_mode, brand = (list(rest) + [None, None, None, None])[:4]
+        return awb, email, courier, reason, payment_mode, brand
     # Last agent wins for a repeated AWB, matching the sheet: the later row's Agent Name write
     # is the one an agent sees, and only one live row per AWB can exist anyway.
-    batch = list({awb: email for awb, email in new_assignments}.items())
+    by_awb = {}
+    for item in new_assignments:
+        awb, email, courier, reason, payment_mode, brand = _unpack(item)
+        by_awb[awb] = (email, courier, reason, payment_mode, brand)
+    batch = [(awb, *rest) for awb, rest in by_awb.items()]
     conn = None
     try:
         # Inside the try, unlike before: a connect failure used to propagate out of here and
@@ -318,22 +330,24 @@ def record_new_assignments(new_assignments):
         cur.executemany(
             "UPDATE ndr_lead_assignments SET reassigned_away_at = %s "
             "WHERE awb_number = %s AND reassigned_away_at IS NULL",
-            [(now, awb) for awb, _email in batch],
+            [(now, awb) for awb, _email, _courier, _reason, _payment_mode, _brand in batch],
         )
-        for awb, email in batch:
+        for awb, email, courier, reason, payment_mode, brand in batch:
             try:
                 cur.execute(
-                    "INSERT INTO ndr_lead_assignments (awb_number, email, assigned_at) "
-                    "VALUES (%s, %s, %s)",
-                    (awb, email, now),
+                    "INSERT INTO ndr_lead_assignments "
+                    "(awb_number, email, assigned_at, delivery_partner, ndr_reason, payment_mode, brand) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (awb, email, now, courier or None, reason or None, payment_mode or None, brand or None),
                 )
             except pymysql.err.IntegrityError as e:
                 if "ndr_lead_assignments_live_awb_key" not in str(e):
                     raise  # not this AWB's own live row - a real error, don't paper over it
                 cur.execute(
-                    "UPDATE ndr_lead_assignments SET email = %s, assigned_at = %s "
+                    "UPDATE ndr_lead_assignments SET email = %s, assigned_at = %s, "
+                    "delivery_partner = %s, ndr_reason = %s, payment_mode = %s, brand = %s "
                     "WHERE awb_number = %s AND reassigned_away_at IS NULL",
-                    (email, now, awb),
+                    (email, now, courier or None, reason or None, payment_mode or None, brand or None, awb),
                 )
         conn.commit()
         return True
@@ -365,7 +379,7 @@ def assign_for_run(run, online_agents, quotas, attempt_filters, reason_filters,
 
     current_load = {email: 0 for email in online_agents}
     unassigned = []  # (row_number, latest_ndr_date, attempt_bucket, latest_ndr_reason,
-                      #  payment_mode, brand, awb_number)
+                      #  payment_mode, brand, courier, awb_number)
     for i, row in enumerate(sheet_rows):
         agent = row[COL_AGENT].strip().lower() if len(row) > COL_AGENT and row[COL_AGENT] else ""
         if agent:
@@ -383,9 +397,10 @@ def assign_for_run(run, online_agents, quotas, attempt_filters, reason_filters,
             reason = row[COL_LATEST_NDR_REASON] if len(row) > COL_LATEST_NDR_REASON else ""
             payment_mode = row[COL_PAYMENT_MODE] if len(row) > COL_PAYMENT_MODE else ""
             brand = brand_of(row[COL_ORDER_ID] if len(row) > COL_ORDER_ID else "")
+            courier = row[COL_COURIER] if len(row) > COL_COURIER else ""
             awb = row[COL_AWB] if len(row) > COL_AWB else ""
             if awb:
-                unassigned.append((i + 2, latest_ndr_date, bucket, reason, payment_mode, brand, awb))
+                unassigned.append((i + 2, latest_ndr_date, bucket, reason, payment_mode, brand, courier, awb))
 
     if not unassigned:
         print(f"[{label}] No unassigned NDR leads found - nothing to assign.")
@@ -424,16 +439,17 @@ def assign_for_run(run, online_agents, quotas, attempt_filters, reason_filters,
     # alongside four unrestricted colleagues (see test_assign_for_run_does_not_starve_a_filtered
     # _agent). Nobody could see it happening either: the run only ever printed who DID get leads.
     supply = {email: 0 for email in online_agents}
-    for _, _, bucket, reason, payment_mode, brand, _ in unassigned:
+    for _, _, bucket, reason, payment_mode, brand, _courier, _ in unassigned:
         for email in online_agents:
             if _eligible(email, bucket, reason, payment_mode, brand):
                 supply[email] += 1
 
     value_ranges = []
-    new_assignments = []  # (awb_number, email) - mirrored into Postgres after the sheet write
+    new_assignments = []  # (awb_number, email, courier, reason, payment_mode, brand) - mirrored
+                          # into MySQL after the sheet write
     assigned_count = {}
     no_agent_for_bucket = 0
-    for row_num, _, bucket, reason, payment_mode, brand, awb in unassigned:
+    for row_num, _, bucket, reason, payment_mode, brand, courier, awb in unassigned:
         if not remaining_agents:
             break
         candidates = [e for e in remaining_agents
@@ -458,7 +474,7 @@ def assign_for_run(run, online_agents, quotas, attempt_filters, reason_filters,
             "range": f"'{sheet_tab}'!{COL_AGENT_LETTER}{row_num}",
             "values": [[email]],
         })
-        new_assignments.append((awb, email))
+        new_assignments.append((awb, email, courier, reason, payment_mode, brand))
         assigned_count[email] = assigned_count.get(email, 0) + 1
         needed[email] -= 1
         if needed[email] <= 0:
