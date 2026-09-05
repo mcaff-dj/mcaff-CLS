@@ -218,6 +218,16 @@ export default function NpsCallingClient() {
     return '';
   }, [selectedReasons]);
 
+  // Once a branch is picked, the OTHER branch's whole category list is hidden, not just
+  // unselectable - showing 30-odd Connected reasons while a Non Connected reason is checked
+  // is confusing (an agent could easily miss that ticking one of them would just switch
+  // branches). Both branches show again once nothing is selected, so there's still a way in.
+  const visibleDispositionNodes = useMemo(() => {
+    if (!derivedConnected) return processDispositions;
+    const wantLabel = derivedConnected === 'Yes' ? 'Connected' : 'Non Connected';
+    return (processDispositions || []).filter((n) => n.label === wantLabel);
+  }, [processDispositions, derivedConnected]);
+
   const saveDisposition = async () => {
     if (!detailTkt || !selectedReasons.size || !derivedConnected) return;
     setDispSaving(true);
@@ -596,7 +606,7 @@ export default function NpsCallingClient() {
               <p className="text-[12px] text-zinc-400 font-semibold mb-1.5">
                 Disposition{selectedReasons.size ? ` (${selectedReasons.size} selected)` : ''} — pick Connected or Non Connected, then check every reason that applies
               </p>
-              <DispositionChecklist nodes={processDispositions} selected={selectedReasons} onToggle={toggleReason} />
+              <DispositionChecklist nodes={visibleDispositionNodes} selected={selectedReasons} onToggle={toggleReason} />
             </div>
 
             <textarea
