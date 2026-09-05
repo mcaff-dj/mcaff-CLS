@@ -28,6 +28,11 @@ const BRAND_OPTIONS = [
   { value: 'mCaffeine', label: 'mCaffeine' },
 ];
 
+const PROCESS_OPTIONS = [
+  { value: 'RTO', label: 'RTO' },
+  { value: 'NDR', label: 'NDR' },
+];
+
 // Shared column shape for every funnel table on this page (Delivery Partner Breakdown, RTO
 // Reason Breakdown, and the per-partner RTO reason sub-table) - only the leftmost label
 // column differs between them.
@@ -42,7 +47,9 @@ function funnelColumns(labelKey, labelText) {
   ];
 }
 const PARTNER_COLUMNS = funnelColumns('deliveryPartner', 'Delivery Partner');
-const REASON_COLUMNS = funnelColumns('rtoReason', 'RTO Reason');
+function reasonColumns(processFilter) {
+  return funnelColumns('rtoReason', processFilter === 'NDR' ? 'NDR Reason' : 'RTO Reason');
+}
 const DEFAULT_SORT = { key: 'totalAssigned', dir: 'desc' };
 
 function sortRows(rows, sort) {
@@ -122,6 +129,7 @@ export default function CallingOverviewClient() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [authed, setAuthed] = useState(false);
+  const [processFilter, setProcessFilter] = useState('RTO');
   const [dateScope, setDateScope] = useState('ALL_TIME');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
@@ -156,6 +164,7 @@ export default function CallingOverviewClient() {
     if (!authed) return;
     setError(null);
     const params = new URLSearchParams();
+    params.set('process', processFilter);
     if (dateFrom) params.set('dateFrom', dateFrom);
     if (dateTo) params.set('dateTo', dateTo);
     if (paymentMode) params.set('paymentMode', paymentMode);
@@ -171,9 +180,10 @@ export default function CallingOverviewClient() {
       })
       .then((json) => setData(json))
       .catch((e) => setError(e.message || 'Could not load Calling Team overview.'));
-  }, [authed, dateFrom, dateTo, paymentMode, brand]);
+  }, [authed, processFilter, dateFrom, dateTo, paymentMode, brand]);
 
   const stats = data && data.stats;
+  const REASON_COLUMNS = reasonColumns(processFilter);
 
   const togglePartner = (partner) => {
     setExpandedPartners((prev) => {
@@ -194,6 +204,14 @@ export default function CallingOverviewClient() {
       </header>
 
       <div className="co-filterbar">
+        <div className="co-filter-group">
+          <label htmlFor="co-process">Process</label>
+          <select id="co-process" value={processFilter} onChange={(e) => setProcessFilter(e.target.value)}>
+            {PROCESS_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
         <div className="co-filter-group">
           <label htmlFor="co-date-scope">Date range</label>
           <select id="co-date-scope" value={dateScope} onChange={(e) => setDateScope(e.target.value)}>
@@ -252,11 +270,13 @@ export default function CallingOverviewClient() {
             <div className="kpi-value">{stats.connectRate}%</div>
             <div className="kpi-sub">Call success</div>
           </div>
-          <div className="kpi kpi-accent">
-            <div className="kpi-label">Refunds</div>
-            <div className="kpi-value">{stats.totalRefunded.toLocaleString('en-IN')}</div>
-            <div className="kpi-sub">₹{stats.totalRefundAmount.toLocaleString('en-IN')}</div>
-          </div>
+          {processFilter !== 'NDR' && (
+            <div className="kpi kpi-accent">
+              <div className="kpi-label">Refunds</div>
+              <div className="kpi-value">{stats.totalRefunded.toLocaleString('en-IN')}</div>
+              <div className="kpi-sub">₹{stats.totalRefundAmount.toLocaleString('en-IN')}</div>
+            </div>
+          )}
           <div className="kpi kpi-good">
             <div className="kpi-label">Total Converted</div>
             <div className="kpi-value">{stats.totalConverted.toLocaleString('en-IN')}</div>
@@ -268,7 +288,7 @@ export default function CallingOverviewClient() {
       {data && data.partnerReasonBreakdown && (
         <div className="co-table-card">
           <h2 className="co-table-title">Delivery Partner Breakdown</h2>
-          <p className="co-table-hint">Click a partner to see its RTO reason funnel.</p>
+          <p className="co-table-hint">Click a partner to see its {processFilter === 'NDR' ? 'NDR' : 'RTO'} reason funnel.</p>
           <table className="co-table">
             <thead>
               <SortableHeaderRow
@@ -346,7 +366,7 @@ export default function CallingOverviewClient() {
 
       {data && data.reasonBreakdown && (
         <div className="co-table-card">
-          <h2 className="co-table-title">RTO Reason Breakdown</h2>
+          <h2 className="co-table-title">{processFilter === 'NDR' ? 'NDR' : 'RTO'} Reason Breakdown</h2>
           <table className="co-table">
             <thead>
               <SortableHeaderRow
