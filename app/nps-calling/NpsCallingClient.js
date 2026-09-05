@@ -230,7 +230,10 @@ export default function NpsCallingClient() {
   const [rosterStatusFilter, setRosterStatusFilter] = useState('All');
   const [allLeadsSearch, setAllLeadsSearch] = useState('');
   const [allLeadsAgentFilter, setAllLeadsAgentFilter] = useState('ALL');
-  const [allLeadsStatusFilter, setAllLeadsStatusFilter] = useState('ALL');
+  // Defaults to DISPOSED, not ALL - the tab is literally labelled "All Leads (Disposed)" and its
+  // count badge only counts disposed tickets, so showing Pending rows under it by default
+  // contradicted both the label and the badge.
+  const [allLeadsStatusFilter, setAllLeadsStatusFilter] = useState('DISPOSED');
   // Next to Assign preview (admin/process-admin only) - fetched once on first visit to that tab,
   // not eagerly alongside allTickets, since it's a rarely-opened peek rather than core workflow.
   const [predictedLeads, setPredictedLeads] = useState(null);
