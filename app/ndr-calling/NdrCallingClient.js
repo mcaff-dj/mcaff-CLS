@@ -1165,6 +1165,10 @@ export default function NdrCallingClient() {
   // mode/refund data at all, so every Prepaid/COD/Refund column RTO has is replaced here with
   // NDR's own equivalents: Reorders Converted (outcome 'New order Placed'), Mark RTO Count
   // (outcome 'Mark RTO'), and High-Attempt Assigned (3+ delivery attempts).
+  // Case-insensitive: the admin-editable disposition tree (useProcessDispositions) lets any
+  // team re-word this label's case ("New Order Placed" vs "New order Placed") without it
+  // being a schema change, and an exact-match check would silently zero this metric out.
+  const ndrIsReorderOutcome = (t) => (t.outcome || '').toLowerCase() === 'new order placed';
   const ndrIsAssignedTo = (t, email) => {
     const e = (email || '').toLowerCase();
     const a = (t.assignedAgent || '').toLowerCase();
@@ -1190,7 +1194,7 @@ export default function NdrCallingClient() {
   const ndrKpiTotalPending = ndrKpiTotalAssigned - ndrKpiTotalDisposed;
   const ndrKpiAvgConnectRate = ndrKpiTotalDisposed > 0 ? Math.round((ndrKpiTotalConnected / ndrKpiTotalDisposed) * 100) : 0;
   const ndrKpiTotalReordersConverted = ndrTickets.filter(t =>
-    ndrOverviewRoster.some(ag => ndrIsAssignedTo(t, ag.email)) && t.outcome === 'New order Placed' && ndrKpiInScope(t)
+    ndrOverviewRoster.some(ag => ndrIsAssignedTo(t, ag.email)) && ndrIsReorderOutcome(t) && ndrKpiInScope(t)
   ).length;
   // Unscoped by role (matches RTO's own freshUnassignedInScope) - an unassigned lead isn't
   // "assigned to" any agent, so per-agent roster scoping doesn't apply to it either way.
@@ -1210,7 +1214,7 @@ export default function NdrCallingClient() {
 
     const disposedByDate = ndrTickets.filter(t => ndrIsAssignedTo(t, ag.email) && t.connected && ndrDisposedDateInScope(t));
     const connected = disposedByDate.filter(t => t.connected === 'Yes');
-    const reordersConverted = disposedByDate.filter(t => t.outcome === 'New order Placed');
+    const reordersConverted = disposedByDate.filter(ndrIsReorderOutcome);
     const markedRto = disposedByDate.filter(t => t.outcome === 'Mark RTO');
 
     // First Called At / FRT - per active IST day, same averaging as RTO's own
@@ -1343,7 +1347,7 @@ export default function NdrCallingClient() {
   const ndrHeatmapAgentData = ndrOverviewRoster.map(ag => {
     const disposedByDate = ndrTickets.filter(t => ndrIsAssignedTo(t, ag.email) && t.connected && ndrDisposedDateInScope(t));
     const metricTickets = ndrHeatmapMetric === 'connected' ? disposedByDate.filter(t => t.connected === 'Yes')
-      : ndrHeatmapMetric === 'converted' ? disposedByDate.filter(t => t.outcome === 'New order Placed')
+      : ndrHeatmapMetric === 'converted' ? disposedByDate.filter(ndrIsReorderOutcome)
       : disposedByDate;
     const bucketCounts = new Map();
     for (const t of metricTickets) {
@@ -1389,7 +1393,7 @@ export default function NdrCallingClient() {
   );
   const ndrLeadDisposed = ndrLeadTargetTickets.filter(t => t.connected);
   const ndrLeadConnectedCalls = ndrLeadDisposed.filter(t => t.connected === 'Yes').length;
-  const ndrLeadReordersConverted = ndrLeadDisposed.filter(t => t.outcome === 'New order Placed').length;
+  const ndrLeadReordersConverted = ndrLeadDisposed.filter(ndrIsReorderOutcome).length;
   const ndrLeadMarkedRto = ndrLeadDisposed.filter(t => t.outcome === 'Mark RTO').length;
   const ndrLeadConnectRate = ndrLeadDisposed.length > 0 ? Math.round((ndrLeadConnectedCalls / ndrLeadDisposed.length) * 100) : 0;
   const ndrLeadReorderRate = ndrLeadConnectedCalls > 0 ? Math.round((ndrLeadReordersConverted / ndrLeadConnectedCalls) * 100) : 0;
