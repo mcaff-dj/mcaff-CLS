@@ -386,11 +386,16 @@ export default function NpsCallingClient() {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { showToast(`⚠️ ${d.error || 'Could not save disposition'}`); return; }
-      setTickets((prev) => prev.map((t) => (
+      const patch = (t) => (
         t.response_id === detailTkt.response_id
           ? { ...t, disposed_at: new Date().toISOString(), disposition: joinedDisposition, agent_remarks: dispRemarks, connected: derivedConnected, attempt }
           : t
-      )));
+      );
+      setTickets((prev) => prev.map(patch));
+      // detailTkt can be someone else's lead (admin/process-admin override via the All/Fresh
+      // Leads tables, not just this agent's own tickets array) - patch allTickets too so the
+      // admin table reflects it without a refetch.
+      setAllTickets((prev) => (prev ? prev.map(patch) : prev));
       showToast('Disposition saved');
       closeDispose();
     } catch (e) {
@@ -554,6 +559,7 @@ export default function NpsCallingClient() {
                     <th className="py-2.5 px-4 text-left font-medium">Status</th>
                     <th className="py-2.5 px-4 text-left font-medium">Disposition</th>
                     <th className="py-2.5 px-4 text-center font-medium">Connected</th>
+                    <th className="py-2.5 px-4 text-center font-medium">Action</th>
                   </tr></thead>
                   <tbody className="divide-y divide-zinc-800/50">
                     {filtered.map((t) => (
@@ -570,6 +576,18 @@ export default function NpsCallingClient() {
                         </td>
                         <td className="py-2.5 px-4 text-zinc-400 max-w-[220px] truncate" title={t.disposition || ''}>{t.disposition || '—'}</td>
                         <td className="py-2.5 px-4 text-center text-zinc-400">{t.connected || '—'}</td>
+                        <td className="py-2.5 px-4 text-center">
+                          {!t.disposed_at && (
+                            <button
+                              type="button"
+                              onClick={() => openDispose(t)}
+                              title="Dispose on this agent's behalf"
+                              className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+                            >
+                              Dispose
+                            </button>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

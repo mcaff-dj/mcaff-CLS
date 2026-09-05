@@ -1906,15 +1906,34 @@ async function getUnassignedDetractorLeads(limit = 20) {
 // second dispose of the same lead is a no-op) - no self-heal insert like disposeNdrLead's,
 // because unlike NDR there is no Sheet that could have the claim while this table doesn't; the
 // row from getNextDetractorLead's own INSERT always exists first.
-async function disposeDetractorLead(responseId, disposition, agentRemarks, connected, attempt, email) {
+// allowAnyAgent (admin/process-admin override, checked by the caller - api/detractor/
+// lead-assignment.js - before setting this true): drops the ownership check so an admin can
+// dispose a lead assigned to someone else (agent unavailable, QA correction). The row's own
+// agent_email is left untouched either way - the disposition still counts toward the ORIGINAL
+// agent's metrics/connect-rate, not the admin who filed it on their behalf. Returns the lead's
+// agent_email (whether or not the update actually matched a row) so the caller can log who an
+// override was performed on.
+async function disposeDetractorLead(responseId, disposition, agentRemarks, connected, attempt, email, { allowAnyAgent = false } = {}) {
   await ensureSchema();
-  await sql`
-    UPDATE CLS_NPS_calling
-    SET disposed_at = NOW(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null},
-        connected = ${connected || null}, attempt = ${attempt || null}
-    WHERE response_id = ${responseId} AND LOWER(agent_email) = LOWER(${email}) AND disposed_at IS NULL
-  `;
+  const { rows: existing } = await sql`SELECT agent_email FROM CLS_NPS_calling WHERE response_id = ${responseId}`;
+  const originalAgentEmail = existing.length ? existing[0].agent_email : null;
+  if (allowAnyAgent) {
+    await sql`
+      UPDATE CLS_NPS_calling
+      SET disposed_at = NOW(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null},
+          connected = ${connected || null}, attempt = ${attempt || null}
+      WHERE response_id = ${responseId} AND disposed_at IS NULL
+    `;
+  } else {
+    await sql`
+      UPDATE CLS_NPS_calling
+      SET disposed_at = NOW(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null},
+          connected = ${connected || null}, attempt = ${attempt || null}
+      WHERE response_id = ${responseId} AND LOWER(agent_email) = LOWER(${email}) AND disposed_at IS NULL
+    `;
+  }
   invalidateCache('calling:detractorLeadDates');
+  return { originalAgentEmail };
 }
 
 // This agent's own tickets (assigned and/or disposed), newest first - "My Queue"/"Disposed" tabs.
