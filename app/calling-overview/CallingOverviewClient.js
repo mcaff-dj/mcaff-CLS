@@ -344,7 +344,7 @@ export default function CallingOverviewClient() {
         </div>
       )}
 
-      {data && data.rtoReasonBreakdown && (
+      {data && data.reasonBreakdown && (
         <div className="co-table-card">
           <h2 className="co-table-title">RTO Reason Breakdown</h2>
           <table className="co-table">
@@ -356,7 +356,7 @@ export default function CallingOverviewClient() {
               />
             </thead>
             <tbody>
-              {sortRows(data.rtoReasonBreakdown, reasonSort).map((row) => (
+              {sortRows(data.reasonBreakdown, reasonSort).map((row) => (
                 <tr key={row.rtoReason}>
                   <td>{row.rtoReason}</td>
                   <td>{row.totalAssigned.toLocaleString('en-IN')}</td>
@@ -366,13 +366,13 @@ export default function CallingOverviewClient() {
                   <td>{row.convertedPct}%</td>
                 </tr>
               ))}
-              {!data.rtoReasonBreakdown.length && (
+              {!data.reasonBreakdown.length && (
                 <tr><td colSpan={6} className="co-table-empty">No data for this filter.</td></tr>
               )}
-              {!!data.rtoReasonBreakdown.length && (() => {
-                const totalAssigned = data.rtoReasonBreakdown.reduce((s, r) => s + r.totalAssigned, 0);
-                const totalConnected = data.rtoReasonBreakdown.reduce((s, r) => s + r.totalConnected, 0);
-                const totalConverted = data.rtoReasonBreakdown.reduce((s, r) => s + r.totalConverted, 0);
+              {!!data.reasonBreakdown.length && (() => {
+                const totalAssigned = data.reasonBreakdown.reduce((s, r) => s + r.totalAssigned, 0);
+                const totalConnected = data.reasonBreakdown.reduce((s, r) => s + r.totalConnected, 0);
+                const totalConverted = data.reasonBreakdown.reduce((s, r) => s + r.totalConverted, 0);
                 const pct = (n, d) => (d > 0 ? Math.round((n / d) * 100) : 0);
                 return (
                   <tr className="co-table-total">

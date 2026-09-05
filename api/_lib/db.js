@@ -4425,18 +4425,180 @@ async function getCallingPartnerReasonBreakdown(dateFrom, dateTo, paymentMode, b
     .sort((a, b) => b.totalAssigned - a.totalAssigned);
 }
 
+// connected/converted have no dedicated column - disposition already IS the full dash-joined
+// disposition-tree leaf path an agent picked (see NdrCallingClient.js's saveNdrDisposition),
+// e.g. "Connected - New order Placed" or "Not Connected - Reattempt". LOWER()+LIKE mirrors the
+// case-insensitive matching commit efe2d09 already established for this exact ambiguity
+// (an admin can reword a tree label's case without it being a schema change).
+//
+// Written as LITERAL SQL text inline below, not interpolated via ${} - the `sql` tag in this
+// file binds every ${} as a parameterized value (like a prepared-statement `?`), so passing a
+// SQL fragment string through ${} would try to bind
+// "LOWER(TRIM(disposition)) LIKE 'connected%'" as a VALUE, not splice it in as SQL, and the
+// query would fail. This is exactly how the existing RTO functions handle their own fixed
+// fragment (`IF(UPPER(order_id) LIKE 'HYP%', 'Hyphen', 'mCaffeine')`) - always written directly
+// in the template's static text, never through a substitution.
+
+// Cross-agent KPIs for the Overview's Process=NDR view, reading ndr_lead_assignments instead
+// of CLS_RTO_calling. Same assigned/pending (reassigned_away_at IS NULL + assigned_at bounds)
+// vs disposed/connected/converted (every cycle + disposed_at bounds) grain split as
+// getCallingOverviewStats - see its own comment for why. No refund fields: NDR calling has no
+// refund concept, and the Overview hides that KPI tile entirely for this process rather than
+// showing a fixed zero.
+async function getNdrCallingOverviewStats(dateFrom, dateTo) {
+  await ensureSchema();
+  const { from, to } = dateBounds(dateFrom, dateTo);
+  const { rows } = await sql`
+    SELECT
+      COUNT(DISTINCT CASE WHEN reassigned_away_at IS NULL AND (${from} IS NULL OR assigned_at >= ${from}) AND (${to} IS NULL OR assigned_at <= ${to}) THEN awb_number END) AS total_assigned,
+      COUNT(DISTINCT CASE WHEN disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN awb_number END) AS total_disposed,
+      COUNT(DISTINCT CASE WHEN reassigned_away_at IS NULL AND disposed_at IS NULL AND (${from} IS NULL OR assigned_at >= ${from}) AND (${to} IS NULL OR assigned_at <= ${to}) THEN awb_number END) AS total_pending,
+      COUNT(DISTINCT CASE WHEN LOWER(TRIM(disposition)) LIKE 'connected%' AND disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN awb_number END) AS total_connected,
+      COUNT(DISTINCT CASE WHEN LOWER(TRIM(disposition)) NOT LIKE 'connected%' AND disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN awb_number END) AS total_unreachable,
+      COUNT(DISTINCT CASE WHEN LOWER(disposition) LIKE '%new order placed%' AND disposed_at IS NOT NULL AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to}) THEN awb_number END) AS total_converted
+    FROM ndr_lead_assignments
+  `;
+  const r = rows[0] || {};
+  return {
+    totalAssigned: Number(r.total_assigned) || 0,
+    totalDisposed: Number(r.total_disposed) || 0,
+    totalPending: Number(r.total_pending) || 0,
+    totalConnected: Number(r.total_connected) || 0,
+    totalUnreachable: Number(r.total_unreachable) || 0,
+    totalConverted: Number(r.total_converted) || 0,
+  };
+}
+
+// Top-level NDR Reason Breakdown table - GROUP BY ndr_reason directly, no category rollup (no
+// NDR equivalent of categorizeRtoReason - these are free-text courier reasons, shown as-is).
+async function getNdrCallingReasonBreakdown(dateFrom, dateTo, paymentMode, brand) {
+  await ensureSchema();
+  const { from, to } = dateBounds(dateFrom, dateTo);
+  const mode = paymentMode === 'Prepaid' || paymentMode === 'COD' ? paymentMode : null;
+  const brandFilter = brand === 'Hyphen' || brand === 'mCaffeine' ? brand : null;
+  const { rows } = await sql`
+    SELECT
+      COALESCE(ndr_reason, 'Unknown') AS ndr_reason,
+      SUM(CASE WHEN reassigned_away_at IS NULL
+            AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${brandFilter} IS NULL OR brand = ${brandFilter})
+            AND (${from} IS NULL OR assigned_at >= ${from}) AND (${to} IS NULL OR assigned_at <= ${to})
+          THEN 1 ELSE 0 END) AS total_assigned,
+      SUM(CASE WHEN disposed_at IS NOT NULL AND LOWER(TRIM(disposition)) LIKE 'connected%'
+            AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${brandFilter} IS NULL OR brand = ${brandFilter})
+            AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+          THEN 1 ELSE 0 END) AS total_connected,
+      SUM(CASE WHEN disposed_at IS NOT NULL AND LOWER(disposition) LIKE '%new order placed%'
+            AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${brandFilter} IS NULL OR brand = ${brandFilter})
+            AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+          THEN 1 ELSE 0 END) AS total_converted
+    FROM ndr_lead_assignments
+    GROUP BY 1
+    HAVING total_assigned > 0 OR total_connected > 0 OR total_converted > 0
+    ORDER BY total_assigned DESC
+  `;
+  const pct = (n, d) => (d > 0 ? Math.round((n / d) * 100) : 0);
+  return rows.map((r) => {
+    const totalAssigned = Number(r.total_assigned) || 0;
+    const totalConnected = Number(r.total_connected) || 0;
+    const totalConverted = Number(r.total_converted) || 0;
+    return {
+      rtoReason: r.ndr_reason, // same column key funnelColumns' labelKey uses on the client for both processes
+      totalAssigned, totalConnected, totalConverted,
+      connectedPct: pct(totalConnected, totalAssigned),
+      convertedPct: pct(totalConverted, totalAssigned),
+    };
+  });
+}
+
+// Delivery Partner Breakdown for Process=NDR - GROUP BY (delivery_partner, ndr_reason), same
+// reassembly into {deliveryPartner, ...totals, reasons: [...]} as getCallingPartnerReasonBreakdown.
+async function getNdrCallingPartnerReasonBreakdown(dateFrom, dateTo, paymentMode, brand) {
+  await ensureSchema();
+  const { from, to } = dateBounds(dateFrom, dateTo);
+  const mode = paymentMode === 'Prepaid' || paymentMode === 'COD' ? paymentMode : null;
+  const brandFilter = brand === 'Hyphen' || brand === 'mCaffeine' ? brand : null;
+  const { rows } = await sql`
+    SELECT
+      COALESCE(delivery_partner, 'Unknown') AS partner,
+      COALESCE(ndr_reason, 'Unknown') AS ndr_reason,
+      SUM(CASE WHEN reassigned_away_at IS NULL
+            AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${brandFilter} IS NULL OR brand = ${brandFilter})
+            AND (${from} IS NULL OR assigned_at >= ${from}) AND (${to} IS NULL OR assigned_at <= ${to})
+          THEN 1 ELSE 0 END) AS total_assigned,
+      SUM(CASE WHEN disposed_at IS NOT NULL AND LOWER(TRIM(disposition)) LIKE 'connected%'
+            AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${brandFilter} IS NULL OR brand = ${brandFilter})
+            AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+          THEN 1 ELSE 0 END) AS total_connected,
+      SUM(CASE WHEN disposed_at IS NOT NULL AND LOWER(disposition) LIKE '%new order placed%'
+            AND (${mode} IS NULL OR payment_mode = ${mode})
+            AND (${brandFilter} IS NULL OR brand = ${brandFilter})
+            AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+          THEN 1 ELSE 0 END) AS total_converted
+    FROM ndr_lead_assignments
+    GROUP BY 1, 2
+    HAVING total_assigned > 0 OR total_connected > 0 OR total_converted > 0
+  `;
+  const pct = (n, d) => (d > 0 ? Math.round((n / d) * 100) : 0);
+  const emptyAcc = () => ({ totalAssigned: 0, totalConnected: 0, totalConverted: 0 });
+  const byPartner = new Map();
+  for (const r of rows) {
+    const assigned = Number(r.total_assigned) || 0;
+    const connected = Number(r.total_connected) || 0;
+    const converted = Number(r.total_converted) || 0;
+    const partnerAcc = byPartner.get(r.partner) || { totals: emptyAcc(), byReason: new Map() };
+    partnerAcc.totals.totalAssigned += assigned;
+    partnerAcc.totals.totalConnected += connected;
+    partnerAcc.totals.totalConverted += converted;
+    const reasonAcc = partnerAcc.byReason.get(r.ndr_reason) || emptyAcc();
+    reasonAcc.totalAssigned += assigned;
+    reasonAcc.totalConnected += connected;
+    reasonAcc.totalConverted += converted;
+    partnerAcc.byReason.set(r.ndr_reason, reasonAcc);
+    byPartner.set(r.partner, partnerAcc);
+  }
+  const toFunnelRow = (acc) => ({
+    totalAssigned: acc.totalAssigned,
+    totalConnected: acc.totalConnected,
+    connectedPct: pct(acc.totalConnected, acc.totalAssigned),
+    totalConverted: acc.totalConverted,
+    convertedPct: pct(acc.totalConverted, acc.totalAssigned),
+  });
+  return [...byPartner.entries()]
+    .map(([deliveryPartner, acc]) => ({
+      deliveryPartner,
+      ...toFunnelRow(acc.totals),
+      reasons: [...acc.byReason.entries()]
+        .map(([rtoReason, reasonAcc]) => ({ rtoReason, ...toFunnelRow(reasonAcc) }))
+        .sort((a, b) => b.totalAssigned - a.totalAssigned),
+    }))
+    .sort((a, b) => b.totalAssigned - a.totalAssigned);
+}
+
 // Combines all queries above into the single payload api/report/data/[key].js's
 // "calling-overview" route serves - one round trip for the whole Overview tab.
 async function getCallingOverviewData(query) {
-  const { dateFrom, dateTo, paymentMode, brand } = query || {};
-  const [stats, hourly, partnerBreakdown, rtoReasonBreakdown, partnerReasonBreakdown] = await Promise.all([
+  const { dateFrom, dateTo, paymentMode, brand, process: proc } = query || {};
+  if (proc === 'NDR') {
+    const [stats, reasonBreakdown, partnerReasonBreakdown] = await Promise.all([
+      getNdrCallingOverviewStats(dateFrom, dateTo),
+      getNdrCallingReasonBreakdown(dateFrom, dateTo, paymentMode, brand),
+      getNdrCallingPartnerReasonBreakdown(dateFrom, dateTo, paymentMode, brand),
+    ]);
+    return { stats, reasonBreakdown, partnerReasonBreakdown };
+  }
+  const [stats, hourly, partnerBreakdown, reasonBreakdown, partnerReasonBreakdown] = await Promise.all([
     getCallingOverviewStats(dateFrom, dateTo),
     getCallingHourlyStats(dateFrom, dateTo),
     getCallingPartnerBreakdown(dateFrom, dateTo),
     getCallingRtoReasonBreakdown(dateFrom, dateTo, paymentMode, brand),
     getCallingPartnerReasonBreakdown(dateFrom, dateTo, paymentMode, brand),
   ]);
-  return { stats, hourly, partnerBreakdown, rtoReasonBreakdown, partnerReasonBreakdown };
+  return { stats, hourly, partnerBreakdown, reasonBreakdown, partnerReasonBreakdown };
 }
 
 // {order_id: {assignedAt, disposedAt}} for EVERY lead ever assigned, not just a recent window
