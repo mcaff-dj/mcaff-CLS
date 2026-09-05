@@ -101,7 +101,6 @@ mount('post', '/api/ndr/lead-assignment', '../ndr/lead-assignment.js');
 mount('post', '/api/ndr/upload', '../ndr/upload.js');
 mount('post', '/api/ndr/next-lead', '../ndr/next-lead.js');
 mount('get', '/api/detractor/tickets', '../detractor/tickets.js');
-mount('post', '/api/detractor/next-lead', '../detractor/next-lead.js');
 mount('post', '/api/detractor/lead-assignment', '../detractor/lead-assignment.js');
 mount('all', '/api/delivery-escalation/sheet', '../delivery-escalation/sheet.js');
 mount('all', '/api/delivery-escalation/record', '../delivery-escalation/record.js');
