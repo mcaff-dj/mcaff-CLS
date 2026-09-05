@@ -93,29 +93,31 @@ const TOP_RATED_AREA_LABELS = {
 function TicketSurveyDetails({ t }) {
   return (
     <>
-      {(t.category || t.sub_category) && (
-        <p className="text-[12px] text-zinc-400">{[t.category, t.sub_category].filter(Boolean).join(' · ')}</p>
-      )}
+      <div className="space-y-1 mb-2">
+        {(t.category || t.sub_category) && (
+          <p className="text-[12px] text-zinc-400">{[t.category, t.sub_category].filter(Boolean).join(' · ')}</p>
+        )}
 
-      {hasValue(t.product_name_list) && (
-        <p className="text-[12px] text-zinc-400"><span className="font-semibold text-zinc-300">Product(s):</span> {t.product_name_list}</p>
-      )}
+        {hasValue(t.product_name_list) && (
+          <p className="text-[12px] text-zinc-400"><span className="font-semibold text-zinc-300">Product(s):</span> {t.product_name_list}</p>
+        )}
 
-      {(hasValue(t.payment_method) || hasValue(t.courier_company)) && (
-        <p className="text-[12px] text-zinc-400">
-          {hasValue(t.payment_method) && <span className="uppercase">{t.payment_method}</span>}
-          {hasValue(t.payment_method) && hasValue(t.courier_company) && ' · '}
-          {hasValue(t.courier_company) && <span>{t.courier_company}</span>}
-        </p>
-      )}
+        {(hasValue(t.payment_method) || hasValue(t.courier_company)) && (
+          <p className="text-[12px] text-zinc-400">
+            {hasValue(t.payment_method) && <span className="uppercase">{t.payment_method}</span>}
+            {hasValue(t.payment_method) && hasValue(t.courier_company) && ' · '}
+            {hasValue(t.courier_company) && <span>{t.courier_company}</span>}
+          </p>
+        )}
 
-      {(hasValue(t.top_rated_area) || hasValue(t.other_l1_specify)) && (
-        <p className="text-[12px] text-zinc-400">
-          {hasValue(t.top_rated_area) && <span><span className="font-semibold text-zinc-300">Top-rated area:</span> {TOP_RATED_AREA_LABELS[t.top_rated_area] || t.top_rated_area}</span>}
-          {hasValue(t.top_rated_area) && hasValue(t.other_l1_specify) && ' · '}
-          {hasValue(t.other_l1_specify) && <span><span className="font-semibold text-zinc-300">Other:</span> {t.other_l1_specify}</span>}
-        </p>
-      )}
+        {(hasValue(t.top_rated_area) || hasValue(t.other_l1_specify)) && (
+          <p className="text-[12px] text-zinc-400">
+            {hasValue(t.top_rated_area) && <span><span className="font-semibold text-zinc-300">Top-rated area:</span> {TOP_RATED_AREA_LABELS[t.top_rated_area] || t.top_rated_area}</span>}
+            {hasValue(t.top_rated_area) && hasValue(t.other_l1_specify) && ' · '}
+            {hasValue(t.other_l1_specify) && <span><span className="font-semibold text-zinc-300">Other:</span> {t.other_l1_specify}</span>}
+          </p>
+        )}
+      </div>
 
       <div className="space-y-2">
         {AREAS.map(({ label, rating, reach, buckets }) => {
@@ -167,29 +169,41 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [] }) {
   if (!nodes || !nodes.length) {
     return <p className="text-[12px] text-zinc-500">No disposition options configured yet - an admin can add some under Admin Panel.</p>;
   }
+  // Top-level nodes (categories, e.g. "Product Related Issue") get their own card so the eye can
+  // chunk the list into groups instead of scanning one long undifferentiated run of checkboxes -
+  // nested children (there are none deeper than one level today) fall back to the plain list.
+  const isTopLevel = ancestors.length === 0;
   return (
-    <div className="space-y-3">
+    <div className="space-y-2.5">
       {nodes.map((n) => {
         const path = [...ancestors, n.label];
         const hasChildren = n.children && n.children.length > 0;
         if (hasChildren) {
-          return (
+          const body = <DispositionChecklist nodes={n.children} selected={selected} onToggle={onToggle} ancestors={path} />;
+          return isTopLevel ? (
+            <div key={n.id} className="bg-zinc-950/50 border border-zinc-800/60 rounded-lg p-3 space-y-2">
+              <p className="text-[12px] font-bold text-zinc-200 tracking-tight">{n.label}</p>
+              {body}
+            </div>
+          ) : (
             <div key={n.id} className="space-y-1.5">
               <p className="text-[12px] font-bold text-zinc-300">{n.label}</p>
-              <div className="pl-3 border-l border-zinc-800">
-                <DispositionChecklist nodes={n.children} selected={selected} onToggle={onToggle} ancestors={path} />
-              </div>
+              <div className="pl-3 border-l border-zinc-800">{body}</div>
             </div>
           );
         }
         const checked = selected.has(n.id);
         return (
-          <label key={n.id} className="flex items-center gap-2 text-[12px] text-zinc-200 cursor-pointer" title={n.description || ''}>
+          <label
+            key={n.id}
+            className="flex items-center gap-2 text-[13px] text-zinc-200 cursor-pointer rounded-md px-1.5 py-1 -mx-1.5 hover:bg-zinc-800/40 transition-colors"
+            title={n.description || ''}
+          >
             <input
               type="checkbox"
               checked={checked}
               onChange={() => onToggle(n.id, path)}
-              className="accent-indigo-500"
+              className="accent-indigo-500 w-4 h-4"
             />
             {n.label}
           </label>
@@ -555,6 +569,7 @@ export default function NpsCallingClient() {
                     <th className="py-2.5 px-4 text-left font-medium">Order</th>
                     <th className="py-2.5 px-4 text-left font-medium">NPS</th>
                     <th className="py-2.5 px-4 text-left font-medium">Agent</th>
+                    <th className="py-2.5 px-4 text-left font-medium">Submitted</th>
                     <th className="py-2.5 px-4 text-left font-medium">Assigned</th>
                     <th className="py-2.5 px-4 text-left font-medium">Status</th>
                     <th className="py-2.5 px-4 text-left font-medium">Disposition</th>
@@ -568,6 +583,7 @@ export default function NpsCallingClient() {
                         <td className="py-2.5 px-4 text-zinc-400">{[t.brand, t.channel_order_id].filter(Boolean).join(' · ') || '—'}</td>
                         <td className="py-2.5 px-4 text-zinc-400">{t.nps_score ?? '—'} · {t.nps_category || '—'}</td>
                         <td className="py-2.5 px-4 text-zinc-400 font-mono text-[11px]">{t.agent_email || '—'}</td>
+                        <td className="py-2.5 px-4 text-zinc-500 text-[11px]">{t.submitted_date || '—'}</td>
                         <td className="py-2.5 px-4 text-zinc-500 text-[11px]">{t.assigned_at ? new Date(t.assigned_at).toLocaleString() : '—'}</td>
                         <td className="py-2.5 px-4">
                           {t.disposed_at
@@ -702,11 +718,10 @@ export default function NpsCallingClient() {
               {tab === 'predicted' && canAdminTab && (
                 <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden p-4 space-y-3">
                   <div>
-                    <h3 className="text-[15px] font-bold text-zinc-100">Next to Assign</h3>
+                    <h3 className="text-[15px] font-bold text-zinc-100 tracking-tight">Next to Assign</h3>
                     <p className="text-[12px] text-zinc-500 mt-0.5">
-                      Preview of the next unassigned NPS detractor leads, oldest first - the same
-                      pool pullNextLead draws from. NPS has no batch assigner, agents still pull
-                      one lead at a time; this is a read-only peek, not a queue anyone is on.
+                      The next leads waiting to be pulled, oldest first. Read-only - nobody is
+                      assigned yet.
                     </p>
                   </div>
                   {predictedLeads === null && <p className="text-[12px] text-zinc-500">Loading…</p>}
@@ -743,31 +758,45 @@ export default function NpsCallingClient() {
               )}
 
               {tab === 'overview' && (
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  {(() => {
-                    const source = allTickets || tickets;
-                    const total = source.length;
-                    const disposedCount = source.filter((t) => !isUndisposed(t)).length;
-                    const undisposedCount = total - disposedCount;
-                    const connectedCount = source.filter((t) => t.connected === 'Yes').length;
-                    const stats = [
-                      { label: 'Total Leads', value: total },
-                      { label: 'Disposed', value: disposedCount },
-                      { label: 'Pending', value: undisposedCount },
-                      { label: 'Connected', value: connectedCount },
-                    ];
-                    return stats.map((s) => (
-                      <div key={s.label} className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl p-4">
-                        <p className="text-[11px] text-zinc-500 font-semibold uppercase">{s.label}</p>
-                        <p className="text-2xl font-extrabold text-zinc-100">{s.value}</p>
-                      </div>
-                    ));
-                  })()}
+                <div className="space-y-3">
+                  <div>
+                    <h3 className="text-[15px] font-bold text-zinc-100 tracking-tight">Overview</h3>
+                    <p className="text-[12px] text-zinc-500 mt-0.5">
+                      {canAdminTab ? "Roster-wide totals, all agents, all time." : 'Your own totals, all time.'}
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    {(() => {
+                      const source = allTickets || tickets;
+                      const total = source.length;
+                      const disposedCount = source.filter((t) => !isUndisposed(t)).length;
+                      const undisposedCount = total - disposedCount;
+                      const connectedCount = source.filter((t) => t.connected === 'Yes').length;
+                      const stats = [
+                        { label: 'Total Leads', value: total, icon: '📋' },
+                        { label: 'Disposed', value: disposedCount, icon: '✅' },
+                        { label: 'Pending', value: undisposedCount, icon: '⏳' },
+                        { label: 'Connected', value: connectedCount, icon: '📞' },
+                      ];
+                      return stats.map((s) => (
+                        <div key={s.label} className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl p-4">
+                          <p className="text-[11px] text-zinc-500 font-semibold uppercase flex items-center gap-1.5">
+                            <span>{s.icon}</span>{s.label}
+                          </p>
+                          <p className="text-2xl font-extrabold text-zinc-100 tracking-tight">{s.value}</p>
+                        </div>
+                      ));
+                    })()}
+                  </div>
                 </div>
               )}
 
               {tab === 'admin' && canAdminTab && (
                 <div className="space-y-5">
+                  <div>
+                    <h3 className="text-[15px] font-bold text-zinc-100 tracking-tight">Admin Panel & Roster</h3>
+                    <p className="text-[12px] text-zinc-500 mt-0.5">Calling hours, default quota, dispositions, and the agent roster below.</p>
+                  </div>
                   <CallingHoursCard processKey={PROCESS_KEY} processLabel="NPS-Calling" hours={hours} />
                   <DefaultQuotaCard processLabel="NPS-Calling" fallback={FALLBACK_QUOTA} quota={defaultQuota} />
                   <ProcessDispositionsCard processLabel="NPS-Calling" disp={disp} allowInputTypeControl />
@@ -890,49 +919,53 @@ export default function NpsCallingClient() {
 
       {detailTkt && (
         <Overlay onClose={closeDispose}>
-          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 w-full max-w-lg space-y-4">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 w-full max-w-xl space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-[15px] font-bold text-zinc-100">Dispose lead — {detailTkt.customer_name || detailTkt.response_id}</h3>
+              <h3 className="text-[15px] font-bold text-zinc-100 tracking-tight">Dispose lead — {detailTkt.customer_name || detailTkt.response_id}</h3>
               <button type="button" onClick={closeDispose}><XIcon className="text-zinc-500 hover:text-zinc-200" /></button>
             </div>
 
-            <div className="max-h-48 overflow-y-auto custom-scroll bg-zinc-950/40 border border-zinc-800/60 rounded-lg p-3">
+            <div className="max-h-52 overflow-y-auto custom-scroll bg-zinc-950/40 border border-zinc-800/60 rounded-lg p-3">
               <TicketSurveyDetails t={detailTkt} />
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="text-[12px] text-zinc-400 font-semibold">Connected:</span>
-              <button
-                type="button"
-                onClick={() => pickBranch('Yes')}
-                className={`px-3 py-1 rounded-lg text-[12px] font-bold border ${
-                  branchChoice === 'Yes' ? 'bg-emerald-600 border-emerald-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
-                }`}
-              >
-                Connected
-              </button>
-              <button
-                type="button"
-                onClick={() => pickBranch('No')}
-                className={`px-3 py-1 rounded-lg text-[12px] font-bold border ${
-                  branchChoice === 'No' ? 'bg-rose-600 border-rose-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
-                }`}
-              >
-                Non Connected
-              </button>
-              <span className="text-[12px] text-zinc-400 font-semibold ml-3">Attempt</span>
-              <input
-                type="number"
-                min="1"
-                value={attempt}
-                onChange={(e) => setAttempt(e.target.value)}
-                className="w-16 h-8 px-2 rounded-lg bg-zinc-950 border border-zinc-800 text-[12px] text-zinc-200"
-              />
+            <div className="flex items-center gap-4 flex-wrap">
+              <div className="flex items-center gap-2">
+                <span className="text-[12px] text-zinc-400 font-semibold">Connected:</span>
+                <button
+                  type="button"
+                  onClick={() => pickBranch('Yes')}
+                  className={`px-3 py-1 rounded-lg text-[12px] font-bold border ${
+                    branchChoice === 'Yes' ? 'bg-emerald-600 border-emerald-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
+                  }`}
+                >
+                  Connected
+                </button>
+                <button
+                  type="button"
+                  onClick={() => pickBranch('No')}
+                  className={`px-3 py-1 rounded-lg text-[12px] font-bold border ${
+                    branchChoice === 'No' ? 'bg-rose-600 border-rose-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
+                  }`}
+                >
+                  Non Connected
+                </button>
+              </div>
+              <div className="flex items-center gap-2 pl-4 border-l border-zinc-800">
+                <span className="text-[12px] text-zinc-400 font-semibold">Attempt</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={attempt}
+                  onChange={(e) => setAttempt(e.target.value)}
+                  className="w-16 h-8 px-2 rounded-lg bg-zinc-950 border border-zinc-800 text-[12px] text-zinc-200"
+                />
+              </div>
             </div>
 
             <div>
-              <p className="text-[12px] text-zinc-400 font-semibold mb-1.5">
-                Disposition{selectedReasons.size ? ` (${selectedReasons.size} selected)` : ''} — pick Connected or Non Connected above, then check every reason that applies
+              <p className="text-[12px] text-zinc-400 font-semibold mb-1.5 tracking-tight">
+                Disposition{selectedReasons.size ? ` · ${selectedReasons.size} selected` : ''}
               </p>
               {branchChoice
                 ? <DispositionChecklist nodes={visibleDispositionNodes} selected={selectedReasons} onToggle={toggleReason} />
