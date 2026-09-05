@@ -67,6 +67,15 @@ def _get_connection(cred):
         _conn = pymysql.connect(
             host=cred["host"], user=cred["user"], password=cred["password"],
             database=cred["database"], port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
+            # autocommit=True: this connection is reused for the process's lifetime (a warm
+            # Lambda container can span many invocations). Without it, pymysql leaves autocommit
+            # off, so query()'s SELECT-only callers (which never commit) sit inside one
+            # never-closed REPEATABLE READ transaction and keep seeing the snapshot from
+            # whenever that transaction first opened - any row committed by another connection
+            # afterward (e.g. agent_presence heartbeats) stays invisible until this connection
+            # happens to recycle. Caught via assign_ndr_leads.py reporting an online, heartbeat-
+            # fresh agent as stale on every invocation while an ad-hoc connection saw her fine.
+            autocommit=True,
             # connect_timeout alone only bounds the TCP/TLS handshake - once connected, a
             # blocked query waits forever. A refresh run hung for 1h28m inside
             # gen_geo_insights' order-count query before being cancelled by hand; the whole
