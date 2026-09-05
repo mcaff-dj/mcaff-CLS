@@ -97,6 +97,18 @@ function TicketSurveyDetails({ t }) {
         <p className="text-[12px] text-zinc-400">{[t.category, t.sub_category].filter(Boolean).join(' · ')}</p>
       )}
 
+      {hasValue(t.product_name_list) && (
+        <p className="text-[12px] text-zinc-400"><span className="font-semibold text-zinc-300">Product(s):</span> {t.product_name_list}</p>
+      )}
+
+      {(hasValue(t.payment_method) || hasValue(t.courier_company)) && (
+        <p className="text-[12px] text-zinc-400">
+          {hasValue(t.payment_method) && <span className="uppercase">{t.payment_method}</span>}
+          {hasValue(t.payment_method) && hasValue(t.courier_company) && ' · '}
+          {hasValue(t.courier_company) && <span>{t.courier_company}</span>}
+        </p>
+      )}
+
       {(hasValue(t.top_rated_area) || hasValue(t.other_l1_specify)) && (
         <p className="text-[12px] text-zinc-400">
           {hasValue(t.top_rated_area) && <span><span className="font-semibold text-zinc-300">Top-rated area:</span> {TOP_RATED_AREA_LABELS[t.top_rated_area] || t.top_rated_area}</span>}
@@ -211,14 +223,17 @@ export default function NpsCallingClient() {
   }, []);
 
   const canAdminTab = sessionIsAdmin || isProcessAdmin;
-  const [tab, setTab] = useState('queue');
+  const [tab, setTab] = useState('fresh');
   useEffect(() => {
-    if (tab === 'admin' && !canAdminTab) setTab('queue');
+    if ((tab === 'admin' || tab === 'predicted') && !canAdminTab) setTab('fresh');
   }, [tab, canAdminTab]);
   const [rosterStatusFilter, setRosterStatusFilter] = useState('All');
   const [allLeadsSearch, setAllLeadsSearch] = useState('');
   const [allLeadsAgentFilter, setAllLeadsAgentFilter] = useState('ALL');
   const [allLeadsStatusFilter, setAllLeadsStatusFilter] = useState('ALL');
+  // Next to Assign preview (admin/process-admin only) - fetched once on first visit to that tab,
+  // not eagerly alongside allTickets, since it's a rarely-opened peek rather than core workflow.
+  const [predictedLeads, setPredictedLeads] = useState(null);
 
   // My tickets: everything CLS_NPS_calling holds for this agent, undisposed and disposed alike -
   // split client-side (queue vs disposed) rather than two separate fetches, since one agent's
@@ -255,6 +270,19 @@ export default function NpsCallingClient() {
     } catch (e) { /* Overview falls back to own tickets below - not worth a toast */ }
   }, []);
   useEffect(() => { if (canAdminTab) fetchAllTickets(); }, [canAdminTab, fetchAllTickets]);
+
+  useEffect(() => {
+    if (tab !== 'predicted' || !canAdminTab || predictedLeads !== null) return;
+    (async () => {
+      try {
+        const r = await fetch('/api/detractor/tickets?scope=unassigned');
+        const d = await r.json().catch(() => ({}));
+        setPredictedLeads(r.ok ? (d.leads || []) : []);
+      } catch (e) {
+        setPredictedLeads([]);
+      }
+    })();
+  }, [tab, canAdminTab, predictedLeads]);
 
   const [pulling, setPulling] = useState(false);
   const pullNextLead = async () => {
@@ -371,12 +399,18 @@ export default function NpsCallingClient() {
 
   const pendingTickets = tickets.filter(isUndisposed);
   const disposedTickets = tickets.filter((t) => !isUndisposed(t));
+  // Fresh/All counts read allTickets (every agent) for admin/process-admin, own tickets
+  // otherwise - same admin-sees-everyone/agent-sees-own split RTO's Fresh Leads and All Leads
+  // tabs already use.
+  const freshCount = canAdminTab ? (allTickets || []).filter(isUndisposed).length : pendingTickets.length;
+  const allDisposedCount = canAdminTab ? (allTickets || []).filter((t) => !isUndisposed(t)).length : disposedTickets.length;
 
   const tabsList = [
-    { key: 'queue', label: '📞 My Queue', count: pendingTickets.length },
-    { key: 'disposed', label: 'Disposed', count: disposedTickets.length },
-    { key: 'overview', label: '📊 Overview', count: (allTickets || tickets).length },
-    ...(canAdminTab ? [{ key: 'admin', label: 'Admin Panel', count: (processAgents || []).length }] : []),
+    { key: 'overview', label: 'Overview (Agents Data)', count: (processAgents || []).length },
+    { key: 'all', label: 'All Leads (Disposed)', count: allDisposedCount },
+    { key: 'fresh', label: 'Fresh Leads (Assigned)', count: freshCount },
+    ...(canAdminTab ? [{ key: 'admin', label: 'Admin Panel & Roster', count: (processAgents || []).length }] : []),
+    ...(canAdminTab ? [{ key: 'predicted', label: 'Next to Assign', count: predictedLeads ? predictedLeads.length : 0 }] : []),
   ];
 
   const hasAccess = sessionIsAdmin || !invitedProcessKeys || invitedProcessKeys.includes(PROCESS_KEY);
@@ -447,6 +481,102 @@ export default function NpsCallingClient() {
     </div>
   );
 
+  // Shared by the All Leads and Fresh Leads admin tabs - same search/agent filter controls and
+  // table shape, just a different base list (every ticket vs undisposed-only) and whether the
+  // status filter makes sense (Fresh Leads is already fixed to undisposed).
+  const renderAdminLeadsTable = (source, { title, subtitle, showStatusFilter }) => {
+    const search = allLeadsSearch.trim().toLowerCase();
+    const filtered = (source || []).filter((t) => {
+      if (allLeadsAgentFilter !== 'ALL' && (t.agent_email || '').toLowerCase() !== allLeadsAgentFilter.toLowerCase()) return false;
+      if (showStatusFilter) {
+        if (allLeadsStatusFilter === 'DISPOSED' && isUndisposed(t)) return false;
+        if (allLeadsStatusFilter === 'PENDING' && !isUndisposed(t)) return false;
+      }
+      if (!search) return true;
+      return [t.customer_name, t.channel_order_id, t.agent_email, t.customer_phone]
+        .filter(Boolean).some((v) => String(v).toLowerCase().includes(search));
+    });
+    return (
+      <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden">
+        <div className="flex items-center justify-between flex-wrap gap-3 p-4 pb-3">
+          <div>
+            <h3 className="text-[15px] font-bold text-zinc-100">{title}</h3>
+            <p className="text-[12px] text-zinc-500 mt-0.5">{subtitle}</p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="relative">
+              <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500" />
+              <input
+                value={allLeadsSearch}
+                onChange={(e) => setAllLeadsSearch(e.target.value)}
+                placeholder="Search customer, order, agent…"
+                className="w-52 pl-8 pr-3 py-1.5 text-[12px] bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+            <CustomSelect
+              value={allLeadsAgentFilter}
+              onChange={setAllLeadsAgentFilter}
+              options={[
+                { value: 'ALL', label: 'All Agents' },
+                ...(processAgents || []).map((a) => ({ value: a.email, label: a.name || a.email })),
+              ]}
+            />
+            {showStatusFilter && (
+              <CustomSelect
+                value={allLeadsStatusFilter}
+                onChange={setAllLeadsStatusFilter}
+                options={[
+                  { value: 'ALL', label: 'All Statuses' },
+                  { value: 'DISPOSED', label: 'Disposed' },
+                  { value: 'PENDING', label: 'Pending' },
+                ]}
+              />
+            )}
+          </div>
+        </div>
+
+        {source == null
+          ? <p className="text-[12px] text-zinc-500 px-4 pb-4">Loading…</p>
+          : !filtered.length
+            ? <p className="text-[12px] text-zinc-500 px-4 pb-4">No leads match.</p>
+            : (
+              <div className="overflow-x-auto custom-scroll">
+                <table className="w-full text-[13px]">
+                  <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
+                    <th className="py-2.5 px-4 text-left font-medium">Customer</th>
+                    <th className="py-2.5 px-4 text-left font-medium">Order</th>
+                    <th className="py-2.5 px-4 text-left font-medium">NPS</th>
+                    <th className="py-2.5 px-4 text-left font-medium">Agent</th>
+                    <th className="py-2.5 px-4 text-left font-medium">Assigned</th>
+                    <th className="py-2.5 px-4 text-left font-medium">Status</th>
+                    <th className="py-2.5 px-4 text-left font-medium">Disposition</th>
+                    <th className="py-2.5 px-4 text-center font-medium">Connected</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-zinc-800/50">
+                    {filtered.map((t) => (
+                      <tr key={t.response_id} className="hover:bg-zinc-900/40 transition-colors">
+                        <td className="py-2.5 px-4 text-zinc-200">{t.customer_name || '—'}</td>
+                        <td className="py-2.5 px-4 text-zinc-400">{[t.brand, t.channel_order_id].filter(Boolean).join(' · ') || '—'}</td>
+                        <td className="py-2.5 px-4 text-zinc-400">{t.nps_score ?? '—'} · {t.nps_category || '—'}</td>
+                        <td className="py-2.5 px-4 text-zinc-400 font-mono text-[11px]">{t.agent_email || '—'}</td>
+                        <td className="py-2.5 px-4 text-zinc-500 text-[11px]">{t.assigned_at ? new Date(t.assigned_at).toLocaleString() : '—'}</td>
+                        <td className="py-2.5 px-4">
+                          {t.disposed_at
+                            ? <span className="text-emerald-400 font-semibold">Disposed</span>
+                            : <span className="text-amber-400 font-semibold">Pending</span>}
+                        </td>
+                        <td className="py-2.5 px-4 text-zinc-400 max-w-[220px] truncate" title={t.disposition || ''}>{t.disposition || '—'}</td>
+                        <td className="py-2.5 px-4 text-center text-zinc-400">{t.connected || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+      </div>
+    );
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-[#09090b]">
       <CallingShell
@@ -486,37 +616,108 @@ export default function NpsCallingClient() {
         {hasAccess && (
           <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-1.5 shadow-xl backdrop-blur-md">
             <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar w-full mb-1.5">
-              {tabsList.map((t) => (
-                <button
-                  key={t.key}
-                  onClick={() => setTab(t.key)}
-                  className={`relative px-4 py-2 rounded-xl text-[13px] font-bold whitespace-nowrap transition-all flex items-center gap-2.5 ${
-                    tab === t.key
-                      ? 'text-white bg-indigo-600 shadow-md shadow-indigo-950/50 border border-indigo-500/40'
-                      : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 border border-transparent'
-                  }`}
-                >
-                  {t.label}
-                  <span className="px-1.5 py-0.5 rounded-md text-[11px] bg-black/20">{t.count}</span>
-                </button>
-              ))}
+              {tabsList.map((t) => {
+                const isActive = tab === t.key;
+                return (
+                  <button
+                    key={t.key}
+                    onClick={() => setTab(t.key)}
+                    className={`relative px-4 py-2 rounded-xl text-[13px] font-bold whitespace-nowrap transition-all flex items-center gap-2.5 ${
+                      isActive
+                        ? 'text-white bg-indigo-600 shadow-md shadow-indigo-950/50 border border-indigo-500/40'
+                        : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 border border-transparent'
+                    }`}
+                  >
+                    {t.key === 'overview' && <span className="text-indigo-300">📊</span>}
+                    {t.key === 'all' && <span className="text-sky-300">📦</span>}
+                    {t.key === 'fresh' && <span className="text-amber-300">⚡</span>}
+                    {t.key === 'admin' && <span className="text-emerald-300">🛡️</span>}
+                    {t.key === 'predicted' && <span className="text-violet-300">🔮</span>}
+                    <span>{t.label}</span>
+                    <span className={`text-[11px] tabular-nums px-2 py-0.5 rounded-md font-mono font-bold ${
+                      isActive ? 'text-white bg-indigo-950/80 border border-indigo-400/30' : 'text-zinc-400 bg-zinc-800 border border-zinc-700/50'
+                    }`}>
+                      {t.count.toLocaleString('en-IN')}
+                    </span>
+                  </button>
+                );
+              })}
             </nav>
 
             <div className="p-3">
-              {tab === 'queue' && (
-                <div className="space-y-3">
-                  {ticketsLoading && <p className="text-[13px] text-zinc-500">Loading…</p>}
-                  {!ticketsLoading && !pendingTickets.length && (
-                    <p className="text-[13px] text-zinc-500">No leads in your queue. Click Pull Next Lead above.</p>
-                  )}
-                  {pendingTickets.map((t) => renderTicketCard(t, { showDisposeButton: true }))}
-                </div>
+              {tab === 'fresh' && (
+                canAdminTab ? (
+                  renderAdminLeadsTable((allTickets || []).filter(isUndisposed), {
+                    title: 'Fresh Leads',
+                    subtitle: 'Assigned but not yet disposed, across every agent.',
+                    showStatusFilter: false,
+                  })
+                ) : (
+                  <div className="space-y-3">
+                    {ticketsLoading && <p className="text-[13px] text-zinc-500">Loading…</p>}
+                    {!ticketsLoading && !pendingTickets.length && (
+                      <p className="text-[13px] text-zinc-500">No leads in your queue. Click Pull Next Lead above.</p>
+                    )}
+                    {pendingTickets.map((t) => renderTicketCard(t, { showDisposeButton: true }))}
+                  </div>
+                )
               )}
 
-              {tab === 'disposed' && (
-                <div className="space-y-3">
-                  {!disposedTickets.length && <p className="text-[13px] text-zinc-500">Nothing disposed yet.</p>}
-                  {disposedTickets.map((t) => renderTicketCard(t, { showDisposeButton: false }))}
+              {tab === 'all' && (
+                canAdminTab ? (
+                  renderAdminLeadsTable(allTickets, {
+                    title: 'All Leads',
+                    subtitle: "Every agent's tickets, admin/process-admin view.",
+                    showStatusFilter: true,
+                  })
+                ) : (
+                  <div className="space-y-3">
+                    {!disposedTickets.length && <p className="text-[13px] text-zinc-500">Nothing disposed yet.</p>}
+                    {disposedTickets.map((t) => renderTicketCard(t, { showDisposeButton: false }))}
+                  </div>
+                )
+              )}
+
+              {tab === 'predicted' && canAdminTab && (
+                <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden p-4 space-y-3">
+                  <div>
+                    <h3 className="text-[15px] font-bold text-zinc-100">Next to Assign</h3>
+                    <p className="text-[12px] text-zinc-500 mt-0.5">
+                      Preview of the next unassigned NPS detractor leads, oldest first - the same
+                      pool pullNextLead draws from. NPS has no batch assigner, agents still pull
+                      one lead at a time; this is a read-only peek, not a queue anyone is on.
+                    </p>
+                  </div>
+                  {predictedLeads === null && <p className="text-[12px] text-zinc-500">Loading…</p>}
+                  {predictedLeads && !predictedLeads.length && (
+                    <p className="text-[12px] text-zinc-500">No unassigned detractor leads waiting right now.</p>
+                  )}
+                  {predictedLeads && !!predictedLeads.length && (
+                    <div className="overflow-x-auto custom-scroll">
+                      <table className="w-full text-[13px]">
+                        <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
+                          <th className="py-2.5 px-4 text-left font-medium">#</th>
+                          <th className="py-2.5 px-4 text-left font-medium">Customer</th>
+                          <th className="py-2.5 px-4 text-left font-medium">Order</th>
+                          <th className="py-2.5 px-4 text-left font-medium">NPS</th>
+                          <th className="py-2.5 px-4 text-left font-medium">Category</th>
+                          <th className="py-2.5 px-4 text-left font-medium">Submitted</th>
+                        </tr></thead>
+                        <tbody className="divide-y divide-zinc-800/50">
+                          {predictedLeads.map((t, i) => (
+                            <tr key={t.response_id} className="hover:bg-zinc-900/40 transition-colors">
+                              <td className="py-2.5 px-4 text-zinc-500">{i + 1}</td>
+                              <td className="py-2.5 px-4 text-zinc-200">{t.customer_name || '—'}</td>
+                              <td className="py-2.5 px-4 text-zinc-400">{[t.brand, t.channel_order_id].filter(Boolean).join(' · ') || '—'}</td>
+                              <td className="py-2.5 px-4 text-zinc-400">{t.nps_score ?? '—'}</td>
+                              <td className="py-2.5 px-4 text-zinc-400">{[t.category, t.sub_category].filter(Boolean).join(' · ') || '—'}</td>
+                              <td className="py-2.5 px-4 text-zinc-500 text-[11px]">{t.submitted_date || '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -540,94 +741,6 @@ export default function NpsCallingClient() {
                         <p className="text-2xl font-extrabold text-zinc-100">{s.value}</p>
                       </div>
                     ));
-                  })()}
-                </div>
-              )}
-
-              {tab === 'overview' && canAdminTab && (
-                <div className="mt-4 bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden">
-                  <div className="flex items-center justify-between flex-wrap gap-3 p-4 pb-3">
-                    <div>
-                      <h3 className="text-[15px] font-bold text-zinc-100">All Leads</h3>
-                      <p className="text-[12px] text-zinc-500 mt-0.5">Every agent's tickets, admin/process-admin view.</p>
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <div className="relative">
-                        <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500" />
-                        <input
-                          value={allLeadsSearch}
-                          onChange={(e) => setAllLeadsSearch(e.target.value)}
-                          placeholder="Search customer, order, agent…"
-                          className="w-52 pl-8 pr-3 py-1.5 text-[12px] bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-500"
-                        />
-                      </div>
-                      <CustomSelect
-                        value={allLeadsAgentFilter}
-                        onChange={setAllLeadsAgentFilter}
-                        options={[
-                          { value: 'ALL', label: 'All Agents' },
-                          ...(processAgents || []).map((a) => ({ value: a.email, label: a.name || a.email })),
-                        ]}
-                      />
-                      <CustomSelect
-                        value={allLeadsStatusFilter}
-                        onChange={setAllLeadsStatusFilter}
-                        options={[
-                          { value: 'ALL', label: 'All Statuses' },
-                          { value: 'DISPOSED', label: 'Disposed' },
-                          { value: 'PENDING', label: 'Pending' },
-                        ]}
-                      />
-                    </div>
-                  </div>
-
-                  {(() => {
-                    const source = allTickets || [];
-                    const search = allLeadsSearch.trim().toLowerCase();
-                    const filtered = source.filter((t) => {
-                      if (allLeadsAgentFilter !== 'ALL' && (t.agent_email || '').toLowerCase() !== allLeadsAgentFilter.toLowerCase()) return false;
-                      if (allLeadsStatusFilter === 'DISPOSED' && isUndisposed(t)) return false;
-                      if (allLeadsStatusFilter === 'PENDING' && !isUndisposed(t)) return false;
-                      if (!search) return true;
-                      return [t.customer_name, t.channel_order_id, t.agent_email, t.customer_phone]
-                        .filter(Boolean).some((v) => String(v).toLowerCase().includes(search));
-                    });
-                    if (!allTickets) return <p className="text-[12px] text-zinc-500 px-4 pb-4">Loading…</p>;
-                    if (!filtered.length) return <p className="text-[12px] text-zinc-500 px-4 pb-4">No leads match.</p>;
-                    return (
-                      <div className="overflow-x-auto custom-scroll">
-                        <table className="w-full text-[13px]">
-                          <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
-                            <th className="py-2.5 px-4 text-left font-medium">Customer</th>
-                            <th className="py-2.5 px-4 text-left font-medium">Order</th>
-                            <th className="py-2.5 px-4 text-left font-medium">NPS</th>
-                            <th className="py-2.5 px-4 text-left font-medium">Agent</th>
-                            <th className="py-2.5 px-4 text-left font-medium">Assigned</th>
-                            <th className="py-2.5 px-4 text-left font-medium">Status</th>
-                            <th className="py-2.5 px-4 text-left font-medium">Disposition</th>
-                            <th className="py-2.5 px-4 text-center font-medium">Connected</th>
-                          </tr></thead>
-                          <tbody className="divide-y divide-zinc-800/50">
-                            {filtered.map((t) => (
-                              <tr key={t.response_id} className="hover:bg-zinc-900/40 transition-colors">
-                                <td className="py-2.5 px-4 text-zinc-200">{t.customer_name || '—'}</td>
-                                <td className="py-2.5 px-4 text-zinc-400">{[t.brand, t.channel_order_id].filter(Boolean).join(' · ') || '—'}</td>
-                                <td className="py-2.5 px-4 text-zinc-400">{t.nps_score ?? '—'} · {t.nps_category || '—'}</td>
-                                <td className="py-2.5 px-4 text-zinc-400 font-mono text-[11px]">{t.agent_email || '—'}</td>
-                                <td className="py-2.5 px-4 text-zinc-500 text-[11px]">{t.assigned_at ? new Date(t.assigned_at).toLocaleString() : '—'}</td>
-                                <td className="py-2.5 px-4">
-                                  {t.disposed_at
-                                    ? <span className="text-emerald-400 font-semibold">Disposed</span>
-                                    : <span className="text-amber-400 font-semibold">Pending</span>}
-                                </td>
-                                <td className="py-2.5 px-4 text-zinc-400 max-w-[220px] truncate" title={t.disposition || ''}>{t.disposition || '—'}</td>
-                                <td className="py-2.5 px-4 text-center text-zinc-400">{t.connected || '—'}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    );
                   })()}
                 </div>
               )}

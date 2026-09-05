@@ -434,6 +434,10 @@ async function bootstrapSchema() {
       delivery_detractor_reason TEXT,
       delivery_detractor_openend TEXT,
       additional_feedback TEXT,
+      -- Order context, added by scripts/add_product_name_list_to_calling.py.
+      product_name_list TEXT,
+      payment_method VARCHAR(50),
+      courier_company VARCHAR(100),
       submitted_date VARCHAR(20),
       agent_email VARCHAR(320) NOT NULL,
       assigned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1824,7 +1828,8 @@ async function getNextDetractorLead(email) {
            d.delivery_service_rating, d.delivery_promoter_reason, d.delivery_promoter_openend,
            d.delivery_passive_reason, d.delivery_passive_openend,
            d.delivery_detractor_reason, d.delivery_detractor_openend,
-           d.additional_feedback, d.submitted_date
+           d.additional_feedback, d.product_name_list, d.payment_method, d.courier_company,
+           d.submitted_date
     FROM nps_delivery d
     LEFT JOIN CLS_NPS_calling c ON c.response_id = d.response_id
     WHERE d.nps_category = 'Detractor' AND c.response_id IS NULL
@@ -1851,7 +1856,7 @@ async function getNextDetractorLead(email) {
       delivery_service_rating, delivery_promoter_reason, delivery_promoter_openend,
       delivery_passive_reason, delivery_passive_openend,
       delivery_detractor_reason, delivery_detractor_openend,
-      additional_feedback, submitted_date,
+      additional_feedback, product_name_list, payment_method, courier_company, submitted_date,
       agent_email, assigned_at
     ) VALUES (
       ${lead.response_id}, ${lead.brand}, ${lead.channel_order_id}, ${lead.customer_name}, ${lead.customer_phone},
@@ -1870,10 +1875,30 @@ async function getNextDetractorLead(email) {
       ${lead.delivery_service_rating}, ${lead.delivery_promoter_reason}, ${lead.delivery_promoter_openend},
       ${lead.delivery_passive_reason}, ${lead.delivery_passive_openend},
       ${lead.delivery_detractor_reason}, ${lead.delivery_detractor_openend},
-      ${lead.additional_feedback}, ${lead.submitted_date}, ${email}, NOW()
+      ${lead.additional_feedback}, ${lead.product_name_list}, ${lead.payment_method}, ${lead.courier_company},
+      ${lead.submitted_date}, ${email}, NOW()
     )
   `;
   return lead;
+}
+
+// Read-only peek at what getNextDetractorLead would hand out next, in the same oldest-first
+// order - no INSERT, so it never claims anything. Backs the "Next to Assign" admin tab's preview
+// of the unassigned pool (NPS has no batch assigner like RTO/NDR's assign_leads.py to preview
+// instead).
+async function getUnassignedDetractorLeads(limit = 20) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT d.response_id, d.brand, d.channel_order_id, d.customer_name, d.nps_score, d.nps_category,
+           d.category, d.sub_category, d.submitted_date
+    FROM nps_delivery d
+    LEFT JOIN CLS_NPS_calling c ON c.response_id = d.response_id
+    WHERE d.nps_category = 'Detractor' AND c.response_id IS NULL
+      AND STR_TO_DATE(d.submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+    ORDER BY STR_TO_DATE(d.submitted_date, '%d/%m/%Y') ASC
+    LIMIT ${limit}
+  `;
+  return rows;
 }
 
 // Records the outcome of a call against the live cycle getNextDetractorLead opened. Ownership +
@@ -4948,7 +4973,7 @@ module.exports = {
   claimNdrLead, disposeNdrLead, getLiveNdrLeadEmail, getDeliveredAwbNumbers,
   getNdrAgentAssignmentConfig,
   getDetractorAgentQuota, getDetractorAgentAvailability, getDetractorLoadByAgent,
-  getNextDetractorLead, disposeDetractorLead, getDetractorTicketsForAgent, getAllDetractorTickets,
+  getNextDetractorLead, getUnassignedDetractorLeads, disposeDetractorLead, getDetractorTicketsForAgent, getAllDetractorTickets,
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
