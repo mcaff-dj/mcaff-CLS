@@ -27,7 +27,7 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const { action, responseId, disposition, agentRemarks, connected, attempt } = req.body || {};
+  const { action, responseId, disposition, agentRemarks, connected, attempt, affectedProducts } = req.body || {};
   if (!responseId) {
     res.status(400).json({ error: 'responseId is required' });
     return;
@@ -44,7 +44,8 @@ module.exports = async (req, res) => {
     // the check).
     const allowAnyAgent = session.isAdmin || (await isCallingProcessAdmin(session.email, TAB_KEY));
     const { originalAgentEmail } = await disposeDetractorLead(
-      responseId, disposition, agentRemarks, connected, attempt, session.email, { allowAnyAgent },
+      responseId, disposition, agentRemarks, connected, attempt, session.email,
+      { allowAnyAgent, affectedProducts: Array.isArray(affectedProducts) ? affectedProducts.join(', ') : (affectedProducts || null) },
     );
     if (allowAnyAgent && originalAgentEmail && originalAgentEmail.toLowerCase() !== session.email.toLowerCase()) {
       const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';

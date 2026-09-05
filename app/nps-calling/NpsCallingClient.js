@@ -332,6 +332,9 @@ export default function NpsCallingClient() {
   // click Connected/Non Connected first; nothing renders until then, so the full ~30-reason
   // tree never shows before a branch is chosen.
   const [branchChoice, setBranchChoice] = useState('');
+  // Which of this lead's own product_name_list the agent says the issue is actually about -
+  // only meaningful (and only shown) while a "Product Related Issue" reason is checked.
+  const [selectedProducts, setSelectedProducts] = useState([]);
 
   const openDispose = (t) => {
     setDetailTkt(t);
@@ -339,6 +342,7 @@ export default function NpsCallingClient() {
     setDispRemarks(t.agent_remarks || '');
     setAttempt(t.attempt || 1);
     setBranchChoice('');
+    setSelectedProducts([]);
   };
   const closeDispose = () => setDetailTkt(null);
   const pickBranch = (choice) => {
@@ -382,6 +386,17 @@ export default function NpsCallingClient() {
     return (processDispositions || []).filter((n) => n.label === (branchChoice === 'Yes' ? 'Connected' : 'Non Connected'));
   }, [processDispositions, branchChoice]);
 
+  // This lead's own product_name_list ("Product A, Product B") split into options - only ever
+  // meaningful once "Product Related Issue" has a reason checked.
+  const productOptions = useMemo(() => {
+    const list = detailTkt && detailTkt.product_name_list;
+    return hasValue(list) ? list.split(',').map((p) => p.trim()).filter(Boolean) : [];
+  }, [detailTkt]);
+  const hasProductIssueSelected = useMemo(
+    () => Array.from(selectedReasons.values()).some((r) => r.path.includes('Product Related Issue')),
+    [selectedReasons],
+  );
+
   const saveDisposition = async () => {
     if (!detailTkt || !selectedReasons.size || !derivedConnected) return;
     setDispSaving(true);
@@ -396,13 +411,18 @@ export default function NpsCallingClient() {
           agentRemarks: dispRemarks,
           connected: derivedConnected,
           attempt: Number(attempt) || 1,
+          affectedProducts: hasProductIssueSelected ? selectedProducts : [],
         }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { showToast(`⚠️ ${d.error || 'Could not save disposition'}`); return; }
       const patch = (t) => (
         t.response_id === detailTkt.response_id
-          ? { ...t, disposed_at: new Date().toISOString(), disposition: joinedDisposition, agent_remarks: dispRemarks, connected: derivedConnected, attempt }
+          ? {
+              ...t, disposed_at: new Date().toISOString(), disposition: joinedDisposition, agent_remarks: dispRemarks,
+              connected: derivedConnected, attempt,
+              affected_products: hasProductIssueSelected ? selectedProducts.join(', ') : t.affected_products,
+            }
           : t
       );
       setTickets((prev) => prev.map(patch));
@@ -490,6 +510,7 @@ export default function NpsCallingClient() {
             <p key={i} className="flex items-center gap-1.5"><CheckIcon /> {line}</p>
           ))}
           <p className="text-zinc-500">Connected: {t.connected || '—'} · Attempt {t.attempt ?? '—'}</p>
+          {hasValue(t.affected_products) && <p className="text-zinc-500">Product(s): {t.affected_products}</p>}
         </div>
       ) : showDisposeButton ? (
         <button
@@ -971,6 +992,24 @@ export default function NpsCallingClient() {
                 ? <DispositionChecklist nodes={visibleDispositionNodes} selected={selectedReasons} onToggle={toggleReason} />
                 : <p className="text-[12px] text-zinc-500">Pick Connected or Non Connected above to see reasons.</p>}
             </div>
+
+            {hasProductIssueSelected && productOptions.length > 0 && (
+              <div>
+                <label className="text-[12px] text-zinc-400 font-semibold mb-1.5 tracking-tight block">
+                  Which product(s)? {selectedProducts.length ? `· ${selectedProducts.length} selected` : ''}
+                </label>
+                <select
+                  multiple
+                  value={selectedProducts}
+                  onChange={(e) => setSelectedProducts(Array.from(e.target.selectedOptions, (o) => o.value))}
+                  size={Math.min(productOptions.length, 5)}
+                  className="w-full text-[13px] bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 p-1.5"
+                >
+                  {productOptions.map((p) => <option key={p} value={p}>{p}</option>)}
+                </select>
+                <p className="text-[11px] text-zinc-500 mt-1">Ctrl/Cmd-click (or shift-click) to select more than one.</p>
+              </div>
+            )}
 
             <textarea
               value={dispRemarks}

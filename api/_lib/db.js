@@ -447,6 +447,11 @@ async function bootstrapSchema() {
       agent_remarks TEXT,
       connected VARCHAR(10),
       attempt INT,
+      -- Which of this lead's own product_name_list the agent identifies as the actual subject
+      -- of a "Product Related Issue" disposition, comma-joined - filled at dispose time
+      -- (api/detractor/lead-assignment.js), not copied from nps_delivery. Added by
+      -- scripts/add_affected_products_to_calling.py.
+      affected_products TEXT,
       live_response_id VARCHAR(64) GENERATED ALWAYS AS
         (IF(reassigned_away_at IS NULL, response_id, NULL)) VIRTUAL,
       UNIQUE KEY cls_nps_calling_live_response_key (live_response_id)
@@ -1913,7 +1918,7 @@ async function getUnassignedDetractorLeads(limit = 20) {
 // agent's metrics/connect-rate, not the admin who filed it on their behalf. Returns the lead's
 // agent_email (whether or not the update actually matched a row) so the caller can log who an
 // override was performed on.
-async function disposeDetractorLead(responseId, disposition, agentRemarks, connected, attempt, email, { allowAnyAgent = false } = {}) {
+async function disposeDetractorLead(responseId, disposition, agentRemarks, connected, attempt, email, { allowAnyAgent = false, affectedProducts = null } = {}) {
   await ensureSchema();
   const { rows: existing } = await sql`SELECT agent_email FROM CLS_NPS_calling WHERE response_id = ${responseId}`;
   const originalAgentEmail = existing.length ? existing[0].agent_email : null;
@@ -1921,14 +1926,14 @@ async function disposeDetractorLead(responseId, disposition, agentRemarks, conne
     await sql`
       UPDATE CLS_NPS_calling
       SET disposed_at = NOW(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null},
-          connected = ${connected || null}, attempt = ${attempt || null}
+          connected = ${connected || null}, attempt = ${attempt || null}, affected_products = ${affectedProducts || null}
       WHERE response_id = ${responseId} AND disposed_at IS NULL
     `;
   } else {
     await sql`
       UPDATE CLS_NPS_calling
       SET disposed_at = NOW(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null},
-          connected = ${connected || null}, attempt = ${attempt || null}
+          connected = ${connected || null}, attempt = ${attempt || null}, affected_products = ${affectedProducts || null}
       WHERE response_id = ${responseId} AND LOWER(agent_email) = LOWER(${email}) AND disposed_at IS NULL
     `;
   }
