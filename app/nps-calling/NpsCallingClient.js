@@ -7,7 +7,7 @@
 // api/_lib/db.js's getNextDetractorLead/disposeDetractorLead. So this file has no sync-from-
 // sheet loop, no upload modal, and no team split (single shared queue/disposition tree for v1).
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { XIcon, CheckIcon, PhoneIcon, CustomSelect, Overlay, CalendarIcon } from '../_calling/ui';
+import { XIcon, CheckIcon, PhoneIcon, CustomSelect, Overlay, CalendarIcon, SearchIcon } from '../_calling/ui';
 import { useCallingSession, ROSTER_STATUS_OPTIONS, STATUS_OPTIONS } from '../_calling/useCallingSession';
 import { useBusinessHours, CallingHoursCard, useDefaultQuota, DefaultQuotaCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
@@ -154,6 +154,9 @@ export default function NpsCallingClient() {
     if (tab === 'admin' && !canAdminTab) setTab('queue');
   }, [tab, canAdminTab]);
   const [rosterStatusFilter, setRosterStatusFilter] = useState('All');
+  const [allLeadsSearch, setAllLeadsSearch] = useState('');
+  const [allLeadsAgentFilter, setAllLeadsAgentFilter] = useState('ALL');
+  const [allLeadsStatusFilter, setAllLeadsStatusFilter] = useState('ALL');
 
   // My tickets: everything CLS_NPS_calling holds for this agent, undisposed and disposed alike -
   // split client-side (queue vs disposed) rather than two separate fetches, since one agent's
@@ -218,20 +221,26 @@ export default function NpsCallingClient() {
   const [dispRemarks, setDispRemarks] = useState('');
   const [attempt, setAttempt] = useState(1);
   const [dispSaving, setDispSaving] = useState(false);
+  // Top-level branch pick ('' | 'Yes' | 'No') - gates the whole checklist below. Agent must
+  // click Connected/Non Connected first; nothing renders until then, so the full ~30-reason
+  // tree never shows before a branch is chosen.
+  const [branchChoice, setBranchChoice] = useState('');
 
   const openDispose = (t) => {
     setDetailTkt(t);
     setSelectedReasons(new Map());
     setDispRemarks(t.agent_remarks || '');
     setAttempt(t.attempt || 1);
+    setBranchChoice('');
   };
   const closeDispose = () => setDetailTkt(null);
+  const pickBranch = (choice) => {
+    setBranchChoice(choice);
+    setSelectedReasons(new Map());
+  };
 
-  // Connected/Non Connected are the tree's own two top-level branches (see
-  // scripts/restructure_nps_calling_dispositions.py) and mutually exclusive by nature - a call
-  // either went through or it didn't, never both. Checking a leaf from one branch drops every
-  // selection from the other, so there's no separate "Connected? Yes/No" toggle to keep in sync
-  // with the tree - derivedConnected below reads it straight off whichever branch is checked.
+  // Leaves only ever come from whichever branch pickBranch chose (visibleDispositionNodes is
+  // filtered to it), so cross-branch cleanup here is just a belt-and-suspenders guard.
   const toggleReason = (id, path) => {
     setSelectedReasons((prev) => {
       const next = new Map(prev);
@@ -256,25 +265,15 @@ export default function NpsCallingClient() {
     [selectedReasons],
   );
 
-  // toggleReason's own exclusivity rule guarantees every selected reason shares one branch, so
-  // the first one is enough to tell which.
-  const derivedConnected = useMemo(() => {
-    const first = selectedReasons.values().next().value;
-    if (!first) return '';
-    if (first.path[0] === 'Connected') return 'Yes';
-    if (first.path[0] === 'Non Connected') return 'No';
-    return '';
-  }, [selectedReasons]);
+  // branchChoice is the picked top-level branch; the checklist below only ever shows that
+  // branch's categories (nothing renders until it's picked), so every selected leaf's path[0]
+  // already agrees with it.
+  const derivedConnected = branchChoice;
 
-  // Once a branch is picked, the OTHER branch's whole category list is hidden, not just
-  // unselectable - showing 30-odd Connected reasons while a Non Connected reason is checked
-  // is confusing (an agent could easily miss that ticking one of them would just switch
-  // branches). Both branches show again once nothing is selected, so there's still a way in.
   const visibleDispositionNodes = useMemo(() => {
-    if (!derivedConnected) return processDispositions;
-    const wantLabel = derivedConnected === 'Yes' ? 'Connected' : 'Non Connected';
-    return (processDispositions || []).filter((n) => n.label === wantLabel);
-  }, [processDispositions, derivedConnected]);
+    if (!branchChoice) return [];
+    return (processDispositions || []).filter((n) => n.label === (branchChoice === 'Yes' ? 'Connected' : 'Non Connected'));
+  }, [processDispositions, branchChoice]);
 
   const saveDisposition = async () => {
     if (!detailTkt || !selectedReasons.size || !derivedConnected) return;
@@ -519,6 +518,94 @@ export default function NpsCallingClient() {
                 </div>
               )}
 
+              {tab === 'overview' && canAdminTab && (
+                <div className="mt-4 bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden">
+                  <div className="flex items-center justify-between flex-wrap gap-3 p-4 pb-3">
+                    <div>
+                      <h3 className="text-[15px] font-bold text-zinc-100">All Leads</h3>
+                      <p className="text-[12px] text-zinc-500 mt-0.5">Every agent's tickets, admin/process-admin view.</p>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="relative">
+                        <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500" />
+                        <input
+                          value={allLeadsSearch}
+                          onChange={(e) => setAllLeadsSearch(e.target.value)}
+                          placeholder="Search customer, order, agent…"
+                          className="w-52 pl-8 pr-3 py-1.5 text-[12px] bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-500"
+                        />
+                      </div>
+                      <CustomSelect
+                        value={allLeadsAgentFilter}
+                        onChange={setAllLeadsAgentFilter}
+                        options={[
+                          { value: 'ALL', label: 'All Agents' },
+                          ...(processAgents || []).map((a) => ({ value: a.email, label: a.name || a.email })),
+                        ]}
+                      />
+                      <CustomSelect
+                        value={allLeadsStatusFilter}
+                        onChange={setAllLeadsStatusFilter}
+                        options={[
+                          { value: 'ALL', label: 'All Statuses' },
+                          { value: 'DISPOSED', label: 'Disposed' },
+                          { value: 'PENDING', label: 'Pending' },
+                        ]}
+                      />
+                    </div>
+                  </div>
+
+                  {(() => {
+                    const source = allTickets || [];
+                    const search = allLeadsSearch.trim().toLowerCase();
+                    const filtered = source.filter((t) => {
+                      if (allLeadsAgentFilter !== 'ALL' && (t.agent_email || '').toLowerCase() !== allLeadsAgentFilter.toLowerCase()) return false;
+                      if (allLeadsStatusFilter === 'DISPOSED' && isUndisposed(t)) return false;
+                      if (allLeadsStatusFilter === 'PENDING' && !isUndisposed(t)) return false;
+                      if (!search) return true;
+                      return [t.customer_name, t.channel_order_id, t.agent_email, t.customer_phone]
+                        .filter(Boolean).some((v) => String(v).toLowerCase().includes(search));
+                    });
+                    if (!allTickets) return <p className="text-[12px] text-zinc-500 px-4 pb-4">Loading…</p>;
+                    if (!filtered.length) return <p className="text-[12px] text-zinc-500 px-4 pb-4">No leads match.</p>;
+                    return (
+                      <div className="overflow-x-auto custom-scroll">
+                        <table className="w-full text-[13px]">
+                          <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
+                            <th className="py-2.5 px-4 text-left font-medium">Customer</th>
+                            <th className="py-2.5 px-4 text-left font-medium">Order</th>
+                            <th className="py-2.5 px-4 text-left font-medium">NPS</th>
+                            <th className="py-2.5 px-4 text-left font-medium">Agent</th>
+                            <th className="py-2.5 px-4 text-left font-medium">Assigned</th>
+                            <th className="py-2.5 px-4 text-left font-medium">Status</th>
+                            <th className="py-2.5 px-4 text-left font-medium">Disposition</th>
+                            <th className="py-2.5 px-4 text-center font-medium">Connected</th>
+                          </tr></thead>
+                          <tbody className="divide-y divide-zinc-800/50">
+                            {filtered.map((t) => (
+                              <tr key={t.response_id} className="hover:bg-zinc-900/40 transition-colors">
+                                <td className="py-2.5 px-4 text-zinc-200">{t.customer_name || '—'}</td>
+                                <td className="py-2.5 px-4 text-zinc-400">{[t.brand, t.channel_order_id].filter(Boolean).join(' · ') || '—'}</td>
+                                <td className="py-2.5 px-4 text-zinc-400">{t.nps_score ?? '—'} · {t.nps_category || '—'}</td>
+                                <td className="py-2.5 px-4 text-zinc-400 font-mono text-[11px]">{t.agent_email || '—'}</td>
+                                <td className="py-2.5 px-4 text-zinc-500 text-[11px]">{t.assigned_at ? new Date(t.assigned_at).toLocaleString() : '—'}</td>
+                                <td className="py-2.5 px-4">
+                                  {t.disposed_at
+                                    ? <span className="text-emerald-400 font-semibold">Disposed</span>
+                                    : <span className="text-amber-400 font-semibold">Pending</span>}
+                                </td>
+                                <td className="py-2.5 px-4 text-zinc-400 max-w-[220px] truncate" title={t.disposition || ''}>{t.disposition || '—'}</td>
+                                <td className="py-2.5 px-4 text-center text-zinc-400">{t.connected || '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
               {tab === 'admin' && canAdminTab && (
                 <div className="space-y-5">
                   <CallingHoursCard processKey={PROCESS_KEY} processLabel="NPS-Calling" hours={hours} />
@@ -651,13 +738,24 @@ export default function NpsCallingClient() {
 
             <div className="flex items-center gap-2">
               <span className="text-[12px] text-zinc-400 font-semibold">Connected:</span>
-              <span className={`px-3 py-1 rounded-lg text-[12px] font-bold border ${
-                derivedConnected === 'Yes' ? 'bg-emerald-600 border-emerald-500 text-white'
-                  : derivedConnected === 'No' ? 'bg-rose-600 border-rose-500 text-white'
-                  : 'border-zinc-700 text-zinc-500'
-              }`}>
-                {derivedConnected || 'Pick a reason below'}
-              </span>
+              <button
+                type="button"
+                onClick={() => pickBranch('Yes')}
+                className={`px-3 py-1 rounded-lg text-[12px] font-bold border ${
+                  branchChoice === 'Yes' ? 'bg-emerald-600 border-emerald-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
+                }`}
+              >
+                Connected
+              </button>
+              <button
+                type="button"
+                onClick={() => pickBranch('No')}
+                className={`px-3 py-1 rounded-lg text-[12px] font-bold border ${
+                  branchChoice === 'No' ? 'bg-rose-600 border-rose-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
+                }`}
+              >
+                Non Connected
+              </button>
               <span className="text-[12px] text-zinc-400 font-semibold ml-3">Attempt</span>
               <input
                 type="number"
@@ -670,9 +768,11 @@ export default function NpsCallingClient() {
 
             <div>
               <p className="text-[12px] text-zinc-400 font-semibold mb-1.5">
-                Disposition{selectedReasons.size ? ` (${selectedReasons.size} selected)` : ''} — pick Connected or Non Connected, then check every reason that applies
+                Disposition{selectedReasons.size ? ` (${selectedReasons.size} selected)` : ''} — pick Connected or Non Connected above, then check every reason that applies
               </p>
-              <DispositionChecklist nodes={visibleDispositionNodes} selected={selectedReasons} onToggle={toggleReason} />
+              {branchChoice
+                ? <DispositionChecklist nodes={visibleDispositionNodes} selected={selectedReasons} onToggle={toggleReason} />
+                : <p className="text-[12px] text-zinc-500">Pick Connected or Non Connected above to see reasons.</p>}
             </div>
 
             <textarea
