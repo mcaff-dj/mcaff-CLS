@@ -76,6 +76,16 @@ function hasValue(v) {
   return !!v && v !== 'NA';
 }
 
+// top_rated_area is a raw numeric code in the source survey with no label of its own - mapping
+// confirmed against the survey's own question options, not guessed. Falls back to the raw code
+// for anything outside 1-4, rather than hiding it, so an unexpected value is still visible.
+const TOP_RATED_AREA_LABELS = {
+  '1': 'Delivery experience',
+  '2': 'Customer support',
+  '3': 'Product',
+  '4': 'Website / app experience',
+};
+
 // The survey-detail block (category, top-rated area, per-area ratings/reasons, free-text
 // feedback) - shared by the ticket card (queue/disposed lists) and the dispose modal, so an
 // agent still has the customer's full context in front of them while filling out the
@@ -89,7 +99,7 @@ function TicketSurveyDetails({ t }) {
 
       {(hasValue(t.top_rated_area) || hasValue(t.other_l1_specify)) && (
         <p className="text-[12px] text-zinc-400">
-          {hasValue(t.top_rated_area) && <span><span className="font-semibold text-zinc-300">Top-rated area:</span> {t.top_rated_area}</span>}
+          {hasValue(t.top_rated_area) && <span><span className="font-semibold text-zinc-300">Top-rated area:</span> {TOP_RATED_AREA_LABELS[t.top_rated_area] || t.top_rated_area}</span>}
           {hasValue(t.top_rated_area) && hasValue(t.other_l1_specify) && ' · '}
           {hasValue(t.other_l1_specify) && <span><span className="font-semibold text-zinc-300">Other:</span> {t.other_l1_specify}</span>}
         </p>
