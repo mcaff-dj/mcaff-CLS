@@ -18,15 +18,63 @@ const PROCESS_KEY = 'detractor';
 // "blank" reads as a real number instead of an unexplained empty field.
 const FALLBACK_QUOTA = 15;
 
-// Snapshot fields on a ticket worth showing the agent, in display order - {label, field}. Reason
-// pairs are only rendered when their *_reason (or _openend) actually has text, since a detractor
-// only ever fills in the area(s) relevant to their complaint.
-const REASON_AREAS = [
-  { label: 'Delivery', reason: 'delivery_detractor_reason', openend: 'delivery_detractor_openend' },
-  { label: 'Customer Service', reason: 'cs_detractor_reason', openend: 'cs_detractor_openend' },
-  { label: 'Product / Packaging', reason: 'product_packaging_detractor_reason', openend: 'product_packaging_detractor_openend' },
-  { label: 'Platform', reason: 'platform_detractor_reason', openend: 'platform_detractor_openend' },
+// Every surveyed area from nps_delivery (see scripts/add_nps_area_ratings_to_calling.py), not
+// just whichever area's detractor_reason happened to trigger the overall Detractor status - a
+// customer can be an overall detractor while still having rated another area well, and that
+// contrast is worth showing the agent. `rating` is one of the four columns scripts/nps_source.py's
+// AREA_RATING_COLUMNS also uses (not on one consistent scale over time - see that file's own
+// comment - so shown as the source's raw value, not normalized). `buckets` lists every
+// promoter/passive/detractor reason+openend pair that exists for the area; only whichever
+// bucket the customer's response actually filled in ever has text, same "only what's relevant"
+// shape the old single-bucket version already had.
+const AREAS = [
+  {
+    label: 'Order Placement / Website',
+    rating: 'order_placement_experience',
+    buckets: [{ reason: 'order_placement_promoter_reason', openend: 'order_placement_promoter_openend' }],
+  },
+  {
+    label: 'Platform',
+    rating: null,
+    buckets: [
+      { reason: 'platform_passive_reason', openend: 'platform_passive_openend' },
+      { reason: 'platform_detractor_reason', openend: 'platform_detractor_openend' },
+    ],
+  },
+  {
+    label: 'Product / Packaging',
+    rating: 'product_first_impression',
+    buckets: [
+      { reason: 'product_packaging_promoter_reason', openend: 'product_packaging_promoter_openend' },
+      { reason: 'product_first_impression_passive_reason', openend: 'product_first_impression_passive_openend' },
+      { reason: 'product_packaging_detractor_reason', openend: 'product_packaging_detractor_openend' },
+    ],
+  },
+  {
+    label: 'Customer Service',
+    rating: 'cs_team_rating',
+    reach: 'cs_reach',
+    buckets: [
+      { reason: 'cs_promoter_reason', openend: 'cs_promoter_openend' },
+      { reason: 'cs_passive_reason', openend: 'cs_passive_openend' },
+      { reason: 'cs_detractor_reason', openend: 'cs_detractor_openend' },
+    ],
+  },
+  {
+    label: 'Delivery',
+    rating: 'delivery_service_rating',
+    buckets: [
+      { reason: 'delivery_promoter_reason', openend: 'delivery_promoter_openend' },
+      { reason: 'delivery_passive_reason', openend: 'delivery_passive_openend' },
+      { reason: 'delivery_detractor_reason', openend: 'delivery_detractor_openend' },
+    ],
+  },
 ];
+
+// nps_delivery stores an unfilled field as the literal string "NA", not NULL/blank.
+function hasValue(v) {
+  return !!v && v !== 'NA';
+}
 
 function isUndisposed(t) {
   return !t.disposed_at;
@@ -317,18 +365,36 @@ export default function NpsCallingClient() {
         <p className="text-[12px] text-zinc-400">{[t.category, t.sub_category].filter(Boolean).join(' · ')}</p>
       )}
 
-      <div className="space-y-1.5">
-        {REASON_AREAS.map(({ label, reason, openend }) => {
-          const r = t[reason];
-          const o = t[openend];
-          if (!r && !o) return null;
+      {(hasValue(t.top_rated_area) || hasValue(t.other_l1_specify)) && (
+        <p className="text-[12px] text-zinc-400">
+          {hasValue(t.top_rated_area) && <span><span className="font-semibold text-zinc-300">Top-rated area:</span> {t.top_rated_area}</span>}
+          {hasValue(t.top_rated_area) && hasValue(t.other_l1_specify) && ' · '}
+          {hasValue(t.other_l1_specify) && <span><span className="font-semibold text-zinc-300">Other:</span> {t.other_l1_specify}</span>}
+        </p>
+      )}
+
+      <div className="space-y-2">
+        {AREAS.map(({ label, rating, reach, buckets }) => {
+          const ratingVal = rating && t[rating];
+          const reachVal = reach && t[reach];
+          const filledBuckets = buckets
+            .map(({ reason, openend }) => ({ reason: t[reason], openend: t[openend] }))
+            .filter((b) => hasValue(b.reason) || hasValue(b.openend));
+          if (!hasValue(ratingVal) && !hasValue(reachVal) && !filledBuckets.length) return null;
           return (
-            <p key={label} className="text-[12px] text-zinc-300">
-              <span className="font-semibold text-zinc-200">{label}:</span> {[r, o].filter(Boolean).join(' — ')}
-            </p>
+            <div key={label} className="text-[12px] text-zinc-300">
+              <p>
+                <span className="font-semibold text-zinc-200">{label}</span>
+                {hasValue(ratingVal) && <span className="text-zinc-500"> · Rating: {ratingVal}</span>}
+                {hasValue(reachVal) && <span className="text-zinc-500"> · Reached CS: {reachVal}</span>}
+              </p>
+              {filledBuckets.map((b, i) => (
+                <p key={i} className="pl-2">{[b.reason, b.openend].filter(hasValue).join(' — ')}</p>
+              ))}
+            </div>
           );
         })}
-        {t.additional_feedback && (
+        {hasValue(t.additional_feedback) && (
           <p className="text-[12px] text-zinc-300"><span className="font-semibold text-zinc-200">Feedback:</span> {t.additional_feedback}</p>
         )}
       </div>
