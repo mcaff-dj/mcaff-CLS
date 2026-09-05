@@ -76,6 +76,58 @@ function hasValue(v) {
   return !!v && v !== 'NA';
 }
 
+// The survey-detail block (category, top-rated area, per-area ratings/reasons, free-text
+// feedback) - shared by the ticket card (queue/disposed lists) and the dispose modal, so an
+// agent still has the customer's full context in front of them while filling out the
+// disposition rather than having to close the modal to re-check the card behind it.
+function TicketSurveyDetails({ t }) {
+  return (
+    <>
+      {(t.category || t.sub_category) && (
+        <p className="text-[12px] text-zinc-400">{[t.category, t.sub_category].filter(Boolean).join(' · ')}</p>
+      )}
+
+      {(hasValue(t.top_rated_area) || hasValue(t.other_l1_specify)) && (
+        <p className="text-[12px] text-zinc-400">
+          {hasValue(t.top_rated_area) && <span><span className="font-semibold text-zinc-300">Top-rated area:</span> {t.top_rated_area}</span>}
+          {hasValue(t.top_rated_area) && hasValue(t.other_l1_specify) && ' · '}
+          {hasValue(t.other_l1_specify) && <span><span className="font-semibold text-zinc-300">Other:</span> {t.other_l1_specify}</span>}
+        </p>
+      )}
+
+      <div className="space-y-2">
+        {AREAS.map(({ label, rating, reach, buckets }) => {
+          const ratingVal = rating && t[rating];
+          const reachVal = reach && t[reach];
+          // Customer service specifically: never reached CS means nothing else about this area
+          // (rating/reasons) is meaningful either - skip the whole block rather than showing a
+          // bare "Reached CS: No" that just invites the agent to look for detail that isn't there.
+          if (reach && reachVal === 'No') return null;
+          const filledBuckets = buckets
+            .map(({ reason, openend }) => ({ reason: t[reason], openend: t[openend] }))
+            .filter((b) => hasValue(b.reason) || hasValue(b.openend));
+          if (!hasValue(ratingVal) && !hasValue(reachVal) && !filledBuckets.length) return null;
+          return (
+            <div key={label} className="text-[12px] text-zinc-300">
+              <p>
+                <span className="font-semibold text-zinc-200">{label}</span>
+                {hasValue(ratingVal) && <span className="text-zinc-500"> · Rating: {ratingVal}</span>}
+                {hasValue(reachVal) && <span className="text-zinc-500"> · Reached CS: {reachVal}</span>}
+              </p>
+              {filledBuckets.map((b, i) => (
+                <p key={i} className="pl-2">{[b.reason, b.openend].filter(hasValue).join(' — ')}</p>
+              ))}
+            </div>
+          );
+        })}
+        {hasValue(t.additional_feedback) && (
+          <p className="text-[12px] text-zinc-300"><span className="font-semibold text-zinc-200">Feedback:</span> {t.additional_feedback}</p>
+        )}
+      </div>
+    </>
+  );
+}
+
 function isUndisposed(t) {
   return !t.disposed_at;
 }
@@ -360,43 +412,7 @@ export default function NpsCallingClient() {
         </div>
       </div>
 
-      {(t.category || t.sub_category) && (
-        <p className="text-[12px] text-zinc-400">{[t.category, t.sub_category].filter(Boolean).join(' · ')}</p>
-      )}
-
-      {(hasValue(t.top_rated_area) || hasValue(t.other_l1_specify)) && (
-        <p className="text-[12px] text-zinc-400">
-          {hasValue(t.top_rated_area) && <span><span className="font-semibold text-zinc-300">Top-rated area:</span> {t.top_rated_area}</span>}
-          {hasValue(t.top_rated_area) && hasValue(t.other_l1_specify) && ' · '}
-          {hasValue(t.other_l1_specify) && <span><span className="font-semibold text-zinc-300">Other:</span> {t.other_l1_specify}</span>}
-        </p>
-      )}
-
-      <div className="space-y-2">
-        {AREAS.map(({ label, rating, reach, buckets }) => {
-          const ratingVal = rating && t[rating];
-          const reachVal = reach && t[reach];
-          const filledBuckets = buckets
-            .map(({ reason, openend }) => ({ reason: t[reason], openend: t[openend] }))
-            .filter((b) => hasValue(b.reason) || hasValue(b.openend));
-          if (!hasValue(ratingVal) && !hasValue(reachVal) && !filledBuckets.length) return null;
-          return (
-            <div key={label} className="text-[12px] text-zinc-300">
-              <p>
-                <span className="font-semibold text-zinc-200">{label}</span>
-                {hasValue(ratingVal) && <span className="text-zinc-500"> · Rating: {ratingVal}</span>}
-                {hasValue(reachVal) && <span className="text-zinc-500"> · Reached CS: {reachVal}</span>}
-              </p>
-              {filledBuckets.map((b, i) => (
-                <p key={i} className="pl-2">{[b.reason, b.openend].filter(hasValue).join(' — ')}</p>
-              ))}
-            </div>
-          );
-        })}
-        {hasValue(t.additional_feedback) && (
-          <p className="text-[12px] text-zinc-300"><span className="font-semibold text-zinc-200">Feedback:</span> {t.additional_feedback}</p>
-        )}
-      </div>
+      <TicketSurveyDetails t={t} />
 
       {(t.address_city || t.address_state || t.address_pincode) && (
         <p className="text-[11px] text-zinc-500">{[t.address_city, t.address_state, t.address_pincode].filter(Boolean).join(', ')}</p>
@@ -734,6 +750,10 @@ export default function NpsCallingClient() {
             <div className="flex items-center justify-between">
               <h3 className="text-[15px] font-bold text-zinc-100">Dispose lead — {detailTkt.customer_name || detailTkt.response_id}</h3>
               <button type="button" onClick={closeDispose}><XIcon className="text-zinc-500 hover:text-zinc-200" /></button>
+            </div>
+
+            <div className="max-h-48 overflow-y-auto custom-scroll bg-zinc-950/40 border border-zinc-800/60 rounded-lg p-3">
+              <TicketSurveyDetails t={detailTkt} />
             </div>
 
             <div className="flex items-center gap-2">
