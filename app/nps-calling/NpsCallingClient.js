@@ -168,7 +168,6 @@ export default function NpsCallingClient() {
   // fresh Map on every toggle so React sees a new reference and re-renders.
   const [selectedReasons, setSelectedReasons] = useState(new Map());
   const [dispRemarks, setDispRemarks] = useState('');
-  const [connected, setConnected] = useState('');
   const [attempt, setAttempt] = useState(1);
   const [dispSaving, setDispSaving] = useState(false);
 
@@ -176,16 +175,27 @@ export default function NpsCallingClient() {
     setDetailTkt(t);
     setSelectedReasons(new Map());
     setDispRemarks(t.agent_remarks || '');
-    setConnected(t.connected || '');
     setAttempt(t.attempt || 1);
   };
   const closeDispose = () => setDetailTkt(null);
 
+  // Connected/Non Connected are the tree's own two top-level branches (see
+  // scripts/restructure_nps_calling_dispositions.py) and mutually exclusive by nature - a call
+  // either went through or it didn't, never both. Checking a leaf from one branch drops every
+  // selection from the other, so there's no separate "Connected? Yes/No" toggle to keep in sync
+  // with the tree - derivedConnected below reads it straight off whichever branch is checked.
   const toggleReason = (id, path) => {
     setSelectedReasons((prev) => {
       const next = new Map(prev);
-      if (next.has(id)) next.delete(id);
-      else next.set(id, { id, path });
+      if (next.has(id)) {
+        next.delete(id);
+        return next;
+      }
+      const branch = path[0];
+      for (const [existingId, existing] of next) {
+        if (existing.path[0] !== branch) next.delete(existingId);
+      }
+      next.set(id, { id, path });
       return next;
     });
   };
@@ -198,8 +208,18 @@ export default function NpsCallingClient() {
     [selectedReasons],
   );
 
+  // toggleReason's own exclusivity rule guarantees every selected reason shares one branch, so
+  // the first one is enough to tell which.
+  const derivedConnected = useMemo(() => {
+    const first = selectedReasons.values().next().value;
+    if (!first) return '';
+    if (first.path[0] === 'Connected') return 'Yes';
+    if (first.path[0] === 'Non Connected') return 'No';
+    return '';
+  }, [selectedReasons]);
+
   const saveDisposition = async () => {
-    if (!detailTkt || !selectedReasons.size || !connected) return;
+    if (!detailTkt || !selectedReasons.size || !derivedConnected) return;
     setDispSaving(true);
     try {
       const r = await fetch('/api/detractor/lead-assignment', {
@@ -210,7 +230,7 @@ export default function NpsCallingClient() {
           responseId: detailTkt.response_id,
           disposition: joinedDisposition,
           agentRemarks: dispRemarks,
-          connected,
+          connected: derivedConnected,
           attempt: Number(attempt) || 1,
         }),
       });
@@ -218,7 +238,7 @@ export default function NpsCallingClient() {
       if (!r.ok) { showToast(`⚠️ ${d.error || 'Could not save disposition'}`); return; }
       setTickets((prev) => prev.map((t) => (
         t.response_id === detailTkt.response_id
-          ? { ...t, disposed_at: new Date().toISOString(), disposition: joinedDisposition, agent_remarks: dispRemarks, connected, attempt }
+          ? { ...t, disposed_at: new Date().toISOString(), disposition: joinedDisposition, agent_remarks: dispRemarks, connected: derivedConnected, attempt }
           : t
       )));
       showToast('Disposition saved');
@@ -554,17 +574,14 @@ export default function NpsCallingClient() {
             </div>
 
             <div className="flex items-center gap-2">
-              <span className="text-[12px] text-zinc-400 font-semibold">Connected?</span>
-              {['Yes', 'No'].map((v) => (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => setConnected(v)}
-                  className={`px-3 py-1 rounded-lg text-[12px] font-bold border ${connected === v ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-zinc-700 text-zinc-300'}`}
-                >
-                  {v}
-                </button>
-              ))}
+              <span className="text-[12px] text-zinc-400 font-semibold">Connected:</span>
+              <span className={`px-3 py-1 rounded-lg text-[12px] font-bold border ${
+                derivedConnected === 'Yes' ? 'bg-emerald-600 border-emerald-500 text-white'
+                  : derivedConnected === 'No' ? 'bg-rose-600 border-rose-500 text-white'
+                  : 'border-zinc-700 text-zinc-500'
+              }`}>
+                {derivedConnected || 'Pick a reason below'}
+              </span>
               <span className="text-[12px] text-zinc-400 font-semibold ml-3">Attempt</span>
               <input
                 type="number"
@@ -577,7 +594,7 @@ export default function NpsCallingClient() {
 
             <div>
               <p className="text-[12px] text-zinc-400 font-semibold mb-1.5">
-                Disposition{selectedReasons.size ? ` (${selectedReasons.size} selected)` : ''} — check every reason the customer raised, across as many categories as apply
+                Disposition{selectedReasons.size ? ` (${selectedReasons.size} selected)` : ''} — pick Connected or Non Connected, then check every reason that applies
               </p>
               <DispositionChecklist nodes={processDispositions} selected={selectedReasons} onToggle={toggleReason} />
             </div>
@@ -592,7 +609,7 @@ export default function NpsCallingClient() {
 
             <button
               type="button"
-              disabled={!selectedReasons.size || !connected || dispSaving}
+              disabled={!selectedReasons.size || !derivedConnected || dispSaving}
               onClick={saveDisposition}
               className="w-full py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-[13px] font-bold text-white transition-colors"
             >
