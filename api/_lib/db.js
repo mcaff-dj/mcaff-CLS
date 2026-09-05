@@ -1720,11 +1720,13 @@ async function getLiveNdrLeadEmail(awbNumber) {
 // (ndr_lead_assignments_live_awb_key), so a re-claim of an already-live row (a race, or the UI's
 // own auto-claim firing twice) is a safe no-op rather than an error - the sheet's own Q/R
 // write already decided who holds the lead; this just mirrors that into MySQL.
-async function claimNdrLead(awbNumber, email) {
+async function claimNdrLead(awbNumber, email, attrs) {
   await ensureSchema();
+  const { courier, reason, paymentMode, brand } = attrs || {};
   await sql`
-    INSERT IGNORE INTO ndr_lead_assignments (awb_number, email)
-    VALUES (${awbNumber}, ${email})
+    INSERT IGNORE INTO ndr_lead_assignments
+      (awb_number, email, delivery_partner, ndr_reason, payment_mode, brand)
+    VALUES (${awbNumber}, ${email}, ${courier || null}, ${reason || null}, ${paymentMode || null}, ${brand || null})
   `;
   invalidateCache('calling:ndrLeadDates');
 }

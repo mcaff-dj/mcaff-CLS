@@ -65,6 +65,7 @@ const MAX_ROUNDS = 3; // initial pass + up to 2 backfills for rows lost to a rac
 // This is someone else's long-running spreadsheet, not ours, so these are fixed positions rather
 // than anything derived from a schema. Only COL_AGENT is ever written here.
 const COL_ORDER_ID = 0;          // A - the only source for brand (no Brand column exists)
+const COL_COURIER = 5;           // F - "Courier Company" / sheet header "Partner name"
 const COL_AWB = 4;               // E
 const COL_PAYMENT_MODE = 11;     // L
 const COL_ATTEMPTS = 14;         // O
@@ -128,6 +129,7 @@ function buildCandidateList(rows, email, filters) {
       latestNdrReason: cell(COL_LATEST_NDR_REASON),
       paymentMode: cell(COL_PAYMENT_MODE),
       brand: brandOf(cell(COL_ORDER_ID)),
+      courier: cell(COL_COURIER),
       sortKey: parseLatestNdrDate(cell(COL_LATEST_NDR_DATE)),
     };
     if (filtersCoverLead(filters, lead)) candidates.push(lead);
@@ -255,7 +257,9 @@ async function handler(req, res) {
         // serialized into the round trips above. Best-effort by design: the sheet write already
         // succeeded and the agent holds the lead, so losing a history row is a reporting gap, not
         // a failed assignment, and must not stop the fill.
-        await Promise.all(free.map((c) => claimNdrLead(c.awb, email).catch((e) => {
+        await Promise.all(free.map((c) => claimNdrLead(c.awb, email, {
+          courier: c.courier, reason: c.latestNdrReason, paymentMode: c.paymentMode, brand: c.brand,
+        }).catch((e) => {
           console.error(`api/ndr/next-lead: Agent Name written for ${c.awb} but ndr_lead_assignments claim failed:`, e.message);
         })));
       }

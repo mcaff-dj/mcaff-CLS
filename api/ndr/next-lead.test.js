@@ -19,9 +19,9 @@ const ME = 'rasika.sawant@mcaffeine.com';
 
 // A sheet row wide enough to reach Connected (index 19), with only the columns this endpoint
 // reads populated. Indices match assign_ndr_leads.py's COL_* constants.
-function row({ orderId = 'MC1', awb = 'AWB1', paymentMode = 'COD', attempts = '', date = '', reason = '', agent = '', connected = '' } = {}) {
+function row({ orderId = 'MC1', awb = 'AWB1', paymentMode = 'COD', attempts = '', date = '', reason = '', agent = '', connected = '', courier = '' } = {}) {
   const r = new Array(20).fill('');
-  r[0] = orderId; r[4] = awb; r[11] = paymentMode; r[14] = attempts;
+  r[0] = orderId; r[4] = awb; r[5] = courier; r[11] = paymentMode; r[14] = attempts;
   r[15] = date; r[16] = reason; r[18] = agent; r[19] = connected;
   return r;
 }
@@ -97,6 +97,13 @@ const unrestricted = normalizeAgentFilters({ email: ME });
   const rows = [row({ awb: 'H1', orderId: 'HYP900' }), row({ awb: 'M1', orderId: 'MC900' })];
   const { candidates } = buildCandidateList(rows, ME, hyphenOnly);
   assert.deepStrictEqual(candidates.map((c) => c.awb), ['H1']);
+}
+
+// --- courier (Courier Company, column F) is carried onto the candidate -----------------------
+{
+  const rows = [row({ awb: 'C1', courier: 'Delhivery' })];
+  const { candidates } = buildCandidateList(rows, ME, unrestricted);
+  assert.strictEqual(candidates[0].courier, 'Delhivery');
 }
 
 // --- ragged rows: Sheets truncates trailing empty cells, so short arrays are normal ----------
