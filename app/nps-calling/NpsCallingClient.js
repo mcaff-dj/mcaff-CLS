@@ -181,7 +181,7 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [] }) {
         if (hasChildren) {
           const body = <DispositionChecklist nodes={n.children} selected={selected} onToggle={onToggle} ancestors={path} />;
           return isTopLevel ? (
-            <div key={n.id} className="bg-zinc-950/50 border border-zinc-800/60 rounded-lg p-3 space-y-2">
+            <div key={n.id} className="bg-zinc-950/60 border border-zinc-800/80 rounded-lg p-3 space-y-2">
               <p className="text-[12px] font-bold text-zinc-200 tracking-tight">{n.label}</p>
               {body}
             </div>
@@ -925,7 +925,7 @@ export default function NpsCallingClient() {
               <button type="button" onClick={closeDispose}><XIcon className="text-zinc-500 hover:text-zinc-200" /></button>
             </div>
 
-            <div className="max-h-52 overflow-y-auto custom-scroll bg-zinc-950/40 border border-zinc-800/60 rounded-lg p-3">
+            <div className="max-h-52 overflow-y-auto custom-scroll bg-zinc-950/60 border border-zinc-800/80 rounded-lg p-3">
               <TicketSurveyDetails t={detailTkt} />
             </div>
 
