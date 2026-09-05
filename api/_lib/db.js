@@ -1765,6 +1765,17 @@ async function getDetractorLoadByAgent(email) {
 // CLS_NPS_calling in the same INSERT that assigns it - see that table's own comment for why this
 // is copy-on-assign rather than a live join. Returns the new ticket row, or null if there is
 // nothing left unclaimed. nps_delivery is read-only here: this function never writes to it.
+//
+// submitted_date is a DD/MM/YYYY string (nps_delivery's own format, confirmed against its data -
+// not ISO), so a plain string ORDER BY sorts it wrong (e.g. "09/06/2026" < "10/01/2026"
+// lexicographically, even though Jan comes before June) - STR_TO_DATE parses it properly for
+// both the recency filter and the ordering below.
+//
+// A detractor call about a months-old order is a call the customer barely remembers making and
+// an agent can't meaningfully help - prior (>30-day-old) leads must never be assigned, not just
+// deprioritized, so this is a hard WHERE filter. STR_TO_DATE returns NULL for anything that
+// doesn't parse as a date, and NULL >= anything is unknown/false in SQL, so a malformed
+// submitted_date fails this filter too rather than being silently treated as "recent enough".
 async function getNextDetractorLead(email) {
   await ensureSchema();
   const { rows } = await sql`
@@ -1779,7 +1790,8 @@ async function getNextDetractorLead(email) {
     FROM nps_delivery d
     LEFT JOIN CLS_NPS_calling c ON c.response_id = d.response_id
     WHERE d.nps_category = 'Detractor' AND c.response_id IS NULL
-    ORDER BY d.submitted_date ASC
+      AND STR_TO_DATE(d.submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+    ORDER BY STR_TO_DATE(d.submitted_date, '%d/%m/%Y') ASC
     LIMIT 1
   `;
   if (!rows.length) return null;
