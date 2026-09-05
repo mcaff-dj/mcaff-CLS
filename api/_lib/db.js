@@ -1766,6 +1766,13 @@ async function disposeNdrLead(awbNumber, disposition, agentRemarks, email) {
   invalidateCache('calling:ndrLeadDates');
 }
 
+// Falls back to this only when no admin has ever set calling_process_settings.default_quota for
+// 'detractor' (Admin Panel's Default Quota card) - a deliberately conservative starting cap.
+// Moved here from the old api/detractor/next-lead.js (now deleted - see the 2026-09-05
+// auto-assignment design spec) since both auto-assign trigger points need this chain, not just
+// one pull endpoint.
+const DETRACTOR_FALLBACK_QUOTA = 15;
+
 // NPS-Calling ("detractor" process key) equivalents of getRtoAgentQuota/getRtoAgentAvailability
 // above - same fail-open (quota)/fail-closed (availability) contract, just against process_key
 // 'detractor' instead of 'rto'.
@@ -1807,6 +1814,19 @@ async function getDetractorLoadByAgent(email) {
     WHERE LOWER(agent_email) = LOWER(${email}) AND live_response_id IS NOT NULL AND disposed_at IS NULL
   `;
   return Number(rows[0].n) || 0;
+}
+
+// Consolidates the quota-then-load chain both auto-assign trigger points need: per-agent
+// override (calling_agent_process.max_quota) -> admin-set default
+// (calling_process_settings.default_quota) -> DETRACTOR_FALLBACK_QUOTA, plus this agent's
+// current undisposed load. One definition so api/auth/[action].js's going-Online trigger and
+// api/detractor/lead-assignment.js's on-disposal trigger can't drift on the fallback chain.
+async function getDetractorQuotaAndLoad(email) {
+  const quotaOverride = await getDetractorAgentQuota(email);
+  const processDefault = await getCallingDefaultQuota('detractor');
+  const quota = quotaOverride != null ? quotaOverride : (processDefault != null ? processDefault : DETRACTOR_FALLBACK_QUOTA);
+  const load = await getDetractorLoadByAgent(email);
+  return { quota, load };
 }
 
 // Hands one fresh nps_delivery Detractor row to `email`, copying the fields the agent needs into
@@ -1909,6 +1929,21 @@ async function getNextDetractorLead(email) {
     )
   `;
   return lead;
+}
+
+// Claims up to maxCount fresh detractor leads for `email` in a loop, stopping the moment
+// getNextDetractorLead returns null (pool exhausted) - the replacement for the removed manual
+// pull button, used by both auto-assign trigger points (going-Online batch-fill, on-disposal
+// self-refill). claimFn is injectable so db.detractorAssign.test.js can verify the loop's stop
+// conditions without a real database.
+async function assignDetractorLeadsToAgent(email, maxCount, claimFn = getNextDetractorLead) {
+  const claimed = [];
+  for (let i = 0; i < maxCount; i++) {
+    const lead = await claimFn(email);
+    if (!lead) break;
+    claimed.push(lead);
+  }
+  return claimed;
 }
 
 // Read-only peek at what getNextDetractorLead would hand out next, in the same oldest-first
@@ -5057,8 +5092,9 @@ module.exports = {
   deleteProcessDisposition, reorderProcessDispositions,
   claimNdrLead, disposeNdrLead, getLiveNdrLeadEmail, getDeliveredAwbNumbers,
   getNdrAgentAssignmentConfig,
-  getDetractorAgentQuota, getDetractorAgentAvailability, getDetractorLoadByAgent,
+  getDetractorAgentQuota, getDetractorAgentAvailability, getDetractorLoadByAgent, getDetractorQuotaAndLoad,
   getNextDetractorLead, getUnassignedDetractorLeads, disposeDetractorLead, getDetractorTicketsForAgent, getAllDetractorTickets,
+  assignDetractorLeadsToAgent,
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
