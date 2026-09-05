@@ -270,7 +270,7 @@ export default function CallingOverviewClient() {
             <div className="kpi-value">{stats.connectRate}%</div>
             <div className="kpi-sub">Call success</div>
           </div>
-          {processFilter !== 'NDR' && (
+          {stats.totalRefunded != null && (
             <div className="kpi kpi-accent">
               <div className="kpi-label">Refunds</div>
               <div className="kpi-value">{stats.totalRefunded.toLocaleString('en-IN')}</div>

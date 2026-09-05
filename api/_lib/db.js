@@ -1723,10 +1723,17 @@ async function getLiveNdrLeadEmail(awbNumber) {
 async function claimNdrLead(awbNumber, email, attrs) {
   await ensureSchema();
   const { courier, reason, paymentMode, brand } = attrs || {};
+  // Trimmed before the || null fallback: a whitespace-only sheet cell is truthy in JS
+  // (' ' || null keeps the space), which would store a non-NULL value that permanently defeats
+  // backfill_ndr_lead_attributes_from_sheet.py's WHERE delivery_partner IS NULL gap-filling
+  // guard for that row, and can silently split otherwise-identical values across separate
+  // GROUP BY rows in the breakdown tables. brand comes from brandOf(), already a clean derived
+  // value, not raw sheet text - no trim needed there.
+  const trim = (v) => (v == null ? null : String(v).trim() || null);
   await sql`
     INSERT IGNORE INTO ndr_lead_assignments
       (awb_number, email, delivery_partner, ndr_reason, payment_mode, brand)
-    VALUES (${awbNumber}, ${email}, ${courier || null}, ${reason || null}, ${paymentMode || null}, ${brand || null})
+    VALUES (${awbNumber}, ${email}, ${trim(courier)}, ${trim(reason)}, ${trim(paymentMode)}, ${brand || null})
   `;
   invalidateCache('calling:ndrLeadDates');
 }
@@ -4459,12 +4466,16 @@ async function getNdrCallingOverviewStats(dateFrom, dateTo) {
     FROM ndr_lead_assignments
   `;
   const r = rows[0] || {};
+  const totalConnected = Number(r.total_connected) || 0;
+  const totalUnreachable = Number(r.total_unreachable) || 0;
+  const totalConnectAttempts = totalConnected + totalUnreachable;
   return {
     totalAssigned: Number(r.total_assigned) || 0,
     totalDisposed: Number(r.total_disposed) || 0,
     totalPending: Number(r.total_pending) || 0,
-    totalConnected: Number(r.total_connected) || 0,
-    totalUnreachable: Number(r.total_unreachable) || 0,
+    totalConnected,
+    totalUnreachable,
+    connectRate: totalConnectAttempts > 0 ? Math.round((totalConnected / totalConnectAttempts) * 100) : 0,
     totalConverted: Number(r.total_converted) || 0,
   };
 }

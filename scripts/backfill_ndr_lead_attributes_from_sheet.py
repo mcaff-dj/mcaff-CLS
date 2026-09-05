@@ -2,8 +2,9 @@
 """One-off backfill: fills PEP_CLS.ndr_lead_assignments.delivery_partner/ndr_reason/
 payment_mode/brand for existing rows, read from each active NDR team's live Google Sheet (see
 docs/superpowers/specs/2026-09-05-calling-overview-process-filter-design.md). Run once, after
-scripts/migrate_ndr_lead_attributes.py --apply and after this repo's claim-time mirroring
-(Tasks 2-3) has deployed - not a substitute for either.
+scripts/migrate_ndr_lead_attributes.py --apply - the only thing this depends on. It does NOT
+need to wait for claim-time mirroring (Tasks 2-3) to deploy first; it can run before, during,
+or after that deploy - it is not a substitute for it either way.
 
 Matched by awb_number, updating EVERY historical cycle for that AWB (these are lead-level
 facts, not cycle-level - a lead's courier/reason/payment-mode/brand don't change across

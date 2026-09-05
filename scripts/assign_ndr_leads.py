@@ -306,10 +306,21 @@ def record_new_assignments(new_assignments):
     # Each item is (awb, email) or (awb, email, courier, reason, payment_mode, brand) - accept
     # both so every existing 2-tuple caller (scripts/test_assign_ndr_leads.py's many fakes) keeps
     # working unchanged; only assign_for_run's own new_assignments passes the longer form.
+    def _clean(v):
+        # Trimmed here so every current AND future caller gets normalized values: a
+        # whitespace-only sheet cell must become NULL, not a truthy space, or it permanently
+        # defeats backfill_ndr_lead_attributes_from_sheet.py's WHERE delivery_partner IS NULL
+        # gap-filling guard for that row, and inconsistent trimming can silently split
+        # otherwise-identical values across separate GROUP BY rows in the breakdown tables.
+        if v is None:
+            return None
+        v = str(v).strip()
+        return v or None
+
     def _unpack(item):
         awb, email, *rest = item
         courier, reason, payment_mode, brand = (list(rest) + [None, None, None, None])[:4]
-        return awb, email, courier, reason, payment_mode, brand
+        return awb, email, _clean(courier), _clean(reason), _clean(payment_mode), brand
     # Last agent wins for a repeated AWB, matching the sheet: the later row's Agent Name write
     # is the one an agent sees, and only one live row per AWB can exist anyway.
     by_awb = {}

@@ -662,6 +662,18 @@ def test_record_new_assignments_still_accepts_plain_two_tuples():
     assert inserts[0][3:] == (None, None, None, None)
 
 
+def test_record_new_assignments_trims_whitespace_only_attrs_to_none():
+    # A whitespace-only sheet cell must become NULL, not a truthy space - otherwise it
+    # permanently defeats backfill_ndr_lead_attributes_from_sheet.py's WHERE
+    # delivery_partner IS NULL gap-filling guard for that row.
+    ok, cursor, _fake = _run_record(
+        [("AWB3", "c@x.com", "  Delhivery  ", "   ", "COD", "mCaffeine")])
+    assert ok is True
+    inserts = [p for sql, p in cursor.statements if "INSERT" in sql]
+    awb, email, now, courier, reason, payment_mode, brand = inserts[0]
+    assert (courier, reason, payment_mode) == ("Delhivery", None, "COD")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

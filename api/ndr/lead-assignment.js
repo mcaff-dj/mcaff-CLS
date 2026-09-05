@@ -72,7 +72,8 @@ module.exports = async (req, res) => {
       // Stamped from the session, never from the body: an agent may only ever claim a lead as
       // THEMSELVES. This previously honoured req.body.email, which let any NDR agent attribute
       // a claim to any other agent - across teams, once per-team isolation exists.
-      await claimNdrLead(awbNumber, session.email);
+      const { courier, reason, paymentMode, brand } = req.body || {};
+      await claimNdrLead(awbNumber, session.email, { courier, reason, paymentMode, brand });
       res.status(200).json({ ok: true });
       return;
     }

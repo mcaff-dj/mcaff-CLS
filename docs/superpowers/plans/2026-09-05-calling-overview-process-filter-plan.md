@@ -1038,9 +1038,6 @@ git commit -m "feat(calling-overview): add Process (RTO/NDR) filter to the Overv
 
 ## Post-implementation (not part of this plan's tasks — tell the user):
 
-1. Run `python scripts/migrate_ndr_lead_attributes.py --apply` against the real database.
-2. Deploy the `api/` and `scripts/` changes (Tasks 2, 3, 5).
-3. Run `python scripts/backfill_ndr_lead_attributes_from_sheet.py --apply` once, to fill historical rows.
-4. Deploy the `app/` change (Task 6).
-
-Steps 1 and 3 must happen before/alongside 2, not after — reading a column that doesn't exist yet throws.
+1. Run `python scripts/migrate_ndr_lead_attributes.py --apply` against the real database. Required before step 2 — the new code reads/writes columns this step creates.
+2. Deploy `api/` and `app/` TOGETHER, in the same deploy pass. Task 5 renamed the RTO payload's `rtoReasonBreakdown` key to `reasonBreakdown` — deploying `api/` alone first would make the old (not-yet-updated) app client's RTO Reason Breakdown table go silently blank until `app/` also deploys, since these two deploy separately in this project.
+3. Run `python scripts/backfill_ndr_lead_attributes_from_sheet.py --apply` once, to fill historical rows. Only depends on step 1 having completed — its timing relative to step 2 does not matter.
