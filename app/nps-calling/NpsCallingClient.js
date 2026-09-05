@@ -76,6 +76,24 @@ function hasValue(v) {
   return !!v && v !== 'NA';
 }
 
+// product_name_list is comma-separated between products, but at least one product's own name
+// ALSO embeds a comma before its size (e.g. "Naked Raw Coffee Face Wash, 100 ml" sits right next
+// to "Naked Raw Coffee Face Scrub100g", which has no comma at all before its own size) - the
+// source data isn't consistent about it. A naive split therefore breaks that one entry into a
+// real product name plus a bare "100 ml" fragment with no product attached. Any split fragment
+// that's JUST a quantity (a number + unit, nothing else) is never a product on its own, so it's
+// re-joined onto whichever fragment came before it instead of kept as its own option.
+const PRODUCT_SIZE_ONLY = /^\d+(\.\d+)?\s*(ml|g|gm|gms|kg|l|ltr|litres?)s?$/i;
+function splitProductNameList(list) {
+  const parts = list.split(',').map((p) => p.trim()).filter(Boolean);
+  const merged = [];
+  for (const part of parts) {
+    if (PRODUCT_SIZE_ONLY.test(part) && merged.length) merged[merged.length - 1] += `, ${part}`;
+    else merged.push(part);
+  }
+  return merged;
+}
+
 // top_rated_area is a raw numeric code in the source survey with no label of its own - mapping
 // confirmed against the survey's own question options, not guessed. Falls back to the raw code
 // for anything outside 1-4, rather than hiding it, so an unexpected value is still visible.
@@ -165,7 +183,12 @@ function isUndisposed(t) {
 // id -> {id, path} kept in NpsCallingClient's own dispose-modal state; `ancestors` is the chain
 // of labels above `nodes` in this recursion, so a checked leaf's `path` carries its whole
 // breadcrumb (e.g. ['Delivery Related', 'Late delivery']) for saveDisposition to join on.
-function DispositionChecklist({ nodes, selected, onToggle, ancestors = [] }) {
+//
+// productOptions/productsByReason/onProductsChange: only meaningful under "Product Related
+// Issue" - a checked reason there gets its OWN inline product picker right below it (rather
+// than one picker for the whole category), since different products on the same order can each
+// have a different problem and the agent needs to say which product goes with which reason.
+function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], productOptions = [], productsByReason = {}, onProductsChange }) {
   if (!nodes || !nodes.length) {
     return <p className="text-[12px] text-zinc-500">No disposition options configured yet - an admin can add some under Admin Panel.</p>;
   }
@@ -179,7 +202,12 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [] }) {
         const path = [...ancestors, n.label];
         const hasChildren = n.children && n.children.length > 0;
         if (hasChildren) {
-          const body = <DispositionChecklist nodes={n.children} selected={selected} onToggle={onToggle} ancestors={path} />;
+          const body = (
+            <DispositionChecklist
+              nodes={n.children} selected={selected} onToggle={onToggle} ancestors={path}
+              productOptions={productOptions} productsByReason={productsByReason} onProductsChange={onProductsChange}
+            />
+          );
           return isTopLevel ? (
             <div key={n.id} className="bg-zinc-950/60 border border-zinc-800/80 rounded-lg p-3 space-y-2">
               <p className="text-[12px] font-bold text-zinc-200 tracking-tight">{n.label}</p>
@@ -193,20 +221,39 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [] }) {
           );
         }
         const checked = selected.has(n.id);
+        const showProductPicker = checked && productOptions.length > 0 && path.includes('Product Related Issue');
+        const picked = productsByReason[n.id] || [];
         return (
-          <label
-            key={n.id}
-            className="flex items-center gap-2 text-[13px] text-zinc-200 cursor-pointer rounded-md px-1.5 py-1 -mx-1.5 hover:bg-zinc-800/40 transition-colors"
-            title={n.description || ''}
-          >
-            <input
-              type="checkbox"
-              checked={checked}
-              onChange={() => onToggle(n.id, path)}
-              className="accent-indigo-500 w-4 h-4"
-            />
-            {n.label}
-          </label>
+          <div key={n.id}>
+            <label
+              className="flex items-center gap-2 text-[13px] text-zinc-200 cursor-pointer rounded-md px-1.5 py-1 -mx-1.5 hover:bg-zinc-800/40 transition-colors"
+              title={n.description || ''}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={() => onToggle(n.id, path)}
+                className="accent-indigo-500 w-4 h-4"
+              />
+              {n.label}
+            </label>
+            {showProductPicker && (
+              <div className="pl-6 pb-1.5">
+                <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
+                  Which product(s)? {picked.length ? `· ${picked.length} selected` : ''}
+                </label>
+                <select
+                  multiple
+                  value={picked}
+                  onChange={(e) => onProductsChange(n.id, Array.from(e.target.selectedOptions, (o) => o.value))}
+                  size={Math.min(productOptions.length, 4)}
+                  className="w-full text-[12px] bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 p-1"
+                >
+                  {productOptions.map((p) => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </div>
+            )}
+          </div>
         );
       })}
     </div>
@@ -333,9 +380,10 @@ export default function NpsCallingClient() {
   // click Connected/Non Connected first; nothing renders until then, so the full ~30-reason
   // tree never shows before a branch is chosen.
   const [branchChoice, setBranchChoice] = useState('');
-  // Which of this lead's own product_name_list the agent says the issue is actually about -
-  // only meaningful (and only shown) while a "Product Related Issue" reason is checked.
-  const [selectedProducts, setSelectedProducts] = useState([]);
+  // Which of this lead's own product_name_list the agent says goes with EACH checked "Product
+  // Related Issue" reason - reason id -> string[], since different products on the same order
+  // can each have a different problem (one flat per-call product list would lose that).
+  const [productsByReason, setProductsByReason] = useState({});
 
   const openDispose = (t) => {
     setDetailTkt(t);
@@ -343,7 +391,7 @@ export default function NpsCallingClient() {
     setDispRemarks(t.agent_remarks || '');
     setAttempt(t.attempt || 1);
     setBranchChoice('');
-    setSelectedProducts([]);
+    setProductsByReason({});
   };
   const closeDispose = () => setDetailTkt(null);
   const pickBranch = (choice) => {
@@ -391,11 +439,25 @@ export default function NpsCallingClient() {
   // meaningful once "Product Related Issue" has a reason checked.
   const productOptions = useMemo(() => {
     const list = detailTkt && detailTkt.product_name_list;
-    return hasValue(list) ? list.split(',').map((p) => p.trim()).filter(Boolean) : [];
+    return hasValue(list) ? splitProductNameList(list) : [];
   }, [detailTkt]);
-  const hasProductIssueSelected = useMemo(
-    () => Array.from(selectedReasons.values()).some((r) => r.path.includes('Product Related Issue')),
-    [selectedReasons],
+  const setReasonProducts = (reasonId, products) => {
+    setProductsByReason((prev) => ({ ...prev, [reasonId]: products }));
+  };
+
+  // "<reason label>: <products>; <reason label>: <products>" - one entry per checked "Product
+  // Related Issue" reason that actually has products picked (a reason with none contributes
+  // nothing, same "only what's relevant" shape used throughout this file).
+  const affectedProductsText = useMemo(
+    () => Array.from(selectedReasons.values())
+      .filter((r) => r.path.includes('Product Related Issue'))
+      .map((r) => {
+        const products = productsByReason[r.id];
+        return products && products.length ? `${r.path[r.path.length - 1]}: ${products.join(', ')}` : null;
+      })
+      .filter(Boolean)
+      .join('; '),
+    [selectedReasons, productsByReason],
   );
 
   const saveDisposition = async () => {
@@ -412,7 +474,7 @@ export default function NpsCallingClient() {
           agentRemarks: dispRemarks,
           connected: derivedConnected,
           attempt: Number(attempt) || 1,
-          affectedProducts: hasProductIssueSelected ? selectedProducts : [],
+          affectedProducts: affectedProductsText,
         }),
       });
       const d = await r.json().catch(() => ({}));
@@ -422,7 +484,7 @@ export default function NpsCallingClient() {
           ? {
               ...t, disposed_at: new Date().toISOString(), disposition: joinedDisposition, agent_remarks: dispRemarks,
               connected: derivedConnected, attempt,
-              affected_products: hasProductIssueSelected ? selectedProducts.join(', ') : t.affected_products,
+              affected_products: affectedProductsText || t.affected_products,
             }
           : t
       );
@@ -991,27 +1053,14 @@ export default function NpsCallingClient() {
                 Disposition{selectedReasons.size ? ` · ${selectedReasons.size} selected` : ''}
               </p>
               {branchChoice
-                ? <DispositionChecklist nodes={visibleDispositionNodes} selected={selectedReasons} onToggle={toggleReason} />
+                ? (
+                  <DispositionChecklist
+                    nodes={visibleDispositionNodes} selected={selectedReasons} onToggle={toggleReason}
+                    productOptions={productOptions} productsByReason={productsByReason} onProductsChange={setReasonProducts}
+                  />
+                )
                 : <p className="text-[12px] text-zinc-500">Pick Connected or Non Connected above to see reasons.</p>}
             </div>
-
-            {hasProductIssueSelected && productOptions.length > 0 && (
-              <div>
-                <label className="text-[12px] text-zinc-400 font-semibold mb-1.5 tracking-tight block">
-                  Which product(s)? {selectedProducts.length ? `· ${selectedProducts.length} selected` : ''}
-                </label>
-                <select
-                  multiple
-                  value={selectedProducts}
-                  onChange={(e) => setSelectedProducts(Array.from(e.target.selectedOptions, (o) => o.value))}
-                  size={Math.min(productOptions.length, 5)}
-                  className="w-full text-[13px] bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 p-1.5"
-                >
-                  {productOptions.map((p) => <option key={p} value={p}>{p}</option>)}
-                </select>
-                <p className="text-[11px] text-zinc-500 mt-1">Ctrl/Cmd-click (or shift-click) to select more than one.</p>
-              </div>
-            )}
 
             <textarea
               value={dispRemarks}
