@@ -9,7 +9,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { XIcon, CheckIcon, PhoneIcon, CustomSelect, Overlay, CalendarIcon, SearchIcon } from '../_calling/ui';
 import { useCallingSession, ROSTER_STATUS_OPTIONS, STATUS_OPTIONS } from '../_calling/useCallingSession';
-import { useBusinessHours, CallingHoursCard, useDefaultQuota, DefaultQuotaCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
+import { useBusinessHours, CallingHoursCard, useDefaultQuota, DefaultQuotaCard, useLeadOrder, LeadOrderCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
 import { scopeToDateBounds } from '../_calling/util';
 
@@ -228,6 +228,7 @@ export default function NpsCallingClient() {
 
   const hours = useBusinessHours(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
   const defaultQuota = useDefaultQuota(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
+  const leadOrder = useLeadOrder(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
   const disp = useProcessDispositions(PROCESS_KEY, { googleUser, showToast });
   const { processDispositions } = disp;
 
@@ -820,6 +821,7 @@ export default function NpsCallingClient() {
                   </div>
                   <CallingHoursCard processKey={PROCESS_KEY} processLabel="NPS-Calling" hours={hours} />
                   <DefaultQuotaCard processLabel="NPS-Calling" fallback={FALLBACK_QUOTA} quota={defaultQuota} />
+                  <LeadOrderCard processLabel="NPS-Calling" order={leadOrder} />
                   <ProcessDispositionsCard processLabel="NPS-Calling" disp={disp} allowInputTypeControl />
 
                   <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden">

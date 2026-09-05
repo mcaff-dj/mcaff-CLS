@@ -504,6 +504,9 @@ async function bootstrapSchema() {
     CREATE TABLE IF NOT EXISTS calling_process_settings (
       process_key VARCHAR(64) NOT NULL PRIMARY KEY,
       default_quota INT,
+      -- 'oldest' (default when NULL) or 'newest' - which unclaimed lead a pull hands out first.
+      -- Added by scripts/add_lead_order_to_calling_process_settings.py.
+      lead_order VARCHAR(10),
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_by VARCHAR(320)
     )
@@ -1816,6 +1819,12 @@ async function getDetractorLoadByAgent(email) {
 // submitted_date fails this filter too rather than being silently treated as "recent enough".
 async function getNextDetractorLead(email) {
   await ensureSchema();
+  // Admin-set pull order (calling_process_settings.lead_order via /api/admin/lead-order) -
+  // 'oldest' (default) or 'newest'. sql`` only binds plain values, never raw SQL keywords, so
+  // ASC/DESC itself can't be parametrized - sortDirection instead flips the SIGN of the sort
+  // key (TO_DAYS as a plain integer), and the query's own ORDER BY stays a fixed ASC on that
+  // signed value: ASC on the day number is oldest-first, ASC on its negation is newest-first.
+  const sortDirection = (await getCallingLeadOrder('detractor')) === 'newest' ? -1 : 1;
   const { rows } = await sql`
     SELECT d.response_id, d.brand, d.channel_order_id, d.customer_name, d.customer_phone,
            d.customer_email, d.address_city, d.address_state, d.address_pincode, d.nps_score,
@@ -1839,7 +1848,7 @@ async function getNextDetractorLead(email) {
     LEFT JOIN CLS_NPS_calling c ON c.response_id = d.response_id
     WHERE d.nps_category = 'Detractor' AND c.response_id IS NULL
       AND STR_TO_DATE(d.submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
-    ORDER BY STR_TO_DATE(d.submitted_date, '%d/%m/%Y') ASC
+    ORDER BY TO_DAYS(STR_TO_DATE(d.submitted_date, '%d/%m/%Y')) * ${sortDirection} ASC
     LIMIT 1
   `;
   if (!rows.length) return null;
@@ -3559,6 +3568,34 @@ async function setCallingDefaultQuota(processKey, quota, updatedBy) {
   return value;
 }
 
+// Admin-set pull order for a process's leads - 'oldest' or 'newest', or null when never set
+// (caller falls back to 'oldest' - see api/detractor/next-lead.js).
+async function getCallingLeadOrder(processKey) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT lead_order FROM calling_process_settings WHERE process_key = ${processKey}
+  `;
+  return rows.length ? rows[0].lead_order : null;
+}
+
+async function setCallingLeadOrder(processKey, order, updatedBy) {
+  await ensureSchema();
+  if (!processKey) throw new Error('processKey is required');
+  const value = order === null || order === '' ? null : order;
+  if (value != null && value !== 'oldest' && value !== 'newest') {
+    throw new Error("lead_order must be 'oldest', 'newest', or blank to clear it");
+  }
+  await sql`
+    INSERT INTO calling_process_settings (process_key, lead_order, updated_at, updated_by)
+    VALUES (${processKey}, ${value}, NOW(), ${updatedBy || null})
+    ON DUPLICATE KEY UPDATE
+      lead_order = VALUES(lead_order),
+      updated_at = VALUES(updated_at),
+      updated_by = VALUES(updated_by)
+  `;
+  return value;
+}
+
 // ── Per-process calling roster ─────────────────────────────────────────────────────────
 // 'Busy' (UI label "On Break") predates this file's own naming conventions - kept as-is
 // rather than renamed, since it's already load-bearing history in agent_presence_log and
@@ -4988,7 +5025,7 @@ module.exports = {
   getOrderPunchJobRowsForExport, getOrderPunchSettings, upsertOrderPunchSetting,
   getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
-  getCallingDefaultQuota, setCallingDefaultQuota,
+  getCallingDefaultQuota, setCallingDefaultQuota, getCallingLeadOrder, setCallingLeadOrder,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
   isCallingProcessAdmin, getAdministeredProcesses,
   listCallingTeams, getCallingTeam, createCallingTeam, updateCallingTeam, resolveCallerTeam,

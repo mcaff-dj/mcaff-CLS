@@ -286,6 +286,106 @@ export function DefaultQuotaCard({ processLabel, fallback, quota }) {
   );
 }
 
+// Admin-set pull order for a process's leads (calling_process_settings.lead_order, via
+// /api/admin/lead-order) - same load-on-open/save shape as useDefaultQuota above.
+export function useLeadOrder(processKey, { userRole, isProcessAdmin, showToast } = {}) {
+  const [order, setOrder] = useState(null);        // server value: 'oldest'/'newest', or null = never set
+  const [loaded, setLoaded] = useState(false);
+  const [draft, setDraft] = useState('oldest');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const loadOrder = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/admin/lead-order?process=${encodeURIComponent(processKey)}`);
+      if (!r.ok) return;
+      const d = await r.json();
+      setOrder(d.order || null);
+      setDraft(d.order || 'oldest');
+      setLoaded(true);
+    } catch { /* leave unloaded - the card just won't render */ }
+  }, [processKey]);
+
+  useEffect(() => {
+    if ((userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin) && !loaded) {
+      loadOrder();
+    }
+  }, [userRole, isProcessAdmin, loaded, loadOrder]);
+
+  const saveOrder = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      const r = await fetch('/api/admin/lead-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ processKey, order: draft }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setError(d.error || `Could not save (${r.status})`);
+        return;
+      }
+      setOrder(d.order || null);
+      if (showToast) showToast('🔀 Lead order saved');
+    } catch (e) {
+      setError(e.message || 'Could not save lead order');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return { order, loaded, draft, setDraft, saving, error, saveOrder };
+}
+
+// order = a useLeadOrder() return value; processLabel = display name (e.g. "NPS-Calling").
+export function LeadOrderCard({ processLabel, order }) {
+  const { loaded, draft, setDraft, saving, error, saveOrder } = order;
+  if (!loaded) return null;
+  return (
+    <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
+      <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
+        <div className="flex items-start gap-3">
+          <span className="h-9 w-9 shrink-0 rounded-xl bg-indigo-950/60 border border-indigo-800/60 flex items-center justify-center text-indigo-300">🔀</span>
+          <div>
+            <h2 className="text-lg font-bold text-zinc-100">
+              Lead Order &mdash; {processLabel}
+            </h2>
+            <p className="text-[13px] text-zinc-500">
+              Which unclaimed lead a Pull Next Lead hands out first.
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {[['oldest', 'Oldest first'], ['newest', 'Newest first']].map(([value, label]) => (
+            <button
+              key={value}
+              onClick={() => setDraft(value)}
+              className={`h-8 px-3 rounded-lg text-[13px] font-bold border transition-colors ${
+                draft === value ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+          <button
+            onClick={saveOrder}
+            disabled={saving}
+            className="h-8 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+      {error && (
+        <p className="mt-3 text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // Per-process TEAM registry (see calling_teams) - the self-serve half of NDR's per-team
 // isolation feature (docs/superpowers/specs/2026-08-26-ndr-per-team-isolation-design.md). A
 // team is a dimension INSIDE a process, not a process of its own: two NDR teams share this

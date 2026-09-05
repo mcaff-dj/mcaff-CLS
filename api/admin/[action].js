@@ -15,6 +15,9 @@
 //                                        default (null = never set, caller's own hardcoded
 //                                        fallback applies - see api/detractor/next-lead.js).
 //   POST   /api/admin/default-quota   -> save it: { processKey, quota } - quota null/'' clears it.
+//   GET    /api/admin/lead-order?process=detractor -> { order } - that process's admin-set
+//                                        pull order: 'oldest' (default when null), 'newest'.
+//   POST   /api/admin/lead-order      -> save it: { processKey, order } - order null/'' clears it.
 //   GET    /api/admin/calling-agents?process=rto -> that process's roster + per-process status/quota
 //   POST   /api/admin/calling-agents  -> { processKey, email, status?, maxQuota?, prepaidPct?,
 //                                          priorityRtoReasons?, reassignPaymentMode?,
@@ -63,7 +66,7 @@
 const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser,
   getUserByEmail, getUserTabPermissions,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
-  getCallingDefaultQuota, setCallingDefaultQuota, logEvent,
+  getCallingDefaultQuota, setCallingDefaultQuota, getCallingLeadOrder, setCallingLeadOrder, logEvent,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
   isCallingProcessAdmin, getAdministeredProcesses, resolveCallerTeam,
   listCallingTeams, createCallingTeam, updateCallingTeam,
@@ -398,6 +401,49 @@ async function handleDefaultQuota(req, res, session) {
       res.status(200).json({ quota });
     } catch (e) {
       res.status(400).json({ error: e.message || 'Could not save default quota' });
+    }
+    return;
+  }
+
+  res.status(405).json({ error: 'Method not allowed' });
+}
+
+// One process's admin-set lead pull order - 'oldest' (default), 'newest', or null/unset.
+async function handleLeadOrder(req, res, session) {
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
+  const known = CALLING_PROCESSES.processes.map((p) => p.key);
+  const body = parseBody(req);
+
+  if (req.method === 'GET') {
+    const processKey = (req.query && req.query.process) || '';
+    if (!known.includes(processKey)) {
+      res.status(400).json({ error: `process must be one of: ${known.join(', ')}` });
+      return;
+    }
+    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, processKey))) {
+      res.status(403).json({ error: 'You do not administer that process' });
+      return;
+    }
+    const order = await getCallingLeadOrder(processKey);
+    res.status(200).json({ order });
+    return;
+  }
+
+  if (req.method === 'POST') {
+    if (!known.includes(body.processKey)) {
+      res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
+      return;
+    }
+    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, body.processKey))) {
+      res.status(403).json({ error: 'You do not administer that process' });
+      return;
+    }
+    try {
+      const order = await setCallingLeadOrder(body.processKey, body.order, session.email);
+      await logEvent(session.uid, session.email, 'calling', 'lead-order', `${body.processKey}: lead order -> ${order == null ? '(default: oldest)' : order}`, ip);
+      res.status(200).json({ order });
+    } catch (e) {
+      res.status(400).json({ error: e.message || 'Could not save lead order' });
     }
     return;
   }
@@ -980,7 +1026,7 @@ module.exports = async (req, res) => {
   // being read or written; passing this gate alone authorises nothing. 'calling-teams' is
   // listed here only for its GET branch (a team lead reading its own team name) - the handler
   // itself still turns every POST/PUT away from anyone but a full admin.
-  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'default-quota', 'calling-agents', 'dispositions', 'calling-teams', 'delivery-partner-access'];
+  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'default-quota', 'lead-order', 'calling-agents', 'dispositions', 'calling-teams', 'delivery-partner-access'];
   if (!session.isAdmin && !PROCESS_ADMIN_ACTIONS.includes(action)) {
     res.status(403).json({ error: 'Forbidden' });
     return;
@@ -991,6 +1037,7 @@ module.exports = async (req, res) => {
   if (action === 'audit') return handleAudit(req, res);
   if (action === 'business-hours') return handleBusinessHours(req, res, session);
   if (action === 'default-quota') return handleDefaultQuota(req, res, session);
+  if (action === 'lead-order') return handleLeadOrder(req, res, session);
   if (action === 'calling-agents') return handleCallingAgents(req, res, session);
   if (action === 'dispositions') return handleDispositions(req, res, session);
   if (action === 'calling-teams') return handleCallingTeams(req, res, session);
