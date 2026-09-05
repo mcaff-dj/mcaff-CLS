@@ -32,28 +32,47 @@ function isUndisposed(t) {
   return !t.disposed_at;
 }
 
-// Recursive cascading picker over the admin-configured disposition tree (calling_process_
-// dispositions, shared across every process - see useProcessDispositions). Clicking a leaf
-// (no children) finalizes; clicking a node with children drills into its own children below.
-function DispositionPicker({ nodes, onPick }) {
+// Recursive multi-select over the admin-configured disposition tree (calling_process_
+// dispositions, shared across every process - see useProcessDispositions). A detractor often
+// raises more than one issue in a single call, so unlike RTO/NDR's single cascading pick, every
+// leaf (no children) is its own checkbox and any number can be checked - independently, across
+// categories - rather than the call being forced into one final label. A node WITH children is
+// just a section header; it's never itself selectable. `selected` is the Map from
+// id -> {id, path} kept in NpsCallingClient's own dispose-modal state; `ancestors` is the chain
+// of labels above `nodes` in this recursion, so a checked leaf's `path` carries its whole
+// breadcrumb (e.g. ['Delivery Related', 'Late delivery']) for saveDisposition to join on.
+function DispositionChecklist({ nodes, selected, onToggle, ancestors = [] }) {
   if (!nodes || !nodes.length) {
     return <p className="text-[12px] text-zinc-500">No disposition options configured yet - an admin can add some under Admin Panel.</p>;
   }
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap gap-2">
-        {nodes.map((n) => (
-          <button
-            key={n.id}
-            type="button"
-            onClick={() => onPick(n)}
-            className="px-3 py-1.5 rounded-lg text-[12px] font-semibold border border-zinc-700 bg-zinc-800/80 text-zinc-200 hover:border-indigo-500 hover:text-white transition-colors"
-            title={n.description || ''}
-          >
+    <div className="space-y-3">
+      {nodes.map((n) => {
+        const path = [...ancestors, n.label];
+        const hasChildren = n.children && n.children.length > 0;
+        if (hasChildren) {
+          return (
+            <div key={n.id} className="space-y-1.5">
+              <p className="text-[12px] font-bold text-zinc-300">{n.label}</p>
+              <div className="pl-3 border-l border-zinc-800">
+                <DispositionChecklist nodes={n.children} selected={selected} onToggle={onToggle} ancestors={path} />
+              </div>
+            </div>
+          );
+        }
+        const checked = selected.has(n.id);
+        return (
+          <label key={n.id} className="flex items-center gap-2 text-[12px] text-zinc-200 cursor-pointer" title={n.description || ''}>
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={() => onToggle(n.id, path)}
+              className="accent-indigo-500"
+            />
             {n.label}
-          </button>
-        ))}
-      </div>
+          </label>
+        );
+      })}
     </div>
   );
 }
@@ -143,7 +162,11 @@ export default function NpsCallingClient() {
 
   // Disposition modal state
   const [detailTkt, setDetailTkt] = useState(null);
-  const [dispPath, setDispPath] = useState([]);
+  // Which reasons are checked, id -> {id, path} (path = the leaf's own breadcrumb of ancestor
+  // labels + itself, e.g. ['Delivery Related', 'Late delivery']) - a Map so toggling one leaf is
+  // an O(1) add/delete regardless of how many categories/reasons are in the tree. Rebuilt as a
+  // fresh Map on every toggle so React sees a new reference and re-renders.
+  const [selectedReasons, setSelectedReasons] = useState(new Map());
   const [dispRemarks, setDispRemarks] = useState('');
   const [connected, setConnected] = useState('');
   const [attempt, setAttempt] = useState(1);
@@ -151,32 +174,32 @@ export default function NpsCallingClient() {
 
   const openDispose = (t) => {
     setDetailTkt(t);
-    setDispPath([]);
+    setSelectedReasons(new Map());
     setDispRemarks(t.agent_remarks || '');
     setConnected(t.connected || '');
     setAttempt(t.attempt || 1);
   };
   const closeDispose = () => setDetailTkt(null);
 
-  // Walks processDispositions by the labels already picked in dispPath, so the picker always
-  // renders whichever depth comes next.
-  const currentDispNodes = useMemo(() => {
-    let nodes = processDispositions || [];
-    for (const label of dispPath) {
-      const match = nodes.find((n) => n.label === label);
-      if (!match) return [];
-      nodes = match.children || [];
-    }
-    return nodes;
-  }, [processDispositions, dispPath]);
-  const finalDisposition = dispPath.length ? dispPath[dispPath.length - 1] : '';
-  const pickDispNode = (node) => {
-    const nextPath = [...dispPath, node.label];
-    setDispPath(nextPath);
+  const toggleReason = (id, path) => {
+    setSelectedReasons((prev) => {
+      const next = new Map(prev);
+      if (next.has(id)) next.delete(id);
+      else next.set(id, { id, path });
+      return next;
+    });
   };
 
+  // Every checked leaf's breadcrumb, joined "Category > Reason", one per selection - lets one
+  // call carry several reasons (even across categories) in the single `disposition` column
+  // rather than forcing the whole call into one final label.
+  const joinedDisposition = useMemo(
+    () => Array.from(selectedReasons.values()).map((r) => r.path.join(' > ')).join('; '),
+    [selectedReasons],
+  );
+
   const saveDisposition = async () => {
-    if (!detailTkt || !finalDisposition || !connected) return;
+    if (!detailTkt || !selectedReasons.size || !connected) return;
     setDispSaving(true);
     try {
       const r = await fetch('/api/detractor/lead-assignment', {
@@ -185,7 +208,7 @@ export default function NpsCallingClient() {
         body: JSON.stringify({
           action: 'dispose',
           responseId: detailTkt.response_id,
-          disposition: finalDisposition,
+          disposition: joinedDisposition,
           agentRemarks: dispRemarks,
           connected,
           attempt: Number(attempt) || 1,
@@ -195,7 +218,7 @@ export default function NpsCallingClient() {
       if (!r.ok) { showToast(`⚠️ ${d.error || 'Could not save disposition'}`); return; }
       setTickets((prev) => prev.map((t) => (
         t.response_id === detailTkt.response_id
-          ? { ...t, disposed_at: new Date().toISOString(), disposition: finalDisposition, agent_remarks: dispRemarks, connected, attempt }
+          ? { ...t, disposed_at: new Date().toISOString(), disposition: joinedDisposition, agent_remarks: dispRemarks, connected, attempt }
           : t
       )));
       showToast('Disposition saved');
@@ -284,7 +307,12 @@ export default function NpsCallingClient() {
       )}
 
       {t.disposed_at ? (
-        <p className="text-[12px] text-emerald-400 flex items-center gap-1.5"><CheckIcon /> {t.disposition} · Connected: {t.connected || '—'} · Attempt {t.attempt ?? '—'}</p>
+        <div className="text-[12px] text-emerald-400 space-y-0.5">
+          {(t.disposition || '').split(';').map((s) => s.trim()).filter(Boolean).map((line, i) => (
+            <p key={i} className="flex items-center gap-1.5"><CheckIcon /> {line}</p>
+          ))}
+          <p className="text-zinc-500">Connected: {t.connected || '—'} · Attempt {t.attempt ?? '—'}</p>
+        </div>
       ) : showDisposeButton ? (
         <button
           type="button"
@@ -398,7 +426,7 @@ export default function NpsCallingClient() {
                 <div className="space-y-5">
                   <CallingHoursCard processKey={PROCESS_KEY} processLabel="NPS-Calling" hours={hours} />
                   <DefaultQuotaCard processLabel="NPS-Calling" fallback={FALLBACK_QUOTA} quota={defaultQuota} />
-                  <ProcessDispositionsCard processLabel="NPS-Calling" disp={disp} />
+                  <ProcessDispositionsCard processLabel="NPS-Calling" disp={disp} allowInputTypeControl />
 
                   <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden">
                     <div className="flex items-center justify-between flex-wrap gap-3 p-4 pb-3">
@@ -548,14 +576,9 @@ export default function NpsCallingClient() {
 
             <div>
               <p className="text-[12px] text-zinc-400 font-semibold mb-1.5">
-                Disposition{dispPath.length ? `: ${dispPath.join(' → ')}` : ''}
+                Disposition{selectedReasons.size ? ` (${selectedReasons.size} selected)` : ''} — check every reason the customer raised, across as many categories as apply
               </p>
-              <DispositionPicker nodes={currentDispNodes} onPick={pickDispNode} />
-              {dispPath.length > 0 && (
-                <button type="button" onClick={() => setDispPath((p) => p.slice(0, -1))} className="text-[11px] text-zinc-500 hover:text-zinc-300 mt-1">
-                  ← back
-                </button>
-              )}
+              <DispositionChecklist nodes={processDispositions} selected={selectedReasons} onToggle={toggleReason} />
             </div>
 
             <textarea
@@ -568,7 +591,7 @@ export default function NpsCallingClient() {
 
             <button
               type="button"
-              disabled={!finalDisposition || !connected || dispSaving}
+              disabled={!selectedReasons.size || !connected || dispSaving}
               onClick={saveDisposition}
               className="w-full py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-[13px] font-bold text-white transition-colors"
             >
