@@ -708,6 +708,12 @@ async function handleDispositions(req, res, session) {
     isAdmin: !!session.isAdmin,
   });
 
+  // No per-role resolution needed (unlike teamId, which is DERIVED for a non-admin so a Team
+  // Lead can't target another team) - lead_type isn't a permission boundary, just which of two
+  // admin-configurable trees this request means. 'product' or nothing (-> shared/Delivery tree).
+  const rawLeadType = req.method === 'GET' ? (req.query && req.query.leadType) : body.leadType;
+  const dispLeadType = rawLeadType === 'product' ? 'product' : null;
+
   if (req.method !== 'GET') {
     const isProcessAdmin = session.isAdmin || (body.processKey && await isCallingProcessAdmin(session.email, body.processKey));
     if (!isProcessAdmin) {
@@ -731,7 +737,7 @@ async function handleDispositions(req, res, session) {
       return;
     }
     try {
-      const dispositions = await addProcessDisposition(body.processKey, body.label, body.description, session.email, body.parentId, dispTeamId);
+      const dispositions = await addProcessDisposition(body.processKey, body.label, body.description, session.email, body.parentId, dispTeamId, dispLeadType);
       const treeLabel = dispTeamId == null ? 'shared' : `team #${dispTeamId}`;
       await logEvent(session.uid, session.email, 'calling', 'disposition-add',
         `${body.processKey} (${treeLabel}): added "${body.label}"${body.parentId ? ` (child of #${body.parentId})` : ''}`, ip);
@@ -749,8 +755,8 @@ async function handleDispositions(req, res, session) {
     }
     try {
       const dispositions = Array.isArray(body.orderedIds)
-        ? await reorderProcessDispositions(body.processKey, body.parentId, body.orderedIds, dispTeamId)
-        : await updateProcessDisposition(body.processKey, body.id, { label: body.label, description: body.description, childrenInputType: body.childrenInputType }, dispTeamId);
+        ? await reorderProcessDispositions(body.processKey, body.parentId, body.orderedIds, dispTeamId, dispLeadType)
+        : await updateProcessDisposition(body.processKey, body.id, { label: body.label, description: body.description, childrenInputType: body.childrenInputType }, dispTeamId, dispLeadType);
       const treeLabel = dispTeamId == null ? 'shared' : `team #${dispTeamId}`;
       await logEvent(session.uid, session.email, 'calling', 'disposition-edit',
         Array.isArray(body.orderedIds) ? `${body.processKey} (${treeLabel}): reordered` : `${body.processKey} (${treeLabel}): edited #${body.id}`, ip);
@@ -766,7 +772,7 @@ async function handleDispositions(req, res, session) {
       res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
       return;
     }
-    const dispositions = await deleteProcessDisposition(body.processKey, body.id, dispTeamId);
+    const dispositions = await deleteProcessDisposition(body.processKey, body.id, dispTeamId, dispLeadType);
     const treeLabel = dispTeamId == null ? 'shared' : `team #${dispTeamId}`;
     await logEvent(session.uid, session.email, 'calling', 'disposition-delete', `${body.processKey} (${treeLabel}): deleted #${body.id}`, ip);
     res.status(200).json({ dispositions });
@@ -794,7 +800,7 @@ async function handleDispositions(req, res, session) {
     res.status(403).json({ error: 'You do not have access to that process.' });
     return;
   }
-  res.status(200).json({ dispositions: await getProcessDispositions(processKey, dispTeamId) });
+  res.status(200).json({ dispositions: await getProcessDispositions(processKey, dispTeamId, dispLeadType) });
 }
 
 // GET    ?process=<key>       -> that process's teams (active only unless ?includeInactive=1)
