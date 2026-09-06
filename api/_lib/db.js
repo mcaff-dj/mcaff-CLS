@@ -2125,7 +2125,7 @@ async function assignDetractorLeadsToAgent(email, maxCount, claimFn = getNextDet
 // instead).
 async function getUnassignedDetractorLeads(limit = 20) {
   await ensureSchema();
-  const { rows } = await sql`
+  const { rows: deliveryRows } = await sql`
     SELECT d.response_id, d.brand, d.channel_order_id, d.customer_name, d.nps_score, d.nps_category,
            d.category, d.sub_category, d.submitted_date
     FROM nps_delivery d
@@ -2135,7 +2135,30 @@ async function getUnassignedDetractorLeads(limit = 20) {
     ORDER BY STR_TO_DATE(d.submitted_date, '%d/%m/%Y') ASC
     LIMIT ${limit}
   `;
-  return rows;
+  const { rows: productRows } = await sql`
+    SELECT p.response_id, MIN(p.brand) AS brand, NULL AS channel_order_id, MIN(p.customer_name) AS customer_name,
+           MIN(p.overall_nps_score) AS nps_score, MIN(p.nps_category) AS nps_category,
+           MIN(p.category) AS category, MIN(p.sub_category) AS sub_category, MIN(p.submitted_date) AS submitted_date
+    FROM nps_product p
+    LEFT JOIN CLS_NPS_calling c ON c.response_id = p.response_id
+    WHERE c.response_id IS NULL
+      AND STR_TO_DATE(p.submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+    GROUP BY p.response_id
+    HAVING MIN(p.nps_category) = 'Detractor'
+    ORDER BY MIN(p.submitted_date) ASC
+    LIMIT ${limit}
+  `;
+  // Same convention this function already used for its own single-pool query: submitted_date is
+  // DD/MM/YYYY text, so a plain string sort is wrong (see parseDdMmYyyy in ./detractorMerge for
+  // why) - both lists are re-sorted together on their PARSED date, oldest-first, matching this
+  // function's existing (hardcoded, lead-order-independent) behavior. parseDdMmYyyy is already
+  // imported at module scope by Task 5.
+  const tagged = [
+    ...deliveryRows.map((r) => ({ ...r, lead_type: 'delivery' })),
+    ...productRows.map((r) => ({ ...r, lead_type: 'product' })),
+  ];
+  tagged.sort((a, b) => (parseDdMmYyyy(a.submitted_date) || 0) - (parseDdMmYyyy(b.submitted_date) || 0));
+  return tagged.slice(0, limit);
 }
 
 // Records the outcome of a call against the live cycle getNextDetractorLead opened. Ownership +
