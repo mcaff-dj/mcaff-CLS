@@ -643,7 +643,7 @@ export function CallingTeamsCard({ processKey, processLabel, teamsHook, sessionI
 // changes, same reasoning as processAgents in useCallingSession: each process's list is its own.
 // RTO's disposition options stay its hardcoded connectedOutcomes/unreachableOutcomes arrays and
 // never touch this endpoint - this only backs a process (NDR today) with no built-in list.
-export function useProcessDispositions(processKey, { googleUser, showToast, teamId = null, leadType = null } = {}) {
+export function useProcessDispositions(processKey, { googleUser, showToast, teamId = null, leadType = null, strict = false } = {}) {
   const [processDispositions, setProcessDispositions] = useState(null); // null = not loaded yet
   const [dispositionsError, setDispositionsError] = useState('');
   const [savingDisposition, setSavingDisposition] = useState(false);
@@ -656,7 +656,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
   // expanded parents never share state or clobber each other.
   const [newChildDrafts, setNewChildDrafts] = useState({});
 
-  const loadDispositions = useCallback(async (key, team, type) => {
+  const loadDispositions = useCallback(async (key, team, type, isStrict) => {
     if (!key) return;
     setProcessDispositions(null);
     setDispositionsError('');
@@ -666,7 +666,10 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
       // permission.
       const teamQuery = team != null ? `&teamId=${encodeURIComponent(team)}` : '';
       const typeQuery = type != null ? `&leadType=${encodeURIComponent(type)}` : '';
-      const r = await fetch(`/api/admin/dispositions?process=${encodeURIComponent(key)}${teamQuery}${typeQuery}`);
+      // strict skips the lead_type fallback server-side (see getProcessDispositions) - only the
+      // admin editor instance of this hook passes strict:true; a ticket-scoped read never does.
+      const strictQuery = isStrict ? '&strict=1' : '';
+      const r = await fetch(`/api/admin/dispositions?process=${encodeURIComponent(key)}${teamQuery}${typeQuery}${strictQuery}`);
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { setDispositionsError(d.error || `Could not load dispositions (${r.status})`); return; }
       setProcessDispositions(d.dispositions || []);
@@ -679,8 +682,8 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
   // the caller doesn't administer, and this stays a lightweight no-op for a process (RTO) whose
   // disposition list never reads from here, rather than an empty admin-only card.
   useEffect(() => {
-    if (googleUser?.email) loadDispositions(processKey, teamId, leadType);
-  }, [googleUser, processKey, teamId, leadType, loadDispositions]);
+    if (googleUser?.email) loadDispositions(processKey, teamId, leadType, strict);
+  }, [googleUser, processKey, teamId, leadType, strict, loadDispositions]);
 
   const toggleDispExpanded = (id) => {
     setExpandedDispIds((prev) => {

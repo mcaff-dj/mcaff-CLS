@@ -312,8 +312,7 @@ export default function NpsCallingClient() {
   // (Delivery, today's shared tree) or 'product'. Independent of any ticket's own lead_type;
   // an admin picks this explicitly to configure either tree.
   const [adminDispLeadType, setAdminDispLeadType] = useState(null);
-  const disp = useProcessDispositions(PROCESS_KEY, { googleUser, showToast, leadType: adminDispLeadType });
-  const { processDispositions } = disp;
+  const disp = useProcessDispositions(PROCESS_KEY, { googleUser, showToast, leadType: adminDispLeadType, strict: true });
 
   useEffect(() => {
     document.documentElement.className = 'light';

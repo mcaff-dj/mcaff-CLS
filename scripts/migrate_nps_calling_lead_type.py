@@ -9,9 +9,14 @@ TABLE IF NOT EXISTS, which is inert against an existing table, and there is no A
 anywhere in api/ - so these two new columns cannot ship themselves with the Lambda deploy the way
 a brand-new table would. Same reasoning, same shape, as scripts/migrate_team_dispositions.py.
 
-Run BEFORE the api/ deploy that reads these columns - a read against a missing column throws
-ER_BAD_FIELD_ERROR (getUnassignedDetractorLeads/getProcessDispositions have no pre-migration
-fallback for these two specifically, unlike team_id's own softened read path).
+Run BEFORE the api/ deploy that reads these columns. getUnassignedDetractorLeads has no
+pre-migration fallback for lead_type (a read against a missing column throws
+ER_BAD_FIELD_ERROR there). getProcessDispositions DOES have a softened fallback (it sheds the
+lead_type predicate first, then team_id too if that retry also fails) - see that function's own
+comment in db.js - but the fallback exists to protect OTHER processes' pre-existing team_id
+reads during this exact deploy window, not to make this migration's run order optional: until
+--apply runs, NPS-Calling's own Product-tree reads/writes still don't work correctly, they just
+fail without crashing the endpoint entirely.
 
 CLS_NPS_calling.lead_type:
   - DEFAULT 'delivery' means the ADD COLUMN itself backfills every existing row correctly (every
@@ -23,6 +28,17 @@ CLS_NPS_calling.lead_type:
     column's expression can be changed in place via MODIFY COLUMN; every existing row's value
     re-derives automatically (all still 'delivery:<response_id>', identical in effect to today),
     no backfill loop needed.
+    RECOVERY IF THIS STEP FAILS PARTWAY (MySQL DDL auto-commits per statement, so a failure here
+    leaves lead_type already added but live_response_id NOT yet rewritten - re-running this
+    script picks up exactly where it left off, since every step checks information_schema before
+    acting). If a manual fix is ever needed: this column carries the table's UNIQUE KEY
+    (cls_nps_calling_live_response_key), so on some MySQL versions altering an indexed virtual
+    column's expression in place may require dropping and re-adding that key by hand:
+      ALTER TABLE CLS_NPS_calling DROP INDEX cls_nps_calling_live_response_key;
+      ALTER TABLE CLS_NPS_calling MODIFY COLUMN live_response_id VARCHAR(80)
+        GENERATED ALWAYS AS (IF(reassigned_away_at IS NULL, CONCAT(lead_type, ':', response_id), NULL)) VIRTUAL;
+      ALTER TABLE CLS_NPS_calling ADD UNIQUE KEY cls_nps_calling_live_response_key (live_response_id);
+    Re-run this script afterward (--apply) to confirm it now reports "already namespaced".
 
 calling_process_dispositions.lead_type: nullable, same convention team_id already established -
 NULL means shared/fallback, not "unassigned". Existing rows (every process, including today's

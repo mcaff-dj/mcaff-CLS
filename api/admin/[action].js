@@ -713,6 +713,9 @@ async function handleDispositions(req, res, session) {
   // admin-configurable trees this request means. 'product' or nothing (-> shared/Delivery tree).
   const rawLeadType = req.method === 'GET' ? (req.query && req.query.leadType) : body.leadType;
   const dispLeadType = rawLeadType === 'product' ? 'product' : null;
+  // Only the admin editor's own read asks for this (see useProcessDispositions' strict option) -
+  // an agent's ticket-scoped read never sends it, so it always keeps the safe fallback.
+  const dispStrict = req.method === 'GET' && req.query && req.query.strict === '1';
 
   if (req.method !== 'GET') {
     const isProcessAdmin = session.isAdmin || (body.processKey && await isCallingProcessAdmin(session.email, body.processKey));
@@ -738,7 +741,7 @@ async function handleDispositions(req, res, session) {
     }
     try {
       const dispositions = await addProcessDisposition(body.processKey, body.label, body.description, session.email, body.parentId, dispTeamId, dispLeadType);
-      const treeLabel = dispTeamId == null ? 'shared' : `team #${dispTeamId}`;
+      const treeLabel = `${dispTeamId == null ? 'shared' : `team #${dispTeamId}`}${dispLeadType === 'product' ? ' · product' : ''}`;
       await logEvent(session.uid, session.email, 'calling', 'disposition-add',
         `${body.processKey} (${treeLabel}): added "${body.label}"${body.parentId ? ` (child of #${body.parentId})` : ''}`, ip);
       res.status(200).json({ dispositions });
@@ -757,7 +760,7 @@ async function handleDispositions(req, res, session) {
       const dispositions = Array.isArray(body.orderedIds)
         ? await reorderProcessDispositions(body.processKey, body.parentId, body.orderedIds, dispTeamId, dispLeadType)
         : await updateProcessDisposition(body.processKey, body.id, { label: body.label, description: body.description, childrenInputType: body.childrenInputType }, dispTeamId, dispLeadType);
-      const treeLabel = dispTeamId == null ? 'shared' : `team #${dispTeamId}`;
+      const treeLabel = `${dispTeamId == null ? 'shared' : `team #${dispTeamId}`}${dispLeadType === 'product' ? ' · product' : ''}`;
       await logEvent(session.uid, session.email, 'calling', 'disposition-edit',
         Array.isArray(body.orderedIds) ? `${body.processKey} (${treeLabel}): reordered` : `${body.processKey} (${treeLabel}): edited #${body.id}`, ip);
       res.status(200).json({ dispositions });
@@ -773,7 +776,7 @@ async function handleDispositions(req, res, session) {
       return;
     }
     const dispositions = await deleteProcessDisposition(body.processKey, body.id, dispTeamId, dispLeadType);
-    const treeLabel = dispTeamId == null ? 'shared' : `team #${dispTeamId}`;
+    const treeLabel = `${dispTeamId == null ? 'shared' : `team #${dispTeamId}`}${dispLeadType === 'product' ? ' · product' : ''}`;
     await logEvent(session.uid, session.email, 'calling', 'disposition-delete', `${body.processKey} (${treeLabel}): deleted #${body.id}`, ip);
     res.status(200).json({ dispositions });
     return;
@@ -800,7 +803,7 @@ async function handleDispositions(req, res, session) {
     res.status(403).json({ error: 'You do not have access to that process.' });
     return;
   }
-  res.status(200).json({ dispositions: await getProcessDispositions(processKey, dispTeamId, dispLeadType) });
+  res.status(200).json({ dispositions: await getProcessDispositions(processKey, dispTeamId, dispLeadType, dispStrict) });
 }
 
 // GET    ?process=<key>       -> that process's teams (active only unless ?includeInactive=1)

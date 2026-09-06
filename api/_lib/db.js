@@ -1862,21 +1862,6 @@ async function getDetractorQuotaAndLoad(email) {
   return { quota, load };
 }
 
-// Hands one fresh nps_delivery Detractor row to `email`, copying the fields the agent needs into
-// CLS_NPS_calling in the same INSERT that assigns it - see that table's own comment for why this
-// is copy-on-assign rather than a live join. Returns the new ticket row, or null if there is
-// nothing left unclaimed. nps_delivery is read-only here: this function never writes to it.
-//
-// submitted_date is a DD/MM/YYYY string (nps_delivery's own format, confirmed against its data -
-// not ISO), so a plain string ORDER BY sorts it wrong (e.g. "09/06/2026" < "10/01/2026"
-// lexicographically, even though Jan comes before June) - STR_TO_DATE parses it properly for
-// both the recency filter and the ordering below.
-//
-// A detractor call about a months-old order is a call the customer barely remembers making and
-// an agent can't meaningfully help - prior (>30-day-old) leads must never be assigned, not just
-// deprioritized, so this is a hard WHERE filter. STR_TO_DATE returns NULL for anything that
-// doesn't parse as a date, and NULL >= anything is unknown/false in SQL, so a malformed
-// submitted_date fails this filter too rather than being silently treated as "recent enough".
 // Reads calling_agent_process.detractor_brand_filter - '' (no row, or an explicitly cleared
 // filter) means unrestricted, same "empty string means no restriction" convention as NDR's
 // ndr_brand_filter. null for a preview/admin call with no agent behind it (getUnassignedDetractorLeads).
@@ -1888,10 +1873,28 @@ async function _detractorBrandFilterFor(email) {
   return (rows[0] && rows[0].detractor_brand_filter) || '';
 }
 
+// Hands back the fields the agent needs to eventually copy into CLS_NPS_calling (the caller,
+// getNextDetractorLead, does that INSERT - see that table's own comment for why this is
+// copy-on-assign rather than a live join). nps_delivery is read-only here: this function never
+// writes to it.
+//
+// submitted_date is a DD/MM/YYYY string (nps_delivery's own format, confirmed against its data -
+// not ISO), so a plain string ORDER BY sorts it wrong (e.g. "09/06/2026" < "10/01/2026"
+// lexicographically, even though Jan comes before June) - STR_TO_DATE parses it properly for
+// both the recency filter and the ordering below.
+//
+// A detractor call about a months-old order is a call the customer barely remembers making and
+// an agent can't meaningfully help - prior (>30-day-old) leads must never be assigned, not just
+// deprioritized, so this is a hard WHERE filter. STR_TO_DATE returns NULL for anything that
+// doesn't parse as a date, and NULL >= anything is unknown/false in SQL, so a malformed
+// submitted_date fails this filter too rather than being silently treated as "recent enough".
+//
 // SELECT-only half of the delivery claim - the same 30-day-filtered, lead-order-sorted,
 // brand-filtered nps_delivery query getNextDetractorLead always ran, now callable without also
-// inserting. limit>1 backs getUnassignedDetractorLeads' merged preview; email=null skips the
-// brand filter (used by that same preview, which has never applied one).
+// inserting. limit and email=null exist for callers that don't need a specific agent's brand
+// filter or a single row - getUnassignedDetractorLeads does NOT use this (it needs its own
+// always-oldest-first ordering, independent of the admin's configurable lead-order setting this
+// function respects, so it writes its own inline query instead).
 async function peekDeliveryDetractorCandidates({ email = null, limit = 1 } = {}) {
   await ensureSchema();
   const sortDirection = (await getCallingLeadOrder('detractor')) === 'newest' ? -1 : 1;
@@ -2076,7 +2079,20 @@ async function getNextDetractorLeadEitherPool(email) {
     sortDirection,
   );
   if (pick === 'delivery') return getNextDetractorLead(email);
-  if (pick === 'product') return claimOneProductDetractorLead(email);
+  if (pick === 'product') {
+    try {
+      return await claimOneProductDetractorLead(email);
+    } catch (e) {
+      // A problem confined to nps_product (bad column, missing grant, migration not yet
+      // applied) must not take Delivery assignment down with it - Delivery never depended on
+      // this table being healthy before this feature existed. ER_DUP_ENTRY is the one exception:
+      // that's the existing claim-race retry signal assignDetractorLeadsToAgent's own loop
+      // already handles, not a real failure - it must still propagate so that retry fires.
+      if (e && e.code === 'ER_DUP_ENTRY') throw e;
+      console.error('getNextDetractorLeadEitherPool: product-pool claim failed, falling back to delivery-only:', e.message || e);
+      return getNextDetractorLead(email);
+    }
+  }
   return null;
 }
 
@@ -2136,7 +2152,7 @@ async function getUnassignedDetractorLeads(limit = 20) {
     LIMIT ${limit}
   `;
   const { rows: productRows } = await sql`
-    SELECT p.response_id, MIN(p.brand) AS brand, NULL AS channel_order_id, MIN(p.customer_name) AS customer_name,
+    SELECT p.response_id, MIN(p.brand) AS brand, MIN(p.channel_order_id) AS channel_order_id, MIN(p.customer_name) AS customer_name,
            MIN(p.overall_nps_score) AS nps_score, MIN(p.nps_category) AS nps_category,
            MIN(p.category) AS category, MIN(p.sub_category) AS sub_category, MIN(p.submitted_date) AS submitted_date
     FROM nps_product p
@@ -2157,7 +2173,7 @@ async function getUnassignedDetractorLeads(limit = 20) {
     ...deliveryRows.map((r) => ({ ...r, lead_type: 'delivery' })),
     ...productRows.map((r) => ({ ...r, lead_type: 'product' })),
   ];
-  tagged.sort((a, b) => (parseDdMmYyyy(a.submitted_date) || 0) - (parseDdMmYyyy(b.submitted_date) || 0));
+  tagged.sort((a, b) => (parseDdMmYyyy(a.submitted_date) ?? Infinity) - (parseDdMmYyyy(b.submitted_date) ?? Infinity));
   return tagged.slice(0, limit);
 }
 
@@ -4250,7 +4266,7 @@ const DISPOSITION_LABEL_MAX = 120;
 // returning [] - an agent handed an empty picker cannot dispose a call at all, so a team created
 // before its clone ran (or whose clone failed) must not take its agents off the phones. See the
 // spec's resolution rules.
-async function getProcessDispositions(processKey, teamId = null, leadType = null) {
+async function getProcessDispositions(processKey, teamId = null, leadType = null, strict = false) {
   await ensureSchema();
   if (!processKey) return [];
   // sql() executes eagerly (it's `await p.execute(...)` inside, not a lazy fragment builder), so
@@ -4282,20 +4298,42 @@ async function getProcessDispositions(processKey, teamId = null, leadType = null
     // independent, sequential fallbacks rather than one combined rule, so a process that never
     // splits by team (every process today) behaves exactly as if only lead_type existed.
     rows = await fetchRows(teamId, leadType);
-    if (!rows.length && leadType != null) rows = await fetchRows(teamId, null);
-    if (!rows.length && teamId != null) rows = await fetchRows(null, leadType);
-    if (!rows.length && teamId != null && leadType != null) rows = await fetchRows(null, null);
+    // strict=true (the admin editor's own read) skips every lead_type fallback rung - an admin
+    // configuring the Product tree must see "no options yet" when it's genuinely empty, never a
+    // silently-substituted Delivery tree they might mistake for Product's own rows. Team
+    // resolution (below) is unaffected - this only short-circuits the leadType-related rungs.
+    if (!strict) {
+      if (!rows.length && leadType != null) rows = await fetchRows(teamId, null);
+      if (!rows.length && teamId != null) rows = await fetchRows(null, leadType);
+      if (!rows.length && teamId != null && leadType != null) rows = await fetchRows(null, null);
+    }
   } catch (e) {
-    // Unlike the release-1 team-isolation softening (api/_lib/callingTeams.js), this migration
-    // is NOT order-independent: the column can be deployed before the api/ code that selects it
-    // is live. Rather than require a strict deploy order, retry as a plain pre-migration read
-    // (no team_id/lead_type predicate - neither column exists yet, so there is nothing to filter
-    // by).
     if (e.code !== 'ER_BAD_FIELD_ERROR') throw e;
-    rows = (await sql`
-      SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
-      WHERE process_key = ${processKey}
-      ORDER BY sort_order ASC, id ASC`).rows;
+    // Deploy-order softening: lead_type can be deployed (this api/ code) before its migration
+    // adds the column, but team_id's own migration may ALREADY be long applied - dropping both
+    // predicates in one shot would merge every team's rows together during that window, a real
+    // regression for NDR's live per-team trees (unrelated to this feature). Shed lead_type FIRST
+    // and retry with team_id still in place; only drop team_id too if THAT retry also proves the
+    // column doesn't exist either.
+    try {
+      rows = teamId == null
+        ? (await sql`
+            SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
+            WHERE process_key = ${processKey} AND team_id IS NULL
+            ORDER BY sort_order ASC, id ASC`).rows
+        : (await sql`
+            SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
+            WHERE process_key = ${processKey} AND team_id = ${teamId}
+            ORDER BY sort_order ASC, id ASC`).rows;
+    } catch (e2) {
+      if (e2.code !== 'ER_BAD_FIELD_ERROR') throw e2;
+      // Neither column exists yet (pre-team_id-migration too, or this table never got it) -
+      // no predicate left to shed.
+      rows = (await sql`
+        SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
+        WHERE process_key = ${processKey}
+        ORDER BY sort_order ASC, id ASC`).rows;
+    }
   }
   const byId = {};
   rows.forEach((r) => {
