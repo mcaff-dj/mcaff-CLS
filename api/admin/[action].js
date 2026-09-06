@@ -13,7 +13,10 @@
 //   POST   /api/admin/business-hours  -> save one process's week: { processKey, week: {mon:{open,close},...} }
 //   GET    /api/admin/default-quota?process=detractor -> { quota } - that process's admin-set
 //                                        default (null = never set, caller's own hardcoded
-//                                        fallback applies - see api/detractor/next-lead.js).
+//                                        fallback applies - for detractor, that's
+//                                        DETRACTOR_FALLBACK_QUOTA in api/_lib/db.js, moved there
+//                                        from api/detractor/next-lead.js (now deleted - see the
+//                                        2026-09-05 auto-assignment design spec)).
 //   POST   /api/admin/default-quota   -> save it: { processKey, quota } - quota null/'' clears it.
 //   GET    /api/admin/lead-order?process=detractor -> { order } - that process's admin-set
 //                                        pull order: 'oldest' (default when null), 'newest'.

@@ -185,8 +185,10 @@ export function CallingHoursCard({ processKey, processLabel, hours }) {
 }
 
 // Admin-editable default quota for a process (calling_process_settings, via
-// /api/admin/default-quota) - the cap next-lead.js/claim.js falls back to for any agent with no
-// per-agent max_quota override in the Team Roster table. Same lazy-load-on-open pattern as
+// /api/admin/default-quota) - the cap RTO/NDR's next-lead.js/claim.js (and NPS-Calling's
+// auto-assign triggers, since its own next-lead.js is deleted - see the 2026-09-05 auto-
+// assignment design spec) fall back to for any agent with no per-agent max_quota override in
+// the Team Roster table. Same lazy-load-on-open pattern as
 // useBusinessHours: agents never see this card, so most sessions never make the call.
 export function useDefaultQuota(processKey, { userRole, isProcessAdmin, showToast } = {}) {
   const [quota, setQuota] = useState(null);       // server value: number, or null = never set
@@ -352,7 +354,7 @@ export function LeadOrderCard({ processLabel, order }) {
               Lead Order &mdash; {processLabel}
             </h2>
             <p className="text-[13px] text-zinc-500">
-              Which unclaimed lead a Pull Next Lead hands out first.
+              Which unclaimed lead gets assigned first.
             </p>
           </div>
         </div>

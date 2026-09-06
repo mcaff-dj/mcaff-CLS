@@ -1943,10 +1943,34 @@ async function getNextDetractorLead(email) {
 // pull button, used by both auto-assign trigger points (going-Online batch-fill, on-disposal
 // self-refill). claimFn is injectable so db.detractorAssign.test.js can verify the loop's stop
 // conditions without a real database.
+//
+// CLS_NPS_calling has a UNIQUE constraint on response_id while a cycle is live, so two
+// concurrent callers (e.g. two agents going Online at the same moment) can both read the same
+// oldest unclaimed lead and race to INSERT it - the loser gets a duplicate-key error
+// (e.code === 'ER_DUP_ENTRY'), not a lead. That's a "someone else got this one, try again" signal
+// for THIS slot, not "the pool is broken" - so it's retried in place (up to
+// DETRACTOR_CLAIM_DUP_RETRIES times) rather than aborting the whole batch and losing every
+// remaining slot. Any other error still propagates as before.
+const DETRACTOR_CLAIM_DUP_RETRIES = 3;
 async function assignDetractorLeadsToAgent(email, maxCount, claimFn = getNextDetractorLead) {
   const claimed = [];
   for (let i = 0; i < maxCount; i++) {
-    const lead = await claimFn(email);
+    let lead = null;
+    let gaveUpOnDup = false;
+    for (let attempt = 0; attempt <= DETRACTOR_CLAIM_DUP_RETRIES; attempt++) {
+      try {
+        lead = await claimFn(email);
+        break;
+      } catch (e) {
+        if (!(e && e.code === 'ER_DUP_ENTRY')) throw e;
+        if (attempt === DETRACTOR_CLAIM_DUP_RETRIES) { gaveUpOnDup = true; break; }
+        // Someone else won this lead first - retry the same slot, there may be others left.
+      }
+    }
+    // Retries exhausted on repeated collisions: give up on just this slot (not pushed, not
+    // counted) and move on to the next - unlike claimFn cleanly returning null, which means the
+    // whole pool is empty and there's nothing left for any remaining slot either.
+    if (gaveUpOnDup) continue;
     if (!lead) break;
     claimed.push(lead);
   }
@@ -3598,7 +3622,9 @@ async function setCallingBusinessHours(processKey, week, updatedBy) {
 }
 
 // Admin-set default quota for a process, or null when never set (caller falls back to its own
-// hardcoded default - see api/detractor/next-lead.js's DEFAULT_QUOTA).
+// hardcoded default - for detractor that's DETRACTOR_FALLBACK_QUOTA above, moved here from
+// api/detractor/next-lead.js's FALLBACK_QUOTA (now deleted - see the 2026-09-05 auto-assignment
+// design spec)).
 async function getCallingDefaultQuota(processKey) {
   await ensureSchema();
   const { rows } = await sql`

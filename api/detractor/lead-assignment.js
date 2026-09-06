@@ -1,6 +1,8 @@
 // The only way the browser disposes an NPS-Calling lead (see api/_lib/db.js's
 // disposeDetractorLead). No 'claim' action here, unlike NDR's equivalent - a lead only ever
-// becomes this agent's via next-lead.js's own INSERT, so there is nothing separate to claim.
+// becomes this agent's via one of the two auto-assign triggers (going Online, in
+// api/auth/[action].js; and this file's own post-dispose self-refill below), so there is
+// nothing separate to claim.
 const { getSession } = require('../_lib/session');
 const {
   disposeDetractorLead, isCallingProcessAdmin, logEvent,

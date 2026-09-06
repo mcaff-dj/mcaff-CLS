@@ -557,16 +557,28 @@ async function handleProcessPresence(req, res) {
   } else if (body.status === 'Online' && body.processKey === 'detractor') {
     // No Sheet, no GoKwik, no cron/Lambda for this process (see the 2026-09-05 auto-assignment
     // design spec) - going Online batch-fills the agent up to quota with a plain inline MySQL
-    // call instead, fire-and-forget same as the two branches above so a slow/failed fill never
-    // blocks the presence-toggle response the agent is waiting on.
-    (async () => {
+    // call instead. Unlike the two Lambda/workflow triggers above, this is AWAITED, not fire-
+    // and-forget: this app runs on Lambda via serverless-http (see api/_lambda/app.js), and once
+    // the HTTP response below is sent, Lambda can freeze mid-flight and silently truncate any
+    // still-running un-awaited work. Wrapped in try/catch so a failure here never blocks or
+    // breaks the res.status(200) below - a failed auto-fill just means the agent goes Online
+    // with an empty/short queue, not a broken presence toggle.
+    //
+    // Gated on the same 'calling' card + 'detractor' tab permission next-lead.js's own
+    // checkAccess used to require (see api/detractor/lead-assignment.js's checkAccess) - without
+    // this, any authenticated session (any card) could reach this branch and have real leads
+    // assigned to it.
+    const callingTabs = session.tabPerms && session.tabPerms.calling;
+    const hasDetractorAccess = (session.perms || []).includes('calling')
+      && !(Array.isArray(callingTabs) && callingTabs.length && !callingTabs.includes('detractor'));
+    if (hasDetractorAccess) {
       try {
         const { quota, load } = await getDetractorQuotaAndLoad(session.email);
         await assignDetractorLeadsToAgent(session.email, Math.max(0, quota - load));
       } catch (e) {
         console.error('handleProcessPresence: detractor auto-fill failed:', e.message || e);
       }
-    })();
+    }
   }
   res.status(200).json({ ok: true, processKey: body.processKey, status: body.status });
 }
