@@ -1971,6 +1971,93 @@ async function getNextDetractorLead(email) {
   return lead;
 }
 
+// nps_product-sourced equivalent of peekDeliveryDetractorCandidates. nps_product has up to 4
+// rows per response_id (one per rated product, product_slot 0-3) with nps_category constant
+// across a response's own slots (confirmed against nps_source.py's own finding) - this dedups to
+// one row per response_id, same "one lead per person" shape nps_delivery already has. Returns
+// only response_id/submitted_date/nps_category: enough to peek and compare against the delivery
+// pool's own candidates (see detractorMerge.js), not the full row - claimOneProductDetractorLead
+// fetches the rest only for the response_id that actually wins.
+async function peekProductDetractorCandidates({ email = null, limit = 1 } = {}) {
+  await ensureSchema();
+  const sortDirection = (await getCallingLeadOrder('detractor')) === 'newest' ? -1 : 1;
+  const brandFilter = await _detractorBrandFilterFor(email);
+  const { rows } = await sql`
+    SELECT p.response_id, MIN(p.submitted_date) AS submitted_date, MIN(p.nps_category) AS nps_category
+    FROM nps_product p
+    LEFT JOIN CLS_NPS_calling c ON c.response_id = p.response_id
+    WHERE c.response_id IS NULL
+      AND (${brandFilter} = '' OR p.brand = ${brandFilter})
+      AND STR_TO_DATE(p.submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+    GROUP BY p.response_id
+    HAVING MIN(p.nps_category) = 'Detractor'
+    ORDER BY TO_DAYS(STR_TO_DATE(MIN(p.submitted_date), '%d/%m/%Y')) * ${sortDirection} ASC
+    LIMIT ${limit}
+  `;
+  return rows;
+}
+
+// Claims one Detractor response_id from nps_product for `email` - the peek above found which
+// response_id to claim; this fetches the rest of that one response's data and inserts it.
+//
+// A Detractor response can have more than one really-rated product (product_name not NULL/'NA');
+// product_name_list joins all of them (same comma-joined shape nps_delivery's own
+// product_name_list already has, parsed client-side by NpsCallingClient.js's
+// splitProductNameList) - but the per-product RATING fields (results, texture, fragrance,
+// packaging, skin_type_category, product_nps) are taken from only the first such slot (lowest
+// product_slot): rendering up to 4 parallel rating sets on one ticket has no clear "the" value to
+// show an agent, so one representative product's ratings is the deliberate simplification here.
+// overall_nps_score/additional_feedback are constant across a response's slots (same finding
+// nps_source.py already relies on) and copied as-is.
+async function claimOneProductDetractorLead(email) {
+  const [candidate] = await peekProductDetractorCandidates({ email, limit: 1 });
+  if (!candidate) return null;
+  const responseId = candidate.response_id;
+
+  const { rows: nameRows } = await sql`
+    SELECT GROUP_CONCAT(DISTINCT product_name ORDER BY product_slot SEPARATOR ', ') AS product_name_list
+    FROM nps_product
+    WHERE response_id = ${responseId} AND product_name IS NOT NULL AND TRIM(product_name) NOT IN ('', 'NA')
+  `;
+  const productNameList = (nameRows[0] && nameRows[0].product_name_list) || null;
+
+  const { rows: slotRows } = await sql`
+    SELECT response_id, brand, channel_order_id, customer_name, customer_phone, customer_email,
+           address_city, address_state, address_pincode, category, sub_category,
+           payment_method, courier_company, submitted_date,
+           overall_nps_score, nps_category, product_nps, results, texture, fragrance, packaging,
+           skin_type_category, additional_feedback
+    FROM nps_product
+    WHERE response_id = ${responseId}
+    ORDER BY (product_name IS NULL OR TRIM(product_name) IN ('', 'NA')) ASC, product_slot ASC
+    LIMIT 1
+  `;
+  const lead = slotRows[0];
+  if (!lead) return null; // the candidate's rows vanished between peek and here - pool moved on, not an error
+
+  await sql`
+    INSERT INTO CLS_NPS_calling (
+      response_id, brand, channel_order_id, customer_name, customer_phone, customer_email,
+      address_city, address_state, address_pincode, nps_score, nps_category, category, sub_category,
+      additional_feedback, product_name_list, payment_method, courier_company, submitted_date,
+      lead_type, product_results, product_texture, product_fragrance, product_packaging_rating,
+      product_skin_type, product_nps, agent_email, assigned_at
+    ) VALUES (
+      ${lead.response_id}, ${lead.brand}, ${lead.channel_order_id}, ${lead.customer_name}, ${lead.customer_phone},
+      ${lead.customer_email}, ${lead.address_city}, ${lead.address_state}, ${lead.address_pincode},
+      ${lead.overall_nps_score}, ${lead.nps_category}, ${lead.category}, ${lead.sub_category},
+      ${lead.additional_feedback}, ${productNameList}, ${lead.payment_method}, ${lead.courier_company},
+      ${lead.submitted_date}, 'product', ${lead.results}, ${lead.texture}, ${lead.fragrance},
+      ${lead.packaging}, ${lead.skin_type_category}, ${lead.product_nps}, ${email}, NOW()
+    )
+  `;
+  return {
+    ...lead, product_name_list: productNameList, lead_type: 'product',
+    product_results: lead.results, product_texture: lead.texture, product_fragrance: lead.fragrance,
+    product_packaging_rating: lead.packaging, product_skin_type: lead.skin_type_category,
+  };
+}
+
 // Claims up to maxCount fresh detractor leads for `email` in a loop, stopping the moment
 // getNextDetractorLead returns null (pool exhausted) - the replacement for the removed manual
 // pull button, used by both auto-assign trigger points (going-Online batch-fill, on-disposal
