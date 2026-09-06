@@ -45,6 +45,10 @@ SCHEMA = "PEP_CLS"
 CALLING_TABLE = "CLS_NPS_calling"
 DISP_TABLE = "calling_process_dispositions"
 DISP_INDEX_NAME = "calling_process_dispositions_lead_type_idx"
+# MySQL's error for "you hold no such privilege on this object" - what a missing INDEX grant
+# raises on CREATE INDEX below. Same constant, same reasoning, as migrate_team_dispositions.py's
+# own ER_SPECIFIC_ACCESS_DENIED: this runner's grants on PEP_CLS have never included INDEX.
+ER_SPECIFIC_ACCESS_DENIED = 1142
 
 OLD_LIVE_RESPONSE_ID_EXPR = "IF(reassigned_away_at IS NULL, response_id, NULL)"
 NEW_LIVE_RESPONSE_ID_EXPR = "IF(reassigned_away_at IS NULL, CONCAT(lead_type, ':', response_id), NULL)"
@@ -87,6 +91,33 @@ def _index_exists(cur, table, index):
         (SCHEMA, table, index),
     )
     return cur.fetchone() is not None
+
+
+def _try_optional_ddl(cur, statement, what, privilege, why_survivable):
+    """Runs a DDL step that needs a privilege beyond the plain DML+ALTER this script's runner is
+    known to hold, and treats a denial as a skip rather than a failure. Returns True if it ran.
+
+    Ported from migrate_team_dispositions.py, which hit this exact 1142 on this exact table
+    (calling_process_dispositions) attempting CREATE INDEX - the runner's grants are
+    SELECT/INSERT/UPDATE/DELETE/CREATE/DROP/ALTER/CREATE VIEW, never INDEX. The four ADD COLUMN
+    steps and the ALTER-based live_response_id rewrite above are NOT run through this helper -
+    they use privileges already confirmed working, and api/ selects lead_type unconditionally, so
+    a skip there would be an outage, not a downgrade. Only ER_SPECIFIC_ACCESS_DENIED is swallowed;
+    any other OperationalError (a syntax error, a duplicate name, a dead connection) still raises,
+    because those mean the step is broken rather than merely not permitted."""
+    try:
+        cur.execute(statement)
+        print(f"  {what}: added")
+        return True
+    except pymysql.err.OperationalError as e:
+        if e.args[0] != ER_SPECIFIC_ACCESS_DENIED:
+            raise
+        print(f"  {what}: SKIPPED - {e.args[1]}")
+        for line in why_survivable:
+            print(f"      {line}")
+        print(f"      To add it later, have a DBA run  GRANT {privilege} ON `{SCHEMA}`.* TO `<user>`@`%`;")
+        print("      then re-run this script - it picks the step up on its own, nothing else to redo.")
+        return False
 
 
 def main():
@@ -157,10 +188,13 @@ def main():
             if _index_exists(cur, DISP_TABLE, DISP_INDEX_NAME):
                 print(f"  index {DISP_INDEX_NAME}: already present")
             elif args.apply:
-                cur.execute(
-                    f"CREATE INDEX {DISP_INDEX_NAME} ON {DISP_TABLE} (process_key, lead_type, sort_order)"
+                _try_optional_ddl(
+                    cur,
+                    f"CREATE INDEX {DISP_INDEX_NAME} ON {DISP_TABLE} (process_key, lead_type, sort_order)",
+                    f"index {DISP_INDEX_NAME}", "INDEX",
+                    ["this one is pure lookup speed and the table holds tens of rows, so its",
+                     "absence is not measurable - every query still returns the same answer."],
                 )
-                print(f"  index {DISP_INDEX_NAME}: added")
             else:
                 print(f"  index {DISP_INDEX_NAME}: would add")
 
