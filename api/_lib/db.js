@@ -439,6 +439,26 @@ async function bootstrapSchema() {
       payment_method VARCHAR(50),
       courier_company VARCHAR(100),
       submitted_date VARCHAR(20),
+      -- Which source table this ticket was claimed from - 'delivery' (nps_delivery, the only
+      -- pool that existed before this) or 'product' (nps_product). Added live by
+      -- scripts/migrate_nps_calling_lead_type.py; DEFAULT 'delivery' matches every existing
+      -- row's actual origin, so the ALTER TABLE that adds this column needs no separate
+      -- backfill. Drives which disposition tree a ticket's dispose modal shows (see
+      -- calling_process_dispositions.lead_type) and which fields TicketSurveyDetails renders
+      -- (app/nps-calling/NpsCallingClient.js).
+      lead_type ENUM('delivery','product') NOT NULL DEFAULT 'delivery',
+      -- nps_product's own per-product rating fields, only ever filled for lead_type='product'
+      -- (a 'delivery' ticket has its own, differently-named rating columns above - these are
+      -- never shared between the two, same "only fill in what's relevant" shape those already
+      -- use). Copied from whichever product_slot claimOneProductDetractorLead picked as
+      -- representative - see that function's own comment for why only one slot's ratings are
+      -- kept even when a response rated more than one product.
+      product_results VARCHAR(20),
+      product_texture VARCHAR(20),
+      product_fragrance VARCHAR(20),
+      product_packaging_rating VARCHAR(20),
+      product_skin_type VARCHAR(50),
+      product_nps VARCHAR(10),
       agent_email VARCHAR(320) NOT NULL,
       assigned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       reassigned_away_at TIMESTAMP NULL,
@@ -452,8 +472,13 @@ async function bootstrapSchema() {
       -- (api/detractor/lead-assignment.js), not copied from nps_delivery. Added by
       -- scripts/add_affected_products_to_calling.py.
       affected_products TEXT,
-      live_response_id VARCHAR(64) GENERATED ALWAYS AS
-        (IF(reassigned_away_at IS NULL, response_id, NULL)) VIRTUAL,
+      -- Namespaced by lead_type, not just response_id: nps_delivery and nps_product are
+      -- separate UUID spaces with no shared generator (confirmed with the process owner), so a
+      -- same-string collision between the two is very unlikely - but the alternative (an
+      -- unrelated Delivery and Product lead silently colliding on this unique key) is a
+      -- hard-to-diagnose failure for one CONCAT to rule out.
+      live_response_id VARCHAR(80) GENERATED ALWAYS AS
+        (IF(reassigned_away_at IS NULL, CONCAT(lead_type, ':', response_id), NULL)) VIRTUAL,
       UNIQUE KEY cls_nps_calling_live_response_key (live_response_id)
     )
   `;
