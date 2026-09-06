@@ -643,7 +643,7 @@ export function CallingTeamsCard({ processKey, processLabel, teamsHook, sessionI
 // changes, same reasoning as processAgents in useCallingSession: each process's list is its own.
 // RTO's disposition options stay its hardcoded connectedOutcomes/unreachableOutcomes arrays and
 // never touch this endpoint - this only backs a process (NDR today) with no built-in list.
-export function useProcessDispositions(processKey, { googleUser, showToast, teamId = null } = {}) {
+export function useProcessDispositions(processKey, { googleUser, showToast, teamId = null, leadType = null } = {}) {
   const [processDispositions, setProcessDispositions] = useState(null); // null = not loaded yet
   const [dispositionsError, setDispositionsError] = useState('');
   const [savingDisposition, setSavingDisposition] = useState(false);
@@ -656,7 +656,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
   // expanded parents never share state or clobber each other.
   const [newChildDrafts, setNewChildDrafts] = useState({});
 
-  const loadDispositions = useCallback(async (key, team) => {
+  const loadDispositions = useCallback(async (key, team, type) => {
     if (!key) return;
     setProcessDispositions(null);
     setDispositionsError('');
@@ -665,7 +665,8 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
       // own team's tree regardless of what is sent here, so this is a UI affordance, not a
       // permission.
       const teamQuery = team != null ? `&teamId=${encodeURIComponent(team)}` : '';
-      const r = await fetch(`/api/admin/dispositions?process=${encodeURIComponent(key)}${teamQuery}`);
+      const typeQuery = type != null ? `&leadType=${encodeURIComponent(type)}` : '';
+      const r = await fetch(`/api/admin/dispositions?process=${encodeURIComponent(key)}${teamQuery}${typeQuery}`);
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { setDispositionsError(d.error || `Could not load dispositions (${r.status})`); return; }
       setProcessDispositions(d.dispositions || []);
@@ -678,8 +679,8 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
   // the caller doesn't administer, and this stays a lightweight no-op for a process (RTO) whose
   // disposition list never reads from here, rather than an empty admin-only card.
   useEffect(() => {
-    if (googleUser?.email) loadDispositions(processKey, teamId);
-  }, [googleUser, processKey, teamId, loadDispositions]);
+    if (googleUser?.email) loadDispositions(processKey, teamId, leadType);
+  }, [googleUser, processKey, teamId, leadType, loadDispositions]);
 
   const toggleDispExpanded = (id) => {
     setExpandedDispIds((prev) => {
@@ -701,7 +702,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
       const r = await fetch('/api/admin/dispositions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ processKey, label, description: draft.description.trim(), parentId: parentId || undefined, ...(teamId != null ? { teamId } : {}) }),
+        body: JSON.stringify({ processKey, label, description: draft.description.trim(), parentId: parentId || undefined, ...(teamId != null ? { teamId } : {}), ...(leadType != null ? { leadType } : {}) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -737,7 +738,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
       const r = await fetch('/api/admin/dispositions', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ processKey, id, ...patch, ...(teamId != null ? { teamId } : {}) }),
+        body: JSON.stringify({ processKey, id, ...patch, ...(teamId != null ? { teamId } : {}), ...(leadType != null ? { leadType } : {}) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -763,7 +764,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
       const r = await fetch('/api/admin/dispositions', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ processKey, id, ...(teamId != null ? { teamId } : {}) }),
+        body: JSON.stringify({ processKey, id, ...(teamId != null ? { teamId } : {}), ...(leadType != null ? { leadType } : {}) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -800,14 +801,14 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
       const r = await fetch('/api/admin/dispositions', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ processKey, orderedIds: next.map((x) => x.id), parentId: parentId || undefined, ...(teamId != null ? { teamId } : {}) }),
+        body: JSON.stringify({ processKey, orderedIds: next.map((x) => x.id), parentId: parentId || undefined, ...(teamId != null ? { teamId } : {}), ...(leadType != null ? { leadType } : {}) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
         const msg = d.error || `Could not reorder (${r.status})`;
         setDispositionsError(msg);
         if (showToast) showToast(`⚠️ ${msg}`);
-        loadDispositions(processKey, teamId);
+        loadDispositions(processKey, teamId, leadType);
         return;
       }
       setProcessDispositions(d.dispositions || []);
@@ -815,7 +816,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
       const msg = e.message || 'Could not reorder';
       setDispositionsError(msg);
       if (showToast) showToast(`⚠️ ${msg}`);
-      loadDispositions(processKey, teamId);
+      loadDispositions(processKey, teamId, leadType);
     } finally {
       setSavingDisposition(false);
     }
@@ -826,7 +827,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
     newDispLabel, setNewDispLabel, newDispDesc, setNewDispDesc,
     expandedDispIds, toggleDispExpanded, newChildDrafts, setNewChildDrafts,
     addDisposition, saveDispositionEdit, deleteDisposition, moveDisposition,
-    teamId,
+    teamId, leadType,
   };
 }
 
