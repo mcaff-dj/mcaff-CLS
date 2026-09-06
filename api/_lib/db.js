@@ -6,6 +6,7 @@
 // configuration (which anyone able to view the function, not just invoke it, can read).
 const mysql = require('mysql2/promise');
 const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
+const { pickOlderDetractorCandidate, parseDdMmYyyy } = require('./detractorMerge');
 
 const secretsClient = new SecretsManagerClient({});
 let pool = null;
@@ -2058,6 +2059,27 @@ async function claimOneProductDetractorLead(email) {
   };
 }
 
+// Peeks both pools' top candidate and claims whichever wins under the admin's lead-order
+// setting (see pickOlderDetractorCandidate) - the single shared-quota merge point every
+// auto-assign trigger (going-Online batch-fill, on-disposal self-refill) now goes through by
+// default. A pool with nothing left to peek just loses every comparison; no special-casing
+// needed for "one pool is empty" beyond what pickOlderDetractorCandidate already does.
+async function getNextDetractorLeadEitherPool(email) {
+  const sortDirection = (await getCallingLeadOrder('detractor')) === 'newest' ? -1 : 1;
+  const [[deliveryCandidate], [productCandidate]] = await Promise.all([
+    peekDeliveryDetractorCandidates({ email, limit: 1 }),
+    peekProductDetractorCandidates({ email, limit: 1 }),
+  ]);
+  const pick = pickOlderDetractorCandidate(
+    deliveryCandidate && deliveryCandidate.submitted_date,
+    productCandidate && productCandidate.submitted_date,
+    sortDirection,
+  );
+  if (pick === 'delivery') return getNextDetractorLead(email);
+  if (pick === 'product') return claimOneProductDetractorLead(email);
+  return null;
+}
+
 // Claims up to maxCount fresh detractor leads for `email` in a loop, stopping the moment
 // getNextDetractorLead returns null (pool exhausted) - the replacement for the removed manual
 // pull button, used by both auto-assign trigger points (going-Online batch-fill, on-disposal
@@ -2072,7 +2094,7 @@ async function claimOneProductDetractorLead(email) {
 // DETRACTOR_CLAIM_DUP_RETRIES times) rather than aborting the whole batch and losing every
 // remaining slot. Any other error still propagates as before.
 const DETRACTOR_CLAIM_DUP_RETRIES = 3;
-async function assignDetractorLeadsToAgent(email, maxCount, claimFn = getNextDetractorLead) {
+async function assignDetractorLeadsToAgent(email, maxCount, claimFn = getNextDetractorLeadEitherPool) {
   const claimed = [];
   for (let i = 0; i < maxCount; i++) {
     let lead = null;
