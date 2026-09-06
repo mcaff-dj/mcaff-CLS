@@ -2145,7 +2145,7 @@ async function getUnassignedDetractorLeads(limit = 20) {
       AND STR_TO_DATE(p.submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
     GROUP BY p.response_id
     HAVING MIN(p.nps_category) = 'Detractor'
-    ORDER BY MIN(p.submitted_date) ASC
+    ORDER BY STR_TO_DATE(MIN(p.submitted_date), '%d/%m/%Y') ASC
     LIMIT ${limit}
   `;
   // Same convention this function already used for its own single-pool query: submitted_date is
