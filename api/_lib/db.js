@@ -4304,6 +4304,7 @@ async function getCallingPartnerBreakdown(dateFrom, dateTo) {
 // Team Roster picker can group its options under the SAME headings without a second copy
 // of the keyword rules drifting from this one - see that file for why keywords, not a map.
 const { categorizeRtoReason } = require('./rtoReasonCategory');
+const { categorizeNdrPartner } = require('./ndrPartnerCategory');
 
 // Per-RTO-reason-category funnel (rto_reason bucketed via categorizeRtoReason above):
 // assigned -> connected -> converted, each stage's own rate over total assigned. Sorted by
@@ -4506,8 +4507,13 @@ async function getNdrCallingOverviewStats(dateFrom, dateTo) {
   };
 }
 
-// Top-level NDR Reason Breakdown table - GROUP BY ndr_reason directly, no category rollup (no
-// NDR equivalent of categorizeRtoReason - these are free-text courier reasons, shown as-is).
+// Top-level NDR Reason Breakdown table - SQL groups by the raw ndr_reason (cheap, one row per
+// distinct sheet value), then this bucket-and-resum step folds those into the SAME categories
+// categorizeRtoReason already defines for RTO (Customer Refused/Cancelled, Address Issue, ...) -
+// courier-generated NDR reason text is the same kind of free text RTO's own rto_reason is, so
+// reusing one shared keyword set avoids inventing a second, likely-overlapping one. Any raw
+// value the keywords don't recognize lands in Unknown/Other, which is the signal for adding a
+// keyword later rather than a silent misclassification.
 async function getNdrCallingReasonBreakdown(dateFrom, dateTo, paymentMode, brand) {
   await ensureSchema();
   const { from, to } = dateBounds(dateFrom, dateTo);
@@ -4537,21 +4543,35 @@ async function getNdrCallingReasonBreakdown(dateFrom, dateTo, paymentMode, brand
     ORDER BY total_assigned DESC
   `;
   const pct = (n, d) => (d > 0 ? Math.round((n / d) * 100) : 0);
-  return rows.map((r) => {
-    const totalAssigned = Number(r.total_assigned) || 0;
-    const totalConnected = Number(r.total_connected) || 0;
-    const totalConverted = Number(r.total_converted) || 0;
-    return {
-      rtoReason: r.ndr_reason, // same column key funnelColumns' labelKey uses on the client for both processes
-      totalAssigned, totalConnected, totalConverted,
-      connectedPct: pct(totalConnected, totalAssigned),
-      convertedPct: pct(totalConverted, totalAssigned),
-    };
-  });
+  const byCategory = new Map();
+  for (const r of rows) {
+    const category = categorizeRtoReason(r.ndr_reason);
+    const acc = byCategory.get(category) || { totalAssigned: 0, totalConnected: 0, totalConverted: 0 };
+    acc.totalAssigned += Number(r.total_assigned) || 0;
+    acc.totalConnected += Number(r.total_connected) || 0;
+    acc.totalConverted += Number(r.total_converted) || 0;
+    byCategory.set(category, acc);
+  }
+  return [...byCategory.entries()]
+    .map(([category, acc]) => ({
+      rtoReason: category, // same column key funnelColumns' labelKey uses on the client for both processes
+      totalAssigned: acc.totalAssigned,
+      totalConnected: acc.totalConnected,
+      totalConverted: acc.totalConverted,
+      connectedPct: pct(acc.totalConnected, acc.totalAssigned),
+      convertedPct: pct(acc.totalConverted, acc.totalAssigned),
+    }))
+    .sort((a, b) => b.totalAssigned - a.totalAssigned);
 }
 
-// Delivery Partner Breakdown for Process=NDR - GROUP BY (delivery_partner, ndr_reason), same
-// reassembly into {deliveryPartner, ...totals, reasons: [...]} as getCallingPartnerReasonBreakdown.
+// Delivery Partner Breakdown for Process=NDR - SQL groups by the raw (delivery_partner,
+// ndr_reason) pair, then this step buckets BOTH dimensions before re-summing: delivery_partner
+// via categorizeNdrPartner (the NDR sheet's raw Courier Company values are compound
+// courier+service-tier codes, e.g. "XBSRF_ Air_Direct" and "XBSRF_Direct_NDD" both -> Xpressbees
+// - unlike CLS_RTO_calling's delivery_partner, which is already a clean name and needs no
+// bucketing), and ndr_reason via categorizeRtoReason (reused from RTO - see
+// getNdrCallingReasonBreakdown's own comment). Same reassembly shape as
+// getCallingPartnerReasonBreakdown: {deliveryPartner, ...totals, reasons: [...]}.
 async function getNdrCallingPartnerReasonBreakdown(dateFrom, dateTo, paymentMode, brand) {
   await ensureSchema();
   const { from, to } = dateBounds(dateFrom, dateTo);
@@ -4587,16 +4607,18 @@ async function getNdrCallingPartnerReasonBreakdown(dateFrom, dateTo, paymentMode
     const assigned = Number(r.total_assigned) || 0;
     const connected = Number(r.total_connected) || 0;
     const converted = Number(r.total_converted) || 0;
-    const partnerAcc = byPartner.get(r.partner) || { totals: emptyAcc(), byReason: new Map() };
+    const partnerCategory = categorizeNdrPartner(r.partner);
+    const reasonCategory = categorizeRtoReason(r.ndr_reason);
+    const partnerAcc = byPartner.get(partnerCategory) || { totals: emptyAcc(), byReason: new Map() };
     partnerAcc.totals.totalAssigned += assigned;
     partnerAcc.totals.totalConnected += connected;
     partnerAcc.totals.totalConverted += converted;
-    const reasonAcc = partnerAcc.byReason.get(r.ndr_reason) || emptyAcc();
+    const reasonAcc = partnerAcc.byReason.get(reasonCategory) || emptyAcc();
     reasonAcc.totalAssigned += assigned;
     reasonAcc.totalConnected += connected;
     reasonAcc.totalConverted += converted;
-    partnerAcc.byReason.set(r.ndr_reason, reasonAcc);
-    byPartner.set(r.partner, partnerAcc);
+    partnerAcc.byReason.set(reasonCategory, reasonAcc);
+    byPartner.set(partnerCategory, partnerAcc);
   }
   const toFunnelRow = (acc) => ({
     totalAssigned: acc.totalAssigned,
