@@ -27,6 +27,19 @@ const FALLBACK_QUOTA = 15;
 // promoter/passive/detractor reason+openend pair that exists for the area; only whichever
 // bucket the customer's response actually filled in ever has text, same "only what's relevant"
 // shape the old single-bucket version already had.
+// Product-lead equivalent of AREAS: nps_product has no promoter/passive/detractor reason buckets
+// (unlike nps_delivery) - just five per-product ratings, plus product_nps (that product's own
+// 0-10 score, distinct from the survey-level nps_score every ticket already carries). Order
+// matches nps_product's own column order.
+const PRODUCT_RATING_FIELDS = [
+  { label: 'Product NPS', field: 'product_nps' },
+  { label: 'Results', field: 'product_results' },
+  { label: 'Texture', field: 'product_texture' },
+  { label: 'Fragrance', field: 'product_fragrance' },
+  { label: 'Packaging', field: 'product_packaging_rating' },
+  { label: 'Skin type', field: 'product_skin_type' },
+];
+
 const AREAS = [
   {
     label: 'Order Placement / Website',
@@ -121,6 +134,10 @@ function TicketSurveyDetails({ t }) {
   return (
     <>
       <div className="space-y-1 mb-2">
+        <p className="text-[11px] font-bold uppercase tracking-wide text-indigo-300">
+          {t.lead_type === 'product' ? 'Product' : 'Delivery'}
+        </p>
+
         {(t.category || t.sub_category) && (
           <p className="text-[12px] text-zinc-400">{[t.category, t.sub_category].filter(Boolean).join(' · ')}</p>
         )}
@@ -147,7 +164,13 @@ function TicketSurveyDetails({ t }) {
       </div>
 
       <div className="space-y-2">
-        {AREAS.map(({ label, rating, reach, buckets }) => {
+        {t.lead_type === 'product' ? (
+          PRODUCT_RATING_FIELDS.filter(({ field }) => hasValue(t[field])).map(({ label, field }) => (
+            <p key={field} className="text-[12px] text-zinc-300">
+              <span className="font-semibold text-zinc-200">{label}:</span> {t[field]}
+            </p>
+          ))
+        ) : AREAS.map(({ label, rating, reach, buckets }) => {
           const ratingVal = rating && t[rating];
           const reachVal = reach && t[reach];
           // Customer service specifically: never reached CS means nothing else about this area
@@ -285,7 +308,11 @@ export default function NpsCallingClient() {
   const hours = useBusinessHours(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
   const defaultQuota = useDefaultQuota(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
   const leadOrder = useLeadOrder(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
-  const disp = useProcessDispositions(PROCESS_KEY, { googleUser, showToast });
+  // Which tree the Admin Panel's Disposition List editor is currently showing/editing - null
+  // (Delivery, today's shared tree) or 'product'. Independent of any ticket's own lead_type;
+  // an admin picks this explicitly to configure either tree.
+  const [adminDispLeadType, setAdminDispLeadType] = useState(null);
+  const disp = useProcessDispositions(PROCESS_KEY, { googleUser, showToast, leadType: adminDispLeadType });
   const { processDispositions } = disp;
 
   useEffect(() => {
@@ -423,10 +450,18 @@ export default function NpsCallingClient() {
   // already agrees with it.
   const derivedConnected = branchChoice;
 
+  // Independent of the admin's own disp/adminDispLeadType above - an agent (who never sees the
+  // Admin Panel) still needs whichever tree matches the TICKET they're disposing, not whatever
+  // the admin toggle above happens to be set to.
+  const dispForTicket = useProcessDispositions(PROCESS_KEY, {
+    googleUser, showToast,
+    leadType: detailTkt && detailTkt.lead_type === 'product' ? 'product' : null,
+  });
+
   const visibleDispositionNodes = useMemo(() => {
     if (!branchChoice) return [];
-    return (processDispositions || []).filter((n) => n.label === (branchChoice === 'Yes' ? 'Connected' : 'Non Connected'));
-  }, [processDispositions, branchChoice]);
+    return (dispForTicket.processDispositions || []).filter((n) => n.label === (branchChoice === 'Yes' ? 'Connected' : 'Non Connected'));
+  }, [dispForTicket.processDispositions, branchChoice]);
 
   // This lead's own product_name_list ("Product A, Product B") split into options - only ever
   // meaningful once "Product Related Issue" has a reason checked.
@@ -893,7 +928,32 @@ export default function NpsCallingClient() {
                   <CallingHoursCard processKey={PROCESS_KEY} processLabel="NPS-Calling" hours={hours} />
                   <DefaultQuotaCard processLabel="NPS-Calling" fallback={FALLBACK_QUOTA} quota={defaultQuota} />
                   <LeadOrderCard processLabel="NPS-Calling" order={leadOrder} />
-                  <ProcessDispositionsCard processLabel="NPS-Calling" disp={disp} allowInputTypeControl />
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-[12px] text-zinc-400 font-semibold">Editing tree:</span>
+                    <button
+                      type="button"
+                      onClick={() => setAdminDispLeadType(null)}
+                      className={`px-3 py-1 rounded-lg text-[12px] font-bold border ${
+                        adminDispLeadType == null ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
+                      }`}
+                    >
+                      Delivery
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAdminDispLeadType('product')}
+                      className={`px-3 py-1 rounded-lg text-[12px] font-bold border ${
+                        adminDispLeadType === 'product' ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
+                      }`}
+                    >
+                      Product
+                    </button>
+                  </div>
+                  <ProcessDispositionsCard
+                    processLabel={`NPS-Calling${adminDispLeadType === 'product' ? ' · Product' : ''}`}
+                    disp={disp}
+                    allowInputTypeControl
+                  />
 
                   <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden">
                     <div className="flex items-center justify-between flex-wrap gap-3 p-4 pb-3">
