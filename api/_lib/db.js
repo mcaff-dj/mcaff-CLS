@@ -1876,21 +1876,25 @@ async function getDetractorQuotaAndLoad(email) {
 // deprioritized, so this is a hard WHERE filter. STR_TO_DATE returns NULL for anything that
 // doesn't parse as a date, and NULL >= anything is unknown/false in SQL, so a malformed
 // submitted_date fails this filter too rather than being silently treated as "recent enough".
-async function getNextDetractorLead(email) {
-  await ensureSchema();
-  // Admin-set pull order (calling_process_settings.lead_order via /api/admin/lead-order) -
-  // 'oldest' (default) or 'newest'. sql`` only binds plain values, never raw SQL keywords, so
-  // ASC/DESC itself can't be parametrized - sortDirection instead flips the SIGN of the sort
-  // key (TO_DAYS as a plain integer), and the query's own ORDER BY stays a fixed ASC on that
-  // signed value: ASC on the day number is oldest-first, ASC on its negation is newest-first.
-  const sortDirection = (await getCallingLeadOrder('detractor')) === 'newest' ? -1 : 1;
-  // '' (no row, or an explicitly cleared filter) = unrestricted - the `${brandFilter} = ''`
-  // branch of the OR below always wins in that case, same "empty string means no restriction"
-  // convention as NDR's ndr_brand_filter (see calling_agent_process's own column comment).
-  const { rows: filterRows } = await sql`
+// Reads calling_agent_process.detractor_brand_filter - '' (no row, or an explicitly cleared
+// filter) means unrestricted, same "empty string means no restriction" convention as NDR's
+// ndr_brand_filter. null for a preview/admin call with no agent behind it (getUnassignedDetractorLeads).
+async function _detractorBrandFilterFor(email) {
+  if (!email) return '';
+  const { rows } = await sql`
     SELECT detractor_brand_filter FROM calling_agent_process WHERE email = ${email} AND process_key = 'detractor'
   `;
-  const brandFilter = (filterRows[0] && filterRows[0].detractor_brand_filter) || '';
+  return (rows[0] && rows[0].detractor_brand_filter) || '';
+}
+
+// SELECT-only half of the delivery claim - the same 30-day-filtered, lead-order-sorted,
+// brand-filtered nps_delivery query getNextDetractorLead always ran, now callable without also
+// inserting. limit>1 backs getUnassignedDetractorLeads' merged preview; email=null skips the
+// brand filter (used by that same preview, which has never applied one).
+async function peekDeliveryDetractorCandidates({ email = null, limit = 1 } = {}) {
+  await ensureSchema();
+  const sortDirection = (await getCallingLeadOrder('detractor')) === 'newest' ? -1 : 1;
+  const brandFilter = await _detractorBrandFilterFor(email);
   const { rows } = await sql`
     SELECT d.response_id, d.brand, d.channel_order_id, d.customer_name, d.customer_phone,
            d.customer_email, d.address_city, d.address_state, d.address_pincode, d.nps_score,
@@ -1916,10 +1920,14 @@ async function getNextDetractorLead(email) {
       AND (${brandFilter} = '' OR d.brand = ${brandFilter})
       AND STR_TO_DATE(d.submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
     ORDER BY TO_DAYS(STR_TO_DATE(d.submitted_date, '%d/%m/%Y')) * ${sortDirection} ASC
-    LIMIT 1
+    LIMIT ${limit}
   `;
-  if (!rows.length) return null;
-  const lead = rows[0];
+  return rows;
+}
+
+async function getNextDetractorLead(email) {
+  const [lead] = await peekDeliveryDetractorCandidates({ email, limit: 1 });
+  if (!lead) return null;
   await sql`
     INSERT INTO CLS_NPS_calling (
       response_id, brand, channel_order_id, customer_name, customer_phone, customer_email,
