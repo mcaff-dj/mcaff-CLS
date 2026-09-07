@@ -18,16 +18,21 @@ function fmtPct(v) {
   return (v === null || v === undefined) ? '–' : v.toFixed(1) + '%';
 }
 
+const HORIZON_MONTHS = 12;
+const EMPTY_M = new Array(HORIZON_MONTHS + 1).fill(0);
+
 function RepeatHeatmap({ data, area }) {
   const rows = useMemo(
     () => data.scores.map((score) => ({
       score,
       total: (data.totals && data.totals[`${area}|${score}`]) || 0,
-      m: data.agg[`${area}|${score}`] || [0, 0, 0, 0, 0, 0, 0],
+      m: data.agg[`${area}|${score}`] || EMPTY_M,
     })),
     [data, area]
   );
-  const max = Math.max(1, ...rows.flatMap((r) => r.m));
+  // Color scale ignores M0/Cohort (always the largest by construction) so the M1-M12 cells
+  // that actually vary aren't washed out to the palest step.
+  const max = Math.max(1, ...rows.flatMap((r) => r.m.slice(1)));
 
   return (
     <div className="og-table-scroll">
@@ -36,13 +41,14 @@ function RepeatHeatmap({ data, area }) {
           <tr>
             <th>NPS score</th>
             <th>Total responses</th>
-            <th>M0</th><th>M1</th><th>M2</th><th>M3</th><th>M4</th><th>M5</th><th>M6</th>
-            <th>Cohort</th>
+            <th>Cohort (M0)</th>
+            {Array.from({ length: HORIZON_MONTHS }, (_, i) => <th key={i}>{`M${i + 1}`}</th>)}
           </tr>
         </thead>
         <tbody>
           {rows.map((r) => {
             const cat = scoreCategory(r.score);
+            const cohort = r.m[0];
             return (
               <tr key={r.score}>
                 <td className="og-rowlabel">
@@ -50,15 +56,21 @@ function RepeatHeatmap({ data, area }) {
                   <span className="rr-cat-tag">{cat.label}</span>
                 </td>
                 <td className="rr-total">{r.total}</td>
-                {r.m.map((v, i) => {
+                <td className="rr-cohort">{cohort}</td>
+                {r.m.slice(1).map((v, i) => {
                   const t = v / max;
+                  const pct = cohort ? (v / cohort) * 100 : null;
                   const style = v === 0 ? {} : {
                     background: `color-mix(in srgb, var(--accent) ${Math.round(t * 75)}%, var(--surface-card))`,
                     color: t > 0.55 ? '#fff' : 'var(--text-primary)',
                   };
-                  return <td key={i} className="rr-cell" style={style}>{v}</td>;
+                  return (
+                    <td key={i} className="rr-cell" style={style}>
+                      <div className="rr-cell-count">{v}</div>
+                      <div className="rr-cell-pct">{pct === null ? '–' : pct.toFixed(1) + '%'}</div>
+                    </td>
+                  );
                 })}
-                <td className="rr-cohort">{r.m[0]}</td>
               </tr>
             );
           })}
@@ -132,10 +144,10 @@ export default function RepeatRateTab() {
         <p>
           For each NPS score a respondent gave, how many of those phones kept placing orders
           in the months after &mdash; matched by customer_phone against Item_level_data.
-          &ldquo;Total responses&rdquo; is everyone who gave that score; &ldquo;Cohort&rdquo;/M0
-          narrows to the ones who also had an order that same month &mdash; M1-M6 track only
-          that narrower group. M4&ndash;M6 undercount for recent cohorts that haven&apos;t
-          reached that horizon yet.
+          &ldquo;Total responses&rdquo; is everyone who gave that score; &ldquo;Cohort (M0)&rdquo;
+          narrows to the ones who also had an order that same month &mdash; M1-M12 track only
+          that narrower group, count and % of cohort. Later months undercount for recent
+          cohorts that haven&apos;t reached that horizon yet.
         </p>
       </header>
 

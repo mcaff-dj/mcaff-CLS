@@ -34,6 +34,7 @@ AREA_LABEL = {
     "website": "Website / app experience",
 }
 SCORES = [10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+HORIZON_MONTHS = 12  # M0..M12
 PROMOTER_SCORES = {9, 10}
 DETRACTOR_SCORES = {0, 1, 2, 3, 4, 5, 6}
 BATCH = 800
@@ -106,7 +107,7 @@ def main():
         print(f"  batch {i // BATCH + 1}/{(len(phones) + BATCH - 1) // BATCH} done", file=sys.stderr)
 
     print("Aggregating cohorts...", file=sys.stderr)
-    agg = defaultdict(lambda: [0] * 7)
+    agg = defaultdict(lambda: [0] * (HORIZON_MONTHS + 1))
     # Every NPS response counts here regardless of whether the phone ever ordered - this is
     # "how many people gave this score", separate from agg's M0 ("...and also ordered that
     # same month"), which is a filtered subset, not the total.
@@ -126,7 +127,7 @@ def main():
         if r["area"]:
             agg[(r["area"], r["score"])][0] += 1
         hit_months = [(y0, m0)]
-        for k in range(1, 7):
+        for k in range(1, HORIZON_MONTHS + 1):
             yk, mk = add_months(y0, m0, k)
             if (yk, mk) in months:
                 agg[("all", r["score"])][k] += 1
