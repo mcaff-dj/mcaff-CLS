@@ -78,7 +78,7 @@ const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser
   getAllDeliveryPartnerAccess, setDeliveryPartnerAccess, getDeliveryEscalationPartnerOptions,
   getAllDeliveryEscalationQueryCategoryAccess, setDeliveryEscalationQueryCategoryAccess,
   getDeliveryEscalationQueryCategoryOptions,
-  getAllDeliveryEscalationUserRoles, setDeliveryEscalationUserRole } = require('../_lib/db');
+  getAllDeliveryEscalationUserRoles, setDeliveryEscalationUserRole, getDeliveryEscalationUserRoleByEmail } = require('../_lib/db');
 const { teamScopeFor, coerceTeamId } = require('../_lib/callingTeams');
 const { dispositionTeamFor } = require('../_lib/dispositionTrees');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
@@ -716,6 +716,19 @@ async function handleDispositions(req, res, session) {
   // Only the admin editor's own read asks for this (see useProcessDispositions' strict option) -
   // an agent's ticket-scoped read never sends it, so it always keeps the safe fallback.
   const dispStrict = req.method === 'GET' && req.query && req.query.strict === '1';
+  // role_scope (Delivery-Escalation's Partner tree) is the same shape as lead_type just above -
+  // not a permission boundary either, since the only people who ever reach the write paths below
+  // are already process admins (Delivery-Escalation's own Admin Panel tab is admin-only, unlike
+  // NDR's per-team split where a Team Lead edits their OWN team and nobody else's). A write
+  // always honours whatever the admin's Shared/Partner toggle sent. A read with nothing explicit
+  // falls back to the CALLER's own delivery_escalation_user_role - so an agent's or partner's own
+  // ticket-dispose picker gets their own tree with no query param required, and the DB lookup
+  // only runs for that one case (an explicit value, or a non-deliveryescalation process, skips it).
+  const rawRoleScope = req.method === 'GET' ? (req.query && req.query.roleScope) : body.roleScope;
+  let dispRoleScope = rawRoleScope === 'Partner' ? 'Partner' : null;
+  if (req.method === 'GET' && !rawRoleScope && dispProcessKey === 'deliveryescalation') {
+    dispRoleScope = (await getDeliveryEscalationUserRoleByEmail(session.email)) === 'Partner' ? 'Partner' : null;
+  }
 
   if (req.method !== 'GET') {
     const isProcessAdmin = session.isAdmin || (body.processKey && await isCallingProcessAdmin(session.email, body.processKey));
@@ -740,8 +753,8 @@ async function handleDispositions(req, res, session) {
       return;
     }
     try {
-      const dispositions = await addProcessDisposition(body.processKey, body.label, body.description, session.email, body.parentId, dispTeamId, dispLeadType);
-      const treeLabel = `${dispTeamId == null ? 'shared' : `team #${dispTeamId}`}${dispLeadType === 'product' ? ' · product' : ''}`;
+      const dispositions = await addProcessDisposition(body.processKey, body.label, body.description, session.email, body.parentId, dispTeamId, dispLeadType, dispRoleScope);
+      const treeLabel = `${dispTeamId == null ? 'shared' : `team #${dispTeamId}`}${dispLeadType === 'product' ? ' · product' : ''}${dispRoleScope === 'Partner' ? ' · partner' : ''}`;
       await logEvent(session.uid, session.email, 'calling', 'disposition-add',
         `${body.processKey} (${treeLabel}): added "${body.label}"${body.parentId ? ` (child of #${body.parentId})` : ''}`, ip);
       res.status(200).json({ dispositions });
@@ -758,9 +771,9 @@ async function handleDispositions(req, res, session) {
     }
     try {
       const dispositions = Array.isArray(body.orderedIds)
-        ? await reorderProcessDispositions(body.processKey, body.parentId, body.orderedIds, dispTeamId, dispLeadType)
-        : await updateProcessDisposition(body.processKey, body.id, { label: body.label, description: body.description, childrenInputType: body.childrenInputType }, dispTeamId, dispLeadType);
-      const treeLabel = `${dispTeamId == null ? 'shared' : `team #${dispTeamId}`}${dispLeadType === 'product' ? ' · product' : ''}`;
+        ? await reorderProcessDispositions(body.processKey, body.parentId, body.orderedIds, dispTeamId, dispLeadType, dispRoleScope)
+        : await updateProcessDisposition(body.processKey, body.id, { label: body.label, description: body.description, childrenInputType: body.childrenInputType }, dispTeamId, dispLeadType, dispRoleScope);
+      const treeLabel = `${dispTeamId == null ? 'shared' : `team #${dispTeamId}`}${dispLeadType === 'product' ? ' · product' : ''}${dispRoleScope === 'Partner' ? ' · partner' : ''}`;
       await logEvent(session.uid, session.email, 'calling', 'disposition-edit',
         Array.isArray(body.orderedIds) ? `${body.processKey} (${treeLabel}): reordered` : `${body.processKey} (${treeLabel}): edited #${body.id}`, ip);
       res.status(200).json({ dispositions });
@@ -775,8 +788,8 @@ async function handleDispositions(req, res, session) {
       res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
       return;
     }
-    const dispositions = await deleteProcessDisposition(body.processKey, body.id, dispTeamId, dispLeadType);
-    const treeLabel = `${dispTeamId == null ? 'shared' : `team #${dispTeamId}`}${dispLeadType === 'product' ? ' · product' : ''}`;
+    const dispositions = await deleteProcessDisposition(body.processKey, body.id, dispTeamId, dispLeadType, dispRoleScope);
+    const treeLabel = `${dispTeamId == null ? 'shared' : `team #${dispTeamId}`}${dispLeadType === 'product' ? ' · product' : ''}${dispRoleScope === 'Partner' ? ' · partner' : ''}`;
     await logEvent(session.uid, session.email, 'calling', 'disposition-delete', `${body.processKey} (${treeLabel}): deleted #${body.id}`, ip);
     res.status(200).json({ dispositions });
     return;
@@ -803,7 +816,7 @@ async function handleDispositions(req, res, session) {
     res.status(403).json({ error: 'You do not have access to that process.' });
     return;
   }
-  res.status(200).json({ dispositions: await getProcessDispositions(processKey, dispTeamId, dispLeadType, dispStrict) });
+  res.status(200).json({ dispositions: await getProcessDispositions(processKey, dispTeamId, dispLeadType, dispStrict, dispRoleScope) });
 }
 
 // GET    ?process=<key>       -> that process's teams (active only unless ?includeInactive=1)

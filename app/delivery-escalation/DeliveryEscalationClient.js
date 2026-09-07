@@ -1580,6 +1580,17 @@ export default function DeliveryEscalationClient() {
   // hours nor a roster to administer (see the module comment up top).
   const disp = useProcessDispositions(TAB_KEY, { googleUser, showToast });
   const { processDispositions } = disp;
+  // Admin Panel's OWN editor for the Partner tree (see role_scope in getProcessDispositions) -
+  // a separate hook instance, never touching `disp` above, because that one drives the actual
+  // dispose picker every agent/partner uses right now and must always follow the CALLER's own
+  // role (server-derived when roleScope is omitted) - never whatever tree an admin happens to be
+  // looking at in this card. strict:true matches the admin editor's own read elsewhere (skips the
+  // empty-tree fallback so "no options yet" reads as exactly that, never a silently-substituted
+  // Shared tree the admin could mistake for Partner's own).
+  const [deDispRoleScope, setDeDispRoleScope] = useState('shared');
+  const adminDisp = useProcessDispositions(TAB_KEY, {
+    googleUser, showToast, strict: true, roleScope: deDispRoleScope === 'Partner' ? 'Partner' : null,
+  });
 
   const [tab, setTab] = useState('overview');
   // If the signed-in agent's own Tab Access restriction excludes the default/current tab (e.g.
@@ -3074,7 +3085,25 @@ export default function DeliveryEscalationClient() {
               )}
 
               {tab === 'admin' && sessionIsAdmin && (
-                <ProcessDispositionsCard processLabel="Delivery-Escalation" disp={disp} allowInputTypeControl />
+                <ProcessDispositionsCard
+                  processLabel="Delivery-Escalation"
+                  disp={adminDisp}
+                  allowInputTypeControl
+                  headerExtra={
+                    <div className="inline-flex rounded-lg bg-zinc-900/90 border border-zinc-800 p-0.5 gap-0.5 shrink-0">
+                      {['shared', 'Partner'].map((v) => (
+                        <button
+                          key={v}
+                          type="button"
+                          onClick={() => setDeDispRoleScope(v)}
+                          className={`h-7 px-3 rounded-md text-[12px] font-semibold transition-colors ${deDispRoleScope === v ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
+                        >
+                          {v === 'shared' ? 'Shared (Agent/Team Leader)' : 'Partner'}
+                        </button>
+                      ))}
+                    </div>
+                  }
+                />
               )}
               {tab === 'admin' && sessionIsAdmin && <DeliveryPartnerAccessCard showToast={showToast} />}
             </div>

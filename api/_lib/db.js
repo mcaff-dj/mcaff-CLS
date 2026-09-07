@@ -4268,73 +4268,88 @@ const DISPOSITION_LABEL_MAX = 120;
 // returning [] - an agent handed an empty picker cannot dispose a call at all, so a team created
 // before its clone ran (or whose clone failed) must not take its agents off the phones. See the
 // spec's resolution rules.
-async function getProcessDispositions(processKey, teamId = null, leadType = null, strict = false) {
+async function getProcessDispositions(processKey, teamId = null, leadType = null, strict = false, roleScope = null) {
   await ensureSchema();
   if (!processKey) return [];
   // sql() executes eagerly (it's `await p.execute(...)` inside, not a lazy fragment builder), so
   // a nested `${sql\`...\`}` fragment would stringify a Promise into the outer query text - two
-  // separate literal queries instead of building SQL by concatenation.
-  const fetchRows = async (team, type) => (team == null
+  // separate literal queries instead of building SQL by concatenation. role_scope is bolted onto
+  // every branch the same null-safe-equal-ish way lead_type already is - see role below.
+  const fetchRows = async (team, type, role) => (team == null
     ? (type == null
         ? (await sql`
             SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
-            WHERE process_key = ${processKey} AND team_id IS NULL AND lead_type IS NULL
+            WHERE process_key = ${processKey} AND team_id IS NULL AND lead_type IS NULL AND (${role} IS NULL AND role_scope IS NULL OR role_scope = ${role})
             ORDER BY sort_order ASC, id ASC`).rows
         : (await sql`
             SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
-            WHERE process_key = ${processKey} AND team_id IS NULL AND lead_type = ${type}
+            WHERE process_key = ${processKey} AND team_id IS NULL AND lead_type = ${type} AND (${role} IS NULL AND role_scope IS NULL OR role_scope = ${role})
             ORDER BY sort_order ASC, id ASC`).rows)
     : (type == null
         ? (await sql`
             SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
-            WHERE process_key = ${processKey} AND team_id = ${team} AND lead_type IS NULL
+            WHERE process_key = ${processKey} AND team_id = ${team} AND lead_type IS NULL AND (${role} IS NULL AND role_scope IS NULL OR role_scope = ${role})
             ORDER BY sort_order ASC, id ASC`).rows
         : (await sql`
             SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
-            WHERE process_key = ${processKey} AND team_id = ${team} AND lead_type = ${type}
+            WHERE process_key = ${processKey} AND team_id = ${team} AND lead_type = ${type} AND (${role} IS NULL AND role_scope IS NULL OR role_scope = ${role})
             ORDER BY sort_order ASC, id ASC`).rows));
   let rows;
   try {
     // Team resolves first (unchanged), then within that team scope, lead_type resolves the same
     // "specific rows if any, else the type-shared (lead_type IS NULL) rows" way - two
     // independent, sequential fallbacks rather than one combined rule, so a process that never
-    // splits by team (every process today) behaves exactly as if only lead_type existed.
-    rows = await fetchRows(teamId, leadType);
-    // strict=true (the admin editor's own read) skips every lead_type fallback rung - an admin
-    // configuring the Product tree must see "no options yet" when it's genuinely empty, never a
-    // silently-substituted Delivery tree they might mistake for Product's own rows. Team
-    // resolution (below) is unaffected - this only short-circuits the leadType-related rungs.
+    // splits by team (every process today) behaves exactly as if only lead_type existed. role
+    // (Delivery-Escalation's Partner tree) is a third, independent dimension the same way - it
+    // never actually co-occurs with team_id/lead_type (no process uses more than one of the
+    // three), so it only needs its own single fallback rung, not the full cross-product.
+    rows = await fetchRows(teamId, leadType, roleScope);
+    // strict=true (the admin editor's own read) skips every fallback rung below - an admin
+    // configuring the Product (or Partner) tree must see "no options yet" when it's genuinely
+    // empty, never a silently-substituted Delivery/Shared tree they might mistake for their own.
     if (!strict) {
-      if (!rows.length && leadType != null) rows = await fetchRows(teamId, null);
-      if (!rows.length && teamId != null) rows = await fetchRows(null, leadType);
-      if (!rows.length && teamId != null && leadType != null) rows = await fetchRows(null, null);
+      if (!rows.length && roleScope != null) rows = await fetchRows(teamId, leadType, null);
+      if (!rows.length && leadType != null) rows = await fetchRows(teamId, null, roleScope);
+      if (!rows.length && teamId != null) rows = await fetchRows(null, leadType, roleScope);
+      if (!rows.length && teamId != null && leadType != null) rows = await fetchRows(null, null, roleScope);
     }
   } catch (e) {
     if (e.code !== 'ER_BAD_FIELD_ERROR') throw e;
-    // Deploy-order softening: lead_type can be deployed (this api/ code) before its migration
-    // adds the column, but team_id's own migration may ALREADY be long applied - dropping both
-    // predicates in one shot would merge every team's rows together during that window, a real
-    // regression for NDR's live per-team trees (unrelated to this feature). Shed lead_type FIRST
-    // and retry with team_id still in place; only drop team_id too if THAT retry also proves the
-    // column doesn't exist either.
+    // Deploy-order softening: role_scope/lead_type can each be deployed (this api/ code) before
+    // their own migration adds the column, but team_id's own migration may ALREADY be long
+    // applied - dropping every predicate in one shot would merge every team's rows together
+    // during that window, a real regression for NDR's live per-team trees (unrelated to this
+    // feature). Shed role_scope FIRST (the newest column), then lead_type, and retry with team_id
+    // still in place; only drop team_id too if that retry also proves the column doesn't exist.
     try {
       rows = teamId == null
-        ? (await sql`
-            SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
-            WHERE process_key = ${processKey} AND team_id IS NULL
-            ORDER BY sort_order ASC, id ASC`).rows
-        : (await sql`
-            SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
-            WHERE process_key = ${processKey} AND team_id = ${teamId}
-            ORDER BY sort_order ASC, id ASC`).rows;
+        ? (leadType == null
+            ? (await sql`SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions WHERE process_key = ${processKey} AND team_id IS NULL AND lead_type IS NULL ORDER BY sort_order ASC, id ASC`).rows
+            : (await sql`SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions WHERE process_key = ${processKey} AND team_id IS NULL AND lead_type = ${leadType} ORDER BY sort_order ASC, id ASC`).rows)
+        : (leadType == null
+            ? (await sql`SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions WHERE process_key = ${processKey} AND team_id = ${teamId} AND lead_type IS NULL ORDER BY sort_order ASC, id ASC`).rows
+            : (await sql`SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions WHERE process_key = ${processKey} AND team_id = ${teamId} AND lead_type = ${leadType} ORDER BY sort_order ASC, id ASC`).rows);
     } catch (e2) {
       if (e2.code !== 'ER_BAD_FIELD_ERROR') throw e2;
-      // Neither column exists yet (pre-team_id-migration too, or this table never got it) -
-      // no predicate left to shed.
-      rows = (await sql`
-        SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
-        WHERE process_key = ${processKey}
-        ORDER BY sort_order ASC, id ASC`).rows;
+      try {
+        rows = teamId == null
+          ? (await sql`
+              SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
+              WHERE process_key = ${processKey} AND team_id IS NULL
+              ORDER BY sort_order ASC, id ASC`).rows
+          : (await sql`
+              SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
+              WHERE process_key = ${processKey} AND team_id = ${teamId}
+              ORDER BY sort_order ASC, id ASC`).rows;
+      } catch (e3) {
+        if (e3.code !== 'ER_BAD_FIELD_ERROR') throw e3;
+        // Neither column exists yet (pre-team_id-migration too, or this table never got it) -
+        // no predicate left to shed.
+        rows = (await sql`
+          SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
+          WHERE process_key = ${processKey}
+          ORDER BY sort_order ASC, id ASC`).rows;
+      }
     }
   }
   const byId = {};
@@ -4361,7 +4376,7 @@ async function getProcessDispositions(processKey, teamId = null, leadType = null
 // New entries land at the end of their OWN scope (current max sort_order among siblings
 // sharing the same parentId, +1) - adding a child never reshuffles other top-level options,
 // and adding a top-level option never touches anyone's children.
-async function addProcessDisposition(processKey, label, description, createdBy, parentId, teamId = null, leadType = null) {
+async function addProcessDisposition(processKey, label, description, createdBy, parentId, teamId = null, leadType = null, roleScope = null) {
   await ensureSchema();
   if (!processKey) throw new Error('processKey is required');
   const trimmed = String(label || '').trim();
@@ -4369,25 +4384,25 @@ async function addProcessDisposition(processKey, label, description, createdBy, 
   if (trimmed.length > DISPOSITION_LABEL_MAX) throw new Error(`Label must be ${DISPOSITION_LABEL_MAX} characters or fewer`);
   const parent = parentId || null;
   if (parent) {
-    // The parent must live in the SAME tree - without the team_id term a Team Lead could pass
-    // the other team's parent id and graft a child onto their tree.
+    // The parent must live in the SAME tree - without the team_id/role_scope terms a Team Lead
+    // (or the Partner-tree editor) could pass another tree's parent id and graft a child onto it.
     const { rows: parentRows } = teamId == null
-      ? await sql`SELECT id FROM calling_process_dispositions WHERE id = ${parent} AND process_key = ${processKey} AND team_id IS NULL AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType})`
-      : await sql`SELECT id FROM calling_process_dispositions WHERE id = ${parent} AND process_key = ${processKey} AND team_id = ${teamId} AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType})`;
+      ? await sql`SELECT id FROM calling_process_dispositions WHERE id = ${parent} AND process_key = ${processKey} AND team_id IS NULL AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})`
+      : await sql`SELECT id FROM calling_process_dispositions WHERE id = ${parent} AND process_key = ${processKey} AND team_id = ${teamId} AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})`;
     if (!parentRows.length) throw new Error('Parent option not found for this process');
   }
   const maxRows = teamId == null
     ? (parent
-      ? (await sql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id = ${parent} AND team_id IS NULL AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType})`).rows
-      : (await sql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id IS NULL AND team_id IS NULL AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType})`).rows)
+      ? (await sql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id = ${parent} AND team_id IS NULL AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})`).rows
+      : (await sql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id IS NULL AND team_id IS NULL AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})`).rows)
     : (parent
-      ? (await sql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id = ${parent} AND team_id = ${teamId} AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType})`).rows
-      : (await sql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id IS NULL AND team_id = ${teamId} AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType})`).rows);
+      ? (await sql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id = ${parent} AND team_id = ${teamId} AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})`).rows
+      : (await sql`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM calling_process_dispositions WHERE process_key = ${processKey} AND parent_id IS NULL AND team_id = ${teamId} AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})`).rows);
   await sql`
-    INSERT INTO calling_process_dispositions (process_key, team_id, lead_type, parent_id, label, description, sort_order, created_by)
-    VALUES (${processKey}, ${teamId ?? null}, ${leadType ?? null}, ${parent}, ${trimmed}, ${String(description || '').trim() || null}, ${maxRows[0].next}, ${createdBy || null})
+    INSERT INTO calling_process_dispositions (process_key, team_id, lead_type, role_scope, parent_id, label, description, sort_order, created_by)
+    VALUES (${processKey}, ${teamId ?? null}, ${leadType ?? null}, ${roleScope ?? null}, ${parent}, ${trimmed}, ${String(description || '').trim() || null}, ${maxRows[0].next}, ${createdBy || null})
   `;
-  return getProcessDispositions(processKey, teamId, leadType);
+  return getProcessDispositions(processKey, teamId, leadType, false, roleScope);
 }
 
 // label/description are independently optional - omitting one (undefined) leaves it
@@ -4396,7 +4411,7 @@ async function addProcessDisposition(processKey, label, description, createdBy, 
 // label can never be blanked out this way since a disposition must always have a name.
 // Works the same regardless of whether id is a top-level option or a child - nesting depth
 // never changes once an option is created.
-async function updateProcessDisposition(processKey, id, { label, description, childrenInputType } = {}, teamId = null, leadType = null) {
+async function updateProcessDisposition(processKey, id, { label, description, childrenInputType } = {}, teamId = null, leadType = null, roleScope = null) {
   await ensureSchema();
   if (!processKey || !id) throw new Error('processKey and id are required');
   const labelText = label === undefined ? null : String(label).trim();
@@ -4410,10 +4425,11 @@ async function updateProcessDisposition(processKey, id, { label, description, ch
   // rows actually CHANGED, not matched (unlike Postgres's RETURNING) - a no-op update (every
   // field already equal to what's being set) would otherwise look like "not found". The team
   // term on both queries means an id from another team's tree simply does not match, and this
-  // same "not found" error covers it - no separate cross-team error needed. Same for lead_type.
+  // same "not found" error covers it - no separate cross-team error needed. Same for lead_type
+  // and role_scope.
   const { rows: existing } = teamId == null
-    ? await sql`SELECT id FROM calling_process_dispositions WHERE id = ${id} AND process_key = ${processKey} AND team_id IS NULL AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType})`
-    : await sql`SELECT id FROM calling_process_dispositions WHERE id = ${id} AND process_key = ${processKey} AND team_id = ${teamId} AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType})`;
+    ? await sql`SELECT id FROM calling_process_dispositions WHERE id = ${id} AND process_key = ${processKey} AND team_id IS NULL AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})`
+    : await sql`SELECT id FROM calling_process_dispositions WHERE id = ${id} AND process_key = ${processKey} AND team_id = ${teamId} AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})`;
   if (!existing.length) throw new Error('Disposition not found for this process');
   if (teamId == null) {
     await sql`
@@ -4421,7 +4437,7 @@ async function updateProcessDisposition(processKey, id, { label, description, ch
       SET label = COALESCE(${labelText}, label),
           description = COALESCE(${descText}, description),
           children_input_type = COALESCE(${childrenInputType ?? null}, children_input_type)
-      WHERE id = ${id} AND process_key = ${processKey} AND team_id IS NULL AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType})
+      WHERE id = ${id} AND process_key = ${processKey} AND team_id IS NULL AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})
     `;
   } else {
     await sql`
@@ -4429,23 +4445,23 @@ async function updateProcessDisposition(processKey, id, { label, description, ch
       SET label = COALESCE(${labelText}, label),
           description = COALESCE(${descText}, description),
           children_input_type = COALESCE(${childrenInputType ?? null}, children_input_type)
-      WHERE id = ${id} AND process_key = ${processKey} AND team_id = ${teamId} AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType})
+      WHERE id = ${id} AND process_key = ${processKey} AND team_id = ${teamId} AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})
     `;
   }
-  return getProcessDispositions(processKey, teamId, leadType);
+  return getProcessDispositions(processKey, teamId, leadType, false, roleScope);
 }
 
 // Cascades to children automatically (ON DELETE CASCADE on parent_id) - deleting a parent
 // option takes its whole child list with it.
-async function deleteProcessDisposition(processKey, id, teamId = null, leadType = null) {
+async function deleteProcessDisposition(processKey, id, teamId = null, leadType = null, roleScope = null) {
   await ensureSchema();
   if (!processKey || !id) throw new Error('processKey and id are required');
   if (teamId == null) {
-    await sql`DELETE FROM calling_process_dispositions WHERE id = ${id} AND process_key = ${processKey} AND team_id IS NULL AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType})`;
+    await sql`DELETE FROM calling_process_dispositions WHERE id = ${id} AND process_key = ${processKey} AND team_id IS NULL AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})`;
   } else {
-    await sql`DELETE FROM calling_process_dispositions WHERE id = ${id} AND process_key = ${processKey} AND team_id = ${teamId} AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType})`;
+    await sql`DELETE FROM calling_process_dispositions WHERE id = ${id} AND process_key = ${processKey} AND team_id = ${teamId} AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})`;
   }
-  return getProcessDispositions(processKey, teamId, leadType);
+  return getProcessDispositions(processKey, teamId, leadType, false, roleScope);
 }
 
 // Full reorder in one shot within ONE scope - either every top-level option (parentId
@@ -4455,7 +4471,7 @@ async function deleteProcessDisposition(processKey, id, teamId = null, leadType 
 // rows instead of silently reparenting/misordering something in a different scope.
 // Transactional so a request that fails partway through never leaves sort_order in a
 // half-renumbered state.
-async function reorderProcessDispositions(processKey, parentId, orderedIds, teamId = null, leadType = null) {
+async function reorderProcessDispositions(processKey, parentId, orderedIds, teamId = null, leadType = null, roleScope = null) {
   await ensureSchema();
   if (!processKey) throw new Error('processKey is required');
   if (!Array.isArray(orderedIds) || !orderedIds.length) throw new Error('orderedIds must be a non-empty array');
@@ -4468,16 +4484,16 @@ async function reorderProcessDispositions(processKey, parentId, orderedIds, team
       if (parent) {
         await conn.execute(
           teamId == null
-            ? 'UPDATE calling_process_dispositions SET sort_order = ? WHERE id = ? AND process_key = ? AND parent_id = ? AND team_id IS NULL AND (? IS NULL AND lead_type IS NULL OR lead_type = ?)'
-            : 'UPDATE calling_process_dispositions SET sort_order = ? WHERE id = ? AND process_key = ? AND parent_id = ? AND team_id = ? AND (? IS NULL AND lead_type IS NULL OR lead_type = ?)',
-          teamId == null ? [i, orderedIds[i], processKey, parent, leadType, leadType] : [i, orderedIds[i], processKey, parent, teamId, leadType, leadType]
+            ? 'UPDATE calling_process_dispositions SET sort_order = ? WHERE id = ? AND process_key = ? AND parent_id = ? AND team_id IS NULL AND (? IS NULL AND lead_type IS NULL OR lead_type = ?) AND (? IS NULL AND role_scope IS NULL OR role_scope = ?)'
+            : 'UPDATE calling_process_dispositions SET sort_order = ? WHERE id = ? AND process_key = ? AND parent_id = ? AND team_id = ? AND (? IS NULL AND lead_type IS NULL OR lead_type = ?) AND (? IS NULL AND role_scope IS NULL OR role_scope = ?)',
+          teamId == null ? [i, orderedIds[i], processKey, parent, leadType, leadType, roleScope, roleScope] : [i, orderedIds[i], processKey, parent, teamId, leadType, leadType, roleScope, roleScope]
         );
       } else {
         await conn.execute(
           teamId == null
-            ? 'UPDATE calling_process_dispositions SET sort_order = ? WHERE id = ? AND process_key = ? AND parent_id IS NULL AND team_id IS NULL AND (? IS NULL AND lead_type IS NULL OR lead_type = ?)'
-            : 'UPDATE calling_process_dispositions SET sort_order = ? WHERE id = ? AND process_key = ? AND parent_id IS NULL AND team_id = ? AND (? IS NULL AND lead_type IS NULL OR lead_type = ?)',
-          teamId == null ? [i, orderedIds[i], processKey, leadType, leadType] : [i, orderedIds[i], processKey, teamId, leadType, leadType]
+            ? 'UPDATE calling_process_dispositions SET sort_order = ? WHERE id = ? AND process_key = ? AND parent_id IS NULL AND team_id IS NULL AND (? IS NULL AND lead_type IS NULL OR lead_type = ?) AND (? IS NULL AND role_scope IS NULL OR role_scope = ?)'
+            : 'UPDATE calling_process_dispositions SET sort_order = ? WHERE id = ? AND process_key = ? AND parent_id IS NULL AND team_id = ? AND (? IS NULL AND lead_type IS NULL OR lead_type = ?) AND (? IS NULL AND role_scope IS NULL OR role_scope = ?)',
+          teamId == null ? [i, orderedIds[i], processKey, leadType, leadType, roleScope, roleScope] : [i, orderedIds[i], processKey, teamId, leadType, leadType, roleScope, roleScope]
         );
       }
     }
@@ -4488,7 +4504,7 @@ async function reorderProcessDispositions(processKey, parentId, orderedIds, team
   } finally {
     conn.release();
   }
-  return getProcessDispositions(processKey, teamId, leadType);
+  return getProcessDispositions(processKey, teamId, leadType, false, roleScope);
 }
 
 // Per-partner disposition breakdown (delivery_partner, derived from awb_code - see

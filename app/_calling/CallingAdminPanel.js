@@ -643,7 +643,7 @@ export function CallingTeamsCard({ processKey, processLabel, teamsHook, sessionI
 // changes, same reasoning as processAgents in useCallingSession: each process's list is its own.
 // RTO's disposition options stay its hardcoded connectedOutcomes/unreachableOutcomes arrays and
 // never touch this endpoint - this only backs a process (NDR today) with no built-in list.
-export function useProcessDispositions(processKey, { googleUser, showToast, teamId = null, leadType = null, strict = false } = {}) {
+export function useProcessDispositions(processKey, { googleUser, showToast, teamId = null, leadType = null, strict = false, roleScope = null } = {}) {
   const [processDispositions, setProcessDispositions] = useState(null); // null = not loaded yet
   const [dispositionsError, setDispositionsError] = useState('');
   const [savingDisposition, setSavingDisposition] = useState(false);
@@ -656,7 +656,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
   // expanded parents never share state or clobber each other.
   const [newChildDrafts, setNewChildDrafts] = useState({});
 
-  const loadDispositions = useCallback(async (key, team, type, isStrict) => {
+  const loadDispositions = useCallback(async (key, team, type, isStrict, role) => {
     if (!key) return;
     setProcessDispositions(null);
     setDispositionsError('');
@@ -669,7 +669,11 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
       // strict skips the lead_type fallback server-side (see getProcessDispositions) - only the
       // admin editor instance of this hook passes strict:true; a ticket-scoped read never does.
       const strictQuery = isStrict ? '&strict=1' : '';
-      const r = await fetch(`/api/admin/dispositions?process=${encodeURIComponent(key)}${teamQuery}${typeQuery}${strictQuery}`);
+      // Same "not a permission, just which admin-configurable tree" role as leadType (see
+      // getProcessDispositions' own role_scope comment) - omitted, a plain agent's own read falls
+      // back to their own Delivery-Escalation role server-side.
+      const roleQuery = role != null ? `&roleScope=${encodeURIComponent(role)}` : '';
+      const r = await fetch(`/api/admin/dispositions?process=${encodeURIComponent(key)}${teamQuery}${typeQuery}${strictQuery}${roleQuery}`);
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { setDispositionsError(d.error || `Could not load dispositions (${r.status})`); return; }
       setProcessDispositions(d.dispositions || []);
@@ -682,8 +686,8 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
   // the caller doesn't administer, and this stays a lightweight no-op for a process (RTO) whose
   // disposition list never reads from here, rather than an empty admin-only card.
   useEffect(() => {
-    if (googleUser?.email) loadDispositions(processKey, teamId, leadType, strict);
-  }, [googleUser, processKey, teamId, leadType, strict, loadDispositions]);
+    if (googleUser?.email) loadDispositions(processKey, teamId, leadType, strict, roleScope);
+  }, [googleUser, processKey, teamId, leadType, strict, roleScope, loadDispositions]);
 
   const toggleDispExpanded = (id) => {
     setExpandedDispIds((prev) => {
@@ -705,7 +709,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
       const r = await fetch('/api/admin/dispositions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ processKey, label, description: draft.description.trim(), parentId: parentId || undefined, ...(teamId != null ? { teamId } : {}), ...(leadType != null ? { leadType } : {}) }),
+        body: JSON.stringify({ processKey, label, description: draft.description.trim(), parentId: parentId || undefined, ...(teamId != null ? { teamId } : {}), ...(leadType != null ? { leadType } : {}), ...(roleScope != null ? { roleScope } : {}) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -741,7 +745,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
       const r = await fetch('/api/admin/dispositions', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ processKey, id, ...patch, ...(teamId != null ? { teamId } : {}), ...(leadType != null ? { leadType } : {}) }),
+        body: JSON.stringify({ processKey, id, ...patch, ...(teamId != null ? { teamId } : {}), ...(leadType != null ? { leadType } : {}), ...(roleScope != null ? { roleScope } : {}) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -767,7 +771,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
       const r = await fetch('/api/admin/dispositions', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ processKey, id, ...(teamId != null ? { teamId } : {}), ...(leadType != null ? { leadType } : {}) }),
+        body: JSON.stringify({ processKey, id, ...(teamId != null ? { teamId } : {}), ...(leadType != null ? { leadType } : {}), ...(roleScope != null ? { roleScope } : {}) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -804,14 +808,14 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
       const r = await fetch('/api/admin/dispositions', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ processKey, orderedIds: next.map((x) => x.id), parentId: parentId || undefined, ...(teamId != null ? { teamId } : {}), ...(leadType != null ? { leadType } : {}) }),
+        body: JSON.stringify({ processKey, orderedIds: next.map((x) => x.id), parentId: parentId || undefined, ...(teamId != null ? { teamId } : {}), ...(leadType != null ? { leadType } : {}), ...(roleScope != null ? { roleScope } : {}) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
         const msg = d.error || `Could not reorder (${r.status})`;
         setDispositionsError(msg);
         if (showToast) showToast(`⚠️ ${msg}`);
-        loadDispositions(processKey, teamId, leadType);
+        loadDispositions(processKey, teamId, leadType, strict, roleScope);
         return;
       }
       setProcessDispositions(d.dispositions || []);
@@ -819,7 +823,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
       const msg = e.message || 'Could not reorder';
       setDispositionsError(msg);
       if (showToast) showToast(`⚠️ ${msg}`);
-      loadDispositions(processKey, teamId, leadType);
+      loadDispositions(processKey, teamId, leadType, strict, roleScope);
     } finally {
       setSavingDisposition(false);
     }
@@ -830,7 +834,7 @@ export function useProcessDispositions(processKey, { googleUser, showToast, team
     newDispLabel, setNewDispLabel, newDispDesc, setNewDispDesc,
     expandedDispIds, toggleDispExpanded, newChildDrafts, setNewChildDrafts,
     addDisposition, saveDispositionEdit, deleteDisposition, moveDisposition,
-    teamId, leadType,
+    teamId, leadType, roleScope,
   };
 }
 
@@ -981,8 +985,8 @@ function DispNode({ d, list, index, parentId, depth, disp, allowInputTypeControl
 // calling_process_dispositions) - "highly customisable" per the ask: an admin can add, rename,
 // describe, nest (any depth), reorder, and remove options freely, with no seeded default and no
 // fixed count. disp = a useProcessDispositions() return value; processLabel = display name.
-export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeControl = false, teamName = '' }) {
-  const { processDispositions, dispositionsError, savingDisposition, newDispLabel, setNewDispLabel, newDispDesc, setNewDispDesc, addDisposition, teamId } = disp;
+export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeControl = false, teamName = '', headerExtra = null }) {
+  const { processDispositions, dispositionsError, savingDisposition, newDispLabel, setNewDispLabel, newDispDesc, setNewDispDesc, addDisposition, teamId, roleScope } = disp;
   return (
     <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
       <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
@@ -993,8 +997,10 @@ export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeCont
               Disposition List{processLabel ? ` — ${processLabel}` : ''}
               {/* Which tree this card edits. Without it an admin switching teams cannot tell
                   whose list they just changed - the one thing per-team trees make possible to
-                  get wrong. */}
+                  get wrong. Same reasoning for roleScope, one level down (Delivery-Escalation's
+                  Partner tree, not a team). */}
               {teamId != null && <span className="text-zinc-400 font-medium"> · {teamName || `Team #${teamId}`}</span>}
+              {roleScope != null && <span className="text-zinc-400 font-medium"> · {roleScope}</span>}
             </h2>
             <p className="text-[13px] text-zinc-500">
               What an agent may select when disposing a lead on this process. Unlike RTO Calling
@@ -1003,6 +1009,7 @@ export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeCont
             </p>
           </div>
         </div>
+        {headerExtra}
         <button
           onClick={() => addDisposition()}
           disabled={savingDisposition || !newDispLabel.trim()}
