@@ -25,6 +25,7 @@
 // everyone invited to this process sees the whole shared desk, admin or not, since tickets are
 // self-claimed from a common unassigned pool - the Agent filter narrows the view by choice.
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from 'react';
+import ExcelJS from 'exceljs';
 import { CustomSelect, MultiSelectDropdown, CheckIcon, XIcon, RefreshIcon, Overlay, ThFilter } from '../_calling/ui';
 import { useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { safeStorage } from '../_calling/util';
@@ -1054,39 +1055,29 @@ async function setTicketTagsMysql(id, tags) {
   if (!r.ok) throw new Error(d.error || `Save failed (${r.status})`);
 }
 
-// Minimal CSV parser for the Fresh tab's bulk outcome upload - handles quoted fields (commas,
-// escaped "" quotes) since Remarks is free text that could contain either. No library: CSV's
-// quoting rule is the one thing a plain .split(',') gets wrong, and it's small enough that a
-// hand-rolled parser beats a dependency for it.
-function parseCsv(text) {
+// Reads the first worksheet of an uploaded .xlsx into plain [header, ...dataRows] arrays (row 1
+// = header) - the same shape the old hand-rolled CSV parser handed back, so every header-lookup/
+// aliasing rule below is unchanged.
+async function readWorkbookRows(arrayBuffer) {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(arrayBuffer);
+  const sheet = workbook.worksheets[0];
+  if (!sheet) return [];
   const rows = [];
-  let row = [], field = '', inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inQuotes) {
-      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQuotes = false; }
-      else field += c;
-    } else if (c === '"') {
-      inQuotes = true;
-    } else if (c === ',') {
-      row.push(field); field = '';
-    } else if (c === '\n' || c === '\r') {
-      if (c === '\r' && text[i + 1] === '\n') i++;
-      row.push(field); field = '';
-      if (row.some(v => v !== '')) rows.push(row);
-      row = [];
-    } else {
-      field += c;
-    }
-  }
-  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  sheet.eachRow({ includeEmpty: false }, (row) => {
+    const cells = [];
+    row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+      cells[colNumber - 1] = cell.value == null ? '' : String(cell.value).trim();
+    });
+    if (cells.some((v) => v !== '')) rows.push(cells);
+  });
   return rows;
 }
 
 // Header lookup is case/space-insensitive ("AWB Number", "awb", "AWB_Number" all match) since
 // this file is hand-exported by whoever's doing the bulk resolution, not machine-generated.
-function rowsFromBulkCsv(text) {
-  const [header, ...dataRows] = parseCsv(text);
+async function rowsFromBulkExcel(arrayBuffer) {
+  const [header, ...dataRows] = await readWorkbookRows(arrayBuffer);
   if (!header) return [];
   const norm = (s) => (s || '').trim().toLowerCase().replace(/[\s_]+/g, '');
   const idx = {};
@@ -1095,7 +1086,7 @@ function rowsFromBulkCsv(text) {
   const outcomeIdx = idx.outcome;
   const remarksIdx = idx.remarks;
   if (awbIdx === undefined || outcomeIdx === undefined) {
-    throw new Error('CSV needs an AWB column and an Outcome column');
+    throw new Error('Excel file needs an AWB column and an Outcome column');
   }
   return dataRows
     .map((r) => ({
@@ -1111,9 +1102,9 @@ function rowsFromBulkCsv(text) {
 // the ticket to that outcome (e.g. Delivered/RTO) - same "mandatory New Order AWB" rule the
 // tab's own single-dispose modal enforces, satisfied here for free since New Order AWB is
 // already required on every row regardless of Outcome. Same header lookup convention as
-// rowsFromBulkCsv.
-function rowsFromNewOrderAwbCsv(text) {
-  const [header, ...dataRows] = parseCsv(text);
+// rowsFromBulkExcel.
+async function rowsFromNewOrderAwbExcel(arrayBuffer) {
+  const [header, ...dataRows] = await readWorkbookRows(arrayBuffer);
   if (!header) return [];
   const norm = (s) => (s || '').trim().toLowerCase().replace(/[\s_]+/g, '');
   const idx = {};
@@ -1123,7 +1114,7 @@ function rowsFromNewOrderAwbCsv(text) {
   const outcomeIdx = idx.outcome;
   const remarksIdx = idx.remarks;
   if (awbIdx === undefined || newAwbIdx === undefined) {
-    throw new Error('CSV needs an AWB column and a New Order AWB column');
+    throw new Error('Excel file needs an AWB column and a New Order AWB column');
   }
   return dataRows
     .map((r) => ({
@@ -1135,11 +1126,65 @@ function rowsFromNewOrderAwbCsv(text) {
     .filter((r) => r.awb && r.newOrderAwb);
 }
 
-// Quote a CSV field only when it needs it (comma, quote, or newline), doubling embedded quotes
-// - the same rule parseCsv above reads back.
-function csvCell(v) {
-  const s = v === null || v === undefined ? '' : String(v);
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+// 0-based column index -> Excel column letter(s) (0->A, 25->Z, 26->AA, ...) - EXPORT_COLUMNS is
+// well under 26 today, but this stays correct if it ever grows past it.
+function excelColumnLetter(index0) {
+  let n = index0 + 1, s = '';
+  while (n > 0) { const rem = (n - 1) % 26; s = String.fromCharCode(65 + rem) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+
+// Every valid outcome path in the process's own disposition tree - root, root > child, root >
+// child > grandchild, ... - not leaves only: a bare parent (e.g. 'Escalated') is itself a
+// complete, valid outcome (see DE_FRESH_WHERE's own bare-'Escalated' clause in db.js), so a
+// leaf-only list would leave real values out of the dropdown. `tree` is whichever role-scoped
+// tree the caller's own useProcessDispositions resolved (Partner or Agent/Team Leader, decided
+// server-side from the signed-in user's own role) - so a Partner's dropdown shows only Partner's
+// outcomes, and everyone else sees the shared ones, with no role logic needed here at all.
+function allOutcomePaths(tree) {
+  const paths = [];
+  const walk = (nodes, prefix) => {
+    for (const node of nodes) {
+      const path = prefix ? `${prefix} > ${node.label}` : node.label;
+      paths.push(path);
+      if (node.children && node.children.length) walk(node.children, path);
+    }
+  };
+  walk(tree || [], '');
+  return paths;
+}
+
+// Backs an Outcome column with a real Excel dropdown, sourced from a hidden helper sheet rather
+// than an inline list formula - Excel's inline list literal is impractical past a couple dozen
+// short values, and a disposition tree can have many. showErrorMessage:false keeps this a
+// convenience list, not a hard lock: a 'text'-type node's own free-text sub-reason (see
+// childrenInputType in CallingAdminPanel.js) has no fixed value to offer, so typing past the list
+// must still be possible.
+function addOutcomeDropdown(workbook, worksheet, colLetter, processDispositions, lastRow) {
+  const paths = allOutcomePaths(processDispositions);
+  if (!paths.length) return;
+  const helper = workbook.addWorksheet('ValidOutcomes');
+  helper.state = 'veryHidden';
+  paths.forEach((p, i) => { helper.getCell(i + 1, 1).value = p; });
+  worksheet.dataValidations.add(`${colLetter}2:${colLetter}${lastRow}`, {
+    type: 'list',
+    allowBlank: true,
+    showErrorMessage: false,
+    formulae: [`ValidOutcomes!$A$1:$A$${paths.length}`],
+  });
+}
+
+async function downloadWorkbook(workbook, filename) {
+  const buf = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 const EXPORT_COLUMNS = [
@@ -1157,9 +1202,10 @@ const EXPORT_COLUMNS = [
 // with no row-count ceiling. The server hands back one chunk per request (bounded so any single
 // response stays inside Lambda's 6MB cap - see DELIVERY_ESCALATION_MAX_EXPORT/hasMore in
 // db.js/record.js); this walks page 1, 2, 3... until a chunk comes back short, then builds one
-// CSV from everything collected. onChunk reports progress for a long export.
-// ﻿ prefix: without a BOM Excel reads a UTF-8 CSV as ANSI and mangles non-ASCII text.
-async function downloadCsv({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags }, onChunk) {
+// workbook from everything collected. onChunk reports progress for a long export. Outcome gets
+// the same role-scoped dropdown the Bulk Upload sample does (see addOutcomeDropdown) - re-editing
+// an exported row and re-uploading it should offer the same valid values either way.
+async function downloadExcel({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags, processDispositions }, onChunk) {
   const rows = [];
   for (let page = 1; ; page++) {
     const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags });
@@ -1171,17 +1217,15 @@ async function downloadCsv({ view, search, brand, agent, date, dateTo, dateField
     onChunk?.(rows.length);
     if (!d.hasMore) break;
   }
-  const lines = [EXPORT_COLUMNS.map(([label]) => csvCell(label)).join(',')];
-  for (const row of rows) lines.push(EXPORT_COLUMNS.map(([, key]) => csvCell(row[key])).join(','));
-  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `delivery-escalation-${view}-${new Date().toISOString().slice(0, 10)}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet(view.slice(0, 31)); // Excel sheet names cap at 31 chars
+  sheet.addRow(EXPORT_COLUMNS.map(([label]) => label));
+  for (const row of rows) sheet.addRow(EXPORT_COLUMNS.map(([, key]) => row[key] ?? ''));
+  const outcomeColIndex = EXPORT_COLUMNS.findIndex(([, key]) => key === 'outcome');
+  if (outcomeColIndex !== -1) {
+    addOutcomeDropdown(workbook, sheet, excelColumnLetter(outcomeColIndex), processDispositions, rows.length + 1);
+  }
+  await downloadWorkbook(workbook, `delivery-escalation-${view}-${new Date().toISOString().slice(0, 10)}.xlsx`);
   return { count: rows.length };
 }
 
@@ -1219,50 +1263,36 @@ function sampleOutcomePaths(tree) {
   return paths;
 }
 
-// Downloads a ready-to-fill CSV for the Bulk Upload button - same AWB/Outcome/Remarks columns
-// rowsFromBulkCsv reads back, pre-populated with two example rows pulled from the process's own
-// disposition tree: a plain top-level outcome, and a nested one showing the "Parent > Child"
-// convention a bulk upload's Outcome column uses for a child disposition (there's no separate
-// column for it - the full path IS the Outcome value, same as a single dispose's
-// dispPath.join(' > ')).
-function downloadBulkSampleCsv(processDispositions) {
+// Downloads a ready-to-fill workbook for the Bulk Upload button - same AWB/Outcome/Remarks
+// columns rowsFromBulkExcel reads back, pre-populated with two example rows pulled from the
+// process's own disposition tree (a plain top-level outcome, and a nested one showing the
+// "Parent > Child" convention a bulk upload's Outcome column uses for a child disposition - there
+// is no separate column for it, the full path IS the Outcome value, same as a single dispose's
+// dispPath.join(' > ')), plus a dropdown of every valid outcome (see addOutcomeDropdown).
+async function downloadBulkSampleExcel(processDispositions) {
   const [path1, path2] = sampleOutcomePaths(processDispositions);
   const outcomeTop = path1 || 'Delivered';
   const outcomeNested = path2 || (path1 && path1.includes(' > ') ? path1 : 'Escalated > Awaiting Partner');
-  const lines = [
-    'AWB,Outcome,Remarks',
-    `SF1234567890EX,${csvCell(outcomeTop)},Optional free text`,
-    `SF0987654321EX,${csvCell(outcomeNested)},`,
-  ];
-  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'delivery-escalation-bulk-upload-sample.csv';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Bulk Upload');
+  sheet.addRow(['AWB', 'Outcome', 'Remarks']);
+  sheet.addRow(['SF1234567890EX', outcomeTop, 'Optional free text']);
+  sheet.addRow(['SF0987654321EX', outcomeNested, '']);
+  addOutcomeDropdown(workbook, sheet, 'B', processDispositions, 1000);
+  await downloadWorkbook(workbook, 'delivery-escalation-bulk-upload-sample.xlsx');
 }
 
-// Sample CSV for the New Order Placed tab's own bulk upload - AWB + New Order AWB, and an
-// OPTIONAL Outcome (blank row just fills New Order AWB; a given Outcome also disposes the
-// ticket, e.g. to Delivered or RTO).
-function downloadNewOrderAwbSampleCsv() {
-  const lines = [
-    'AWB,New Order AWB,Outcome',
-    'SF1234567890EX,SF9999999999EX,',
-    'SF1122334455EX,SF8888888888EX,Delivered',
-  ];
-  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'delivery-escalation-new-order-awb-sample.csv';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+// Sample for the New Order Placed tab's own bulk upload - AWB + New Order AWB, and an OPTIONAL
+// Outcome dropdown (blank row just fills New Order AWB; a picked value also disposes the ticket,
+// e.g. to Delivered or RTO).
+async function downloadNewOrderAwbSampleExcel(processDispositions) {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Bulk Upload');
+  sheet.addRow(['AWB', 'New Order AWB', 'Outcome']);
+  sheet.addRow(['SF1234567890EX', 'SF9999999999EX', '']);
+  sheet.addRow(['SF1122334455EX', 'SF8888888888EX', 'Delivered']);
+  addOutcomeDropdown(workbook, sheet, 'C', processDispositions, 1000);
+  await downloadWorkbook(workbook, 'delivery-escalation-new-order-awb-sample.xlsx');
 }
 
 // Admin Panel card - per-user Role label, Delivery Partner allowlist, and Query Category
@@ -1646,7 +1676,7 @@ export default function DeliveryEscalationClient() {
   const [dateRangePreset, setDateRangePreset] = useState(() => safeStorage.getItem('de_date_range_preset') || 'all');
   const [dateFilter, setDateFilter] = useState('');
   const [dateFilterTo, setDateFilterTo] = useState('');
-  // Which date column the ticket list's date filter (and its CSV export) matches against -
+  // Which date column the ticket list's date filter (and its Excel export) matches against -
   // same 'added_date'/'order_date' choice as the Overview tab's day-wise table.
   const [dateFilterBasis, setDateFilterBasis] = useState(() => safeStorage.getItem('de_date_filter_basis') || 'added_date');
   // Set by clicking a bucket cell in the Overview day-wise table (see drillIntoDaywise) -
@@ -2209,8 +2239,8 @@ export default function DeliveryEscalationClient() {
     setBulkUploading(true);
     setBulkResult(null);
     try {
-      const text = await file.text();
-      const parsed = tab === 'new_order_placed' ? rowsFromNewOrderAwbCsv(text) : rowsFromBulkCsv(text);
+      const buf = await file.arrayBuffer();
+      const parsed = tab === 'new_order_placed' ? await rowsFromNewOrderAwbExcel(buf) : await rowsFromBulkExcel(buf);
       if (!parsed.length) {
         throw new Error(tab === 'new_order_placed'
           ? 'No valid rows found - need an AWB column and a New Order AWB column'
@@ -2236,16 +2266,17 @@ export default function DeliveryEscalationClient() {
   };
 
   // Exports the whole current view+filters, not the page on screen, no row-count ceiling - see
-  // downloadCsv. A large table means several chunk requests, so the toast updates as they land
+  // downloadExcel. A large table means several chunk requests, so the toast updates as they land
   // rather than sitting silent until the last one.
   const handleExport = async () => {
     setExporting(true);
     try {
-      const { count } = await downloadCsv(
+      const { count } = await downloadExcel(
         {
           view: tab, search: debouncedSearch, brand: brandFilter, agent: agentFilter, contactBucket: contactBucketFilter,
           partner: partnerFilter, outcome: outcomeFilter,
           queryCategory: queryCategoryFilter, childDisposition: childDispositionFilter, tags: tagFilter,
+          processDispositions,
           ...effectiveDateFilter,
         },
         (soFar) => showToast(`Exporting… ${soFar.toLocaleString('en-IN')} rows so far`),
@@ -2854,7 +2885,7 @@ export default function DeliveryEscalationClient() {
                           <input
                             ref={bulkFileInputRef}
                             type="file"
-                            accept=".csv,text/csv"
+                            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             className="hidden"
                             onChange={handleBulkFile}
                           />
@@ -2863,17 +2894,17 @@ export default function DeliveryEscalationClient() {
                             disabled={bulkUploading}
                             className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
                             title={tab === 'new_order_placed'
-                              ? 'Bulk upload New Order AWB via CSV (columns: AWB, New Order AWB, optional Outcome - Outcome also disposes the ticket, e.g. Delivered or RTO).'
-                              : 'Bulk upload outcomes via CSV (columns: AWB, Outcome, Remarks). For a child disposition, put the full path in Outcome, e.g. Escalated > Awaiting Partner.'}
+                              ? 'Bulk upload New Order AWB via Excel (columns: AWB, New Order AWB, optional Outcome - Outcome also disposes the ticket, e.g. Delivered or RTO).'
+                              : 'Bulk upload outcomes via Excel (columns: AWB, Outcome, Remarks). For a child disposition, put the full path in Outcome, e.g. Escalated > Awaiting Partner.'}
                           >
                             {bulkUploading ? 'Uploading…' : '📤 Bulk Upload'}
                           </button>
                           <button
-                            onClick={() => tab === 'new_order_placed' ? downloadNewOrderAwbSampleCsv() : downloadBulkSampleCsv(processDispositions)}
+                            onClick={() => tab === 'new_order_placed' ? downloadNewOrderAwbSampleExcel(processDispositions) : downloadBulkSampleExcel(processDispositions)}
                             className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors"
-                            title="Download a sample CSV in the format Bulk Upload expects"
+                            title="Download a sample Excel file in the format Bulk Upload expects, with an Outcome dropdown"
                           >
-                            📋 Sample CSV
+                            📋 Sample Excel
                           </button>
                         </>
                       )}
@@ -2881,9 +2912,9 @@ export default function DeliveryEscalationClient() {
                         onClick={handleExport}
                         disabled={exporting || total === 0}
                         className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[13px] text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
-                        title="Download every ticket matching the current filters as CSV"
+                        title="Download every ticket matching the current filters as Excel"
                       >
-                        {exporting ? 'Preparing…' : '⬇️ Download CSV'}
+                        {exporting ? 'Preparing…' : '⬇️ Download Excel'}
                       </button>
                     </div>
                     <div className="flex items-center gap-2 text-[12px] text-zinc-500">
