@@ -246,6 +246,15 @@ export default function RepeatRateTab() {
       </div>
       <p className="og-note">KPI tiles above are org-wide (not brand/area filtered); the table below is.</p>
 
+      {data.insights && data.insights.length > 0 && (
+        <section className="rr-insights">
+          <h3 className="og-section-title">Insights</h3>
+          <ul>
+            {data.insights.map((text, i) => <li key={i}>{text}</li>)}
+          </ul>
+        </section>
+      )}
+
       <section>
         <h3 className="og-section-title">Repeat-purchase retention, by NPS score</h3>
         <RepeatHeatmap data={data} brand={brand} area={area} />

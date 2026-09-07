@@ -41,6 +41,11 @@ PROMOTER_SCORES = {9, 10}
 DETRACTOR_SCORES = {0, 1, 2, 3, 4, 5, 6}
 BATCH = 800
 MAX_EXAMPLES = 40
+# A brand/area cut needs at least this many cohort (M0) phones before its M3 retention % is
+# stable enough to call out by name in an auto-generated insight - same reasoning as
+# build_trend_digest.py's MIN_WINDOW_CASES: a 3-phone cohort swinging from 33% to 66% on one
+# extra repeat order isn't a finding.
+MIN_COHORT_FOR_INSIGHT = 150
 
 
 def add_months(y, m, n):
@@ -158,6 +163,57 @@ def main():
         m3 = sum(agg[("all", "all", s)][3] for s in scores)
         return round(m3 / m0 * 100, 1) if m0 else None
 
+    def m3_pct_and_cohort(brand, area, scores):
+        """M3-retention % and its own cohort (M0) size for one (brand, area, score-group) cut -
+        the cohort is what gates whether this cut is even worth naming in an insight."""
+        m0 = sum(agg[(brand, area, s)][0] for s in scores)
+        m3 = sum(agg[(brand, area, s)][3] for s in scores)
+        return (round(m3 / m0 * 100, 1) if m0 else None), m0
+
+    def build_insights():
+        """Every insight here is recomputed from this run's own numbers - there is nothing
+        hand-written to go stale. Volume-gated (MIN_COHORT_FOR_INSIGHT) so a small cut doesn't
+        get called out on a couple of orders, same spirit as build_trend_digest.py's
+        MIN_WINDOW_CASES floor on its own auto-generated sentences."""
+        out_insights = []
+
+        promoter_pct, detractor_pct = pct_m3(PROMOTER_SCORES), pct_m3(DETRACTOR_SCORES)
+        if promoter_pct and detractor_pct:
+            mult = round(promoter_pct / detractor_pct, 1)
+            out_insights.append(
+                f"Promoters (9-10) repeat-purchase by M3 at {promoter_pct}% vs {detractor_pct}% "
+                f"for detractors (0-6) - {mult}x more likely to still be ordering three months later."
+            )
+
+        brand_promoter = {b: m3_pct_and_cohort(b, "all", PROMOTER_SCORES) for b in ("mcaffeine", "hyphen")}
+        if all(n >= MIN_COHORT_FOR_INSIGHT for _, n in brand_promoter.values()):
+            (hi_brand, (hi_pct, _)), (lo_brand, (lo_pct, _)) = sorted(
+                brand_promoter.items(), key=lambda kv: -kv[1][0]
+            )
+            if hi_pct > lo_pct:
+                out_insights.append(
+                    f"{BRAND_LABEL[hi_brand]} promoters repeat-purchase by M3 at {hi_pct}% vs "
+                    f"{lo_pct}% for {BRAND_LABEL[lo_brand]} promoters."
+                )
+
+        area_promoter = {
+            a: m3_pct_and_cohort("all", a, PROMOTER_SCORES)
+            for a in ("delivery", "cs", "product", "website")
+        }
+        qualifying = {a: pct for a, (pct, n) in area_promoter.items()
+                      if pct is not None and n >= MIN_COHORT_FOR_INSIGHT}
+        if len(qualifying) >= 2:
+            best_area = max(qualifying, key=qualifying.get)
+            worst_area = min(qualifying, key=qualifying.get)
+            if best_area != worst_area:
+                out_insights.append(
+                    f"Among top-rated areas, promoters who rated {AREA_LABEL[best_area]} highest "
+                    f"repeat-purchase best by M3 ({qualifying[best_area]}%), vs "
+                    f"{AREA_LABEL[worst_area]} weakest ({qualifying[worst_area]}%)."
+                )
+
+        return out_insights
+
     out = {
         "total_responses": len(nps_rows),
         "distinct_phones": len(phones),
@@ -165,6 +221,7 @@ def main():
         "m0_total": sum(agg[("all", "all", s)][0] for s in SCORES),
         "m0_m3_promoter_pct": pct_m3(PROMOTER_SCORES),
         "m0_m3_detractor_pct": pct_m3(DETRACTOR_SCORES),
+        "insights": build_insights(),
         "brands": ["all", "mcaffeine", "hyphen"],
         "brand_labels": BRAND_LABEL,
         "areas": ["all", "delivery", "cs", "product", "website"],

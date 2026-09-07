@@ -910,3 +910,10 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
 .rr-child-label { padding-left: 28px !important; }
 
 .rr-chip-secondary { font-size: 12px; padding: 5px 11px; opacity: 0.9; }
+
+.rr-insights {
+  background: var(--surface-card); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: 0 10px 10px 0; padding: 16px 20px;
+}
+.rr-insights ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 8px; }
+.rr-insights li { font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
