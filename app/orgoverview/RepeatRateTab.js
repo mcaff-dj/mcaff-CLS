@@ -1,14 +1,24 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useMemo, useState, useEffect } from 'react';
 
 const MONTH_ABBR = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const monthLabel = (ym) => { const [y, m] = ym.split('-'); return `${MONTH_ABBR[+m]}'${y.slice(2)}`; };
 
-function scoreCategory(s) {
-  if (s >= 9) return { label: 'Promoter', className: 'rr-good' };
-  if (s >= 7) return { label: 'Passive', className: 'rr-warn' };
-  return { label: 'Detractor', className: 'rr-bad' };
+const HORIZON_MONTHS = 12;
+const EMPTY_M = new Array(HORIZON_MONTHS + 1).fill(0);
+
+// Display order top-to-bottom, both for the group rows and the child rows within each group.
+const GROUPS = [
+  { key: 'promoter', label: 'Promoter', className: 'rr-good', scores: [10, 9] },
+  { key: 'passive', label: 'Passive', className: 'rr-warn', scores: [8, 7] },
+  { key: 'detractor', label: 'Detractor', className: 'rr-bad', scores: [6, 5, 4, 3, 2, 1, 0] },
+];
+
+function scoreClassName(s) {
+  if (s >= 9) return 'rr-good';
+  if (s >= 7) return 'rr-warn';
+  return 'rr-bad';
 }
 
 function fmtNum(v) {
@@ -17,22 +27,54 @@ function fmtNum(v) {
 function fmtPct(v) {
   return (v === null || v === undefined) ? '–' : v.toFixed(1) + '%';
 }
+function sumArrays(arrs) {
+  return arrs.reduce((acc, m) => acc.map((v, i) => v + m[i]), new Array(HORIZON_MONTHS + 1).fill(0));
+}
 
-const HORIZON_MONTHS = 12;
-const EMPTY_M = new Array(HORIZON_MONTHS + 1).fill(0);
+function MonthCells({ m, cohort, max }) {
+  return m.slice(1).map((v, i) => {
+    const t = v / max;
+    const pct = cohort ? (v / cohort) * 100 : null;
+    const style = v === 0 ? {} : {
+      background: `color-mix(in srgb, var(--accent) ${Math.round(t * 75)}%, var(--surface-card))`,
+      color: t > 0.55 ? '#fff' : 'var(--text-primary)',
+    };
+    return (
+      <td key={i} className="rr-cell" style={style}>
+        <div className="rr-cell-count">{v}</div>
+        <div className="rr-cell-pct">{pct === null ? '–' : pct.toFixed(1) + '%'}</div>
+      </td>
+    );
+  });
+}
 
-function RepeatHeatmap({ data, area }) {
-  const rows = useMemo(
-    () => data.scores.map((score) => ({
-      score,
-      total: (data.totals && data.totals[`${area}|${score}`]) || 0,
-      m: data.agg[`${area}|${score}`] || EMPTY_M,
-    })),
-    [data, area]
+function RepeatHeatmap({ data, brand, area }) {
+  const scoreRow = (score) => ({
+    score,
+    total: (data.totals && data.totals[`${brand}|${area}|${score}`]) || 0,
+    m: data.agg[`${brand}|${area}|${score}`] || EMPTY_M,
+  });
+
+  const groupRows = useMemo(
+    () => GROUPS.map((g) => {
+      const children = g.scores.map(scoreRow);
+      return {
+        ...g,
+        total: children.reduce((s, c) => s + c.total, 0),
+        m: sumArrays(children.map((c) => c.m)),
+        children,
+      };
+    }),
+    [data, brand, area]
   );
-  // Color scale ignores M0/Cohort (always the largest by construction) so the M1-M12 cells
-  // that actually vary aren't washed out to the palest step.
-  const max = Math.max(1, ...rows.flatMap((r) => r.m.slice(1)));
+
+  const [expanded, setExpanded] = useState({});
+  const toggle = (key) => setExpanded((e) => ({ ...e, [key]: !e[key] }));
+
+  // Two separate scales: group rows (always the biggest numbers) would otherwise wash out
+  // the individual-score rows' own color range once expanded.
+  const groupMax = Math.max(1, ...groupRows.flatMap((g) => g.m.slice(1)));
+  const scoreMax = Math.max(1, ...groupRows.flatMap((g) => g.children.flatMap((c) => c.m.slice(1))));
 
   return (
     <div className="og-table-scroll">
@@ -46,32 +88,34 @@ function RepeatHeatmap({ data, area }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => {
-            const cat = scoreCategory(r.score);
-            const cohort = r.m[0];
+          {groupRows.map((g) => {
+            const cohort = g.m[0];
+            const isOpen = !!expanded[g.key];
             return (
-              <tr key={r.score}>
-                <td className="og-rowlabel">
-                  <span className={`rr-score-pill ${cat.className}`}>{r.score}</span>
-                  <span className="rr-cat-tag">{cat.label}</span>
-                </td>
-                <td className="rr-total">{r.total}</td>
-                <td className="rr-cohort">{cohort}</td>
-                {r.m.slice(1).map((v, i) => {
-                  const t = v / max;
-                  const pct = cohort ? (v / cohort) * 100 : null;
-                  const style = v === 0 ? {} : {
-                    background: `color-mix(in srgb, var(--accent) ${Math.round(t * 75)}%, var(--surface-card))`,
-                    color: t > 0.55 ? '#fff' : 'var(--text-primary)',
-                  };
+              <Fragment key={g.key}>
+                <tr className="rr-group-row" onClick={() => toggle(g.key)}>
+                  <td className="og-rowlabel">
+                    <span className="rr-expand-arrow">{isOpen ? '▾' : '▸'}</span>
+                    <span className={`rr-score-pill rr-group-pill ${g.className}`}>{g.label}</span>
+                  </td>
+                  <td className="rr-total">{g.total}</td>
+                  <td className="rr-cohort">{cohort}</td>
+                  <MonthCells m={g.m} cohort={cohort} max={groupMax} />
+                </tr>
+                {isOpen && g.children.map((r) => {
+                  const rCohort = r.m[0];
                   return (
-                    <td key={i} className="rr-cell" style={style}>
-                      <div className="rr-cell-count">{v}</div>
-                      <div className="rr-cell-pct">{pct === null ? '–' : pct.toFixed(1) + '%'}</div>
-                    </td>
+                    <tr key={r.score} className="rr-child-row">
+                      <td className="og-rowlabel rr-child-label">
+                        <span className={`rr-score-pill ${g.className}`}>{r.score}</span>
+                      </td>
+                      <td className="rr-total">{r.total}</td>
+                      <td className="rr-cohort">{rCohort}</td>
+                      <MonthCells m={r.m} cohort={rCohort} max={scoreMax} />
+                    </tr>
                   );
                 })}
-              </tr>
+              </Fragment>
             );
           })}
         </tbody>
@@ -80,10 +124,12 @@ function RepeatHeatmap({ data, area }) {
   );
 }
 
-function RepeatDrilldown({ examples, area, areaLabels }) {
-  const filtered = area === 'all' ? examples : examples.filter((r) => r.area === area);
+function RepeatDrilldown({ examples, brand, area, areaLabels }) {
+  const filtered = examples.filter(
+    (r) => (area === 'all' || r.area === area) && (brand === 'all' || (r.brand || '').toLowerCase() === brand)
+  );
   if (!filtered.length) {
-    return <p className="og-note">No example rows tagged &ldquo;{areaLabels[area]}&rdquo; in this cut.</p>;
+    return <p className="og-note">No example rows match this filter in this cut.</p>;
   }
   return (
     <div className="og-table-scroll">
@@ -95,20 +141,17 @@ function RepeatDrilldown({ examples, area, areaLabels }) {
           </tr>
         </thead>
         <tbody>
-          {filtered.map((r, i) => {
-            const cat = scoreCategory(r.score);
-            return (
-              <tr key={i}>
-                <td className="og-rowlabel">{r.phone}</td>
-                <td>{r.brand}</td>
-                <td>{r.area ? areaLabels[r.area] : '—'}</td>
-                <td>{monthLabel(r.ym)}</td>
-                <td><span className={`rr-score-pill rr-score-pill-sm ${cat.className}`}>{r.score}</span></td>
-                <td>{r.months.map(monthLabel).join(', ')}</td>
-                <td>{r.months.length}</td>
-              </tr>
-            );
-          })}
+          {filtered.map((r, i) => (
+            <tr key={i}>
+              <td className="og-rowlabel">{r.phone}</td>
+              <td>{r.brand}</td>
+              <td>{r.area ? areaLabels[r.area] : '—'}</td>
+              <td>{monthLabel(r.ym)}</td>
+              <td><span className={`rr-score-pill rr-score-pill-sm ${scoreClassName(r.score)}`}>{r.score}</span></td>
+              <td>{r.months.map(monthLabel).join(', ')}</td>
+              <td>{r.months.length}</td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </div>
@@ -118,6 +161,7 @@ function RepeatDrilldown({ examples, area, areaLabels }) {
 export default function RepeatRateTab() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [brand, setBrand] = useState('all');
   const [area, setArea] = useState('all');
 
   useEffect(() => {
@@ -147,16 +191,30 @@ export default function RepeatRateTab() {
           &ldquo;Total responses&rdquo; is everyone who gave that score; &ldquo;Cohort (M0)&rdquo;
           narrows to the ones who also had an order that same month &mdash; M1-M12 track only
           that narrower group, count and % of cohort. Later months undercount for recent
-          cohorts that haven&apos;t reached that horizon yet.
+          cohorts that haven&apos;t reached that horizon yet. Click a Promoter/Passive/Detractor
+          row to see the individual scores behind it.
         </p>
       </header>
+
+      <div className="rr-chip-row">
+        {data.brands.map((b) => (
+          <button
+            key={b}
+            type="button"
+            className={'rr-chip' + (b === brand ? ' active' : '')}
+            onClick={() => setBrand(b)}
+          >
+            {data.brand_labels[b]}
+          </button>
+        ))}
+      </div>
 
       <div className="rr-chip-row">
         {data.areas.map((a) => (
           <button
             key={a}
             type="button"
-            className={'rr-chip' + (a === area ? ' active' : '')}
+            className={'rr-chip rr-chip-secondary' + (a === area ? ' active' : '')}
             onClick={() => setArea(a)}
           >
             {data.area_labels[a]}
@@ -186,15 +244,16 @@ export default function RepeatRateTab() {
           <div className="kpi-sub">vs {fmtPct(data.m0_m3_detractor_pct)} for detractors (0-6)</div>
         </div>
       </div>
+      <p className="og-note">KPI tiles above are org-wide (not brand/area filtered); the table below is.</p>
 
       <section>
         <h3 className="og-section-title">Repeat-purchase retention, by NPS score</h3>
-        <RepeatHeatmap data={data} area={area} />
+        <RepeatHeatmap data={data} brand={brand} area={area} />
       </section>
 
       <section>
         <h3 className="og-section-title">Per-customer drill-down</h3>
-        <RepeatDrilldown examples={data.examples} area={area} areaLabels={data.area_labels} />
+        <RepeatDrilldown examples={data.examples} brand={brand} area={area} areaLabels={data.area_labels} />
       </section>
     </div>
   );

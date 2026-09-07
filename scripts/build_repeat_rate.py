@@ -2,9 +2,9 @@
 
 For every NPS response (PEP_CLS.nps_delivery, submitted_date > 2026-01-01), checks whether
 that phone also placed a valid order (mcaff_prod.Item_level_data, Final_Status != 'CANCELLED')
-in the SAME calendar month (M0), then in each of the next 6 months (M1..M6). Counts are
-aggregated by (top_rated_area, nps_score) so the UI can show a cohort-retention heatmap and
-filter it by which area the respondent rated highest.
+in the SAME calendar month (M0), then in each of the next 12 months (M1..M12). Counts are
+aggregated by (brand, top_rated_area, nps_score) so the UI can show a cohort-retention
+heatmap filterable by brand and by which area the respondent rated highest.
 
 Item_level_data is ~50M rows - the batched IN(...) lookup below only works because
 Notification_Mobile is indexed (see idx_ild_grouping / idx_ild_channel_status_mobile); an
@@ -33,6 +33,8 @@ AREA_LABEL = {
     "product": "Product",
     "website": "Website / app experience",
 }
+BRANDS = {"mcaffeine", "hyphen"}  # normalized (lowercased) - nps_delivery.brand is 'Mcaffeine'/'Hyphen'
+BRAND_LABEL = {"all": "All brands", "mcaffeine": "Mcaffeine", "hyphen": "Hyphen"}
 SCORES = [10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
 HORIZON_MONTHS = 12  # M0..M12
 PROMOTER_SCORES = {9, 10}
@@ -78,8 +80,10 @@ def main():
         if not phone:
             continue
         d, m_, y = submitted.split("/")
+        brand_key = (brand or "").strip().lower()
         responses.append({
             "phone": phone, "brand": brand, "score": score_i,
+            "brand_key": brand_key if brand_key in BRANDS else None,
             "area": AREA_CODE.get(area), "ym": (int(y), int(m_)),
         })
         phones.add(phone)
@@ -110,29 +114,34 @@ def main():
     agg = defaultdict(lambda: [0] * (HORIZON_MONTHS + 1))
     # Every NPS response counts here regardless of whether the phone ever ordered - this is
     # "how many people gave this score", separate from agg's M0 ("...and also ordered that
-    # same month"), which is a filtered subset, not the total.
+    # same month"), which is a filtered subset, not the total. Keyed by (brand, area, score) -
+    # "all" for brand/area means "not filtered on this dimension", so every response also
+    # rolls up into the ("all","all",score) bucket in addition to its own brand/area buckets.
     totals = defaultdict(int)
     examples = []
     for r in responses:
-        totals[("all", r["score"])] += 1
-        if r["area"]:
-            totals[(r["area"], r["score"])] += 1
+        brand_keys = {"all"} | ({r["brand_key"]} if r["brand_key"] else set())
+        area_keys = {"all"} | ({r["area"]} if r["area"] else set())
+        for bkey in brand_keys:
+            for akey in area_keys:
+                totals[(bkey, akey, r["score"])] += 1
+
         months = order_months.get(r["phone"])
         if not months:
             continue
         y0, m0 = r["ym"]
         if (y0, m0) not in months:
             continue
-        agg[("all", r["score"])][0] += 1
-        if r["area"]:
-            agg[(r["area"], r["score"])][0] += 1
+        for bkey in brand_keys:
+            for akey in area_keys:
+                agg[(bkey, akey, r["score"])][0] += 1
         hit_months = [(y0, m0)]
         for k in range(1, HORIZON_MONTHS + 1):
             yk, mk = add_months(y0, m0, k)
             if (yk, mk) in months:
-                agg[("all", r["score"])][k] += 1
-                if r["area"]:
-                    agg[(r["area"], r["score"])][k] += 1
+                for bkey in brand_keys:
+                    for akey in area_keys:
+                        agg[(bkey, akey, r["score"])][k] += 1
                 hit_months.append((yk, mk))
         if len(hit_months) >= 2 and len(examples) < MAX_EXAMPLES:
             examples.append({
@@ -145,22 +154,24 @@ def main():
             })
 
     def pct_m3(scores):
-        m0 = sum(agg[("all", s)][0] for s in scores)
-        m3 = sum(agg[("all", s)][3] for s in scores)
+        m0 = sum(agg[("all", "all", s)][0] for s in scores)
+        m3 = sum(agg[("all", "all", s)][3] for s in scores)
         return round(m3 / m0 * 100, 1) if m0 else None
 
     out = {
         "total_responses": len(nps_rows),
         "distinct_phones": len(phones),
         "phones_with_any_order": len(order_months),
-        "m0_total": sum(agg[("all", s)][0] for s in SCORES),
+        "m0_total": sum(agg[("all", "all", s)][0] for s in SCORES),
         "m0_m3_promoter_pct": pct_m3(PROMOTER_SCORES),
         "m0_m3_detractor_pct": pct_m3(DETRACTOR_SCORES),
+        "brands": ["all", "mcaffeine", "hyphen"],
+        "brand_labels": BRAND_LABEL,
         "areas": ["all", "delivery", "cs", "product", "website"],
         "area_labels": AREA_LABEL,
         "scores": SCORES,
-        "totals": {f"{area}|{score}": count for (area, score), count in totals.items()},
-        "agg": {f"{area}|{score}": counts for (area, score), counts in agg.items()},
+        "totals": {f"{b}|{a}|{s}": count for (b, a, s), count in totals.items()},
+        "agg": {f"{b}|{a}|{s}": counts for (b, a, s), counts in agg.items()},
         "examples": examples,
     }
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
