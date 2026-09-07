@@ -14,6 +14,14 @@ on:
         description: 'Refetch the Agent/AI CSAT + RTO-Conversion sheet tabs and the delivery-geo MySQL data instead of reusing cache'
         type: boolean
         default: false
+      refresh_repeat_rate:
+        # build_repeat_rate.py's batched Item_level_data lookup only otherwise runs on the
+        # 3 AM IST NPS schedule (see refresh.py) - this lets an admin force a rebuild the
+        # same day a change lands, without also forcing a live NPS re-query (which this
+        # input deliberately does NOT set - see the NPS= logic below).
+        description: 'Also rebuild the Repeat Rate analysis tab (data/repeat_rate.json) - batched Item_level_data lookup, several minutes'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -75,6 +83,8 @@ jobs:
           # 'true' only when a manual run ticked the full_refresh input - '' on schedules
           # (which are already full runs) and on the site's Refresh-Data button.
           FULL_REFRESH: ${{ github.event.inputs.full_refresh }}
+          # 'true' only when a manual run ticked refresh_repeat_rate - '' otherwise.
+          REFRESH_REPEAT_RATE: ${{ github.event.inputs.refresh_repeat_rate }}
           MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
           MYSQL_USER: ${{ secrets.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
@@ -115,9 +125,17 @@ jobs:
             echo "3 AM IST schedule - re-querying the NPS tables."
             NPS="--refresh-nps"
           fi
+          # Repeat Rate analysis (data/repeat_rate.json) normally only rebuilds alongside NPS
+          # above - this is the manual override so an admin can force it the same day without
+          # waiting for the 3 AM IST run or also forcing a live NPS re-query.
+          REPEAT_RATE=""
+          if [ "${REFRESH_REPEAT_RATE:-}" = "true" ]; then
+            echo "Manual trigger with refresh_repeat_rate - rebuilding data/repeat_rate.json."
+            REPEAT_RATE="--refresh-repeat-rate"
+          fi
           # refresh.py runs both brands concurrently; -u keeps their interleaved per-stage
           # timing lines in real order in this log.
-          python -u ./scripts/refresh.py $QUICK $NPS
+          python -u ./scripts/refresh.py $QUICK $NPS $REPEAT_RATE
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4

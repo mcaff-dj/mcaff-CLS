@@ -22,6 +22,9 @@ def main():
     parser.add_argument("--refresh-nps", action="store_true",
                         help="Re-query the NPS tables rather than reusing each brand's NPS cache. "
                              "Passed straight through to generate_report.py.")
+    parser.add_argument("--refresh-repeat-rate", action="store_true",
+                        help="Rebuild data/repeat_rate.json even outside the --refresh-nps cadence "
+                             "(e.g. a manual admin-triggered run) - see build_repeat_rate.py.")
     args = parser.parse_args()
 
     # The brands are fully independent - separate spreadsheets, separate MySQL tables,
@@ -65,10 +68,12 @@ def main():
     print("=== Building cross-brand trend digest ===", flush=True)
     subprocess.run([sys.executable, "-u", str(HERE / "build_trend_digest.py")], check=True)
 
-    # Same cadence as --refresh-nps (once a day): the batched Item_level_data lookup here
-    # scales with distinct NPS-phone count (tens of thousands), same reason NPS itself is
-    # only re-queried once a day rather than on every run (see refresh.yml).
-    if args.refresh_nps:
+    # Same cadence as --refresh-nps (once a day) by default: the batched Item_level_data
+    # lookup here scales with distinct NPS-phone count (tens of thousands), same reason NPS
+    # itself is only re-queried once a day rather than on every run (see refresh.yml).
+    # --refresh-repeat-rate is the escape hatch for forcing it outside that cadence, e.g. a
+    # same-day manual run right after this tab first ships.
+    if args.refresh_nps or args.refresh_repeat_rate:
         print("=== Building repeat-rate analysis ===", flush=True)
         subprocess.run([sys.executable, "-u", str(HERE / "build_repeat_rate.py")], check=True)
 
