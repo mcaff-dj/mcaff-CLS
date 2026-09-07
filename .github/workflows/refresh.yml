@@ -194,6 +194,13 @@ jobs:
               --content-type "application/json; charset=utf-8" \
               --cache-control "no-cache, must-revalidate" --only-show-errors
           fi
+          # Repeat Rate analysis tab (see build_repeat_rate.py) - only written on the once-a-day
+          # NPS-refresh schedule, so this is a no-op most runs.
+          if [ -f data/repeat_rate.json ]; then
+            aws s3 cp data/repeat_rate.json s3://mcaff-cls-reports/reports/repeat_rate.json \
+              --content-type "application/json; charset=utf-8" \
+              --cache-control "no-cache, must-revalidate" --only-show-errors
+          fi
 
       - name: Invalidate CloudFront cache for updated reports
         # The S3 upload above doesn't bust CloudFront's edge cache on its own, so
@@ -210,7 +217,7 @@ jobs:
             exit 1
           fi
           aws cloudfront create-invalidation --distribution-id "$distId" \
-            --paths "/reports/mcaffeine.html" "/reports/hyphen.html" "/reports/trend_digest.json"
+            --paths "/reports/mcaffeine.html" "/reports/hyphen.html" "/reports/trend_digest.json" "/reports/repeat_rate.json"
 
       - name: Commit & push if changed
         run: |

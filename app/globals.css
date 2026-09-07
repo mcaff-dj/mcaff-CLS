@@ -865,3 +865,35 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
 .og-sku-name { font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; flex-direction: column; gap: 2px; }
 .og-sku-meta { font-size: 11.5px; font-weight: 400; color: var(--text-muted); }
 .og-sku-issues { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); display: flex; flex-direction: column; gap: 3px; }
+
+/* Repeat Rate analysis tab (RepeatRateTab.js) */
+.kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.kpi { background: var(--surface-card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.kpi-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 700; margin-bottom: 6px; }
+.kpi-value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; color: var(--text-primary); }
+.kpi-sub { font-size: 11.5px; color: var(--text-secondary); margin-top: 4px; font-variant-numeric: tabular-nums; }
+.kpi-accent .kpi-value { color: var(--accent); }
+.rr-unit { font-size: 12px; color: var(--text-secondary); font-weight: 500; }
+
+.rr-chip-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.rr-chip {
+  font-size: 12.5px; padding: 6px 13px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--surface-card); color: var(--text-secondary); cursor: pointer; font-weight: 600; font-family: inherit;
+}
+.rr-chip:hover { border-color: var(--accent); }
+.rr-chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+.rr-heatmap td.rr-cell, .rr-heatmap th { text-align: center; }
+.rr-cell { font-weight: 600; border-radius: 4px; }
+.rr-cohort { font-weight: 700; color: var(--text-primary) !important; }
+.rr-score-pill {
+  display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px;
+  border-radius: 6px; font-size: 12px; font-weight: 700; color: #fff; margin-right: 6px;
+}
+.rr-score-pill-sm { width: 18px; height: 18px; font-size: 10.5px; margin-right: 0; }
+.rr-cat-tag { font-size: 10.5px; color: var(--text-muted); }
+.rr-good { background: var(--good); }
+.rr-warn { background: #c2740c; }
+.rr-bad { background: var(--bad); }
+
+.rr-drill td { white-space: normal; }

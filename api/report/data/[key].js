@@ -31,6 +31,7 @@ const DATA_ROUTES = {
   'calling-trend': { card: 'calling', tab: 'rto', page: '/rto-crm', query: getCallingTrendData },
   'calling-timeofday': { card: 'calling', tab: 'rto', page: '/rto-crm', query: getCallingTimeOfDayData },
   'trend-digest': { file: 'trend_digest.json', card: 'orgoverview', page: '/orgoverview', redirect: true },
+  'repeat-rate': { file: 'repeat_rate.json', card: 'orgoverview', page: '/orgoverview', redirect: true },
 };
 
 module.exports = async (req, res) => {

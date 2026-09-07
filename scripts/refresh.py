@@ -65,6 +65,13 @@ def main():
     print("=== Building cross-brand trend digest ===", flush=True)
     subprocess.run([sys.executable, "-u", str(HERE / "build_trend_digest.py")], check=True)
 
+    # Same cadence as --refresh-nps (once a day): the batched Item_level_data lookup here
+    # scales with distinct NPS-phone count (tens of thousands), same reason NPS itself is
+    # only re-queried once a day rather than on every run (see refresh.yml).
+    if args.refresh_nps:
+        print("=== Building repeat-rate analysis ===", flush=True)
+        subprocess.run([sys.executable, "-u", str(HERE / "build_repeat_rate.py")], check=True)
+
 
 if __name__ == "__main__":
     main()
