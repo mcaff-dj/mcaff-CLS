@@ -40,7 +40,6 @@ HORIZON_MONTHS = 12  # M0..M12
 PROMOTER_SCORES = {9, 10}
 DETRACTOR_SCORES = {0, 1, 2, 3, 4, 5, 6}
 BATCH = 800
-MAX_EXAMPLES = 40
 # A brand/area cut needs at least this many cohort (M0) phones before its M3 retention % is
 # stable enough to call out by name in an auto-generated insight - same reasoning as
 # build_trend_digest.py's MIN_WINDOW_CASES: a 3-phone cohort swinging from 33% to 66% on one
@@ -51,10 +50,6 @@ MIN_COHORT_FOR_INSIGHT = 150
 def add_months(y, m, n):
     total = (y * 12 + (m - 1)) + n
     return total // 12, total % 12 + 1
-
-
-def mask_phone(phone):
-    return phone[:2] + "••••" + phone[-4:] if len(phone) >= 6 else phone
 
 
 def main():
@@ -123,7 +118,6 @@ def main():
     # "all" for brand/area means "not filtered on this dimension", so every response also
     # rolls up into the ("all","all",score) bucket in addition to its own brand/area buckets.
     totals = defaultdict(int)
-    examples = []
     for r in responses:
         brand_keys = {"all"} | ({r["brand_key"]} if r["brand_key"] else set())
         area_keys = {"all"} | ({r["area"]} if r["area"] else set())
@@ -140,23 +134,12 @@ def main():
         for bkey in brand_keys:
             for akey in area_keys:
                 agg[(bkey, akey, r["score"])][0] += 1
-        hit_months = [(y0, m0)]
         for k in range(1, HORIZON_MONTHS + 1):
             yk, mk = add_months(y0, m0, k)
             if (yk, mk) in months:
                 for bkey in brand_keys:
                     for akey in area_keys:
                         agg[(bkey, akey, r["score"])][k] += 1
-                hit_months.append((yk, mk))
-        if len(hit_months) >= 2 and len(examples) < MAX_EXAMPLES:
-            examples.append({
-                "phone": mask_phone(r["phone"]),
-                "brand": r["brand"],
-                "area": r["area"],
-                "score": r["score"],
-                "ym": f"{y0:04d}-{m0:02d}",
-                "months": [f"{y:04d}-{m:02d}" for y, m in sorted(hit_months)],
-            })
 
     def pct_m3(scores):
         m0 = sum(agg[("all", "all", s)][0] for s in scores)
@@ -229,7 +212,6 @@ def main():
         "scores": SCORES,
         "totals": {f"{b}|{a}|{s}": count for (b, a, s), count in totals.items()},
         "agg": {f"{b}|{a}|{s}": counts for (b, a, s), counts in agg.items()},
-        "examples": examples,
     }
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(OUT_PATH, "w", encoding="utf-8") as f:

@@ -2,9 +2,6 @@
 
 import { Fragment, useMemo, useState, useEffect } from 'react';
 
-const MONTH_ABBR = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const monthLabel = (ym) => { const [y, m] = ym.split('-'); return `${MONTH_ABBR[+m]}'${y.slice(2)}`; };
-
 const HORIZON_MONTHS = 12;
 const EMPTY_M = new Array(HORIZON_MONTHS + 1).fill(0);
 
@@ -14,12 +11,6 @@ const GROUPS = [
   { key: 'passive', label: 'Passive', className: 'rr-warn', scores: [8, 7] },
   { key: 'detractor', label: 'Detractor', className: 'rr-bad', scores: [6, 5, 4, 3, 2, 1, 0] },
 ];
-
-function scoreClassName(s) {
-  if (s >= 9) return 'rr-good';
-  if (s >= 7) return 'rr-warn';
-  return 'rr-bad';
-}
 
 function fmtNum(v) {
   return (v === null || v === undefined) ? '–' : v.toLocaleString('en-IN');
@@ -118,40 +109,6 @@ function RepeatHeatmap({ data, brand, area }) {
               </Fragment>
             );
           })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function RepeatDrilldown({ examples, brand, area, areaLabels }) {
-  const filtered = examples.filter(
-    (r) => (area === 'all' || r.area === area) && (brand === 'all' || (r.brand || '').toLowerCase() === brand)
-  );
-  if (!filtered.length) {
-    return <p className="og-note">No example rows match this filter in this cut.</p>;
-  }
-  return (
-    <div className="og-table-scroll">
-      <table className="og-table rr-drill">
-        <thead>
-          <tr>
-            <th>Phone</th><th>Brand</th><th>Top-rated area</th><th>NPS month</th>
-            <th>Score</th><th>Order months</th><th>Total orders</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filtered.map((r, i) => (
-            <tr key={i}>
-              <td className="og-rowlabel">{r.phone}</td>
-              <td>{r.brand}</td>
-              <td>{r.area ? areaLabels[r.area] : '—'}</td>
-              <td>{monthLabel(r.ym)}</td>
-              <td><span className={`rr-score-pill rr-score-pill-sm ${scoreClassName(r.score)}`}>{r.score}</span></td>
-              <td>{r.months.map(monthLabel).join(', ')}</td>
-              <td>{r.months.length}</td>
-            </tr>
-          ))}
         </tbody>
       </table>
     </div>
@@ -258,11 +215,6 @@ export default function RepeatRateTab() {
       <section>
         <h3 className="og-section-title">Repeat-purchase retention, by NPS score</h3>
         <RepeatHeatmap data={data} brand={brand} area={area} />
-      </section>
-
-      <section>
-        <h3 className="og-section-title">Per-customer drill-down</h3>
-        <RepeatDrilldown examples={data.examples} brand={brand} area={area} areaLabels={data.area_labels} />
       </section>
     </div>
   );
