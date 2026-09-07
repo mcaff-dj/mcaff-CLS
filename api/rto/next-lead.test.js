@@ -168,6 +168,23 @@ assert.strictEqual(computeFillTarget(20, 1, 0, 25), 0, 'zero candidates -> zero 
   assert.strictEqual(rankBySpecialization(pool, 'me@x.com', null), pool);
   assert.strictEqual(rankBySpecialization(pool, 'me@x.com', []), pool);
 
+  // Tier beats specialization rank - a prepaid lead (tier 0) must sort ahead of the caller's own
+  // COD specialization match (rank 0), not behind it. This is the exact bug that starved every
+  // online RTO agent of prepaid leads on 2026-09-07: a broad enough priority_rto_reasons list
+  // made a caller's COD reason match outrank prepaid outright when rank was the outermost key.
+  {
+    const mixedTiers = [
+      { orderId: 'PREPAID', rtoReason: 'N/A', tier: 0 },
+      { orderId: 'MY_COD', rtoReason: 'Consignee unavailable', tier: 2 },
+    ];
+    assert.deepStrictEqual(
+      rankBySpecialization(mixedTiers, 'me@x.com', [{ email: 'me@x.com', reasons: ['consignee unavailable'] }])
+        .map((c) => c.orderId),
+      ['PREPAID', 'MY_COD'],
+      'prepaid (tier 0) must outrank the caller\'s own COD specialization match, not the reverse',
+    );
+  }
+
   // A reason on both lists is MINE - matching by email, not by whoever is listed first.
   const shared = [{ orderId: 'S', rtoReason: 'Consignee unavailable' }, { orderId: 'F', rtoReason: 'nothing' }];
   assert.deepStrictEqual(

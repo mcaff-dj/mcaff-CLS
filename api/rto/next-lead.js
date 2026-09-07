@@ -238,10 +238,16 @@ function buildCandidateList(orderRows, workRows) {
 //           and leaving an eligible agent idle in front of a backlog is the worse failure. This
 //           only stops the instant top-up from OUTRUNNING the sweep on someone else's speciality.
 //
-// Rank is the outermost key; tier and date still order within a rank because the input is
-// already sorted that way and Array.prototype.sort is stable (Node >= 11). A caller with no
-// specialization of their own simply has no rank-0 leads - the rank-1-before-rank-2 half still
-// applies, which is the half that stops the stealing.
+// Tier is the outermost key, rank only breaks ties WITHIN a tier - prepaid (tier 0) must never
+// sort behind a caller's own COD specialization, however broad that reason list is. This was
+// the actual cause of Tanisha (and, it turned out, every other online agent - all seven were
+// running near-identical ~50-reason specialist lists) never receiving a single prepaid lead via
+// this endpoint on 2026-09-07 despite a 180+ prepaid backlog: rank used to be the outermost key,
+// so any COD lead matching the caller's own (very broad) specialization outranked every prepaid
+// lead outright, on every single disposal, all day. Date still orders within a (tier, rank) pair
+// because the input is already sorted that way and Array.prototype.sort is stable (Node >= 11).
+// A caller with no specialization of their own simply has no rank-0 leads - the
+// rank-1-before-rank-2 half still applies, which is the half that stops the stealing.
 //
 // specialists is the whole online set INCLUDING the caller; matching by email keeps "mine"
 // authoritative when a reason is on both lists. null/[] (lookup failed or nobody specializes)
@@ -260,10 +266,10 @@ function rankBySpecialization(candidates, callerEmail, specialists) {
   };
   return candidates
     .map((c, i) => ({ c, i, r: rank(c) }))
-    // Explicit index tiebreak rather than relying on sort stability alone - the ordering this
-    // preserves (tier, then date) is the whole point, and it is cheap to make that guarantee
-    // local instead of a footnote about the engine.
-    .sort((a, b) => (a.r !== b.r ? a.r - b.r : a.i - b.i))
+    // Tier first, rank second, explicit index tiebreak last rather than relying on sort
+    // stability alone - the ordering this preserves (tier, then date) is the whole point, and it
+    // is cheap to make that guarantee local instead of a footnote about the engine.
+    .sort((a, b) => (a.c.tier !== b.c.tier ? a.c.tier - b.c.tier : (a.r !== b.r ? a.r - b.r : a.i - b.i)))
     .map((x) => x.c);
 }
 
