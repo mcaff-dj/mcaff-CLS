@@ -34,13 +34,12 @@ const PAYMENT_MODES = ['Prepaid', 'COD'];
 // Same repeat-contact buckets getDeliveryEscalationRepeatStats already groups by (see db.js) -
 // reusing them here rather than inventing a second bucketing keeps "how many times did this
 // customer come" meaning one thing everywhere on this page.
-const CONTACT_BUCKET_OPTIONS = [
-  { value: 'ALL', label: 'Total times user came' },
-  { value: '1', label: '1 time' },
-  { value: '2-4', label: '2-4 times' },
-  { value: '5-9', label: '5-9 times' },
-  { value: '10+', label: '10+ times' },
-];
+// Label <-> internal-key expand/collapse, same convention as DE_TAB_LABELS/DE_TAB_LABEL_TO_KEY
+// above - MultiSelectDropdown shows/picks these display labels, values sent to the server stay
+// the plain bucket keys DE_CONTACT_BUCKET_RANGES (db.js) actually matches on.
+const CONTACT_BUCKET_LABELS = { '1': '1 time', '2-4': '2-4 times', '5-9': '5-9 times', '10+': '10+ times' };
+const CONTACT_BUCKET_LABEL_TO_VALUE = Object.fromEntries(Object.entries(CONTACT_BUCKET_LABELS).map(([k, v]) => [v, k]));
+const CONTACT_BUCKET_LABEL_OPTIONS = Object.values(CONTACT_BUCKET_LABELS);
 // Quick date-range presets for the filter bar, shared by every tab (Fresh/Forced RTO/Resolved/
 // New Order Placed all render the same filter row - see the `listTab` block below).
 const DATE_RANGE_PRESET_OPTIONS = [
@@ -921,7 +920,7 @@ function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatB
   if (date && dateTo) p.set('dateTo', dateTo);
   if (date && dateField) p.set('dateField', dateField);
   if (tatBucket) p.set('tatBucket', tatBucket);
-  if (contactBucket && contactBucket !== 'ALL') p.set('contactBucket', contactBucket);
+  if (Array.isArray(contactBucket) && contactBucket.length) p.set('contactBucket', contactBucket.join(','));
   // Canonical name -> every raw delivery_partner variant it folds into, same
   // CANONICAL_TO_RAW_PARTNER convention fetchDaywiseStats already uses - the server only ever
   // filters the raw column, never learns what "canonical" means.
@@ -1644,7 +1643,7 @@ export default function DeliveryEscalationClient() {
   // entirely while active, since a month/week cell spans a date range the single-day picker
   // can't express. Cleared by the chip's × or by picking a tab from the nav bar directly.
   const [dateDrill, setDateDrill] = useState(null);
-  const [contactBucketFilter, setContactBucketFilter] = useState('ALL');
+  const [contactBucketFilter, setContactBucketFilter] = useState(() => []);
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(50);
 
@@ -2832,11 +2831,12 @@ export default function DeliveryEscalationClient() {
                           />
                         </>
                       )}
-                      <CustomSelect
-                        value={contactBucketFilter}
-                        onChange={setContactBucketFilter}
-                        options={CONTACT_BUCKET_OPTIONS}
+                      <MultiSelectDropdown
+                        value={contactBucketFilter.map((v) => CONTACT_BUCKET_LABELS[v])}
+                        onChange={(labels) => setContactBucketFilter(labels.map((l) => CONTACT_BUCKET_LABEL_TO_VALUE[l]))}
+                        options={CONTACT_BUCKET_LABEL_OPTIONS}
                         placeholder="Total times user came"
+                        itemNoun="buckets"
                       />
                       {(tab === 'fresh' || tab === 'forced_rto' || tab === 'new_order_placed') && (
                         <>
@@ -2954,8 +2954,14 @@ export default function DeliveryEscalationClient() {
                           </th>
                           <th className="py-3 px-4 text-left font-medium">
                             Times Contacted
-                            <ThFilter active={contactBucketFilter !== 'ALL'}>
-                              <CustomSelect value={contactBucketFilter} onChange={setContactBucketFilter} options={CONTACT_BUCKET_OPTIONS} placeholder="Total times user came" />
+                            <ThFilter active={contactBucketFilter.length > 0}>
+                              <MultiSelectDropdown
+                                value={contactBucketFilter.map((v) => CONTACT_BUCKET_LABELS[v])}
+                                onChange={(labels) => setContactBucketFilter(labels.map((l) => CONTACT_BUCKET_LABEL_TO_VALUE[l]))}
+                                options={CONTACT_BUCKET_LABEL_OPTIONS}
+                                placeholder="Total times user came"
+                                itemNoun="buckets"
+                              />
                             </ThFilter>
                           </th>
                           <th className="py-3 px-4 text-left font-medium">First Contact</th>

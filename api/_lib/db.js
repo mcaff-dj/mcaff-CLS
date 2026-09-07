@@ -2601,10 +2601,12 @@ function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket,
     else { clauses.push(`DATE(${col}) = ?`); params.push(date); }
   }
   if (tatBucket) { clauses.push(`${DE_TAT_BUCKET_SQL} = ?`); params.push(tatBucket); }
-  if (contactBucket && DE_CONTACT_BUCKET_RANGES[contactBucket]) {
-    const range = DE_CONTACT_BUCKET_RANGES[contactBucket];
-    clauses.push(range.sql);
-    params.push(...range.params);
+  if (Array.isArray(contactBucket) && contactBucket.length) {
+    const ranges = contactBucket.map((b) => DE_CONTACT_BUCKET_RANGES[b]).filter(Boolean);
+    if (ranges.length) {
+      clauses.push(`(${ranges.map((r) => r.sql).join(' OR ')})`);
+      params.push(...ranges.flatMap((r) => r.params));
+    }
   }
   if (search) {
     // Escape LIKE's own wildcards so a literal % or _ in an AWB/order id searches as itself

@@ -104,7 +104,7 @@ module.exports = async (req, res) => {
       dateTo: q.dateTo || '',
       dateField: q.dateField || '',
       tatBucket: q.tatBucket || '',
-      contactBucket: q.contactBucket && q.contactBucket !== 'ALL' ? q.contactBucket : '',
+      contactBucket: q.contactBucket ? String(q.contactBucket).split(',').filter(Boolean) : undefined,
       // The ticket list's own Delivery Partner filter, comma-joined raw values (client already
       // resolved canonical -> raw - see DeliveryEscalationClient.js's filterQuery). Distinct from
       // allowedPartners: this is a user-chosen filter, that's the always-enforced access floor.
