@@ -4,6 +4,108 @@ import { Fragment, useMemo, useState, useEffect } from 'react';
 
 const HORIZON_MONTHS = 12;
 const EMPTY_M = new Array(HORIZON_MONTHS + 1).fill(0);
+const ALL_SCORES = [10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
+const AREA_KEYS = ['delivery', 'cs', 'product', 'website'];
+const BRAND_KEYS = ['mcaffeine', 'hyphen'];
+// A brand/area cut needs at least this many cohort (M0) phones before its M3 retention % is
+// stable enough to call out by name - a 3-phone cohort swinging from 33% to 66% on one extra
+// repeat order isn't a finding.
+const MIN_COHORT_FOR_INSIGHT = 150;
+
+function m3PctAndCohort(data, brand, area, scores) {
+  let m0 = 0, m3 = 0;
+  scores.forEach((s) => {
+    const arr = data.agg[`${brand}|${area}|${s}`];
+    if (arr) { m0 += arr[0]; m3 += arr[3]; }
+  });
+  return { pct: m0 ? Math.round((m3 / m0) * 1000) / 10 : null, n: m0 };
+}
+
+// Insights are computed live from data.agg for the CURRENT brand/area filter, not baked in
+// server-side - so switching a filter re-derives every number rather than showing a stale
+// global read. Framed for prioritization: how many more repeat customers closing a given gap
+// would add, and which cut is the highest-leverage fix once cohort volume is weighed against
+// retention, not retention alone. M6-M12 stay out of any "does the gap persist" claim - most
+// of this cohort responded Apr-Aug'26, so those horizons are still mostly right-censored, not
+// a real decay signal (see the table's own caveat).
+function computeInsights(data, brand, area) {
+  const insights = [];
+  const scopeParts = [];
+  if (brand !== 'all') scopeParts.push(data.brand_labels[brand]);
+  if (area !== 'all') scopeParts.push(data.area_labels[area]);
+  const prefix = scopeParts.length ? `Within ${scopeParts.join(' × ')}: ` : '';
+
+  const promoter = m3PctAndCohort(data, brand, area, [10, 9]);
+  const passive = m3PctAndCohort(data, brand, area, [8, 7]);
+  const detractor = m3PctAndCohort(data, brand, area, [6, 5, 4, 3, 2, 1, 0]);
+
+  if (promoter.pct !== null && detractor.pct) {
+    const mult = Math.round((promoter.pct / detractor.pct) * 10) / 10;
+    let recoverable = 0;
+    if (passive.pct !== null) recoverable += passive.n * Math.max(0, promoter.pct - passive.pct) / 100;
+    recoverable += detractor.n * Math.max(0, promoter.pct - detractor.pct) / 100;
+    insights.push(
+      `${prefix}Promoters (9-10) repeat-purchase by M3 at ${promoter.pct}% vs ${detractor.pct}% for ` +
+      `detractors (0-6) - ${mult}x more likely to still be ordering three months later. If passives ` +
+      `and detractors here repeated at the promoter rate, roughly ${Math.round(recoverable).toLocaleString('en-IN')} ` +
+      `more phones would have reordered by M3 - that gap, not the NPS score itself, is the retention budget worth chasing.`
+    );
+  }
+
+  if (brand === 'all') {
+    const perBrand = BRAND_KEYS.map((b) => [b, m3PctAndCohort(data, b, area, ALL_SCORES)]);
+    if (perBrand.every(([, v]) => v.pct !== null && v.n >= MIN_COHORT_FOR_INSIGHT)) {
+      const sorted = [...perBrand].sort((a, b) => b[1].pct - a[1].pct);
+      const [hiBrand, hi] = sorted[0];
+      const [loBrand, lo] = sorted[1];
+      if (hi.pct > lo.pct) {
+        const brandMult = lo.pct ? Math.round((hi.pct / lo.pct) * 10) / 10 : null;
+        const halfGap = Math.round(lo.n * (hi.pct - lo.pct) / 100 / 2);
+        const areaSuffix = area !== 'all' ? ` within ${data.area_labels[area]}` : '';
+        insights.push(
+          `${data.brand_labels[hiBrand]} customers repeat-purchase by M3 at ${hi.pct}%${areaSuffix} vs ` +
+          `${lo.pct}% for ${data.brand_labels[loBrand]}` + (brandMult ? ` (${brandMult}x)` : '') +
+          ` - on ${lo.n.toLocaleString('en-IN')} respondents, that's a lever worth pulling: closing even ` +
+          `half the gap adds roughly ${halfGap.toLocaleString('en-IN')} more repeat customers from ${data.brand_labels[loBrand]} alone.`
+        );
+      }
+    }
+  }
+
+  if (area === 'all') {
+    const perArea = AREA_KEYS.map((a) => [a, m3PctAndCohort(data, brand, a, ALL_SCORES)]);
+    const qualifying = perArea.filter(([, v]) => v.pct !== null && v.n >= MIN_COHORT_FOR_INSIGHT);
+    if (qualifying.length >= 2) {
+      const totalN = qualifying.reduce((s, [, v]) => s + v.n, 0);
+      const biggest = qualifying.reduce((a, b) => (a[1].n > b[1].n ? a : b));
+      const weakest = qualifying.reduce((a, b) => (a[1].pct < b[1].pct ? a : b));
+      const [biggestArea, biggestStat] = biggest;
+      const share = totalN ? Math.round((biggestStat.n / totalN) * 100) : 0;
+      if (biggestArea === weakest[0]) {
+        insights.push(
+          `${data.area_labels[biggestArea]} is both the largest top-rated-area cohort ` +
+          `(${biggestStat.n.toLocaleString('en-IN')}, ${share}% of the tracked cohort) and its weakest M3 ` +
+          `retention (${biggestStat.pct}%) - the single highest-leverage place to fix, since any ` +
+          `improvement compounds across the most customers.`
+        );
+      } else {
+        const [weakestArea, weakestStat] = weakest;
+        insights.push(
+          `${data.area_labels[biggestArea]} draws the most respondents (${biggestStat.n.toLocaleString('en-IN')}, ` +
+          `${share}% of the tracked cohort) at ${biggestStat.pct}% M3 retention - the highest-leverage area to ` +
+          `improve, since even a small lift compounds across the most customers. ${data.area_labels[weakestArea]} ` +
+          `lags furthest behind at ${weakestStat.pct}%, but on a much smaller base (${weakestStat.n.toLocaleString('en-IN')}) ` +
+          `- worth investigating, but a lower-priority fix today.`
+        );
+      }
+    }
+  }
+
+  if (insights.length === 0) {
+    insights.push(`${prefix}Not enough volume in this cut for a reliable M3 read (needs at least ${MIN_COHORT_FOR_INSIGHT} cohort phones).`);
+  }
+  return insights;
+}
 
 // Display order top-to-bottom, both for the group rows and the child rows within each group.
 const GROUPS = [
@@ -134,6 +236,8 @@ export default function RepeatRateTab() {
       .catch((e) => setError(e.message || 'Could not load the repeat-rate analysis.'));
   }, []);
 
+  const insights = useMemo(() => (data ? computeInsights(data, brand, area) : []), [data, brand, area]);
+
   if (error) return <p className="og-note og-error">{error}</p>;
   if (!data) return <p className="og-note">Loading...</p>;
 
@@ -203,19 +307,19 @@ export default function RepeatRateTab() {
       </div>
       <p className="og-note">KPI tiles above are org-wide (not brand/area filtered); the table below is.</p>
 
-      {data.insights && data.insights.length > 0 && (
-        <section className="rr-insights">
-          <h3 className="og-section-title">Insights</h3>
-          <ul>
-            {data.insights.map((text, i) => <li key={i}>{text}</li>)}
-          </ul>
-        </section>
-      )}
-
       <section>
         <h3 className="og-section-title">Repeat-purchase retention, by NPS score</h3>
         <RepeatHeatmap data={data} brand={brand} area={area} />
       </section>
+
+      {insights.length > 0 && (
+        <section className="rr-insights">
+          <h3 className="og-section-title">Insights</h3>
+          <ul>
+            {insights.map((text, i) => <li key={i}>{text}</li>)}
+          </ul>
+        </section>
+      )}
     </div>
   );
 }
