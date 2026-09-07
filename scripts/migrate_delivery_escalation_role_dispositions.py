@@ -130,14 +130,26 @@ def main():
                 print("  column role_scope: would add")
 
             # No FK privilege concern here (role_scope is a plain label, not a row in another
-            # table - see the module docstring), so unlike team_id's index this one is attempted
-            # unconditionally rather than swallowing a 1142.
+            # table - see the module docstring) - but CREATE INDEX needs its own INDEX grant the
+            # same way migrate_team_dispositions.py/migrate_nps_calling_lead_type.py's own index
+            # steps do, and this runner's grants have never included it (confirmed live: a bare
+            # CREATE INDEX here raised the same 1142 those two already guard against). Swallowed
+            # the same way - the column is what api/ actually needs, an index is pure lookup speed
+            # on a table of tens of rows.
             if role_scope_exists:
                 if _index_exists(cur, INDEX_NAME):
                     print(f"  index {INDEX_NAME}: already present")
                 elif args.apply:
-                    cur.execute(f"CREATE INDEX {INDEX_NAME} ON {TABLE} (process_key, role_scope, sort_order)")
-                    print(f"  index {INDEX_NAME}: added")
+                    try:
+                        cur.execute(f"CREATE INDEX {INDEX_NAME} ON {TABLE} (process_key, role_scope, sort_order)")
+                        print(f"  index {INDEX_NAME}: added")
+                    except pymysql.err.OperationalError as e:
+                        if e.args[0] != 1142:
+                            raise
+                        print(f"  index {INDEX_NAME}: SKIPPED - {e.args[1]}")
+                        print("      absence is not measurable - every query still returns the same answer.")
+                        print(f"      To add it later, have a DBA run  GRANT INDEX ON `{SCHEMA}`.* TO `<user>`@`%`;")
+                        print("      then re-run this script - it picks the step up on its own, nothing else to redo.")
                 else:
                     print(f"  index {INDEX_NAME}: would add")
             else:
