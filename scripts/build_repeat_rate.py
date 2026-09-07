@@ -107,8 +107,15 @@ def main():
 
     print("Aggregating cohorts...", file=sys.stderr)
     agg = defaultdict(lambda: [0] * 7)
+    # Every NPS response counts here regardless of whether the phone ever ordered - this is
+    # "how many people gave this score", separate from agg's M0 ("...and also ordered that
+    # same month"), which is a filtered subset, not the total.
+    totals = defaultdict(int)
     examples = []
     for r in responses:
+        totals[("all", r["score"])] += 1
+        if r["area"]:
+            totals[(r["area"], r["score"])] += 1
         months = order_months.get(r["phone"])
         if not months:
             continue
@@ -151,6 +158,7 @@ def main():
         "areas": ["all", "delivery", "cs", "product", "website"],
         "area_labels": AREA_LABEL,
         "scores": SCORES,
+        "totals": {f"{area}|{score}": count for (area, score), count in totals.items()},
         "agg": {f"{area}|{score}": counts for (area, score), counts in agg.items()},
         "examples": examples,
     }

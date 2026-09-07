@@ -20,7 +20,11 @@ function fmtPct(v) {
 
 function RepeatHeatmap({ data, area }) {
   const rows = useMemo(
-    () => data.scores.map((score) => ({ score, m: data.agg[`${area}|${score}`] || [0, 0, 0, 0, 0, 0, 0] })),
+    () => data.scores.map((score) => ({
+      score,
+      total: (data.totals && data.totals[`${area}|${score}`]) || 0,
+      m: data.agg[`${area}|${score}`] || [0, 0, 0, 0, 0, 0, 0],
+    })),
     [data, area]
   );
   const max = Math.max(1, ...rows.flatMap((r) => r.m));
@@ -31,6 +35,7 @@ function RepeatHeatmap({ data, area }) {
         <thead>
           <tr>
             <th>NPS score</th>
+            <th>Total responses</th>
             <th>M0</th><th>M1</th><th>M2</th><th>M3</th><th>M4</th><th>M5</th><th>M6</th>
             <th>Cohort</th>
           </tr>
@@ -44,6 +49,7 @@ function RepeatHeatmap({ data, area }) {
                   <span className={`rr-score-pill ${cat.className}`}>{r.score}</span>
                   <span className="rr-cat-tag">{cat.label}</span>
                 </td>
+                <td className="rr-total">{r.total}</td>
                 {r.m.map((v, i) => {
                   const t = v / max;
                   const style = v === 0 ? {} : {
@@ -126,7 +132,10 @@ export default function RepeatRateTab() {
         <p>
           For each NPS score a respondent gave, how many of those phones kept placing orders
           in the months after &mdash; matched by customer_phone against Item_level_data.
-          M4&ndash;M6 undercount for recent cohorts that haven&apos;t reached that horizon yet.
+          &ldquo;Total responses&rdquo; is everyone who gave that score; &ldquo;Cohort&rdquo;/M0
+          narrows to the ones who also had an order that same month &mdash; M1-M6 track only
+          that narrower group. M4&ndash;M6 undercount for recent cohorts that haven&apos;t
+          reached that horizon yet.
         </p>
       </header>
 

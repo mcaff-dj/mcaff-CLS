@@ -886,6 +886,7 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
 .rr-heatmap td.rr-cell, .rr-heatmap th { text-align: center; }
 .rr-cell { font-weight: 600; border-radius: 4px; }
 .rr-cohort { font-weight: 700; color: var(--text-primary) !important; }
+.rr-total { color: var(--text-primary) !important; }
 .rr-score-pill {
   display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px;
   border-radius: 6px; font-size: 12px; font-weight: 700; color: #fff; margin-right: 6px;
