@@ -75,16 +75,59 @@ async function getPool() {
 // query, resolved to { rows, insertId, affectedRows }. `rows` is only ever populated
 // for SELECTs - mysql2 returns a ResultSetHeader (not an array) for INSERT/UPDATE/DELETE,
 // which is where insertId/affectedRows come from instead of Postgres's RETURNING.
-async function sql(strings, ...values) {
+// Splits a sql`` call into prepared-statement text plus its bound parameters. A raw() marker
+// is spliced into the SQL TEXT and consumes no parameter slot; every other value - null and
+// undefined included - stays bound, exactly as before raw() existed. Extracted from sql()
+// (its only production caller) purely so db.sqlLimit.test.js can assert that split without a
+// database: getting the parameter ORDER wrong here would silently misbind every query in this
+// file rather than fail loudly.
+function buildSqlText(strings, values) {
   let text = '';
+  const params = [];
   strings.forEach((s, i) => {
     text += s;
-    if (i < values.length) text += '?';
+    if (i >= values.length) return;
+    if (values[i] && typeof values[i] === 'object' && typeof values[i].__raw === 'string') {
+      text += values[i].__raw;
+      return;
+    }
+    text += '?';
+    params.push(values[i]);
   });
+  return { text, params };
+}
+
+async function sql(strings, ...values) {
+  const { text, params } = buildSqlText(strings, values);
   const p = await getPool();
-  const [result] = await p.execute(text, values);
+  const [result] = await p.execute(text, params);
   const rows = Array.isArray(result) ? result : [];
   return { rows, insertId: result.insertId, affectedRows: result.affectedRows };
+}
+
+// LIMIT cannot be a bound placeholder. mysql2 3.23.1 against this MySQL server rejects
+// `LIMIT ?` outright with ER_WRONG_ARGUMENTS ("Incorrect arguments to mysqld_stmt_execute") -
+// the same version-dependent hazard getRefundExportRows already documents further down, which
+// is why that function interpolates its own limit instead of binding it. Reproduced against
+// PEP_CLS on 2026-09-08: the identical query returns 20 rows with the limit inlined and errors
+// with it bound.
+//
+// This was the whole NPS-Calling outage: all four detractor pool queries bound their LIMIT, so
+// peekDeliveryDetractorCandidates/peekProductDetractorCandidates threw on every claim attempt
+// (swallowed by each auto-assign trigger's own console.error) and getUnassignedDetractorLeads
+// threw on every Next-to-Assign load (rendered by the client as "nothing waiting") - while
+// thousands of unclaimed Detractors sat in nps_delivery/nps_product the whole time. No other
+// query in this file binds a LIMIT.
+//
+// Splicing a value into SQL text is the one place a non-integer would become injectable, so
+// every raw() limit goes through safeLimit first rather than trusting the caller. Out-of-range
+// or non-numeric input falls back to `fallback` instead of throwing: a preview or a peek is
+// better served a sane page than a 500.
+function raw(text) { return { __raw: String(text) }; }
+function safeLimit(value, fallback) {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isInteger(n) || n < 1) return fallback;
+  return Math.min(n, 1000);
 }
 
 let schemaReady = false;
@@ -1941,7 +1984,7 @@ async function peekDeliveryDetractorCandidates({ email = null, limit = 1 } = {})
       AND (${brandFilter} = '' OR d.brand = ${brandFilter})
       AND STR_TO_DATE(d.submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
     ORDER BY TO_DAYS(STR_TO_DATE(d.submitted_date, '%d/%m/%Y')) * ${sortDirection} ASC
-    LIMIT ${limit}
+    LIMIT ${raw(safeLimit(limit, 1))}
   `;
   return rows;
 }
@@ -2014,7 +2057,7 @@ async function peekProductDetractorCandidates({ email = null, limit = 1 } = {}) 
     GROUP BY p.response_id
     HAVING MIN(p.nps_category) = 'Detractor'
     ORDER BY TO_DAYS(STR_TO_DATE(MIN(p.submitted_date), '%d/%m/%Y')) * ${sortDirection} ASC
-    LIMIT ${limit}
+    LIMIT ${raw(safeLimit(limit, 1))}
   `;
   return rows;
 }
@@ -2199,7 +2242,7 @@ async function getUnassignedDetractorLeads(limit = 20) {
     WHERE d.nps_category = 'Detractor' AND c.response_id IS NULL
       AND STR_TO_DATE(d.submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
     ORDER BY STR_TO_DATE(d.submitted_date, '%d/%m/%Y') ASC
-    LIMIT ${limit}
+    LIMIT ${raw(safeLimit(limit, 20))}
   `;
   const { rows: productRows } = await sql`
     SELECT p.response_id, MIN(p.brand) AS brand, MIN(p.channel_order_id) AS channel_order_id, MIN(p.customer_name) AS customer_name,
@@ -2212,7 +2255,7 @@ async function getUnassignedDetractorLeads(limit = 20) {
     GROUP BY p.response_id
     HAVING MIN(p.nps_category) = 'Detractor'
     ORDER BY STR_TO_DATE(MIN(p.submitted_date), '%d/%m/%Y') ASC
-    LIMIT ${limit}
+    LIMIT ${raw(safeLimit(limit, 20))}
   `;
   // Same convention this function already used for its own single-pool query: submitted_date is
   // DD/MM/YYYY text, so a plain string sort is wrong (see parseDdMmYyyy in ./detractorMerge for
@@ -2224,7 +2267,7 @@ async function getUnassignedDetractorLeads(limit = 20) {
     ...productRows.map((r) => ({ ...r, lead_type: 'product' })),
   ];
   tagged.sort((a, b) => (parseDdMmYyyy(a.submitted_date) ?? Infinity) - (parseDdMmYyyy(b.submitted_date) ?? Infinity));
-  return tagged.slice(0, limit);
+  return tagged.slice(0, safeLimit(limit, 20));
 }
 
 // Records the outcome of a call against the live cycle getNextDetractorLead opened. Ownership +
@@ -5612,7 +5655,7 @@ module.exports = {
   getNdrAgentAssignmentConfig,
   getDetractorAgentQuota, getDetractorAgentAvailability, getDetractorLoadByAgent, getDetractorQuotaAndLoad,
   getNextDetractorLead, getUnassignedDetractorLeads, disposeDetractorLead, getDetractorTicketsForAgent, getAllDetractorTickets,
-  assignDetractorLeadsToAgent, topUpDetractorAgent,
+  assignDetractorLeadsToAgent, topUpDetractorAgent, safeLimit, raw, buildSqlText,
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,

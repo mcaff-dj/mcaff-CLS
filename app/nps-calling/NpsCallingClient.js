@@ -406,14 +406,29 @@ export default function NpsCallingClient() {
     }
   };
 
+  // A FAILED pool read must never render as "nothing waiting" - the two are opposite problems
+  // (a broken query/permission to fix now, vs. a genuinely empty pool to wait out) and this tab
+  // used to show the identical empty-state line for both, which is exactly what hid a real
+  // server error behind a plausible-looking zero while thousands of unclaimed leads sat in
+  // nps_delivery/nps_product. The error text comes from the endpoint itself
+  // (api/detractor/tickets.js), so whatever actually broke is on screen instead of in a log
+  // nobody is watching.
+  const [predictedError, setPredictedError] = useState('');
   useEffect(() => {
     if (tab !== 'predicted' || !canAdminTab || predictedLeads !== null) return;
     (async () => {
       try {
         const r = await fetch('/api/detractor/tickets?scope=unassigned');
         const d = await r.json().catch(() => ({}));
-        setPredictedLeads(r.ok ? (d.leads || []) : []);
+        if (!r.ok) {
+          setPredictedError(d.error || `Could not load the pool (HTTP ${r.status})`);
+          setPredictedLeads([]);
+          return;
+        }
+        setPredictedError('');
+        setPredictedLeads(d.leads || []);
       } catch (e) {
+        setPredictedError(e.message || 'Could not reach the server');
         setPredictedLeads([]);
       }
     })();
@@ -972,8 +987,18 @@ export default function NpsCallingClient() {
                       assigned yet.
                     </p>
                   </div>
-                  {predictedLeads === null && <p className="text-[12px] text-zinc-500">Loading…</p>}
-                  {predictedLeads && !predictedLeads.length && (
+                  {predictedLeads === null && !predictedError && <p className="text-[12px] text-zinc-500">Loading…</p>}
+                  {/* Distinct from the empty-state line below on purpose - see the fetch's own comment. */}
+                  {!!predictedError && (
+                    <div className="rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2">
+                      <p className="text-[12px] font-bold text-red-300">Could not read the unassigned pool</p>
+                      <p className="text-[12px] text-red-200/80 mt-0.5 break-words">{predictedError}</p>
+                      <p className="text-[11px] text-red-200/60 mt-1">
+                        This is a server error, not an empty pool - leads may well be waiting.
+                      </p>
+                    </div>
+                  )}
+                  {predictedLeads && !predictedLeads.length && !predictedError && (
                     <p className="text-[12px] text-zinc-500">No unassigned detractor leads waiting right now.</p>
                   )}
                   {predictedLeads && !!predictedLeads.length && (
