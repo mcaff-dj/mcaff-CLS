@@ -1,7 +1,7 @@
 // Pure-function tests for merging NPS-Calling's two detractor pools (nps_delivery,
 // nps_product) into one claim order. No DB, no network. Run: node api/_lib/detractorMerge.test.js
 const assert = require('assert');
-const { parseDdMmYyyy, pickOlderDetractorCandidate } = require('./detractorMerge');
+const { parseDdMmYyyy, pickOlderDetractorCandidate, poolAllowedByLeadTypeFilter } = require('./detractorMerge');
 
 // parseDdMmYyyy
 assert.strictEqual(parseDdMmYyyy('27/04/2026'), new Date(2026, 3, 27).getTime());
@@ -28,5 +28,16 @@ assert.strictEqual(pickOlderDetractorCandidate('01/01/2026', null, -1), 'deliver
 
 // Both pools empty: nothing to claim from either.
 assert.strictEqual(pickOlderDetractorCandidate(null, null), null);
+
+// poolAllowedByLeadTypeFilter: unset/'' means Both - every existing agent's unrestricted
+// behavior. A set filter allows only its own pool.
+assert.strictEqual(poolAllowedByLeadTypeFilter('delivery', ''), true);
+assert.strictEqual(poolAllowedByLeadTypeFilter('product', ''), true);
+assert.strictEqual(poolAllowedByLeadTypeFilter('delivery', null), true);
+assert.strictEqual(poolAllowedByLeadTypeFilter('product', undefined), true);
+assert.strictEqual(poolAllowedByLeadTypeFilter('delivery', 'delivery'), true);
+assert.strictEqual(poolAllowedByLeadTypeFilter('product', 'delivery'), false);
+assert.strictEqual(poolAllowedByLeadTypeFilter('product', 'product'), true);
+assert.strictEqual(poolAllowedByLeadTypeFilter('delivery', 'product'), false);
 
 console.log('detractorMerge.test.js: all assertions passed');

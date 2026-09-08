@@ -34,4 +34,11 @@ function pickOlderDetractorCandidate(deliverySubmittedDate, productSubmittedDate
   return (d - p) * sortDirection < 0 ? 'delivery' : 'product';
 }
 
-module.exports = { parseDdMmYyyy, pickOlderDetractorCandidate };
+// Whether `pool` ('delivery' or 'product') is claimable under an agent's
+// detractor_lead_type_filter ('' / null / undefined = Both, unrestricted - the pre-existing
+// behavior for every agent who never had this filter set).
+function poolAllowedByLeadTypeFilter(pool, leadTypeFilter) {
+  return !leadTypeFilter || leadTypeFilter === pool;
+}
+
+module.exports = { parseDdMmYyyy, pickOlderDetractorCandidate, poolAllowedByLeadTypeFilter };

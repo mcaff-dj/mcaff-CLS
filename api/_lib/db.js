@@ -6,7 +6,7 @@
 // configuration (which anyone able to view the function, not just invoke it, can read).
 const mysql = require('mysql2/promise');
 const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
-const { pickOlderDetractorCandidate, parseDdMmYyyy } = require('./detractorMerge');
+const { pickOlderDetractorCandidate, parseDdMmYyyy, poolAllowedByLeadTypeFilter } = require('./detractorMerge');
 
 const secretsClient = new SecretsManagerClient({});
 let pool = null;
@@ -557,6 +557,10 @@ async function bootstrapSchema() {
   // getNextDetractorLead - '' = no restriction. Values are nps_delivery.brand's own casing
   // ('Mcaffeine'/'Hyphen'), NOT ndr_brand_filter's ('mCaffeine') - the two tables disagree on
   // the 'c' in Mcaffeine, confirmed via information_schema/SELECT DISTINCT on each source.
+  // detractor_lead_type_filter: which of the two shared-quota pools (see the 2026-09-06 Product
+  // Leads spec) this agent may claim from - '' = Both (every pre-existing agent's unrestricted
+  // behavior), 'delivery' or 'product' restricts them to that pool only. Checked via
+  // poolAllowedByLeadTypeFilter in peekDeliveryDetractorCandidates/peekProductDetractorCandidates.
   await sql`
     CREATE TABLE IF NOT EXISTS calling_agent_process (
       email VARCHAR(320) NOT NULL,
@@ -572,6 +576,7 @@ async function bootstrapSchema() {
       ndr_payment_mode_filter VARCHAR(16),
       ndr_brand_filter VARCHAR(16),
       detractor_brand_filter VARCHAR(16),
+      detractor_lead_type_filter VARCHAR(16),
       -- team_id: which calling_teams row (if any) this agent belongs to within the process. This
       -- column already exists on the LIVE table via scripts/migrate_ndr_team_id.py, which is
       -- still the path for prod - IF NOT EXISTS makes this line a no-op there. It is added here so
@@ -1873,6 +1878,17 @@ async function _detractorBrandFilterFor(email) {
   return (rows[0] && rows[0].detractor_brand_filter) || '';
 }
 
+// Reads calling_agent_process.detractor_lead_type_filter - same "'' = unrestricted" convention
+// as _detractorBrandFilterFor above. '' for a preview/admin call with no agent behind it
+// (getUnassignedDetractorLeads doesn't scope by agent, so it never calls this).
+async function _detractorLeadTypeFilterFor(email) {
+  if (!email) return '';
+  const { rows } = await sql`
+    SELECT detractor_lead_type_filter FROM calling_agent_process WHERE email = ${email} AND process_key = 'detractor'
+  `;
+  return (rows[0] && rows[0].detractor_lead_type_filter) || '';
+}
+
 // Hands back the fields the agent needs to eventually copy into CLS_NPS_calling (the caller,
 // getNextDetractorLead, does that INSERT - see that table's own comment for why this is
 // copy-on-assign rather than a live join). nps_delivery is read-only here: this function never
@@ -1897,6 +1913,7 @@ async function _detractorBrandFilterFor(email) {
 // function respects, so it writes its own inline query instead).
 async function peekDeliveryDetractorCandidates({ email = null, limit = 1 } = {}) {
   await ensureSchema();
+  if (!poolAllowedByLeadTypeFilter('delivery', await _detractorLeadTypeFilterFor(email))) return [];
   const sortDirection = (await getCallingLeadOrder('detractor')) === 'newest' ? -1 : 1;
   const brandFilter = await _detractorBrandFilterFor(email);
   const { rows } = await sql`
@@ -1984,6 +2001,7 @@ async function getNextDetractorLead(email) {
 // fetches the rest only for the response_id that actually wins.
 async function peekProductDetractorCandidates({ email = null, limit = 1 } = {}) {
   await ensureSchema();
+  if (!poolAllowedByLeadTypeFilter('product', await _detractorLeadTypeFilterFor(email))) return [];
   const sortDirection = (await getCallingLeadOrder('detractor')) === 'newest' ? -1 : 1;
   const brandFilter = await _detractorBrandFilterFor(email);
   const { rows } = await sql`
@@ -3913,7 +3931,7 @@ async function getCallingProcessAgents(processKey, teamId) {
     sql`
       SELECT email, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons,
              reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter,
-             ndr_brand_filter, detractor_brand_filter, team_id, updated_at, updated_by
+             ndr_brand_filter, detractor_brand_filter, detractor_lead_type_filter, team_id, updated_at, updated_by
       FROM calling_agent_process WHERE process_key = ${processKey}
     `,
   ]);
@@ -3936,6 +3954,7 @@ async function getCallingProcessAgents(processKey, teamId) {
       ndrPaymentModeFilter: (s && s.ndr_payment_mode_filter) || '',
       ndrBrandFilter: (s && s.ndr_brand_filter) || '',
       detractorBrandFilter: (s && s.detractor_brand_filter) || '',
+      detractorLeadTypeFilter: (s && s.detractor_lead_type_filter) || '',
       // null means "no team", which for a team-scoped view means excluded from every real
       // team's roster - the INVERSE of the report_tab_permissions convention above (membership
       // query) where absence of a tab row means unrestricted/every-process. Two tables, two
@@ -3958,7 +3977,7 @@ async function getCallingProcessAgents(processKey, teamId) {
 
 // Upserts one agent's status and/or quota for one process. Either field may be omitted, so an
 // agent flipping their own status can't accidentally reset a quota an admin set.
-async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons, reassignPaymentMode, attemptCountFilter, ndrReasonFilter, ndrPaymentModeFilter, ndrBrandFilter, detractorBrandFilter, teamId } = {}, updatedBy) {
+async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons, reassignPaymentMode, attemptCountFilter, ndrReasonFilter, ndrPaymentModeFilter, ndrBrandFilter, detractorBrandFilter, detractorLeadTypeFilter, teamId } = {}, updatedBy) {
   await ensureSchema();
   const key = String(email || '').trim().toLowerCase();
   if (!processKey || !key) throw new Error('processKey and email are required');
@@ -4025,6 +4044,13 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
     throw new Error("detractorBrandFilter must be '', 'Mcaffeine', or 'Hyphen'");
   }
   const detractorBrandFilterText = detractorBrandFilter === undefined ? null : String(detractorBrandFilter || '').trim();
+  // Same fixed-value-set validation as detractorBrandFilter above - '' = Both (unrestricted,
+  // the pre-existing behavior), 'delivery'/'product' restricts this agent to that one pool.
+  if (detractorLeadTypeFilter !== undefined && detractorLeadTypeFilter !== '' &&
+      detractorLeadTypeFilter !== 'delivery' && detractorLeadTypeFilter !== 'product') {
+    throw new Error("detractorLeadTypeFilter must be '', 'delivery', or 'product'");
+  }
+  const detractorLeadTypeFilterText = detractorLeadTypeFilter === undefined ? null : String(detractorLeadTypeFilter || '').trim();
   // team_id needs a THIRD state that COALESCE(new, old) cannot express on its own: undefined =
   // leave the stored team alone (COALESCE would handle this fine), a number = assign that team
   // (COALESCE handles this too) - but null = explicitly UNASSIGN, and COALESCE(NULL, team_id)
@@ -4046,8 +4072,8 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
     if (!Number.isFinite(teamValue) || teamValue <= 0) throw new Error('teamId must be a positive whole number or null');
   }
   await sql`
-    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter, ndr_brand_filter, detractor_brand_filter, team_id, updated_at, updated_by)
-    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, ${reassignModeText || ''}, ${attemptFilterText || ''}, ${ndrReasonFilterText || ''}, ${ndrPaymentModeFilterText || ''}, ${ndrBrandFilterText || ''}, ${detractorBrandFilterText || ''}, ${touchTeam ? teamValue : null}, NOW(), ${updatedBy || null})
+    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter, ndr_brand_filter, detractor_brand_filter, detractor_lead_type_filter, team_id, updated_at, updated_by)
+    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, ${reassignModeText || ''}, ${attemptFilterText || ''}, ${ndrReasonFilterText || ''}, ${ndrPaymentModeFilterText || ''}, ${ndrBrandFilterText || ''}, ${detractorBrandFilterText || ''}, ${detractorLeadTypeFilterText || ''}, ${touchTeam ? teamValue : null}, NOW(), ${updatedBy || null})
     ON DUPLICATE KEY UPDATE
       status = COALESCE(${status || null}, status),
       max_quota = COALESCE(${quota}, max_quota),
@@ -4061,6 +4087,7 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
       ndr_payment_mode_filter = COALESCE(${ndrPaymentModeFilterText}, ndr_payment_mode_filter),
       ndr_brand_filter = COALESCE(${ndrBrandFilterText}, ndr_brand_filter),
       detractor_brand_filter = COALESCE(${detractorBrandFilterText}, detractor_brand_filter),
+      detractor_lead_type_filter = COALESCE(${detractorLeadTypeFilterText}, detractor_lead_type_filter),
       updated_at = NOW(),
       updated_by = ${updatedBy || null}
   `;

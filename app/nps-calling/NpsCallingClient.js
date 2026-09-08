@@ -1000,6 +1000,7 @@ export default function NpsCallingClient() {
                             <th className="py-3 px-4 text-center font-medium">Connect %</th>
                             <th className="py-3 px-4 text-left font-medium">Quota</th>
                             <th className="py-3 px-4 text-left font-medium" title="Brand restriction for lead assignment - All Brands means no restriction">Brand</th>
+                            <th className="py-3 px-4 text-left font-medium" title="Which pool this agent is auto-assigned from - Both means the shared mixed-pool default">Process</th>
                             <th className="py-3 px-4 text-center font-medium" title="Can manage this process's roster and calling hours - nothing else">Process admin</th>
                           </tr></thead>
                           <tbody className="divide-y divide-zinc-800/50">
@@ -1051,6 +1052,17 @@ export default function NpsCallingClient() {
                                       { value: '', label: 'All Brands' },
                                       { value: 'Mcaffeine', label: 'Mcaffeine' },
                                       { value: 'Hyphen', label: 'Hyphen' },
+                                    ]}
+                                  />
+                                </td>
+                                <td className="py-3 px-4">
+                                  <CustomSelect
+                                    value={a.detractorLeadTypeFilter || ''}
+                                    onChange={(val) => saveProcessAgent(a.email, { detractorLeadTypeFilter: val })}
+                                    options={[
+                                      { value: '', label: 'Both' },
+                                      { value: 'delivery', label: 'Delivery NPS' },
+                                      { value: 'product', label: 'Product NPS' },
                                     ]}
                                   />
                                 </td>
