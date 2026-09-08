@@ -248,8 +248,14 @@ export function useCallingSession(processKey, { getPendingBox, getDateBounds } =
     const body = { status };
     if (typeof opts.pendingBox === 'number') body.pendingBox = opts.pendingBox;
     if (opts.email) { body.email = opts.email; body.name = opts.name; }
+    // Which process this tab is on. Only NPS-Calling ('detractor') acts on it server-side, and
+    // only for a SELF report (no opts.email): that process has no cron/Lambda assignment sweep,
+    // so the 2-minute heartbeat below is the only recurring chance to notice an Online agent
+    // sitting under quota and top them up (see handlePresence in api/auth/[action].js). Every
+    // other process ignores it and keeps behaving exactly as before.
+    if (processKey) body.processKey = processKey;
     postJsonWithRetry('/api/auth/presence', body);
-  }, []);
+  }, [processKey]);
 
   // Combined self-status write: both halves have to be written, or assign_leads.py won't agree
   // with what the UI shows - agent_presence ("at their desk", global) and calling_agent_process

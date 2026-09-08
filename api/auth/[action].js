@@ -3,12 +3,22 @@
 // us which logical route was hit; URLs are unchanged.
 const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent, isCallingProcessAdmin, resolveCallerTeam, getDeliveryEscalationUserRoleByEmail,
-  getDetractorQuotaAndLoad, assignDetractorLeadsToAgent } = require('../_lib/db');
+  topUpDetractorAgent } = require('../_lib/db');
 const { teamScopeFor } = require('../_lib/callingTeams');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
 
 const PRESENCE_STATUSES = new Set(['Online', 'Busy', 'OnCall', 'Offline']);
+
+// The 'calling' card + 'detractor' tab gate shared by every NPS-Calling auto-assign trigger in
+// this file (same two checks, same absence semantics, as api/detractor/lead-assignment.js's
+// checkAccess). Without it, any authenticated session - any card - could reach a branch that
+// assigns real leads to itself.
+function hasDetractorAccess(session) {
+  const callingTabs = session.tabPerms && session.tabPerms.calling;
+  return (session.perms || []).includes('calling')
+    && !(Array.isArray(callingTabs) && callingTabs.length && !callingTabs.includes('detractor'));
+}
 const GH_REPO = 'mcaff-dj/mcaff-CLS';
 const RTO_ASSIGN_LAMBDA = 'mcaff-cls-assign-leads';
 // Per-process assign target, for the /processPresence path below. rto moved to AWS Lambda
@@ -342,6 +352,27 @@ async function handlePresence(req, res) {
     targetName = body.name || targetEmail;
   }
   await upsertAgentPresence(targetEmail, targetName, body.status);
+  // Heartbeat top-up, NPS-Calling only. This POST repeats every 2 minutes from the agent's own
+  // tab (see useCallingSession.js's heartbeat), and it is the only recurring server contact this
+  // process has - unlike RTO/NDR it has no cron/Lambda sweep to re-check who is short of leads.
+  // Topping up here is what makes an Online agent's queue self-heal: rows that land in
+  // nps_delivery/nps_product after they went Online reach them within one heartbeat instead of
+  // never (see topUpDetractorAgent's own comment for the dead end this closes).
+  //
+  // Self only - deliberately NOT the admin body.email path, whose target has their own tab doing
+  // their own heartbeat, and whose admin-initiated status change is already topped up by
+  // /api/admin/calling-agents. Gated on the same card+tab permission as handleProcessPresence's
+  // going-Online fill, and AWAITED for the same reason: Lambda can freeze this container the
+  // moment the response is sent, silently truncating un-awaited work. Wrapped so a failure here
+  // never breaks the heartbeat itself - a missed top-up just retries on the next one.
+  if (body.processKey === 'detractor' && body.status === 'Online'
+      && !(session.isAdmin && body.email) && hasDetractorAccess(session)) {
+    try {
+      await topUpDetractorAgent(session.email);
+    } catch (e) {
+      console.error('handlePresence: detractor heartbeat top-up failed:', e.message || e);
+    }
+  }
   if (body.status === 'Online' && body.pendingBox === 0) {
     triggerImmediateLambdaAssignment(RTO_ASSIGN_LAMBDA).catch(() => {});
   }
@@ -568,13 +599,9 @@ async function handleProcessPresence(req, res) {
     // checkAccess used to require (see api/detractor/lead-assignment.js's checkAccess) - without
     // this, any authenticated session (any card) could reach this branch and have real leads
     // assigned to it.
-    const callingTabs = session.tabPerms && session.tabPerms.calling;
-    const hasDetractorAccess = (session.perms || []).includes('calling')
-      && !(Array.isArray(callingTabs) && callingTabs.length && !callingTabs.includes('detractor'));
-    if (hasDetractorAccess) {
+    if (hasDetractorAccess(session)) {
       try {
-        const { quota, load } = await getDetractorQuotaAndLoad(session.email);
-        await assignDetractorLeadsToAgent(session.email, Math.max(0, quota - load));
+        await topUpDetractorAgent(session.email);
       } catch (e) {
         console.error('handleProcessPresence: detractor auto-fill failed:', e.message || e);
       }

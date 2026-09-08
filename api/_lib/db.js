@@ -2153,6 +2153,38 @@ async function assignDetractorLeadsToAgent(email, maxCount, claimFn = getNextDet
   return claimed;
 }
 
+// The single "fill this agent's queue up to their quota, if they are actually available right
+// now" definition every NPS-Calling auto-assign trigger goes through: the agent's own
+// going-Online POST (handleProcessPresence), their 2-minute presence heartbeat (handlePresence),
+// and an admin flipping their roster row to Online (handleCallingAgents).
+//
+// Before this existed only the FIRST of those three assigned anything, and that asymmetry was
+// the bug: the roster's status control routes through the admin route for anyone but the caller
+// themselves (see useCallingSession.js's setStatusForAgent), which wrote status and nothing
+// else - so an agent set Online by an admin sat at zero leads. With zero leads there is also no
+// way back, because the only other trigger is the post-dispose self-refill, which needs a lead
+// to dispose in the first place. Same dead end for an agent who was already Online when fresh
+// rows landed in nps_delivery/nps_product: this process has no cron/Lambda sweep like RTO/NDR,
+// so nothing re-checked them until they toggled Offline and back.
+//
+// Re-checks availability and quota at call time rather than trusting the caller's own idea of
+// either - the heartbeat path fires every 2 minutes, and the agent may have gone Offline or had
+// their quota lowered in between. Returns [] (never throws for these) for an unavailable or
+// already-full agent, so every caller can treat it as a best-effort top-up.
+//
+// deps exists only for db.detractorAssign.test.js - same injectable-seam reasoning as claimFn
+// above, so the guard order can be verified without a database.
+async function topUpDetractorAgent(email, deps = {}) {
+  const availabilityFn = deps.availabilityFn || getDetractorAgentAvailability;
+  const quotaLoadFn = deps.quotaLoadFn || getDetractorQuotaAndLoad;
+  const assignFn = deps.assignFn || assignDetractorLeadsToAgent;
+  if (!email) return [];
+  if ((await availabilityFn(email)) !== 'Online') return [];
+  const { quota, load } = await quotaLoadFn(email);
+  if (load >= quota) return [];
+  return assignFn(email, quota - load);
+}
+
 // Read-only peek at what getNextDetractorLead would hand out next, in the same oldest-first
 // order - no INSERT, so it never claims anything. Backs the "Next to Assign" admin tab's preview
 // of the unassigned pool (NPS has no batch assigner like RTO/NDR's assign_leads.py to preview
@@ -5580,7 +5612,7 @@ module.exports = {
   getNdrAgentAssignmentConfig,
   getDetractorAgentQuota, getDetractorAgentAvailability, getDetractorLoadByAgent, getDetractorQuotaAndLoad,
   getNextDetractorLead, getUnassignedDetractorLeads, disposeDetractorLead, getDetractorTicketsForAgent, getAllDetractorTickets,
-  assignDetractorLeadsToAgent,
+  assignDetractorLeadsToAgent, topUpDetractorAgent,
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,

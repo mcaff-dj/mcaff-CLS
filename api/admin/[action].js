@@ -85,7 +85,7 @@ const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser
   getAllDeliveryEscalationQueryCategoryAccess, setDeliveryEscalationQueryCategoryAccess,
   getDeliveryEscalationQueryCategoryOptions,
   getAllDeliveryEscalationUserRoles, setDeliveryEscalationUserRole, getDeliveryEscalationUserRoleByEmail,
-  assignDetractorLeadsToAgent, getDetractorQuotaAndLoad } = require('../_lib/db');
+  assignDetractorLeadsToAgent, getDetractorQuotaAndLoad, topUpDetractorAgent } = require('../_lib/db');
 const { teamScopeFor, coerceTeamId } = require('../_lib/callingTeams');
 const { dispositionTeamFor } = require('../_lib/dispositionTrees');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
@@ -575,6 +575,20 @@ async function handleCallingAgents(req, res, session) {
       );
       await logEvent(session.uid, session.email, 'calling', 'process-agent',
         `${body.processKey}: ${body.email} status=${body.status ?? '-'} quota=${body.maxQuota ?? '-'}`, ip);
+      // An admin flipping a roster row to Online has to assign leads too, exactly as the agent's
+      // own going-Online POST does (api/auth/[action].js's handleProcessPresence). The roster
+      // status control routes HERE for anyone but the caller themselves (see
+      // useCallingSession.js's setStatusForAgent), and this branch used to write status and
+      // nothing else - leaving the agent Online with an empty queue and, since the only other
+      // trigger is the post-dispose self-refill, no lead to dispose that could ever refill it.
+      // Best-effort: a failed top-up must not fail the status write that already committed.
+      if (body.processKey === 'detractor' && body.status === 'Online') {
+        try {
+          await topUpDetractorAgent(String(body.email || '').trim().toLowerCase());
+        } catch (e) {
+          console.error('handleCallingAgents: detractor auto-fill failed:', e.message || e);
+        }
+      }
       // setCallingProcessAgent itself returns the FULL, unfiltered roster (it has no idea who's
       // asking) - forwarding that verbatim would mean a write that changed one agent answers
       // with every agent on the process, including the other team's. Re-scope the response the

@@ -1,7 +1,7 @@
 // Self-check for assignDetractorLeadsToAgent's loop control (db.js) - pure once claimFn is
 // stubbed out, no database involved. Run with `node api/_lib/db.detractorAssign.test.js`.
 const assert = require('assert');
-const { assignDetractorLeadsToAgent } = require('./db');
+const { assignDetractorLeadsToAgent, topUpDetractorAgent } = require('./db');
 
 (async () => {
   // Stops exactly at maxCount when the pool never runs out.
@@ -58,6 +58,52 @@ const { assignDetractorLeadsToAgent } = require('./db');
       () => assignDetractorLeadsToAgent('a@x.com', 2, claimFn),
       /connection reset/,
     );
+  }
+
+  // topUpDetractorAgent's guard order - the shared entry point all three auto-assign triggers
+  // (going Online, presence heartbeat, admin roster toggle) now call.
+  {
+    // Offline for the process: never even looks at quota, never assigns.
+    let quotaCalls = 0, assignCalls = 0;
+    const claimed = await topUpDetractorAgent('a@x.com', {
+      availabilityFn: async () => 'Offline',
+      quotaLoadFn: async () => { quotaCalls += 1; return { quota: 15, load: 0 }; },
+      assignFn: async () => { assignCalls += 1; return [{ response_id: 'L1' }]; },
+    });
+    assert.deepStrictEqual(claimed, []);
+    assert.strictEqual(quotaCalls, 0, 'must short-circuit before the quota lookup');
+    assert.strictEqual(assignCalls, 0);
+  }
+  {
+    // Online but already at quota: no assignment, and not a negative count.
+    let assignCalls = 0;
+    const claimed = await topUpDetractorAgent('a@x.com', {
+      availabilityFn: async () => 'Online',
+      quotaLoadFn: async () => ({ quota: 10, load: 12 }),
+      assignFn: async () => { assignCalls += 1; return []; },
+    });
+    assert.deepStrictEqual(claimed, []);
+    assert.strictEqual(assignCalls, 0, 'over-quota must not reach assignDetractorLeadsToAgent');
+  }
+  {
+    // Online and short: asks for exactly the shortfall, not the whole quota.
+    let asked = null;
+    const claimed = await topUpDetractorAgent('a@x.com', {
+      availabilityFn: async () => 'Online',
+      quotaLoadFn: async () => ({ quota: 15, load: 11 }),
+      assignFn: async (email, count) => { asked = { email, count }; return [{ response_id: 'L1' }]; },
+    });
+    assert.deepStrictEqual(asked, { email: 'a@x.com', count: 4 });
+    assert.strictEqual(claimed.length, 1);
+  }
+  {
+    // No email (an admin row with nothing behind it): no lookups at all.
+    let availabilityCalls = 0;
+    const claimed = await topUpDetractorAgent('', {
+      availabilityFn: async () => { availabilityCalls += 1; return 'Online'; },
+    });
+    assert.deepStrictEqual(claimed, []);
+    assert.strictEqual(availabilityCalls, 0);
   }
 
   console.log('db.detractorAssign.test.js: all assertions passed');
