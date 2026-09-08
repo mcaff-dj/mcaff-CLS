@@ -25,6 +25,9 @@ def main():
     parser.add_argument("--refresh-repeat-rate", action="store_true",
                         help="Rebuild data/repeat_rate.json even outside the --refresh-nps cadence "
                              "(e.g. a manual admin-triggered run) - see build_repeat_rate.py.")
+    parser.add_argument("--refresh-csat-repeat-rate", action="store_true",
+                        help="Rebuild data/csat_repeat_rate.json even outside the --refresh-nps "
+                             "cadence - see build_csat_repeat_rate.py.")
     args = parser.parse_args()
 
     # The brands are fully independent - separate spreadsheets, separate MySQL tables,
@@ -76,6 +79,13 @@ def main():
     if args.refresh_nps or args.refresh_repeat_rate:
         print("=== Building repeat-rate analysis ===", flush=True)
         subprocess.run([sys.executable, "-u", str(HERE / "build_repeat_rate.py")], check=True)
+
+    # Independent of NPS (sourced from ticket CSAT, not nps_delivery) but the same batched
+    # Item_level_data cost profile, so bundled under the same once-daily cadence rather than
+    # given its own schedule.
+    if args.refresh_nps or args.refresh_csat_repeat_rate:
+        print("=== Building CSAT repeat-rate analysis ===", flush=True)
+        subprocess.run([sys.executable, "-u", str(HERE / "build_csat_repeat_rate.py")], check=True)
 
 
 if __name__ == "__main__":

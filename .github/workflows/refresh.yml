@@ -22,6 +22,10 @@ on:
         description: 'Also rebuild the Repeat Rate analysis tab (data/repeat_rate.json) - batched Item_level_data lookup, several minutes'
         type: boolean
         default: false
+      refresh_csat_repeat_rate:
+        description: 'Also rebuild the CSAT Repeat Rate tab (data/csat_repeat_rate.json) - batched Item_level_data lookup, several minutes'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -85,6 +89,7 @@ jobs:
           FULL_REFRESH: ${{ github.event.inputs.full_refresh }}
           # 'true' only when a manual run ticked refresh_repeat_rate - '' otherwise.
           REFRESH_REPEAT_RATE: ${{ github.event.inputs.refresh_repeat_rate }}
+          REFRESH_CSAT_REPEAT_RATE: ${{ github.event.inputs.refresh_csat_repeat_rate }}
           MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
           MYSQL_USER: ${{ secrets.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
@@ -133,9 +138,14 @@ jobs:
             echo "Manual trigger with refresh_repeat_rate - rebuilding data/repeat_rate.json."
             REPEAT_RATE="--refresh-repeat-rate"
           fi
+          CSAT_REPEAT_RATE=""
+          if [ "${REFRESH_CSAT_REPEAT_RATE:-}" = "true" ]; then
+            echo "Manual trigger with refresh_csat_repeat_rate - rebuilding data/csat_repeat_rate.json."
+            CSAT_REPEAT_RATE="--refresh-csat-repeat-rate"
+          fi
           # refresh.py runs both brands concurrently; -u keeps their interleaved per-stage
           # timing lines in real order in this log.
-          python -u ./scripts/refresh.py $QUICK $NPS $REPEAT_RATE
+          python -u ./scripts/refresh.py $QUICK $NPS $REPEAT_RATE $CSAT_REPEAT_RATE
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -219,6 +229,12 @@ jobs:
               --content-type "application/json; charset=utf-8" \
               --cache-control "no-cache, must-revalidate" --only-show-errors
           fi
+          # CSAT Repeat Rate tab (see build_csat_repeat_rate.py) - same once-a-day cadence.
+          if [ -f data/csat_repeat_rate.json ]; then
+            aws s3 cp data/csat_repeat_rate.json s3://mcaff-cls-reports/reports/csat_repeat_rate.json \
+              --content-type "application/json; charset=utf-8" \
+              --cache-control "no-cache, must-revalidate" --only-show-errors
+          fi
 
       - name: Invalidate CloudFront cache for updated reports
         # The S3 upload above doesn't bust CloudFront's edge cache on its own, so
@@ -235,7 +251,7 @@ jobs:
             exit 1
           fi
           aws cloudfront create-invalidation --distribution-id "$distId" \
-            --paths "/reports/mcaffeine.html" "/reports/hyphen.html" "/reports/trend_digest.json" "/reports/repeat_rate.json"
+            --paths "/reports/mcaffeine.html" "/reports/hyphen.html" "/reports/trend_digest.json" "/reports/repeat_rate.json" "/reports/csat_repeat_rate.json"
 
       - name: Commit & push if changed
         run: |

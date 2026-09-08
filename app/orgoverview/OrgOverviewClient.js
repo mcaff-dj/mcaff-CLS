@@ -3,13 +3,14 @@
 import { useState } from 'react';
 import OrgKycTrendsTab from './OrgKycTrendsTab';
 import RepeatRateTab from './RepeatRateTab';
+import CsatRepeatRateTab from './CsatRepeatRateTab';
 
-// Two tabs today - this is the same tab-shell pattern app/deepdive/DeepdiveClient.js uses
-// for its own multi-tab card, so a further org-wide view can be added here later (new TABS
-// entry + panel) without restructuring.
+// Same tab-shell pattern app/deepdive/DeepdiveClient.js uses for its own multi-tab card, so a
+// further org-wide view can be added here later (new TABS entry + panel) without restructuring.
 const TABS = [
   { key: 'kyctrends', label: 'Org_KYC_Trends' },
   { key: 'repeatrate', label: 'Repeat Rate analysis' },
+  { key: 'csatrepeatrate', label: 'CSAT Repeat rate' },
 ];
 
 export default function OrgOverviewClient() {
@@ -39,6 +40,9 @@ export default function OrgOverviewClient() {
         </div>
         <div className={'tab-panel' + (activeTab === 'repeatrate' ? ' active' : '')} id="panel-repeatrate">
           {activeTab === 'repeatrate' && <RepeatRateTab />}
+        </div>
+        <div className={'tab-panel' + (activeTab === 'csatrepeatrate' ? ' active' : '')} id="panel-csatrepeatrate">
+          {activeTab === 'csatrepeatrate' && <CsatRepeatRateTab />}
         </div>
       </div>
     </div>
