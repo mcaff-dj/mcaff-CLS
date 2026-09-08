@@ -703,10 +703,11 @@ export default function NpsCallingClient() {
     };
     const exportCsv = () => {
       const lines = [
-        ['Customer', 'Brand', 'Order ID', 'NPS Score', 'NPS Category', 'Agent', 'Submitted', 'Assigned',
+        ['Customer', 'Brand', 'Order ID', 'Type', 'NPS Score', 'NPS Category', 'Agent', 'Submitted', 'Assigned',
          'Disposed', 'Status', 'Disposition', 'Agent Remarks', 'Connected', 'Attempt', 'Affected Products'].join(','),
         ...filtered.map((t) => [
-          t.customer_name, t.brand, t.channel_order_id, t.nps_score, t.nps_category, t.agent_email,
+          t.customer_name, t.brand, t.channel_order_id, t.lead_type === 'product' ? 'Product' : 'Delivery',
+          t.nps_score, t.nps_category, t.agent_email,
           t.submitted_date, t.assigned_at ? new Date(t.assigned_at).toLocaleString() : '',
           t.disposed_at ? new Date(t.disposed_at).toLocaleString() : '',
           t.disposed_at ? 'Disposed' : 'Pending', t.disposition, t.agent_remarks, t.connected, t.attempt,
@@ -801,6 +802,7 @@ export default function NpsCallingClient() {
                   <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
                     <th className="py-2.5 px-4 text-left font-medium">Customer</th>
                     <th className="py-2.5 px-4 text-left font-medium">Order</th>
+                    <th className="py-2.5 px-4 text-left font-medium" title="Which detractor pool this lead was claimed from - nps_delivery or nps_product">Type</th>
                     <th className="py-2.5 px-4 text-left font-medium">NPS</th>
                     <th className="py-2.5 px-4 text-left font-medium">Sentiment</th>
                     <th className="py-2.5 px-4 text-left font-medium">Agent</th>
@@ -816,6 +818,13 @@ export default function NpsCallingClient() {
                       <tr key={t.response_id} className="hover:bg-zinc-900/40 transition-colors">
                         <td className="py-2.5 px-4 text-zinc-200">{t.customer_name || '—'}</td>
                         <td className="py-2.5 px-4 text-zinc-400">{[t.brand, t.channel_order_id].filter(Boolean).join(' · ') || '—'}</td>
+                        <td className="py-2.5 px-4">
+                          <span className={`px-2 py-0.5 rounded-md text-[11px] font-bold border ${
+                            t.lead_type === 'product' ? 'bg-violet-950/50 text-violet-300 border-violet-800/50' : 'bg-sky-950/50 text-sky-300 border-sky-800/50'
+                          }`}>
+                            {t.lead_type === 'product' ? 'Product' : 'Delivery'}
+                          </span>
+                        </td>
                         <td className="py-2.5 px-4 text-zinc-400">{t.nps_score ?? '—'} · {t.nps_category || '—'}</td>
                         <td className="py-2.5 px-4">
                           {hasValue(t.sentiment)
