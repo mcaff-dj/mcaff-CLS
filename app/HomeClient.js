@@ -425,6 +425,7 @@ export default function HomePage() {
         if (d.isAdmin) {
           document.getElementById('userRole').textContent = 'Administrator';
           document.getElementById('adminLink').style.display = 'inline';
+          document.getElementById('refreshBtn').style.display = 'inline-flex';
         }
 
         userCards = d.cards || [];
@@ -460,7 +461,7 @@ export default function HomePage() {
           <div className="logo-container">
             <h1 className="logo-title">CX Unified Dashboard</h1>
           </div>
-          <button type="button" className="refresh-btn" id="refreshBtn" onClick={triggerRefresh}>
+          <button type="button" className="refresh-btn" id="refreshBtn" style={{ display: 'none' }} onClick={triggerRefresh}>
             <span className="spin">&#8635;</span> Refresh Data
           </button>
           <div className="refresh-progress" id="refreshProgress"><div className="refresh-progress-bar"></div></div>

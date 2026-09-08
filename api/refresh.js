@@ -1,13 +1,15 @@
 // Vercel serverless function: POST /api/refresh
 //
-// Lets ANYONE viewing the deployed site trigger a data refresh, without needing
+// Lets an admin viewing the deployed site trigger a data refresh, without needing
 // access to the GitHub repo. It holds a GitHub token server-side (Vercel env var,
 // never sent to the browser) and calls GitHub's workflow_dispatch API on the
-// visitor's behalf.
+// admin's behalf.
 //
 // Required Vercel env var: GH_DISPATCH_TOKEN
 //   A GitHub fine-grained personal access token, scoped ONLY to this repo, with
 //   "Actions: Read and write" permission (no other scopes needed).
+
+const { getSession } = require('./_lib/session');
 
 const OWNER = 'mcaff-dj';
 const REPO = 'mcaff-CLS';
@@ -26,6 +28,12 @@ function ghHeaders(token) {
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).json({ status: 'error', message: 'Use POST' });
+    return;
+  }
+
+  const session = await getSession(req);
+  if (!session || !session.isAdmin) {
+    res.status(403).json({ status: 'error', message: 'Admin access required.' });
     return;
   }
 
