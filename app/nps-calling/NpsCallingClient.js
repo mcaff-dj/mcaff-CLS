@@ -331,6 +331,15 @@ export default function NpsCallingClient() {
   // count badge only counts disposed tickets, so showing Pending rows under it by default
   // contradicted both the label and the badge.
   const [allLeadsStatusFilter, setAllLeadsStatusFilter] = useState('DISPOSED');
+  // Disposed-date range for the All Leads (Disposed) tab's CSV export - blank means unbounded on
+  // that side. Only meaningful there (Fresh Leads has no disposed_at yet), gated the same way the
+  // status filter already is (showStatusFilter).
+  const [allLeadsDisposedFrom, setAllLeadsDisposedFrom] = useState('');
+  const [allLeadsDisposedTo, setAllLeadsDisposedTo] = useState('');
+  // Read-only "what did the agent write" detail for one disposed lead - separate from
+  // detailTkt/openDispose (the editable Dispose modal) since this never lets an admin change
+  // anything, just see it.
+  const [viewTicket, setViewTicket] = useState(null);
   // Next to Assign preview (admin/process-admin only) - fetched once on first visit to that tab,
   // not eagerly alongside allTickets, since it's a rarely-opened peek rather than core workflow.
   const [predictedLeads, setPredictedLeads] = useState(null);
@@ -370,6 +379,32 @@ export default function NpsCallingClient() {
     } catch (e) { /* Overview falls back to own tickets below - not worth a toast */ }
   }, []);
   useEffect(() => { if (canAdminTab) fetchAllTickets(); }, [canAdminTab, fetchAllTickets]);
+
+  // Manual stopgap for the going-Online auto-fill trigger - lets an admin/process admin fill
+  // one agent's queue on demand (fills to that agent's own quota minus current load, same
+  // default the real trigger uses) instead of waiting for the agent to toggle their own status.
+  const [assigningEmail, setAssigningEmail] = useState('');
+  const manualAssignNow = async (email) => {
+    setAssigningEmail(email);
+    try {
+      const r = await fetch('/api/admin/calling-assign-now', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ processKey: PROCESS_KEY, email }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        showToast(`⚠️ ${d.error || 'Could not assign leads'}`);
+        return;
+      }
+      showToast(d.claimed > 0 ? `✅ Assigned ${d.claimed} lead(s)` : 'Pool is empty for this agent right now - nothing to assign');
+      fetchAllTickets();
+    } catch (e) {
+      showToast(`⚠️ ${e.message || 'Could not assign leads'}`);
+    } finally {
+      setAssigningEmail('');
+    }
+  };
 
   useEffect(() => {
     if (tab !== 'predicted' || !canAdminTab || predictedLeads !== null) return;
@@ -645,10 +680,50 @@ export default function NpsCallingClient() {
         if (allLeadsStatusFilter === 'DISPOSED' && isUndisposed(t)) return false;
         if (allLeadsStatusFilter === 'PENDING' && !isUndisposed(t)) return false;
       }
+      // Disposed-date range only applies where disposed_at is meaningful (showStatusFilter -
+      // the All Leads tab); Fresh Leads' rows have no disposed_at yet, so this is a no-op there
+      // even if the state happened to be set from a prior tab visit.
+      if (showStatusFilter && (allLeadsDisposedFrom || allLeadsDisposedTo)) {
+        if (!t.disposed_at) return false;
+        const disposedDay = new Date(t.disposed_at).toISOString().slice(0, 10);
+        if (allLeadsDisposedFrom && disposedDay < allLeadsDisposedFrom) return false;
+        if (allLeadsDisposedTo && disposedDay > allLeadsDisposedTo) return false;
+      }
       if (!search) return true;
       return [t.customer_name, t.channel_order_id, t.agent_email, t.customer_phone]
         .filter(Boolean).some((v) => String(v).toLowerCase().includes(search));
     });
+
+    // Client-side only, same pattern as RTO Calling's CSV exports (RtoCrmClient.js) - no server
+    // round trip, exports exactly what's currently on screen (search/agent/status/date filters
+    // already applied to `filtered`).
+    const escapeCsv = (v) => {
+      const s = String(v ?? '');
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const exportCsv = () => {
+      const lines = [
+        ['Customer', 'Brand', 'Order ID', 'NPS Score', 'NPS Category', 'Agent', 'Submitted', 'Assigned',
+         'Disposed', 'Status', 'Disposition', 'Agent Remarks', 'Connected', 'Attempt', 'Affected Products'].join(','),
+        ...filtered.map((t) => [
+          t.customer_name, t.brand, t.channel_order_id, t.nps_score, t.nps_category, t.agent_email,
+          t.submitted_date, t.assigned_at ? new Date(t.assigned_at).toLocaleString() : '',
+          t.disposed_at ? new Date(t.disposed_at).toLocaleString() : '',
+          t.disposed_at ? 'Disposed' : 'Pending', t.disposition, t.agent_remarks, t.connected, t.attempt,
+          t.affected_products,
+        ].map(escapeCsv).join(',')),
+      ];
+      const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `nps-calling-leads-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    };
+
     return (
       <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden">
         <div className="flex items-center justify-between flex-wrap gap-3 p-4 pb-3">
@@ -685,6 +760,34 @@ export default function NpsCallingClient() {
                 ]}
               />
             )}
+            {showStatusFilter && (
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="date"
+                  value={allLeadsDisposedFrom}
+                  onChange={(e) => setAllLeadsDisposedFrom(e.target.value)}
+                  title="Disposed from"
+                  className="h-8 px-2 rounded-lg bg-zinc-900 border border-zinc-800 text-[12px] text-zinc-300 focus:outline-none focus:border-indigo-500"
+                />
+                <span className="text-zinc-600 text-[12px]">–</span>
+                <input
+                  type="date"
+                  value={allLeadsDisposedTo}
+                  onChange={(e) => setAllLeadsDisposedTo(e.target.value)}
+                  title="Disposed to"
+                  className="h-8 px-2 rounded-lg bg-zinc-900 border border-zinc-800 text-[12px] text-zinc-300 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={exportCsv}
+              disabled={!filtered.length}
+              title="Export the leads currently shown below to CSV"
+              className="h-8 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 text-[12px] font-bold transition-colors disabled:opacity-40"
+            >
+              ⬇ Export CSV
+            </button>
           </div>
         </div>
 
@@ -730,7 +833,16 @@ export default function NpsCallingClient() {
                         <td className="py-2.5 px-4 text-zinc-400 max-w-[220px] truncate" title={t.disposition || ''}>{t.disposition || '—'}</td>
                         <td className="py-2.5 px-4 text-center text-zinc-400">{t.connected || '—'}</td>
                         <td className="py-2.5 px-4 text-center">
-                          {!t.disposed_at && (
+                          {t.disposed_at ? (
+                            <button
+                              type="button"
+                              onClick={() => setViewTicket(t)}
+                              title="View what the agent recorded"
+                              className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors"
+                            >
+                              View
+                            </button>
+                          ) : (
                             <button
                               type="button"
                               onClick={() => openDispose(t)}
@@ -1002,6 +1114,7 @@ export default function NpsCallingClient() {
                             <th className="py-3 px-4 text-left font-medium" title="Brand restriction for lead assignment - All Brands means no restriction">Brand</th>
                             <th className="py-3 px-4 text-left font-medium" title="Which pool this agent is auto-assigned from - Both means the shared mixed-pool default">Process</th>
                             <th className="py-3 px-4 text-center font-medium" title="Can manage this process's roster and calling hours - nothing else">Process admin</th>
+                            <th className="py-3 px-4 text-center font-medium" title="Manually fill this agent's queue now instead of waiting for them to go Online">Assign</th>
                           </tr></thead>
                           <tbody className="divide-y divide-zinc-800/50">
                             {visibleAgentMetrics.map((a) => (
@@ -1079,6 +1192,17 @@ export default function NpsCallingClient() {
                                       title={sessionIsAdmin ? 'Let this person manage this process' : 'Only a full admin can change this'}
                                     />
                                   )}
+                                </td>
+                                <td className="py-3 px-4 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => manualAssignNow(a.email)}
+                                    disabled={assigningEmail === a.email}
+                                    title="Fill this agent's queue up to quota right now"
+                                    className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-40"
+                                  >
+                                    {assigningEmail === a.email ? 'Assigning…' : 'Assign Now'}
+                                  </button>
                                 </td>
                               </tr>
                             ))}
@@ -1170,6 +1294,56 @@ export default function NpsCallingClient() {
             >
               {dispSaving ? 'Saving…' : 'Save Disposition'}
             </button>
+          </div>
+        </Overlay>
+      )}
+
+      {viewTicket && (
+        <Overlay onClose={() => setViewTicket(null)}>
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 w-full max-w-xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-[15px] font-bold text-zinc-100 tracking-tight">
+                {viewTicket.customer_name || viewTicket.response_id}
+              </h3>
+              <button type="button" onClick={() => setViewTicket(null)}><XIcon className="text-zinc-500 hover:text-zinc-200" /></button>
+            </div>
+
+            <div className="max-h-52 overflow-y-auto custom-scroll bg-zinc-950/60 border border-zinc-800/80 rounded-lg p-3">
+              <TicketSurveyDetails t={viewTicket} />
+            </div>
+
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[12px]">
+              <p className="text-zinc-500">Agent <span className="text-zinc-200 font-mono">{viewTicket.agent_email || '—'}</span></p>
+              <p className="text-zinc-500">Connected <span className="text-zinc-200">{viewTicket.connected || '—'}</span></p>
+              <p className="text-zinc-500">Submitted <span className="text-zinc-200">{viewTicket.submitted_date || '—'}</span></p>
+              <p className="text-zinc-500">Attempt <span className="text-zinc-200">{viewTicket.attempt ?? '—'}</span></p>
+              <p className="text-zinc-500">Assigned <span className="text-zinc-200">{viewTicket.assigned_at ? new Date(viewTicket.assigned_at).toLocaleString() : '—'}</span></p>
+              <p className="text-zinc-500">Disposed <span className="text-zinc-200">{viewTicket.disposed_at ? new Date(viewTicket.disposed_at).toLocaleString() : '—'}</span></p>
+            </div>
+
+            <div>
+              <p className="text-[12px] text-zinc-400 font-semibold mb-1.5 tracking-tight">Disposition</p>
+              <div className="text-[13px] text-emerald-400 space-y-0.5 bg-zinc-950/60 border border-zinc-800/80 rounded-lg p-3">
+                {(viewTicket.disposition || '').split(';').map((s) => s.trim()).filter(Boolean).map((line, i) => (
+                  <p key={i} className="flex items-center gap-1.5"><CheckIcon /> {line}</p>
+                ))}
+                {!hasValue(viewTicket.disposition) && <p className="text-zinc-500">—</p>}
+              </div>
+            </div>
+
+            {hasValue(viewTicket.affected_products) && (
+              <div>
+                <p className="text-[12px] text-zinc-400 font-semibold mb-1.5 tracking-tight">Affected Product(s)</p>
+                <p className="text-[13px] text-zinc-300 bg-zinc-950/60 border border-zinc-800/80 rounded-lg p-3">{viewTicket.affected_products}</p>
+              </div>
+            )}
+
+            <div>
+              <p className="text-[12px] text-zinc-400 font-semibold mb-1.5 tracking-tight">Agent Remarks</p>
+              <p className="text-[13px] text-zinc-300 bg-zinc-950/60 border border-zinc-800/80 rounded-lg p-3 whitespace-pre-wrap">
+                {hasValue(viewTicket.agent_remarks) ? viewTicket.agent_remarks : '—'}
+              </p>
+            </div>
           </div>
         </Overlay>
       )}

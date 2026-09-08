@@ -29,6 +29,12 @@
 //   DELETE /api/admin/calling-agents  -> revoke ONE process's access for one agent, leaving
 //                                        every other process/card they hold untouched:
 //                                        { processKey, email }
+//   POST   /api/admin/calling-assign-now -> { processKey: 'detractor', email, count? } - admin/
+//                                        process-admin manual stopgap for the going-Online
+//                                        auto-fill trigger: claims `count` leads (default: quota
+//                                        minus current load, same as going Online would) for one
+//                                        agent right now. NPS-Calling ('detractor') only - RTO/NDR
+//                                        assign via their own Lambda sweeps, not this claim shape.
 //   GET    /api/admin/dispositions?process=ndr -> that process's own disposition tree (see
 //                                        calling_process_dispositions - RTO's list stays
 //                                        hardcoded in RtoCrmClient.js and never reads this).
@@ -78,7 +84,8 @@ const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser
   getAllDeliveryPartnerAccess, setDeliveryPartnerAccess, getDeliveryEscalationPartnerOptions,
   getAllDeliveryEscalationQueryCategoryAccess, setDeliveryEscalationQueryCategoryAccess,
   getDeliveryEscalationQueryCategoryOptions,
-  getAllDeliveryEscalationUserRoles, setDeliveryEscalationUserRole, getDeliveryEscalationUserRoleByEmail } = require('../_lib/db');
+  getAllDeliveryEscalationUserRoles, setDeliveryEscalationUserRole, getDeliveryEscalationUserRoleByEmail,
+  assignDetractorLeadsToAgent, getDetractorQuotaAndLoad } = require('../_lib/db');
 const { teamScopeFor, coerceTeamId } = require('../_lib/callingTeams');
 const { dispositionTeamFor } = require('../_lib/dispositionTrees');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
@@ -680,6 +687,59 @@ async function handleCallingAgents(req, res, session) {
   });
 }
 
+// Manual stopgap for NPS-Calling's going-Online auto-fill trigger (handleProcessPresence in
+// api/auth/[action].js) - lets an admin/process admin fill one agent's queue on demand instead
+// of relying on that agent toggling their own status. Same claim path
+// (assignDetractorLeadsToAgent) and same default fill amount (quota minus current load,
+// via getDetractorQuotaAndLoad) as the real trigger - this just lets an admin invoke it directly.
+// 'detractor' only: RTO/NDR fill via their own Lambda round-robin sweeps, not this claim shape.
+async function handleCallingAssignNow(req, res, session) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
+  const body = parseBody(req);
+  if (body.processKey !== 'detractor') {
+    res.status(400).json({ error: 'Manual assignment is only available for NPS-Calling (detractor)' });
+    return;
+  }
+  if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, body.processKey))) {
+    res.status(403).json({ error: 'You do not administer that process' });
+    return;
+  }
+  const email = (body.email || '').trim().toLowerCase();
+  if (!email) {
+    res.status(400).json({ error: 'email is required' });
+    return;
+  }
+  // Same cross-team membership guard as handleCallingAgents' own POST/DELETE branches - a
+  // process admin may only manually assign to an agent already on their own scoped roster.
+  if (!session.isAdmin) {
+    const { teamId } = await scopeFor(session, body.processKey, undefined);
+    const scoped = await getCallingProcessAgents(body.processKey, teamId);
+    if (!scoped.some((a) => a.email.toLowerCase() === email)) {
+      res.status(403).json({ error: 'That agent is not on your team' });
+      return;
+    }
+  }
+  let count;
+  if (body.count === undefined || body.count === null || body.count === '') {
+    const { quota, load } = await getDetractorQuotaAndLoad(email);
+    count = Math.max(0, quota - load);
+  } else {
+    count = parseInt(body.count, 10);
+    if (!Number.isFinite(count) || count < 0) {
+      res.status(400).json({ error: 'count must be a non-negative whole number' });
+      return;
+    }
+  }
+  const claimed = await assignDetractorLeadsToAgent(email, count);
+  await logEvent(session.uid, session.email, 'calling', 'manual-assign',
+    `${body.processKey}: ${claimed.length} lead(s) manually assigned to ${email}`, ip);
+  res.status(200).json({ claimed: claimed.length, agents: await getCallingProcessAgents(body.processKey) });
+}
+
 // GET    ?process=<key> -> that process's own disposition list (empty until an admin adds
 //                          some - there is no seeded default, since only RTO has a built-in
 //                          list and this table intentionally never backs RTO).
@@ -1053,7 +1113,7 @@ module.exports = async (req, res) => {
   // being read or written; passing this gate alone authorises nothing. 'calling-teams' is
   // listed here only for its GET branch (a team lead reading its own team name) - the handler
   // itself still turns every POST/PUT away from anyone but a full admin.
-  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'default-quota', 'lead-order', 'calling-agents', 'dispositions', 'calling-teams', 'delivery-partner-access'];
+  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'default-quota', 'lead-order', 'calling-agents', 'calling-assign-now', 'dispositions', 'calling-teams', 'delivery-partner-access'];
   if (!session.isAdmin && !PROCESS_ADMIN_ACTIONS.includes(action)) {
     res.status(403).json({ error: 'Forbidden' });
     return;
@@ -1066,6 +1126,7 @@ module.exports = async (req, res) => {
   if (action === 'default-quota') return handleDefaultQuota(req, res, session);
   if (action === 'lead-order') return handleLeadOrder(req, res, session);
   if (action === 'calling-agents') return handleCallingAgents(req, res, session);
+  if (action === 'calling-assign-now') return handleCallingAssignNow(req, res, session);
   if (action === 'dispositions') return handleDispositions(req, res, session);
   if (action === 'calling-teams') return handleCallingTeams(req, res, session);
   if (action === 'delivery-partner-access') return handleDeliveryPartnerAccess(req, res, session);
