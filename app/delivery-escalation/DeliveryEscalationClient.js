@@ -1754,7 +1754,7 @@ export default function DeliveryEscalationClient() {
   // ageCounts/ageTotal does - old responses simply lack these fields rather than erroring.
   const groupedUnresolvedAge = useMemo(
     () => buildMonthsFromDayRows(
-      daywise.rows.map((r) => ({ date: r.date, counts: r.ageCounts || {}, total: r.ageTotal || 0 })),
+      daywise.rows.map((r) => ({ date: r.date, counts: r.ageCounts || {}, total: r.ageTotal || 0, pct: r.agePct || {} })),
       daywise.unresolvedAgeBuckets || [],
       'age::'
     ),
