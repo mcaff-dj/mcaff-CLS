@@ -29,6 +29,7 @@ import ExcelJS from 'exceljs';
 import { CustomSelect, MultiSelectDropdown, CheckIcon, XIcon, RefreshIcon, Overlay, ThFilter } from '../_calling/ui';
 import { useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { safeStorage } from '../_calling/util';
+import { toCSV } from '../../api/_lib/csv';
 
 const BRANDS = ['HYPHEN', 'mCaffeine'];
 const PAYMENT_MODES = ['Prepaid', 'COD'];
@@ -1181,6 +1182,18 @@ function addOutcomeDropdown(workbook, worksheet, colLetter, processDispositions,
   });
 }
 
+function downloadCsvBlob(text, filename) {
+  const blob = new Blob([text], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 async function downloadWorkbook(workbook, filename) {
   const buf = await workbook.xlsx.writeBuffer();
   const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -1233,6 +1246,29 @@ async function downloadExcel({ view, search, brand, agent, date, dateTo, dateFie
     addOutcomeDropdown(workbook, sheet, excelColumnLetter(outcomeColIndex), processDispositions, rows.length + 1);
   }
   await downloadWorkbook(workbook, `delivery-escalation-${view}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  return { count: rows.length };
+}
+
+// Same paging/mapping as downloadExcel above, but a plain .csv via toCSV (api/_lib/csv.js) -
+// no ExcelJS workbook, no outcome-dropdown validation. Used for the Unresolved Leads Funnel's
+// own click-to-download (see handleUnresolvedAgeExport) rather than the ticket list's own
+// "Download Excel" button, which still wants the dropdown-backed .xlsx.
+async function downloadUnresolvedAgeCsv({ view, brand, agent, date, dateTo, dateField, ageBucket }, onChunk) {
+  const rows = [];
+  for (let page = 1; ; page++) {
+    const p = filterQuery({ view, brand, agent, date, dateTo, dateField, ageBucket });
+    p.set('op', 'export');
+    p.set('page', String(page));
+    const d = await getJson(`/api/delivery-escalation/record?${p}`);
+    const chunk = d.rows || [];
+    for (const r of chunk) rows.push(mapRow(r, view === 'resolved'));
+    onChunk?.(rows.length);
+    if (!d.hasMore) break;
+  }
+  const headers = EXPORT_COLUMNS.map(([label]) => label);
+  const csvRows = rows.map((row) => Object.fromEntries(EXPORT_COLUMNS.map(([label, key]) => [label, row[key] ?? ''])));
+  const bucketSlug = ageBucket.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '');
+  downloadCsvBlob(toCSV(csvRows, headers), `delivery-escalation-${view}-${bucketSlug}-${new Date().toISOString().slice(0, 10)}.csv`);
   return { count: rows.length };
 }
 
@@ -2329,6 +2365,33 @@ export default function DeliveryEscalationClient() {
     }
   };
 
+  // Clicking an Unresolved Leads Funnel cell both jumps to the filtered Fresh tab (see
+  // drillIntoUnresolvedAge) AND downloads that exact slice straight away - unlike the plain
+  // TAT-by-date table's cells, which only filter and leave the Export button for the agent to
+  // click themselves. Params are passed explicitly rather than read back off dateDrill/
+  // effectiveDateFilter - the setDateDrill above hasn't re-rendered yet at this point in the
+  // handler, so those would still read last render's (stale) values.
+  const handleUnresolvedAgeExport = async (dateFrom, dateTo, ageBucket) => {
+    drillIntoUnresolvedAge(dateFrom, dateTo, ageBucket);
+    setExporting(true);
+    showToast('Preparing CSV…');
+    try {
+      const { count } = await downloadUnresolvedAgeCsv(
+        {
+          view: 'fresh', brand: brandFilter, agent: agentFilter,
+          date: dateFrom, dateTo, dateField: daywiseDateBasis, ageBucket,
+        },
+        (soFar) => showToast(`Exporting… ${soFar.toLocaleString('en-IN')} rows so far`),
+      );
+      showToast(count ? `Downloaded ${count.toLocaleString('en-IN')} rows` : 'No tickets matched - nothing to download');
+    } catch (e) {
+      if (isSessionExpired(e)) setSessionExpired(true);
+      else showToast(`⚠️ Export failed: ${e.message}`);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   // Collapses same-page duplicates (an AWB can legitimately appear more than once on one page)
   // down to a single row - NOT a re-sort, just a stable partition, so each group still surfaces
   // at the position of its first (i.e. newest, given the server's DESC order) member. That's
@@ -2638,7 +2701,7 @@ export default function DeliveryEscalationClient() {
                                     return [
                                       <td
                                         key={`${b}-n`}
-                                        onClick={count ? (e) => { e.stopPropagation(); drillIntoUnresolvedAge(days[0]?.date, days[days.length - 1]?.date, b); } : undefined}
+                                        onClick={count ? (e) => { e.stopPropagation(); handleUnresolvedAgeExport(days[0]?.date, days[days.length - 1]?.date, b); } : undefined}
                                         title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
                                         className={`py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
                                       >{count}</td>,
@@ -2665,7 +2728,7 @@ export default function DeliveryEscalationClient() {
                                           return [
                                             <td
                                               key={`${b}-n`}
-                                              onClick={count ? (e) => { e.stopPropagation(); drillIntoUnresolvedAge(days[0]?.date, days[days.length - 1]?.date, b); } : undefined}
+                                              onClick={count ? (e) => { e.stopPropagation(); handleUnresolvedAgeExport(days[0]?.date, days[days.length - 1]?.date, b); } : undefined}
                                               title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
                                               className={`py-1.5 px-3 text-right text-zinc-400 text-[12px] tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
                                             >{count}</td>,
@@ -2682,7 +2745,7 @@ export default function DeliveryEscalationClient() {
                                             return [
                                               <td
                                                 key={`${b}-n`}
-                                                onClick={count ? (e) => { e.stopPropagation(); drillIntoUnresolvedAge(r.date, r.date, b); } : undefined}
+                                                onClick={count ? (e) => { e.stopPropagation(); handleUnresolvedAgeExport(r.date, r.date, b); } : undefined}
                                                 title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
                                                 className={`py-1.5 px-3 text-right text-zinc-500 text-[12px] tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
                                               >{count}</td>,
