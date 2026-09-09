@@ -353,6 +353,21 @@ def has_valid_order_id(row):
     return bool(order_id) and order_id.upper() != "N/A"
 
 
+def has_valid_awb(row):
+    """A ticket with no AWB must never reach Delivery_escalation either - same reasoning as
+    has_valid_order_id, just for the other identifier every report/export/drill-down here keys
+    off (see api/_lib/db.js's UNRESOLVED_AGE_BUCKET_SQL and friends). Checked AFTER
+    fill_missing_awb's own Item_level_data lookup (see sync_tab) has already had its shot, so
+    this only drops what's still genuinely unrecoverable right now - the courier hasn't
+    generated one yet.
+    This is a SKIP BY TIME WINDOW, not a retry: once this run's cursor advances (see sync_tab),
+    a skipped ticket's own creation time falls outside every future window, so the normal 2-hourly
+    sync never looks at it again on its own. Recovering one once an AWB does later show up is
+    scripts/backfill_delivery_escalation_missing_order_and_awb.py's job, same as it already does
+    for a recovered order_id."""
+    return bool((row[4] or "").strip())
+
+
 def fill_missing_awb(rows):
     """rows are the raw tuples (as lists) from fetch_flowcall_delivery_rows - mutates awb
     (index 4) in place wherever it's blank and Item_level_data has a Tracking_Number for that
@@ -533,6 +548,16 @@ def sync_tab(tab, dry_run, since=None, hours_back=2, api_token=None):
     skipped = before_count - len(rows)
     if skipped:
         print(f"  skipped {skipped} ticket(s) with no valid order id (null/N/A)")
+
+    # Same reasoning as the order_id gate just above, for AWB instead - see has_valid_awb.
+    # fill_missing_awb() above already tried an Item_level_data lookup, so this only drops what's
+    # still genuinely unrecoverable right now.
+    before_count = len(rows)
+    rows = [r for r in rows if has_valid_awb(r)]
+    skipped_awb = before_count - len(rows)
+    if skipped_awb:
+        print(f"  skipped {skipped_awb} ticket(s) with no AWB yet")
+
     if not rows:
         if not since and not dry_run:
             state = get_state()
@@ -661,6 +686,15 @@ def self_check():
     assert has_valid_order_id(row_na) is False
     row_na_lower = ("TCK5", None, "", "n/a", "AWB5", "BlueDart", None, None, None, "")
     assert has_valid_order_id(row_na_lower) is False
+    # has_valid_awb: blank/None awb (index 4) is rejected regardless of whatever else the row
+    # carries; a real (even whitespace-padded) AWB passes.
+    assert has_valid_awb(row) is True
+    row_no_awb = ("TCK6", None, "HYP111", "", "", "BlueDart", None, None, None, "")
+    assert has_valid_awb(row_no_awb) is False
+    row_no_awb_none = ("TCK7", None, "HYP112", "", None, "BlueDart", None, None, None, "")
+    assert has_valid_awb(row_no_awb_none) is False
+    row_awb_padded = ("TCK8", None, "HYP113", "", "  AWB9  ", "BlueDart", None, None, None, "")
+    assert has_valid_awb(row_awb_padded) is True
     print("self-check ok")
 
 
