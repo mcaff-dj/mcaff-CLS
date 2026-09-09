@@ -122,6 +122,13 @@ assert.throws(() => deWhere('everything', {}), /Unknown Delivery-Escalation view
   ]);
   assert.ok(UNRESOLVED_AGE_BUCKET_SQL.includes("outcome = 'Escalated > New order placed'"),
     'a New order placed disposition must count as a new order placed, regardless of new_order_AWB');
+  // outcome IS NULL for every never-disposed (plain Fresh) ticket - `NULL = 'Escalated > New
+  // order placed'` is NULL, not FALSE, and NOT(NULL) is ALSO NULL, which a CASE WHEN treats as
+  // no-match. Without this guard (same trap DE_FORCED_RTO_WHERE's own comment documents), EVERY
+  // blank-outcome ticket - the bulk of a genuinely aged, untouched queue - silently fell out of
+  // this bucket into the day-range buckets below instead.
+  assert.ok(UNRESOLVED_AGE_BUCKET_SQL.includes("NOT (outcome IS NOT NULL AND"),
+    'the New-order-placed exclusion must guard against outcome IS NULL, or every blank-outcome ticket silently drops out of this bucket');
   for (const label of UNRESOLVED_AGE_BUCKETS) {
     assert.ok(UNRESOLVED_AGE_BUCKET_SQL.includes(`'${label}'`),
       `bucket ${label} is listed for display but never emitted by the CASE`);
