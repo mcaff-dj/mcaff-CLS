@@ -22,8 +22,13 @@ export const ChatIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" f
 export const ShieldIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>;
 export const SparklesIcon = (p) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3L12 3z"/></svg>;
 
-export function CustomSelect({ value, onChange, options, icon: IconComponent, placeholder, className = "" }) {
+// searchable (optional, default off - every existing caller is unaffected): adds a text input
+// at the top of the open panel that filters `options` by label, case-insensitive substring - for
+// a dropdown whose option list can grow long (e.g. Delivery-Escalation's Agent filter, one entry
+// per person who's ever touched a ticket) rather than a short fixed list like Brand.
+export function CustomSelect({ value, onChange, options, icon: IconComponent, placeholder, className = "", searchable = false }) {
   const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState('');
   const ref = useRef(null);
 
   useEffect(() => {
@@ -32,7 +37,15 @@ export function CustomSelect({ value, onChange, options, icon: IconComponent, pl
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Cleared on close (not on select) so the next open starts from the full list rather than
+  // wherever the last search left off.
+  useEffect(() => { if (!isOpen) setSearch(''); }, [isOpen]);
+
   const selectedOpt = options.find(o => String(o.value) === String(value)) || options[0];
+  const q = search.trim().toLowerCase();
+  const visibleOptions = searchable && q
+    ? options.filter(o => String(o.label).toLowerCase().includes(q))
+    : options;
 
   return (
     <div className={`relative inline-block ${className}`} ref={ref}>
@@ -50,7 +63,21 @@ export function CustomSelect({ value, onChange, options, icon: IconComponent, pl
 
       {isOpen && (
         <div className="absolute left-0 mt-1.5 min-w-[160px] w-full max-w-xs bg-[#141417] border border-zinc-800/90 rounded-xl shadow-2xl z-50 overflow-hidden animate-fadeIn py-1 custom-scroll max-h-60 overflow-y-auto">
-          {options.map((opt) => {
+          {searchable && (
+            <div className="sticky top-0 z-10 bg-[#141417] px-2 pb-1.5 pt-0.5 border-b border-zinc-800/80">
+              <input
+                autoFocus
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search…"
+                className="w-full h-7 px-2 bg-zinc-900/90 border border-zinc-800 rounded-md text-[12px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+              />
+            </div>
+          )}
+          {searchable && visibleOptions.length === 0 && (
+            <div className="px-3 py-2 text-[13px] text-zinc-600">No match</div>
+          )}
+          {visibleOptions.map((opt) => {
             const isSelected = String(opt.value) === String(value);
             return (
               <button

@@ -3053,7 +3053,7 @@ export default function DeliveryEscalationClient() {
                       />
                       {/* Everyone with access gets this - it is how an agent narrows the shared
                           desk down to their own tickets now that nothing is hidden from them. */}
-                      <CustomSelect value={agentFilter} onChange={setAgentFilter} options={agentOptions} placeholder="Agent" />
+                      <CustomSelect value={agentFilter} onChange={setAgentFilter} options={agentOptions} placeholder="Agent" searchable />
                       <CustomSelect
                         value={partnerFilter}
                         onChange={(v) => { setPartnerFilter(v); safeStorage.setItem('de_partner_filter', v); }}
@@ -3250,7 +3250,7 @@ export default function DeliveryEscalationClient() {
                           <th className="py-3 px-4 text-left font-medium">
                             Agent Name
                             <ThFilter active={agentFilter !== 'ALL'}>
-                              <CustomSelect value={agentFilter} onChange={setAgentFilter} options={agentOptions} placeholder="Agent" />
+                              <CustomSelect value={agentFilter} onChange={setAgentFilter} options={agentOptions} placeholder="Agent" searchable />
                             </ThFilter>
                           </th>
                           <th className="py-3 px-4 text-left font-medium">
