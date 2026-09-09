@@ -54,6 +54,19 @@ jobs:
           MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
         run: python scripts/sync_delivery_tickets_to_sheet.py --tab mCaffeine --api-token "${{ secrets.FLOWCALL_TOKEN_MCAFFEINE }}" ${{ github.event.inputs.since && format('--since {0}', github.event.inputs.since) || '' }}
 
+      # Refreshes new_order_AWB for New Order Placed tickets (see backfill_delivery_escalation_
+      # new_order_awb.py's own comment) - lmd_courier_tracking gets a new row for a reshipped
+      # order under the same order_id but a different, later-dated awb_number, so this needs
+      # re-running as new reshipments land there, not just once.
+      - name: Backfill new_order_AWB for New Order Placed tickets
+        env:
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+          MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+        run: python scripts/backfill_delivery_escalation_new_order_awb.py --apply
+
       # Commits the incremental-sync cursor (data/delivery-escalation-sync-state.json) - same
       # need, same rebase-and-retry pattern, as export-resolved-tickets.yml's own state commit.
       # A --since run never touches this file, so a manual backfill has nothing to commit here.
