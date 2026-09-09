@@ -2655,7 +2655,7 @@ const DE_DAYWISE_DATE_FIELDS = { added_date: 'added_date', order_date: 'order_da
 // own comment describes. Applied here rather than as a separate step so every caller of
 // deWhere/deFilterSql (getDeliveryEscalationPage, getDeliveryEscalationStats,
 // getDeliveryEscalationExport) enforces it automatically, with no per-caller opt-in to forget.
-function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcomeRoot, queryCategory, childDisposition, tags, allowedPartners, allowedQueryCategories } = {}) {
+function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket, ageBucket, contactBucket, partner, outcomeRoot, queryCategory, childDisposition, tags, allowedPartners, allowedQueryCategories } = {}) {
   const clauses = [];
   const params = [];
   if (brand) { clauses.push('brand = ?'); params.push(brand); }
@@ -2713,6 +2713,9 @@ function deFilterSql({ search, brand, agent, date, dateTo, dateField, tatBucket,
     else { clauses.push(`DATE(${col}) = ?`); params.push(date); }
   }
   if (tatBucket) { clauses.push(`${DE_TAT_BUCKET_SQL} = ?`); params.push(tatBucket); }
+  // ageBucket: the Unresolved Leads Funnel's own drill (DeliveryEscalationClient.js's
+  // drillIntoUnresolvedAge) - same bound-value-no-whitelist-needed shape as tatBucket just above.
+  if (ageBucket) { clauses.push(`${UNRESOLVED_AGE_BUCKET_SQL} = ?`); params.push(ageBucket); }
   if (Array.isArray(contactBucket) && contactBucket.length) {
     const ranges = contactBucket.map((b) => DE_CONTACT_BUCKET_RANGES[b]).filter(Boolean);
     if (ranges.length) {

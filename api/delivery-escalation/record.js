@@ -11,7 +11,7 @@
 // GET serves three shapes, all paged/filtered in SQL (see db.js's own header comment on
 // why - Lambda's 6MB response cap):
 //   ?view=fresh|resolved&page&perPage&search&brand&agent&date&contactBucket&outcome&partner
-//        &queryCategory&childDisposition&tags&tatBucket        -> { rows, total, page, perPage }
+//        &queryCategory&childDisposition&tags&tatBucket&ageBucket -> { rows, total, page, perPage }
 //   ?op=stats                                            -> { stats, agents, repeatStats,
 //                                                       queryCategories, childDispositions }
 //   ?op=export&view=...(+ same filters)                  -> { rows, capped }
@@ -104,6 +104,9 @@ module.exports = async (req, res) => {
       dateTo: q.dateTo || '',
       dateField: q.dateField || '',
       tatBucket: q.tatBucket || '',
+      // ageBucket: the Unresolved Leads Funnel's own drill (see deFilterSql's own comment) -
+      // a plain bound parameter against UNRESOLVED_AGE_BUCKET_SQL, no server whitelist needed.
+      ageBucket: q.ageBucket || '',
       contactBucket: q.contactBucket ? String(q.contactBucket).split(',').filter(Boolean) : undefined,
       // The ticket list's own Delivery Partner filter, comma-joined raw values (client already
       // resolved canonical -> raw - see DeliveryEscalationClient.js's filterQuery). Distinct from

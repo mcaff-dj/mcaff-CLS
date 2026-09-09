@@ -128,6 +128,14 @@ assert.throws(() => deWhere('everything', {}), /Unknown Delivery-Escalation view
   }
 }
 
+// 6c. ageBucket filter (the Unresolved Leads Funnel's own drill, see deFilterSql/record.js) -
+// bound as a value against UNRESOLVED_AGE_BUCKET_SQL, same shape tatBucket already uses.
+{
+  const { where, params } = deWhere('fresh', { ageBucket: 'open Within 48 hrs' });
+  assert.ok(where.includes(UNRESOLVED_AGE_BUCKET_SQL), 'ageBucket must filter on UNRESOLVED_AGE_BUCKET_SQL');
+  assert.ok(params.includes('open Within 48 hrs'), 'ageBucket value must be bound, not interpolated');
+}
+
 // 7. Bulk upload's view guard runs BEFORE any query - a bulk upload must be scoped to Fresh or
 // Forced RTO (the only two tabs that offer it), never 'resolved' or a typo view, and rejecting
 // it up front is what stops that mistake from silently matching the wrong tab's rows (or none).

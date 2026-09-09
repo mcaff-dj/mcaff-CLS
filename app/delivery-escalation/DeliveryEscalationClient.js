@@ -912,7 +912,7 @@ function GeoCategoryTable({
   );
 }
 
-function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags }) {
+function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, ageBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags }) {
   const p = new URLSearchParams();
   if (view) p.set('view', view);
   if (search) p.set('search', search);
@@ -922,6 +922,9 @@ function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatB
   if (date && dateTo) p.set('dateTo', dateTo);
   if (date && dateField) p.set('dateField', dateField);
   if (tatBucket) p.set('tatBucket', tatBucket);
+  // ageBucket: the Unresolved Leads Funnel's own drill (see drillIntoUnresolvedAge) - matches
+  // UNRESOLVED_AGE_BUCKET_SQL server-side, same bound-value-no-whitelist-needed shape as tatBucket.
+  if (ageBucket) p.set('ageBucket', ageBucket);
   if (Array.isArray(contactBucket) && contactBucket.length) p.set('contactBucket', contactBucket.join(','));
   // Canonical name -> every raw delivery_partner variant it folds into, same
   // CANONICAL_TO_RAW_PARTNER convention fetchDaywiseStats already uses - the server only ever
@@ -940,8 +943,8 @@ function filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatB
 }
 
 // One page of whichever tab is open, with the current filters applied server-side.
-async function fetchPage({ view, page, perPage, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags }) {
-  const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags });
+async function fetchPage({ view, page, perPage, search, brand, agent, date, dateTo, dateField, tatBucket, ageBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags }) {
+  const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, ageBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags });
   p.set('page', String(page));
   p.set('perPage', String(perPage));
   const d = await getJson(`/api/delivery-escalation/record?${p}`);
@@ -1209,10 +1212,10 @@ const EXPORT_COLUMNS = [
 // workbook from everything collected. onChunk reports progress for a long export. Outcome gets
 // the same role-scoped dropdown the Bulk Upload sample does (see addOutcomeDropdown) - re-editing
 // an exported row and re-uploading it should offer the same valid values either way.
-async function downloadExcel({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags, processDispositions }, onChunk) {
+async function downloadExcel({ view, search, brand, agent, date, dateTo, dateField, tatBucket, ageBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags, processDispositions }, onChunk) {
   const rows = [];
   for (let page = 1; ; page++) {
-    const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags });
+    const p = filterQuery({ view, search, brand, agent, date, dateTo, dateField, tatBucket, ageBucket, contactBucket, partner, outcome, queryCategory, childDisposition, tags });
     p.set('op', 'export');
     p.set('page', String(page));
     const d = await getJson(`/api/delivery-escalation/record?${p}`);
@@ -1683,10 +1686,11 @@ export default function DeliveryEscalationClient() {
   // Which date column the ticket list's date filter (and its Excel export) matches against -
   // same 'added_date'/'order_date' choice as the Overview tab's day-wise table.
   const [dateFilterBasis, setDateFilterBasis] = useState(() => safeStorage.getItem('de_date_filter_basis') || 'added_date');
-  // Set by clicking a bucket cell in the Overview day-wise table (see drillIntoDaywise) -
-  // { dateFrom, dateTo, dateField, tatBucket, label } overrides dateFilter/dateFilterBasis
-  // entirely while active, since a month/week cell spans a date range the single-day picker
-  // can't express. Cleared by the chip's × or by picking a tab from the nav bar directly.
+  // Set by clicking a bucket cell in the Overview day-wise table (see drillIntoDaywise) or the
+  // Unresolved Leads Funnel (see drillIntoUnresolvedAge) - { dateFrom, dateTo, dateField,
+  // tatBucket, ageBucket, bucket, view } overrides dateFilter/dateFilterBasis entirely while
+  // active, since a month/week cell spans a date range the single-day picker can't express.
+  // Cleared by the chip's × or by picking a tab from the nav bar directly.
   const [dateDrill, setDateDrill] = useState(null);
   const [contactBucketFilter, setContactBucketFilter] = useState(() => []);
   const [page, setPage] = useState(1);
@@ -1954,8 +1958,8 @@ export default function DeliveryEscalationClient() {
   // falls back to the TAT header filter (tatFilter) - same underlying match
   // (DE_TAT_BUCKET_SQL = ?), just a second entry point onto it.
   const effectiveDateFilter = useMemo(() => (dateDrill
-    ? { date: dateDrill.dateFrom, dateTo: dateDrill.dateTo, dateField: dateDrill.dateField, tatBucket: dateDrill.tatBucket }
-    : { date: dateFilter, dateTo: dateFilterTo, dateField: dateFilterBasis, tatBucket: tatFilter !== 'ALL' ? tatFilter : '' }
+    ? { date: dateDrill.dateFrom, dateTo: dateDrill.dateTo, dateField: dateDrill.dateField, tatBucket: dateDrill.tatBucket, ageBucket: dateDrill.ageBucket || '' }
+    : { date: dateFilter, dateTo: dateFilterTo, dateField: dateFilterBasis, tatBucket: tatFilter !== 'ALL' ? tatFilter : '', ageBucket: '' }
   ), [dateDrill, dateFilter, dateFilterTo, dateFilterBasis, tatFilter]);
 
   // Any change to what's being asked for restarts at page 1 - staying on page 12 of a filter
@@ -2061,6 +2065,15 @@ export default function DeliveryEscalationClient() {
       : bucket === 'unresolved' ? 'fresh' : 'resolved';
     setDateDrill({ dateFrom, dateTo, dateField: daywiseDateBasis, tatBucket: view === 'resolved' ? bucket : '', bucket, view });
     setTab(view);
+  };
+
+  // Clicking a cell in the Unresolved Leads Funnel - every row there is already 'unresolved'
+  // (see drillIntoDaywise's own comment on why that maps to the Fresh tab), so this only ever
+  // needs to add the age bucket on top, same ageBucket = UNRESOLVED_AGE_BUCKET_SQL match
+  // deFilterSql applies server-side.
+  const drillIntoUnresolvedAge = (dateFrom, dateTo, ageBucket) => {
+    setDateDrill({ dateFrom, dateTo, dateField: daywiseDateBasis, tatBucket: '', ageBucket, bucket: ageBucket, view: 'fresh' });
+    setTab('fresh');
   };
 
   const refresh = useCallback(async (silent = true) => {
@@ -2619,10 +2632,19 @@ export default function DeliveryEscalationClient() {
                                     <span className="inline-block w-4 text-zinc-500">{monthOpen ? '▾' : '▸'}</span>
                                     {formatDaywiseMonth(month.key)}
                                   </td>
-                                  {ageBuckets.flatMap((b) => ([
-                                    <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60">{month.counts[b] || 0}</td>,
-                                    <td key={`${b}-pct`} style={pctHeatStyle(month.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
-                                  ]))}
+                                  {ageBuckets.flatMap((b) => {
+                                    const count = month.counts[b] || 0;
+                                    const days = month.days;
+                                    return [
+                                      <td
+                                        key={`${b}-n`}
+                                        onClick={count ? (e) => { e.stopPropagation(); drillIntoUnresolvedAge(days[0]?.date, days[days.length - 1]?.date, b); } : undefined}
+                                        title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
+                                        className={`py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
+                                      >{count}</td>,
+                                      <td key={`${b}-pct`} style={pctHeatStyle(month.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
+                                    ];
+                                  })}
                                   <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
                                 </tr>
                                 {monthOpen && month.weeks.map((week) => {
@@ -2637,19 +2659,36 @@ export default function DeliveryEscalationClient() {
                                           <span className="inline-block w-4 text-zinc-600">{weekOpen ? '▾' : '▸'}</span>
                                           {formatDaywiseWeek(week)}
                                         </td>
-                                        {ageBuckets.flatMap((b) => ([
-                                          <td key={`${b}-n`} className="py-1.5 px-3 text-right text-zinc-400 text-[12px] tabular-nums border-l border-zinc-800/60">{week.counts[b] || 0}</td>,
-                                          <td key={`${b}-pct`} className="py-1.5 px-3 text-right text-zinc-600 tabular-nums text-[11px]">{week.pct[b] || 0}%</td>,
-                                        ]))}
+                                        {ageBuckets.flatMap((b) => {
+                                          const count = week.counts[b] || 0;
+                                          const days = week.days;
+                                          return [
+                                            <td
+                                              key={`${b}-n`}
+                                              onClick={count ? (e) => { e.stopPropagation(); drillIntoUnresolvedAge(days[0]?.date, days[days.length - 1]?.date, b); } : undefined}
+                                              title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
+                                              className={`py-1.5 px-3 text-right text-zinc-400 text-[12px] tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
+                                            >{count}</td>,
+                                            <td key={`${b}-pct`} className="py-1.5 px-3 text-right text-zinc-600 tabular-nums text-[11px]">{week.pct[b] || 0}%</td>,
+                                          ];
+                                        })}
                                         <td className="py-1.5 px-3 text-right text-zinc-300 text-[12px] tabular-nums border-l border-zinc-800/60">{week.total.toLocaleString('en-IN')}</td>
                                       </tr>
                                       {weekOpen && week.days.filter((r) => r.total > 0).map((r) => (
                                         <tr key={r.date} className="group hover:bg-zinc-800/30 transition-colors">
                                           <td className="sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800/30 transition-colors py-1.5 px-3 pl-14 text-zinc-500 text-[12px] whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
-                                          {ageBuckets.flatMap((b) => ([
-                                            <td key={`${b}-n`} className="py-1.5 px-3 text-right text-zinc-500 text-[12px] tabular-nums border-l border-zinc-800/60">{r.counts[b] || 0}</td>,
-                                            <td key={`${b}-pct`} className="py-1.5 px-3 text-right text-zinc-600 tabular-nums text-[11px]">{r.pct[b] || 0}%</td>,
-                                          ]))}
+                                          {ageBuckets.flatMap((b) => {
+                                            const count = r.counts[b] || 0;
+                                            return [
+                                              <td
+                                                key={`${b}-n`}
+                                                onClick={count ? (e) => { e.stopPropagation(); drillIntoUnresolvedAge(r.date, r.date, b); } : undefined}
+                                                title={count ? `View these ${count.toLocaleString('en-IN')} ticket(s)` : undefined}
+                                                className={`py-1.5 px-3 text-right text-zinc-500 text-[12px] tabular-nums border-l border-zinc-800/60 ${count ? 'cursor-pointer hover:underline hover:text-indigo-400' : ''}`}
+                                              >{count}</td>,
+                                              <td key={`${b}-pct`} className="py-1.5 px-3 text-right text-zinc-600 tabular-nums text-[11px]">{r.pct[b] || 0}%</td>,
+                                            ];
+                                          })}
                                           <td className="py-1.5 px-3 text-right text-zinc-400 text-[12px] tabular-nums border-l border-zinc-800/60">{r.total.toLocaleString('en-IN')}</td>
                                         </tr>
                                       ))}
