@@ -2472,16 +2472,35 @@ const DE_RTO_ROOT_SQL = `(outcome = 'RTO' OR outcome LIKE 'RTO > %' OR outcome =
 
 const DE_FORCED_RTO_WHERE = `((tat IS NOT NULL AND tat = 'Forced to be marked as RTO') OR (outcome IS NOT NULL AND ${DE_RTO_ROOT_SQL}))`;
 
+// Other still-open outcome roots an admin has added to the disposition tree over time (Admin
+// Panel's Disposition List - see callingProcesses.json's "no seeded default" note), sibling to
+// 'Escalated' rather than nested under it. None had a matching branch here, so every row under
+// them was invisible in Fresh - and therefore in every tab, since none of Resolved/Forced RTO/
+// New Order Placed recognized them either - unsearchable, unclaimable, silently stuck (found via
+// scripts/investigate_de_orphan_outcomes.py: 2194 rows, none dispositioned any further, i.e. no
+// 'X > <child>' rows exist yet - but matched with the same bare-OR-'root > %' shape as Escalated
+// below in case a child gets added under one later). Add here (and to DE_ORPHAN_OUTCOME_ROOTS'
+// own comment reference below, if that ever needs listing them) the moment a NEW root is added to
+// the tree that means "still open" - this list is hardcoded, same as RTO/Escalated/Delivered/
+// Resolved already are, so it does NOT auto-discover new roots on its own.
+const DE_OTHER_OPEN_ROOTS_SQL = `(outcome = 'In Transit' OR outcome LIKE 'In Transit > %'
+   OR outcome = 'NDR' OR outcome LIKE 'NDR > %'
+   OR outcome = 'Processing' OR outcome LIKE 'Processing > %'
+   OR outcome = 'Lost Damaged' OR outcome LIKE 'Lost Damaged > %'
+   OR outcome = 'Invalid' OR outcome LIKE 'Invalid > %')`;
+
 // A ticket is Fresh while its outcome is blank (never disposed), RTO (an RTO'd order can still
-// be re-shipped and later delivered, so it isn't terminal), or Escalated (still waiting on the
-// delivery partner) - EXCLUDING Forced RTO, which moved to its own view (DE_FORCED_RTO_WHERE)
-// instead of sitting inside Fresh's ordinary RTO rows. Resolved is Delivered ONLY. Matched on
-// the top-level outcome label, so a nested "Delivered > <sub-reason>" still counts.
+// be re-shipped and later delivered, so it isn't terminal), Escalated (still waiting on the
+// delivery partner), or one of DE_OTHER_OPEN_ROOTS_SQL's own still-open roots - EXCLUDING Forced
+// RTO, which moved to its own view (DE_FORCED_RTO_WHERE) instead of sitting inside Fresh's
+// ordinary RTO rows. Resolved is Delivered ONLY. Matched on the top-level outcome label, so a
+// nested "Delivered > <sub-reason>" still counts.
 // 'Escalated > New order placed' is explicitly excluded from the generic Escalated match below:
 // it's still a DISPOSED, terminal state with its own tab (DE_NEW_ORDER_PLACED_WHERE), not an
 // open Fresh ticket, even though it sits under the same 'Escalated' root as a genuinely-open one.
 const DE_FRESH_WHERE = `((outcome IS NULL OR outcome = ''
    OR ${DE_RTO_ROOT_SQL}
+   OR ${DE_OTHER_OPEN_ROOTS_SQL}
    OR (outcome = 'Escalated' OR (outcome LIKE 'Escalated > %' AND outcome <> 'Escalated > New order placed')))
    AND NOT (${DE_FORCED_RTO_WHERE}))`;
 // 'Resolved' is scripts/auto_dispose_de_categories.py's own root: query categories whose

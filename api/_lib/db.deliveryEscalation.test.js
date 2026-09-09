@@ -17,6 +17,14 @@ const {
   assert.ok(where.includes('outcome'), 'fresh view must filter on outcome');
   assert.ok(!where.includes('agent_email'), 'no forced per-agent scope may survive');
   assert.deepStrictEqual(params, []);
+  // Admin-added disposition roots (Admin Panel's Disposition List) that sit sibling to
+  // 'Escalated' rather than nested under it - found invisible in every tab (scripts/
+  // investigate_de_orphan_outcomes.py: 2194 rows) because Fresh's outcome match never
+  // recognized them as still-open. Regression guard: each must count as Fresh.
+  for (const root of ['In Transit', 'NDR', 'Processing', 'Lost Damaged', 'Invalid']) {
+    assert.ok(where.includes(`outcome = '${root}'`),
+      `'${root}' must be recognized as a still-open outcome in the Fresh view`);
+  }
 }
 
 // 2. Unclaimed rows (agent_email NULL or '') must satisfy Fresh - nothing in the SQL excludes
