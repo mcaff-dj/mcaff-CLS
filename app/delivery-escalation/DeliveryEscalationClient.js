@@ -2517,6 +2517,62 @@ export default function DeliveryEscalationClient() {
                 </div>
               )}
 
+              {tab === 'overview' && (showOverviewTable('unresolved_age') || showOverviewTable('daywise')) && (
+                <div className="bg-zinc-900/70 rounded-2xl p-3 border border-zinc-800/80 shadow-xs">
+                  <div className="flex items-center justify-end gap-2 flex-wrap">
+                    {daywiseLoading && <span className="text-[11px] text-zinc-600">Loading…</span>}
+                    <CustomSelect
+                      value={daywiseDateBasis}
+                      onChange={(v) => { setDaywiseDateBasis(v); safeStorage.setItem('de_daywise_date_basis', v); }}
+                      options={[{ value: 'added_date', label: 'Query Date' }, { value: 'order_date', label: 'Order Date' }]}
+                      placeholder="Date"
+                    />
+                    <CustomSelect
+                      value={daywiseDateRangePreset}
+                      onChange={handleDaywiseDateRangePreset}
+                      options={DATE_RANGE_PRESET_OPTIONS}
+                      placeholder="Date Range"
+                    />
+                    {daywiseDateRangePreset === 'custom' && (
+                      <>
+                        <input
+                          type="date"
+                          value={daywiseDateFrom}
+                          onChange={(e) => setDaywiseDateFrom(e.target.value)}
+                          title={`From (${daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} date)`}
+                          className="h-8 px-3 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                        />
+                        <input
+                          type="date"
+                          value={daywiseDateTo}
+                          onChange={(e) => setDaywiseDateTo(e.target.value)}
+                          title={`To (${daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} date)`}
+                          className="h-8 px-3 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                        />
+                      </>
+                    )}
+                    <CustomSelect
+                      value={brandFilter}
+                      onChange={(v) => { setBrandFilter(v); safeStorage.setItem('de_brand_filter', v); }}
+                      options={[{ value: 'ALL', label: 'All Brands' }, ...BRANDS.map(b => ({ value: b, label: b }))]}
+                      placeholder="Brand"
+                    />
+                    <CustomSelect
+                      value={daywisePartnerFilter}
+                      onChange={(v) => { setDaywisePartnerFilter(v); safeStorage.setItem('de_daywise_partner_filter', v); }}
+                      options={[{ value: 'ALL', label: 'All Partners' }, ...PARTNER_FILTER_OPTIONS.map(p => ({ value: p, label: p }))]}
+                      placeholder="Partner"
+                    />
+                    <CustomSelect
+                      value={daywisePaymentModeFilter}
+                      onChange={(v) => { setDaywisePaymentModeFilter(v); safeStorage.setItem('de_daywise_payment_mode_filter', v); }}
+                      options={[{ value: 'ALL', label: 'All Payment Modes' }, ...PAYMENT_MODES.map(m => ({ value: m, label: m }))]}
+                      placeholder="Payment Mode"
+                    />
+                  </div>
+                </div>
+              )}
+
               {tab === 'overview' && showOverviewTable('unresolved_age') && (() => {
                 // `|| []`/`|| {}`/`|| 0` guards: api/ (Lambda) and app/ (Amplify) deploy
                 // independently, so this bundle can be live before the Lambda carrying these
@@ -2628,62 +2684,9 @@ export default function DeliveryEscalationClient() {
 
               {tab === 'overview' && showOverviewTable('daywise') && (
                 <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
-                  <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
-                    <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500">
-                      TAT by {daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} Date
-                    </p>
-                    <div className="flex items-center gap-2">
-                      {daywiseLoading && <span className="text-[11px] text-zinc-600">Loading…</span>}
-                      <CustomSelect
-                        value={daywiseDateBasis}
-                        onChange={(v) => { setDaywiseDateBasis(v); safeStorage.setItem('de_daywise_date_basis', v); }}
-                        options={[{ value: 'added_date', label: 'Query Date' }, { value: 'order_date', label: 'Order Date' }]}
-                        placeholder="Date"
-                      />
-                      <CustomSelect
-                        value={daywiseDateRangePreset}
-                        onChange={handleDaywiseDateRangePreset}
-                        options={DATE_RANGE_PRESET_OPTIONS}
-                        placeholder="Date Range"
-                      />
-                      {daywiseDateRangePreset === 'custom' && (
-                        <>
-                          <input
-                            type="date"
-                            value={daywiseDateFrom}
-                            onChange={(e) => setDaywiseDateFrom(e.target.value)}
-                            title={`From (${daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} date)`}
-                            className="h-8 px-3 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                          />
-                          <input
-                            type="date"
-                            value={daywiseDateTo}
-                            onChange={(e) => setDaywiseDateTo(e.target.value)}
-                            title={`To (${daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} date)`}
-                            className="h-8 px-3 text-[13px] bg-zinc-900/90 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
-                          />
-                        </>
-                      )}
-                      <CustomSelect
-                        value={brandFilter}
-                        onChange={(v) => { setBrandFilter(v); safeStorage.setItem('de_brand_filter', v); }}
-                        options={[{ value: 'ALL', label: 'All Brands' }, ...BRANDS.map(b => ({ value: b, label: b }))]}
-                        placeholder="Brand"
-                      />
-                      <CustomSelect
-                        value={daywisePartnerFilter}
-                        onChange={(v) => { setDaywisePartnerFilter(v); safeStorage.setItem('de_daywise_partner_filter', v); }}
-                        options={[{ value: 'ALL', label: 'All Partners' }, ...PARTNER_FILTER_OPTIONS.map(p => ({ value: p, label: p }))]}
-                        placeholder="Partner"
-                      />
-                      <CustomSelect
-                        value={daywisePaymentModeFilter}
-                        onChange={(v) => { setDaywisePaymentModeFilter(v); safeStorage.setItem('de_daywise_payment_mode_filter', v); }}
-                        options={[{ value: 'ALL', label: 'All Payment Modes' }, ...PAYMENT_MODES.map(m => ({ value: m, label: m }))]}
-                        placeholder="Payment Mode"
-                      />
-                    </div>
-                  </div>
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1">
+                    TAT by {daywiseDateBasis === 'order_date' ? 'Order' : 'Query'} Date
+                  </p>
                   <p className="text-[12px] text-zinc-500 mb-3">
                     Every parcel (distinct AWB), bucketed by days since Query Date - resolved
                     parcels use their actual resolution date, still-open parcels use today's
