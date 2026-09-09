@@ -111,10 +111,13 @@ assert.throws(() => deWhere('everything', {}), /Unknown Delivery-Escalation view
     'unresolved age must be measured as of today against added_date');
   assert.ok(!UNRESOLVED_AGE_BUCKET_SQL.includes('disposed_at'),
     'a still-open ticket has no disposed_at to measure against');
-  // 4 buckets, ascending severity, matching the display list exactly (same "CASE output must be a
-  // subset of the display array" contract DE_DAYWISE_BUCKETS' own test guards above).
+  // 5 buckets, ascending severity, matching the display list exactly (same "CASE output must be a
+  // subset of the display array" contract DE_DAYWISE_BUCKETS' own test guards above). The 96hrs
+  // bucket is carved out of the 4-8/>8 day ranges - only unresolved tickets that ALSO have no
+  // new_order_AWB (no replacement order placed yet) land there instead.
   assert.deepStrictEqual(UNRESOLVED_AGE_BUCKETS, [
     'open Within 48 hrs', 'open Within 2-4 days', 'open within 4-8 days', 'open Greater than 8days',
+    'open Greater than 96hrs, new order not placed',
   ]);
   for (const label of UNRESOLVED_AGE_BUCKETS) {
     assert.ok(UNRESOLVED_AGE_BUCKET_SQL.includes(`'${label}'`),
