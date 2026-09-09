@@ -3301,15 +3301,50 @@ async function getDeliveryEscalationGeoCategoryStats(opts = {}) {
 
 async function getDeliveryEscalationAgents() {
   // Cached with the other Overview reads (op=stats fetches this alongside them on every mount):
-  // the agent list changes when a ticket is assigned, not between one mount and the next, so it
-  // does not need to be re-derived by a full-table DISTINCT per request.
+  // the agent list changes when a ticket is assigned or access is granted, not between one mount
+  // and the next, so it does not need to be re-derived per request.
   return cachedRead('de-agents', async () => {
-    const { rows } = await sql`
-      SELECT DISTINCT agent_email FROM Delivery_escalation
-      WHERE agent_email IS NOT NULL AND agent_email != ''
-      ORDER BY agent_email
-    `;
-    return rows.map((r) => r.agent_email);
+    await ensureSchema();
+    // A plain DISTINCT agent_email (this table has no roster otherwise - see this file's own
+    // header comment) only ever lists people who've ALREADY claimed/been assigned a row, so a
+    // person granted access today but with zero activity yet (or a Partner-role viewer who may
+    // never claim one under their own email at all) never appears in the Agent filter - not a
+    // typo/case bug, just nothing yet to be DISTINCT over. Merged here with the same "who
+    // actually has the deliveryescalation tab" eligibility admin/[action].js's own
+    // handleDeliveryPartnerAccess computes for its user list (full admin, OR holds the 'calling'
+    // card with no tab restriction, OR has 'deliveryescalation' explicitly in their tab list) -
+    // same query shape, kept in sync by hand since there's no shared helper for it yet.
+    const [{ rows: activeRows }, { rows: users }, { rows: perms }, { rows: tabPerms }] = await Promise.all([
+      sql`SELECT DISTINCT agent_email FROM Delivery_escalation
+          WHERE agent_email IS NOT NULL AND agent_email != ''`,
+      sql`SELECT id, email, is_admin FROM users`,
+      sql`SELECT user_id FROM permissions WHERE card_key = 'calling'`,
+      sql`SELECT user_id, tab_key FROM report_tab_permissions WHERE card_key = 'calling'`,
+    ]);
+    const callingUserIds = new Set(perms.map((p) => p.user_id));
+    const restrictedTabsByUser = {};
+    tabPerms.forEach((t) => { (restrictedTabsByUser[t.user_id] = restrictedTabsByUser[t.user_id] || []).push(t.tab_key); });
+    const rosterEmails = users
+      .filter((u) => {
+        if (u.is_admin) return true;
+        if (!callingUserIds.has(u.id)) return false;
+        const tabs = restrictedTabsByUser[u.id];
+        return !tabs || tabs.length === 0 || tabs.includes('deliveryescalation');
+      })
+      .map((u) => u.email);
+    // Case-insensitive de-dup (agent_email's own casing wins on a collision, since that's what
+    // every existing ticket already carries) - a plain Set on the raw strings would keep both
+    // 'Rohit.khambe@mcaffeine.com' (a real disposed row) and 'rohit.khambe@mcaffeine.com' (the
+    // users-table casing) as two separate options for the same person.
+    const seen = new Set();
+    const merged = [];
+    for (const email of [...activeRows.map((r) => r.agent_email), ...rosterEmails]) {
+      const key = String(email).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(email);
+    }
+    return merged.sort((a, b) => a.localeCompare(b));
   }, DE_OVERVIEW_CACHE_TTL_MS);
 }
 
