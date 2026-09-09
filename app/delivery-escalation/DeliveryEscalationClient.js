@@ -1007,6 +1007,9 @@ async function fetchDaywiseStats({ brand, agent, dateField, partner, paymentMode
     grandTotal: d.grandTotal || {},
     grandTotalAll: d.grandTotalAll || 0,
     missingDateCount: d.missingDateCount || 0,
+    unresolvedAgeBuckets: d.unresolvedAgeBuckets || [],
+    grandTotalAge: d.grandTotalAge || {},
+    grandTotalAgeAll: d.grandTotalAgeAll || 0,
   };
 }
 
@@ -1742,13 +1745,18 @@ export default function DeliveryEscalationClient() {
   // their ageCounts/ageTotal (how long each still-open ticket has been sitting - see
   // UNRESOLVED_AGE_BUCKET_SQL in api/_lib/db.js) instead of counts/total, then rolled up through
   // the exact same Month grouping helper as everything else on this page.
+  // Month -> Week -> Day, same as groupedDaywise above, just off ageCounts/ageTotal instead of
+  // counts/total - keyPrefix 'age::' keeps this table's month/week keys out of the plain '2026-07'
+  // keyspace groupedDaywise uses, so expanding a month here can't also expand it there (same
+  // shared expandedMonths/expandedWeeks convention groupPartnerwiseRows etc. already rely on).
+  // `|| []`/`|| {}` guards: api/ (Lambda) and app/ (Amplify) deploy independently, so a request
+  // can land after this bundle ships but before the Lambda carrying unresolvedAgeBuckets/
+  // ageCounts/ageTotal does - old responses simply lack these fields rather than erroring.
   const groupedUnresolvedAge = useMemo(
-    // `|| []`/`|| {}` guards: api/ (Lambda) and app/ (Amplify) deploy independently, so a request
-    // can land after this bundle ships but before the Lambda carrying unresolvedAgeBuckets/
-    // ageCounts/ageTotal does - old responses simply lack these fields rather than erroring.
-    () => groupDaywiseRows(
+    () => buildMonthsFromDayRows(
       daywise.rows.map((r) => ({ date: r.date, counts: r.ageCounts || {}, total: r.ageTotal || 0 })),
-      daywise.unresolvedAgeBuckets || []
+      daywise.unresolvedAgeBuckets || [],
+      'age::'
     ),
     [daywise.rows, daywise.unresolvedAgeBuckets]
   );
@@ -2543,16 +2551,58 @@ export default function DeliveryEscalationClient() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-zinc-800/50">
-                          {groupedUnresolvedAge.map((month) => (
-                            <tr key={month.key} className="hover:bg-zinc-800/30 transition-colors">
-                              <td className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">{formatDaywiseMonth(month.key)}</td>
-                              {ageBuckets.flatMap((b) => ([
-                                <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60">{month.counts[b] || 0}</td>,
-                                <td key={`${b}-pct`} style={pctHeatStyle(month.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
-                              ]))}
-                              <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
-                            </tr>
-                          ))}
+                          {groupedUnresolvedAge.map((month) => {
+                            const monthOpen = expandedMonths.has(month.key);
+                            return (
+                              <Fragment key={month.key}>
+                                <tr
+                                  onClick={() => toggleExpanded(setExpandedMonths, month.key)}
+                                  className="group hover:bg-zinc-800/30 transition-colors cursor-pointer"
+                                >
+                                  <td className="sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800/30 transition-colors py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">
+                                    <span className="inline-block w-4 text-zinc-500">{monthOpen ? '▾' : '▸'}</span>
+                                    {formatDaywiseMonth(month.key)}
+                                  </td>
+                                  {ageBuckets.flatMap((b) => ([
+                                    <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60">{month.counts[b] || 0}</td>,
+                                    <td key={`${b}-pct`} style={pctHeatStyle(month.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
+                                  ]))}
+                                  <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
+                                </tr>
+                                {monthOpen && month.weeks.map((week) => {
+                                  const weekOpen = expandedWeeks.has(week.key);
+                                  return (
+                                    <Fragment key={week.key}>
+                                      <tr
+                                        onClick={() => toggleExpanded(setExpandedWeeks, week.key)}
+                                        className="group hover:bg-zinc-800/30 transition-colors cursor-pointer bg-zinc-950/20"
+                                      >
+                                        <td className="sticky left-0 z-10 bg-zinc-950 group-hover:bg-zinc-800/30 transition-colors py-1.5 px-3 pl-8 text-zinc-500 text-[12px] whitespace-nowrap">
+                                          <span className="inline-block w-4 text-zinc-600">{weekOpen ? '▾' : '▸'}</span>
+                                          {formatDaywiseWeek(week)}
+                                        </td>
+                                        {ageBuckets.flatMap((b) => ([
+                                          <td key={`${b}-n`} className="py-1.5 px-3 text-right text-zinc-400 text-[12px] tabular-nums border-l border-zinc-800/60">{week.counts[b] || 0}</td>,
+                                          <td key={`${b}-pct`} className="py-1.5 px-3 text-right text-zinc-600 tabular-nums text-[11px]">{week.pct[b] || 0}%</td>,
+                                        ]))}
+                                        <td className="py-1.5 px-3 text-right text-zinc-300 text-[12px] tabular-nums border-l border-zinc-800/60">{week.total.toLocaleString('en-IN')}</td>
+                                      </tr>
+                                      {weekOpen && week.days.filter((r) => r.total > 0).map((r) => (
+                                        <tr key={r.date} className="group hover:bg-zinc-800/30 transition-colors">
+                                          <td className="sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800/30 transition-colors py-1.5 px-3 pl-14 text-zinc-500 text-[12px] whitespace-nowrap">{formatDaywiseDate(r.date)}</td>
+                                          {ageBuckets.flatMap((b) => ([
+                                            <td key={`${b}-n`} className="py-1.5 px-3 text-right text-zinc-500 text-[12px] tabular-nums border-l border-zinc-800/60">{r.counts[b] || 0}</td>,
+                                            <td key={`${b}-pct`} className="py-1.5 px-3 text-right text-zinc-600 tabular-nums text-[11px]">{r.pct[b] || 0}%</td>,
+                                          ]))}
+                                          <td className="py-1.5 px-3 text-right text-zinc-400 text-[12px] tabular-nums border-l border-zinc-800/60">{r.total.toLocaleString('en-IN')}</td>
+                                        </tr>
+                                      ))}
+                                    </Fragment>
+                                  );
+                                })}
+                              </Fragment>
+                            );
+                          })}
                           {groupedUnresolvedAge.length === 0 && (
                             <tr><td colSpan={ageBuckets.length * 2 + 2} className="py-4 px-3 text-center text-zinc-600">No unresolved tickets.</td></tr>
                           )}
