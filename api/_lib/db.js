@@ -2586,7 +2586,9 @@ const DE_DAYWISE_BUCKETS = [
 const UNRESOLVED_AGE_BUCKET_SQL = `CASE
     WHEN DATEDIFF(CURDATE(), added_date) <= 2 THEN 'open Within 48 hrs'
     WHEN DATEDIFF(CURDATE(), added_date) <= 4 THEN 'open Within 2-4 days'
-    WHEN TIMESTAMPDIFF(HOUR, added_date, NOW()) > 96 AND (new_order_AWB IS NULL OR new_order_AWB = '') THEN 'open Greater than 96hrs, new order not placed'
+    WHEN TIMESTAMPDIFF(HOUR, added_date, NOW()) > 96
+      AND NOT (${DE_NEW_ORDER_PLACED_WHERE})
+      AND (new_order_AWB IS NULL OR new_order_AWB = '') THEN 'open Greater than 96hrs, new order not placed'
     WHEN DATEDIFF(CURDATE(), added_date) <= 8 THEN 'open within 4-8 days'
     ELSE 'open Greater than 8days'
   END`;

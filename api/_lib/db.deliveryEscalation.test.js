@@ -114,11 +114,14 @@ assert.throws(() => deWhere('everything', {}), /Unknown Delivery-Escalation view
   // 5 buckets, ascending severity, matching the display list exactly (same "CASE output must be a
   // subset of the display array" contract DE_DAYWISE_BUCKETS' own test guards above). The 96hrs
   // bucket is carved out of the 4-8/>8 day ranges - only unresolved tickets that ALSO have no
-  // new_order_AWB (no replacement order placed yet) land there instead.
+  // new_order_AWB AND whose outcome isn't 'Escalated > New order placed' (a disposition-flagged
+  // new order counts as placed even if new_order_AWB itself is still blank) land there instead.
   assert.deepStrictEqual(UNRESOLVED_AGE_BUCKETS, [
     'open Within 48 hrs', 'open Within 2-4 days', 'open within 4-8 days', 'open Greater than 8days',
     'open Greater than 96hrs, new order not placed',
   ]);
+  assert.ok(UNRESOLVED_AGE_BUCKET_SQL.includes("outcome = 'Escalated > New order placed'"),
+    'a New order placed disposition must count as a new order placed, regardless of new_order_AWB');
   for (const label of UNRESOLVED_AGE_BUCKETS) {
     assert.ok(UNRESOLVED_AGE_BUCKET_SQL.includes(`'${label}'`),
       `bucket ${label} is listed for display but never emitted by the CASE`);
