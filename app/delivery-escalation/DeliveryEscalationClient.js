@@ -79,6 +79,7 @@ const DE_OVERVIEW_TABLE_CARD_KEY = 'deliveryescalation-overview-tables';
 const DE_OVERVIEW_TABLE_LABELS = {
   summary: '🔢 Summary Tiles',
   daywise: '📅 TAT by Query Date',
+  unresolved_age: '⏳ Unresolved Leads Funnel',
   partnerwise: '🚚 TAT by Delivery Partner',
   query_class: '🏷️ TAT by Query Class',
   contact_bucket: '🔁 TAT by Repeat Contacts',
@@ -1697,7 +1698,10 @@ export default function DeliveryEscalationClient() {
   // filter icons pick from these (see fetchStats).
   const [queryCategoryOptions, setQueryCategoryOptions] = useState([]);
   const [childDispositionOptions, setChildDispositionOptions] = useState([]);
-  const [daywise, setDaywise] = useState({ buckets: [], rows: [], grandTotal: {}, grandTotalAll: 0, missingDateCount: 0 });
+  const [daywise, setDaywise] = useState({
+    buckets: [], rows: [], grandTotal: {}, grandTotalAll: 0, missingDateCount: 0,
+    unresolvedAgeBuckets: [], grandTotalAge: {}, grandTotalAgeAll: 0,
+  });
   const [daywiseLoading, setDaywiseLoading] = useState(false);
   // Collapsed by default at every level - a flat list of every individual day was the whole
   // problem being fixed here. Shared between the date table and the partner-wise table below it:
@@ -1733,6 +1737,17 @@ export default function DeliveryEscalationClient() {
   const groupedDaywise = useMemo(
     () => groupDaywiseRows(daywise.rows, daywise.buckets),
     [daywise.rows, daywise.buckets]
+  );
+  // Unresolved Leads Funnel: same day rows the TAT table above already fetched, just read off
+  // their ageCounts/ageTotal (how long each still-open ticket has been sitting - see
+  // UNRESOLVED_AGE_BUCKET_SQL in api/_lib/db.js) instead of counts/total, then rolled up through
+  // the exact same Month grouping helper as everything else on this page.
+  const groupedUnresolvedAge = useMemo(
+    () => groupDaywiseRows(
+      daywise.rows.map((r) => ({ date: r.date, counts: r.ageCounts, total: r.ageTotal })),
+      daywise.unresolvedAgeBuckets
+    ),
+    [daywise.rows, daywise.unresolvedAgeBuckets]
   );
   const groupedPartnerwise = useMemo(
     () => groupPartnerwiseRows(daywise.rows, daywise.buckets),
@@ -2487,6 +2502,65 @@ export default function DeliveryEscalationClient() {
                   <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
                     <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Awaiting Resolution</p>
                     <p className="text-2xl font-extrabold text-zinc-100 tabular-nums">{stats.fresh.toLocaleString('en-IN')}</p>
+                  </div>
+                </div>
+              )}
+
+              {tab === 'overview' && showOverviewTable('unresolved_age') && (
+                <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Unresolved Leads Funnel</p>
+                  <p className="text-[12px] text-zinc-500 mb-3">
+                    Still-open tickets only (Fresh/Escalated/RTO, not Forced RTO or Resolved),
+                    bucketed by days since Query Date - i.e. how long each has been sitting
+                    unresolved as of today. % is each bucket&apos;s share of that row&apos;s own total.
+                  </p>
+                  <div className="rounded-xl border border-zinc-800/80 overflow-hidden">
+                    <div className="overflow-x-auto custom-scroll">
+                      <table className="w-full text-[13px]">
+                        <thead>
+                          <tr className="border-b border-zinc-800/80 text-zinc-500">
+                            <th rowSpan={2} className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">Query date</th>
+                            {daywise.unresolvedAgeBuckets.map((b) => (
+                              <th key={b} colSpan={2} className="py-2 px-3 text-center font-medium border-l border-zinc-800/60 whitespace-nowrap">{b}</th>
+                            ))}
+                            <th rowSpan={2} className="py-2 px-3 text-right font-medium align-bottom border-l border-zinc-800/60 whitespace-nowrap">Total unresolved</th>
+                          </tr>
+                          <tr className="border-b border-zinc-800/80 text-zinc-600 text-[11px]">
+                            {daywise.unresolvedAgeBuckets.flatMap((b) => ([
+                              <th key={`${b}-n`} className="py-1 px-3 text-right font-medium border-l border-zinc-800/60"> </th>,
+                              <th key={`${b}-pct`} className="py-1 px-3 text-right font-medium">%</th>,
+                            ]))}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-zinc-800/50">
+                          {groupedUnresolvedAge.map((month) => (
+                            <tr key={month.key} className="hover:bg-zinc-800/30 transition-colors">
+                              <td className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">{formatDaywiseMonth(month.key)}</td>
+                              {daywise.unresolvedAgeBuckets.flatMap((b) => ([
+                                <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60">{month.counts[b] || 0}</td>,
+                                <td key={`${b}-pct`} style={pctHeatStyle(month.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
+                              ]))}
+                              <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{month.total.toLocaleString('en-IN')}</td>
+                            </tr>
+                          ))}
+                          {groupedUnresolvedAge.length === 0 && (
+                            <tr><td colSpan={daywise.unresolvedAgeBuckets.length * 2 + 2} className="py-4 px-3 text-center text-zinc-600">No unresolved tickets.</td></tr>
+                          )}
+                          <tr className="bg-zinc-950/60">
+                            <td className="sticky left-0 z-10 bg-zinc-950/60 py-2 px-3 text-zinc-100 font-bold whitespace-nowrap">Grand Total</td>
+                            {daywise.unresolvedAgeBuckets.flatMap((b) => {
+                              const count = daywise.grandTotalAge[b] || 0;
+                              const pct = daywise.grandTotalAgeAll ? Math.round((count / daywise.grandTotalAgeAll) * 100) : 0;
+                              return [
+                                <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{count.toLocaleString('en-IN')}</td>,
+                                <td key={`${b}-pct`} style={pctHeatStyle(pct)} className="py-2 px-3 text-right text-zinc-400 tabular-nums text-[12px]">{pct}%</td>,
+                              ];
+                            })}
+                            <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{daywise.grandTotalAgeAll.toLocaleString('en-IN')}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}

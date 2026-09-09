@@ -5,7 +5,11 @@
 // hid every unclaimed ticket from the very people meant to claim them (a newly-invited agent saw
 // an empty page). Access is checkAccess()/report_tab_permissions only - no row-level scope.
 const assert = require('assert');
-const { deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS, bulkDisposeDeliveryEscalationByAwb } = require('./db');
+const {
+  deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS,
+  UNRESOLVED_AGE_BUCKET_SQL, UNRESOLVED_AGE_BUCKETS,
+  bulkDisposeDeliveryEscalationByAwb,
+} = require('./db');
 
 // 1. No filters: the view predicate alone, no agent/scope clause bolted on.
 {
@@ -95,6 +99,25 @@ assert.throws(() => deWhere('everything', {}), /Unknown Delivery-Escalation view
   for (const label of ['Within 48 hrs', 'Within 2-4 days', '4-8 days', '8-10 days',
     'Greater than 10 days', 'Forced to be marked as RTO', 'unresolved']) {
     assert.ok(DE_DAYWISE_BUCKET_SQL.includes(`'${label}'`),
+      `bucket ${label} is listed for display but never emitted by the CASE`);
+  }
+}
+
+// 6b. Unresolved Leads Funnel's age split (UNRESOLVED_AGE_BUCKET_SQL) - unlike DE_DAYWISE_BUCKET_SQL
+// above, every row this CASE runs against is genuinely still open, so it must measure age AS OF
+// TODAY off added_date, never disposed_at (an open ticket has none) or a fixed cutoff date.
+{
+  assert.ok(/DATEDIFF\(CURDATE\(\), added_date\)/.test(UNRESOLVED_AGE_BUCKET_SQL),
+    'unresolved age must be measured as of today against added_date');
+  assert.ok(!UNRESOLVED_AGE_BUCKET_SQL.includes('disposed_at'),
+    'a still-open ticket has no disposed_at to measure against');
+  // 4 buckets, ascending severity, matching the display list exactly (same "CASE output must be a
+  // subset of the display array" contract DE_DAYWISE_BUCKETS' own test guards above).
+  assert.deepStrictEqual(UNRESOLVED_AGE_BUCKETS, [
+    'open Within 48 hrs', 'open Within 2-4 days', 'open within 4-8 days', 'open Greater than 8days',
+  ]);
+  for (const label of UNRESOLVED_AGE_BUCKETS) {
+    assert.ok(UNRESOLVED_AGE_BUCKET_SQL.includes(`'${label}'`),
       `bucket ${label} is listed for display but never emitted by the CASE`);
   }
 }

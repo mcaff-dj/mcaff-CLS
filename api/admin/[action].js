@@ -941,7 +941,7 @@ const DE_TAB_KEYS = ['overview', 'fresh', 'forced_rto', 'resolved', 'new_order_p
 // one section, so there is nothing narrower to enforce server-side.
 const DE_OVERVIEW_TABLE_CARD_KEY = 'deliveryescalation-overview-tables';
 const DE_OVERVIEW_TABLE_KEYS = [
-  'summary', 'daywise', 'partnerwise', 'query_class', 'contact_bucket', 'geo_category', 'repeat_offenders',
+  'summary', 'daywise', 'unresolved_age', 'partnerwise', 'query_class', 'contact_bucket', 'geo_category', 'repeat_offenders',
 ];
 
 async function handleDeliveryPartnerAccess(req, res, session) {

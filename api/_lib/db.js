@@ -2578,6 +2578,21 @@ const DE_DAYWISE_BUCKETS = [
   'Forced to be marked as RTO', 'unresolved',
 ];
 
+// Age-since-added_date split of the day-wise table's own 'unresolved' bucket above - how long
+// each still-open ticket has been sitting, not how it's classified. Always measured off
+// added_date (when the ticket actually entered the queue) regardless of which date basis the
+// day-wise table itself is grouped by - "how long has this been unresolved" doesn't change
+// meaning just because the table is currently grouped by Order Date instead of Query Date.
+const UNRESOLVED_AGE_BUCKET_SQL = `CASE
+    WHEN DATEDIFF(CURDATE(), added_date) <= 2 THEN 'open Within 48 hrs'
+    WHEN DATEDIFF(CURDATE(), added_date) <= 4 THEN 'open Within 2-4 days'
+    WHEN DATEDIFF(CURDATE(), added_date) <= 8 THEN 'open within 4-8 days'
+    ELSE 'open Greater than 8days'
+  END`;
+const UNRESOLVED_AGE_BUCKETS = [
+  'open Within 48 hrs', 'open Within 2-4 days', 'open within 4-8 days', 'open Greater than 8days',
+];
+
 // agent_remarks is unbounded TEXT; the UI truncates its display anyway, so it's cut here too -
 // otherwise one pathological remark could bloat a page response on its own.
 // child_disposition is a generated column derived from outcome (see
@@ -3055,10 +3070,10 @@ async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
   // (or triple-, ...) counts it. Ignores NULL/blank awb_code the same way COUNT(DISTINCT) does
   // there too - a ticket with no AWB at all doesn't land in any bucket.
   const [rows] = await pool.execute(`
-    SELECT /*+ MAX_EXECUTION_TIME(${DE_MAX_EXEC_MS}) */ DATE_FORMAT(${col}, '%Y-%m-%d') AS d, COALESCE(delivery_partner, 'Unknown') AS partner, COALESCE(query_category, 'Unknown') AS category, ${DE_CONTACT_BUCKET_SQL} AS contactBucket, ${DE_DAYWISE_BUCKET_SQL} AS bucket, COUNT(DISTINCT awb_code) AS c
+    SELECT /*+ MAX_EXECUTION_TIME(${DE_MAX_EXEC_MS}) */ DATE_FORMAT(${col}, '%Y-%m-%d') AS d, COALESCE(delivery_partner, 'Unknown') AS partner, COALESCE(query_category, 'Unknown') AS category, ${DE_CONTACT_BUCKET_SQL} AS contactBucket, ${DE_DAYWISE_BUCKET_SQL} AS bucket, ${UNRESOLVED_AGE_BUCKET_SQL} AS ageBucket, COUNT(DISTINCT awb_code) AS c
     FROM Delivery_escalation
     WHERE ${col} IS NOT NULL${extra}${floorClause}${rangeClause}
-    GROUP BY d, partner, category, contactBucket, bucket
+    GROUP BY d, partner, category, contactBucket, bucket, ageBucket
     ORDER BY d
   `, [...params, ...floorParams, ...rangeParams]);
   const [[{ noDateCount }]] = await pool.execute(
@@ -3068,13 +3083,19 @@ async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
   const pctOf = (counts, total) => Object.fromEntries(DE_DAYWISE_BUCKETS.map((b) => [
     b, total ? Math.round((counts[b] / total) * 100) : 0,
   ]));
+  const zeroAgeCounts = () => Object.fromEntries(UNRESOLVED_AGE_BUCKETS.map((b) => [b, 0]));
+  const pctOfAge = (counts, total) => Object.fromEntries(UNRESOLVED_AGE_BUCKETS.map((b) => [
+    b, total ? Math.round((counts[b] / total) * 100) : 0,
+  ]));
 
   const byDate = new Map();
   const grandTotal = zeroCounts();
   let grandTotalAll = 0;
+  const grandTotalAge = zeroAgeCounts();
+  let grandTotalAgeAll = 0;
   for (const r of rows) {
     const c = Number(r.c) || 0;
-    if (!byDate.has(r.d)) byDate.set(r.d, { date: r.d, counts: zeroCounts(), total: 0, partners: new Map(), categories: new Map(), contactBuckets: new Map() });
+    if (!byDate.has(r.d)) byDate.set(r.d, { date: r.d, counts: zeroCounts(), total: 0, ageCounts: zeroAgeCounts(), ageTotal: 0, partners: new Map(), categories: new Map(), contactBuckets: new Map() });
     const entry = byDate.get(r.d);
     if (!entry.partners.has(r.partner)) entry.partners.set(r.partner, { partner: r.partner, counts: zeroCounts(), total: 0 });
     const partnerEntry = entry.partners.get(r.partner);
@@ -3105,6 +3126,15 @@ async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
     contactBucketPartnerEntry.total += c;
     grandTotal[r.bucket] += c;
     grandTotalAll += c;
+    // Age split only means anything for the 'unresolved' population - ageBucket is still a real
+    // (harmless) value for resolved/forced-RTO rows since UNRESOLVED_AGE_BUCKET_SQL runs
+    // unconditionally, just not one worth counting.
+    if (r.bucket === 'unresolved') {
+      entry.ageCounts[r.ageBucket] += c;
+      entry.ageTotal += c;
+      grandTotalAge[r.ageBucket] += c;
+      grandTotalAgeAll += c;
+    }
   }
   const missingDateCount = Number(noDateCount) || 0;
   grandTotal.unresolved += missingDateCount;
@@ -3114,6 +3144,9 @@ async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
     total: entry.total,
     counts: entry.counts,
     pct: pctOf(entry.counts, entry.total),
+    ageTotal: entry.ageTotal,
+    ageCounts: entry.ageCounts,
+    agePct: pctOfAge(entry.ageCounts, entry.ageTotal),
     partners: [...entry.partners.values()]
       .sort((a, b) => b.total - a.total)
       .map((p) => ({ partner: p.partner, total: p.total, counts: p.counts, pct: pctOf(p.counts, p.total) })),
@@ -3129,7 +3162,16 @@ async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
           .map((p) => ({ partner: p.partner, total: p.total, counts: p.counts, pct: pctOf(p.counts, p.total) })),
       })),
   }));
-  return { buckets: DE_DAYWISE_BUCKETS, rows: rowsOut, grandTotal, grandTotalAll, missingDateCount };
+  return {
+    buckets: DE_DAYWISE_BUCKETS, rows: rowsOut, grandTotal, grandTotalAll, missingDateCount,
+    // Unresolved-only age split (see UNRESOLVED_AGE_BUCKET_SQL) - always keyed off added_date
+    // regardless of dateField, so missingDateCount above (which follows dateField/`col`) is only
+    // an exact stand-in for "can't be aged" while dateField is its added_date default; under the
+    // Order Date toggle it can undercount/overcount by however many rows have one date but not
+    // the other. Not worth a second full-table query to fix for what both bases show as a
+    // handful of rows.
+    unresolvedAgeBuckets: UNRESOLVED_AGE_BUCKETS, grandTotalAge, grandTotalAgeAll,
+  };
 }
 
 // State -> City -> Pincode x Query Category breakdown for the Overview's standalone geo table -
@@ -5672,7 +5714,7 @@ module.exports = {
   buildNpsProductExportWhere,
   // Exported for api/_lib/db.cache.test.js, db.refundExport.test.js and
   // db.deliveryEscalation.test.js only - nothing in the app calls these directly.
-  deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS,
+  deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS, UNRESOLVED_AGE_BUCKET_SQL, UNRESOLVED_AGE_BUCKETS,
   cachedRead, invalidateCache, CACHE_TTL_MS,
   deCacheKey, DE_OVERVIEW_CACHE_TTL_MS, // exported for db.deliveryEscalation.cache.test.js
   buildRefundExportWhere,
