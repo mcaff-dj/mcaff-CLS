@@ -1743,9 +1743,12 @@ export default function DeliveryEscalationClient() {
   // UNRESOLVED_AGE_BUCKET_SQL in api/_lib/db.js) instead of counts/total, then rolled up through
   // the exact same Month grouping helper as everything else on this page.
   const groupedUnresolvedAge = useMemo(
+    // `|| []`/`|| {}` guards: api/ (Lambda) and app/ (Amplify) deploy independently, so a request
+    // can land after this bundle ships but before the Lambda carrying unresolvedAgeBuckets/
+    // ageCounts/ageTotal does - old responses simply lack these fields rather than erroring.
     () => groupDaywiseRows(
-      daywise.rows.map((r) => ({ date: r.date, counts: r.ageCounts, total: r.ageTotal })),
-      daywise.unresolvedAgeBuckets
+      daywise.rows.map((r) => ({ date: r.date, counts: r.ageCounts || {}, total: r.ageTotal || 0 })),
+      daywise.unresolvedAgeBuckets || []
     ),
     [daywise.rows, daywise.unresolvedAgeBuckets]
   );
@@ -2506,7 +2509,14 @@ export default function DeliveryEscalationClient() {
                 </div>
               )}
 
-              {tab === 'overview' && showOverviewTable('unresolved_age') && (
+              {tab === 'overview' && showOverviewTable('unresolved_age') && (() => {
+                // `|| []`/`|| {}`/`|| 0` guards: api/ (Lambda) and app/ (Amplify) deploy
+                // independently, so this bundle can be live before the Lambda carrying these
+                // fields is - an old response simply lacks them rather than crashing the page.
+                const ageBuckets = daywise.unresolvedAgeBuckets || [];
+                const ageGrandTotal = daywise.grandTotalAge || {};
+                const ageGrandTotalAll = daywise.grandTotalAgeAll || 0;
+                return (
                 <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
                   <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-1">Unresolved Leads Funnel</p>
                   <p className="text-[12px] text-zinc-500 mb-3">
@@ -2520,13 +2530,13 @@ export default function DeliveryEscalationClient() {
                         <thead>
                           <tr className="border-b border-zinc-800/80 text-zinc-500">
                             <th rowSpan={2} className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 text-left font-medium align-bottom whitespace-nowrap">Query date</th>
-                            {daywise.unresolvedAgeBuckets.map((b) => (
+                            {ageBuckets.map((b) => (
                               <th key={b} colSpan={2} className="py-2 px-3 text-center font-medium border-l border-zinc-800/60 whitespace-nowrap">{b}</th>
                             ))}
                             <th rowSpan={2} className="py-2 px-3 text-right font-medium align-bottom border-l border-zinc-800/60 whitespace-nowrap">Total unresolved</th>
                           </tr>
                           <tr className="border-b border-zinc-800/80 text-zinc-600 text-[11px]">
-                            {daywise.unresolvedAgeBuckets.flatMap((b) => ([
+                            {ageBuckets.flatMap((b) => ([
                               <th key={`${b}-n`} className="py-1 px-3 text-right font-medium border-l border-zinc-800/60"> </th>,
                               <th key={`${b}-pct`} className="py-1 px-3 text-right font-medium">%</th>,
                             ]))}
@@ -2536,7 +2546,7 @@ export default function DeliveryEscalationClient() {
                           {groupedUnresolvedAge.map((month) => (
                             <tr key={month.key} className="hover:bg-zinc-800/30 transition-colors">
                               <td className="sticky left-0 z-10 bg-zinc-900 py-2 px-3 text-zinc-200 font-semibold whitespace-nowrap">{formatDaywiseMonth(month.key)}</td>
-                              {daywise.unresolvedAgeBuckets.flatMap((b) => ([
+                              {ageBuckets.flatMap((b) => ([
                                 <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-200 font-semibold tabular-nums border-l border-zinc-800/60">{month.counts[b] || 0}</td>,
                                 <td key={`${b}-pct`} style={pctHeatStyle(month.pct[b])} className="py-2 px-3 text-right text-zinc-500 tabular-nums text-[12px]">{month.pct[b] || 0}%</td>,
                               ]))}
@@ -2544,26 +2554,27 @@ export default function DeliveryEscalationClient() {
                             </tr>
                           ))}
                           {groupedUnresolvedAge.length === 0 && (
-                            <tr><td colSpan={daywise.unresolvedAgeBuckets.length * 2 + 2} className="py-4 px-3 text-center text-zinc-600">No unresolved tickets.</td></tr>
+                            <tr><td colSpan={ageBuckets.length * 2 + 2} className="py-4 px-3 text-center text-zinc-600">No unresolved tickets.</td></tr>
                           )}
                           <tr className="bg-zinc-950/60">
                             <td className="sticky left-0 z-10 bg-zinc-950/60 py-2 px-3 text-zinc-100 font-bold whitespace-nowrap">Grand Total</td>
-                            {daywise.unresolvedAgeBuckets.flatMap((b) => {
-                              const count = daywise.grandTotalAge[b] || 0;
-                              const pct = daywise.grandTotalAgeAll ? Math.round((count / daywise.grandTotalAgeAll) * 100) : 0;
+                            {ageBuckets.flatMap((b) => {
+                              const count = ageGrandTotal[b] || 0;
+                              const pct = ageGrandTotalAll ? Math.round((count / ageGrandTotalAll) * 100) : 0;
                               return [
                                 <td key={`${b}-n`} className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{count.toLocaleString('en-IN')}</td>,
                                 <td key={`${b}-pct`} style={pctHeatStyle(pct)} className="py-2 px-3 text-right text-zinc-400 tabular-nums text-[12px]">{pct}%</td>,
                               ];
                             })}
-                            <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{daywise.grandTotalAgeAll.toLocaleString('en-IN')}</td>
+                            <td className="py-2 px-3 text-right text-zinc-100 font-bold tabular-nums border-l border-zinc-800/60">{ageGrandTotalAll.toLocaleString('en-IN')}</td>
                           </tr>
                         </tbody>
                       </table>
                     </div>
                   </div>
                 </div>
-              )}
+                );
+              })()}
 
               {tab === 'overview' && showOverviewTable('daywise') && (
                 <div className="bg-zinc-900/70 rounded-2xl p-4 border border-zinc-800/80 shadow-xs">
