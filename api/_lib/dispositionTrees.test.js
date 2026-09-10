@@ -1,7 +1,7 @@
 // Pure-function tests for per-team disposition trees. No DB, no network - same shape as
 // callingTeams.test.js. Run: node api/_lib/dispositionTrees.test.js
 const assert = require('assert');
-const { dispositionTeamFor, planTreeClone } = require('./dispositionTrees');
+const { dispositionTeamFor, planTreeClone, outcomePathIsValid } = require('./dispositionTrees');
 
 // ── dispositionTeamFor: null means the shared tree, a number means that team's own tree ──
 
@@ -59,5 +59,51 @@ assert.deepStrictEqual(planTreeClone([]), []);
 // A row whose parent is absent from the input is dropped, not silently promoted to a root: a
 // promoted child would appear as a new top-level outcome, which NDR's own metrics key off.
 assert.deepStrictEqual(planTreeClone([{ id: 5, parentId: 99, label: 'Orphan', sortOrder: 0 }]), []);
+
+// ── outcomePathIsValid: is a bulk-upload Outcome cell a real value from THIS tree? ──
+// Same nested shape getProcessDispositions returns (roots with .children), unlike
+// planTreeClone's flat parentId rows above.
+const OUTCOME_TREE = [
+  {
+    label: 'Escalated', childrenInputType: 'single', children: [
+      { label: 'Awaiting Partner', childrenInputType: 'single', children: [] },
+      { label: 'Wrong Address', childrenInputType: 'text', children: [] },
+      {
+        label: 'Fake Order RTO', childrenInputType: 'multi', children: [
+          { label: 'Customer refused', childrenInputType: 'single', children: [] },
+          { label: 'Address issue', childrenInputType: 'single', children: [] },
+        ],
+      },
+    ],
+  },
+  { label: 'Delivered', childrenInputType: 'single', children: [] },
+];
+
+// A leaf with no children configured - always valid on its own.
+assert.strictEqual(outcomePathIsValid('Delivered', OUTCOME_TREE), true);
+// A bare parent is itself a complete, valid outcome (DE_FRESH_WHERE's own bare-'Escalated'
+// clause, and exactly what allOutcomePaths/the Excel dropdown already offers) even though it has
+// children - a bulk upload isn't bound by the single-dispose modal's own "must reach the deepest
+// level" completeness gate.
+assert.strictEqual(outcomePathIsValid('Escalated', OUTCOME_TREE), true);
+// Ordinary nested single-pick.
+assert.strictEqual(outcomePathIsValid('Escalated > Awaiting Partner', OUTCOME_TREE), true);
+// Unknown label at any level is invalid.
+assert.strictEqual(outcomePathIsValid('Not A Real Outcome', OUTCOME_TREE), false);
+assert.strictEqual(outcomePathIsValid('Escalated > Not Real', OUTCOME_TREE), false);
+// A 'text' node's own bare path (no free text yet) is still one of its valid dropdown entries.
+assert.strictEqual(outcomePathIsValid('Escalated > Wrong Address', OUTCOME_TREE), true);
+// A 'text' leaf accepts ANY free-typed reason - it has no fixed value list, by design.
+assert.strictEqual(outcomePathIsValid('Escalated > Wrong Address > literally anything typed here', OUTCOME_TREE), true);
+// A 'multi' leaf: every ", "-joined label must be one of ITS OWN children (order-independent,
+// same as toggleMultiDisp's own checked-list join).
+assert.strictEqual(outcomePathIsValid('Escalated > Fake Order RTO > Customer refused, Address issue', OUTCOME_TREE), true);
+assert.strictEqual(outcomePathIsValid('Escalated > Fake Order RTO > Address issue, Customer refused', OUTCOME_TREE), true);
+assert.strictEqual(outcomePathIsValid('Escalated > Fake Order RTO > Customer refused, Bogus', OUTCOME_TREE), false);
+// A multi/text leaf is always the END of a path - nothing can follow it.
+assert.strictEqual(outcomePathIsValid('Escalated > Fake Order RTO > Customer refused > extra', OUTCOME_TREE), false);
+// Blank, and an empty tree, are both invalid rather than throwing.
+assert.strictEqual(outcomePathIsValid('', OUTCOME_TREE), false);
+assert.strictEqual(outcomePathIsValid('Delivered', []), false);
 
 console.log('dispositionTrees.test.js: all assertions passed');

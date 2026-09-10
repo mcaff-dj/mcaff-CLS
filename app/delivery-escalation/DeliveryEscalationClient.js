@@ -1065,7 +1065,10 @@ async function setTicketTagsMysql(id, tags) {
 
 // Reads the first worksheet of an uploaded .xlsx into plain [header, ...dataRows] arrays (row 1
 // = header) - the same shape the old hand-rolled CSV parser handed back, so every header-lookup/
-// aliasing rule below is unchanged.
+// aliasing rule below is unchanged. Each data row also carries its real Excel row number as
+// `.rowNumber` (an extra property on the cells array, not a cell) - `includeEmpty: false` means a
+// blank row in the middle of the sheet is skipped entirely, so a plain 1-based dataRows index
+// would drift from the row the agent actually sees in Excel the moment one exists.
 async function readWorkbookRows(arrayBuffer) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(arrayBuffer);
@@ -1077,7 +1080,7 @@ async function readWorkbookRows(arrayBuffer) {
     row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
       cells[colNumber - 1] = cell.value == null ? '' : String(cell.value).trim();
     });
-    if (cells.some((v) => v !== '')) rows.push(cells);
+    if (cells.some((v) => v !== '')) { cells.rowNumber = row.number; rows.push(cells); }
   });
   return rows;
 }
@@ -1098,6 +1101,7 @@ async function rowsFromBulkExcel(arrayBuffer) {
   }
   return dataRows
     .map((r) => ({
+      line: r.rowNumber,
       awb: (r[awbIdx] || '').trim(),
       outcome: (r[outcomeIdx] || '').trim(),
       remarks: remarksIdx !== undefined ? (r[remarksIdx] || '').trim() : '',
@@ -1126,6 +1130,7 @@ async function rowsFromNewOrderAwbExcel(arrayBuffer) {
   }
   return dataRows
     .map((r) => ({
+      line: r.rowNumber,
       awb: (r[awbIdx] || '').trim(),
       newOrderAwb: (r[newAwbIdx] || '').trim(),
       outcome: outcomeIdx !== undefined ? (r[outcomeIdx] || '').trim() : '',
@@ -1282,8 +1287,15 @@ async function bulkUploadOutcomes(rows, view) {
     body: JSON.stringify({ action: 'bulkDispose', rows, view }),
   });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || `Bulk upload failed (${r.status})`);
-  return d.results || [];
+  if (!r.ok) {
+    // rejected still travels on a thrown error (e.g. every row had an invalid Outcome, so the
+    // server has nothing left to write and answers 400) - the caller wants those lines shown the
+    // same way as a partial-success response, not lost behind a generic failure toast.
+    const err = new Error(d.error || `Bulk upload failed (${r.status})`);
+    err.rejected = d.rejected || [];
+    throw err;
+  }
+  return { results: d.results || [], rejected: d.rejected || [] };
 }
 
 // Walks the FIRST child at each level of the process's own configured disposition tree, so the
@@ -2321,11 +2333,13 @@ export default function DeliveryEscalationClient() {
           ? 'No valid rows found - need an AWB column and a New Order AWB column'
           : 'No valid rows found - need an AWB and an Outcome column');
       }
-      const results = await bulkUploadOutcomes(parsed, tab);
+      const { results, rejected } = await bulkUploadOutcomes(parsed, tab);
       const unmatched = results.filter((r) => r.matched === 0);
       const matchedCount = results.length - unmatched.length;
-      setBulkResult({ total: results.length, matchedCount, unmatched });
-      showToast(`Bulk upload: ${matchedCount}/${results.length} matched`);
+      setBulkResult({ total: results.length, matchedCount, unmatched, rejected });
+      showToast(rejected.length
+        ? `Bulk upload: ${matchedCount}/${results.length} matched, ${rejected.length} skipped (invalid Outcome)`
+        : `Bulk upload: ${matchedCount}/${results.length} matched`);
       // Could have touched any number of AWBs at once (each cascading, same as saveAction) -
       // no point diffing which; drop the timeline cache and collapse any open groups so
       // reopening one refetches fresh instead of showing a pre-upload outcome.
@@ -2334,7 +2348,12 @@ export default function DeliveryEscalationClient() {
       refresh(true);
     } catch (err) {
       if (isSessionExpired(err)) setSessionExpired(true);
-      else showToast(`⚠️ Bulk upload failed: ${err.message}`);
+      else {
+        showToast(`⚠️ Bulk upload failed: ${err.message}`);
+        // Every row can fail this way (all-invalid Outcome) - the server still lists which
+        // lines and why, worth showing even though nothing got written.
+        if (err.rejected?.length) setBulkResult({ total: 0, matchedCount: 0, unmatched: [], rejected: err.rejected });
+      }
     } finally {
       setBulkUploading(false);
     }
@@ -2560,6 +2579,16 @@ export default function DeliveryEscalationClient() {
                     {bulkResult.unmatched.length > 0 && (
                       <div className="text-amber-400 mt-1">
                         Not matched (already resolved, or AWB not found): {bulkResult.unmatched.map(u => u.awb).join(', ')}
+                      </div>
+                    )}
+                    {bulkResult.rejected?.length > 0 && (
+                      <div className="text-rose-400 mt-1">
+                        {bulkResult.rejected.length} row(s) skipped - invalid Outcome:
+                        <ul className="list-disc list-inside">
+                          {bulkResult.rejected.map((r, i) => (
+                            <li key={i}>{r.line ? `Line ${r.line}` : r.awb}: {r.reason}</li>
+                          ))}
+                        </ul>
                       </div>
                     )}
                   </div>

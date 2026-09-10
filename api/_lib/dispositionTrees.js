@@ -58,4 +58,39 @@ function planTreeClone(rows) {
   return plan;
 }
 
-module.exports = { dispositionTeamFor, planTreeClone };
+// Is `path` (e.g. "Escalated > Fake Order RTO > Customer refused, Address issue") a real value
+// from `tree` (the nested shape getProcessDispositions returns: [{label, childrenInputType,
+// children}, ...])? Built for the delivery-escalation bulk Excel upload's Outcome column, which
+// - unlike the single-dispose modal's own stepped picker - has no UI stopping a typed cell from
+// being garbage; the Excel dropdown addOutcomeDropdown backs it with is a convenience list only
+// (showErrorMessage: false), not an enforced one.
+//
+// Mirrors DeliveryEscalationClient.js's own dispLevels walk exactly, not just membership in
+// allOutcomePaths' flat list - that list is single-select-only and can't enumerate every real
+// value: a 'multi' node's valid values are any ", "-joined SUBSET of its children's labels
+// (however the agent happened to check them), and a 'text' node accepts arbitrary typed prose.
+// Both are still leaves - nothing can follow either in a valid path. A 'single' node, by
+// contrast, is ALWAYS valid to stop at even mid-tree (a bare parent is a complete, valid outcome
+// - see DE_FRESH_WHERE's own bare-'Escalated' clause), so only an unrecognised label anywhere in
+// the chain, or a segment beyond a multi/text leaf, is what makes a path invalid.
+function outcomePathIsValid(path, tree) {
+  const segments = String(path || '').split(' > ').map((s) => s.trim());
+  if (!segments.length || segments.some((s) => !s)) return false;
+  let nodes = tree || [];
+  for (let i = 0; i < segments.length; i++) {
+    const node = nodes.find((n) => n.label === segments[i]);
+    if (!node) return false;
+    nodes = node.children || [];
+    const childrenInputType = node.childrenInputType || 'single';
+    if (childrenInputType !== 'single' && i < segments.length - 1) {
+      if (i + 1 !== segments.length - 1) return false; // a multi/text leaf must end the path
+      const leaf = segments[i + 1];
+      if (childrenInputType === 'text') return !!leaf;
+      const labels = leaf.split(', ').map((s) => s.trim()).filter(Boolean);
+      return labels.length > 0 && labels.every((l) => nodes.some((n) => n.label === l));
+    }
+  }
+  return true;
+}
+
+module.exports = { dispositionTeamFor, planTreeClone, outcomePathIsValid };

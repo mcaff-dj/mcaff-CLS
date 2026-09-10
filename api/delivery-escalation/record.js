@@ -49,7 +49,9 @@ const {
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
   DE_ESCALATION_TAGS, setDeliveryEscalationTicketTags,
+  getDeliveryEscalationUserRoleByEmail, getProcessDispositions,
 } = require('../_lib/db');
+const { outcomePathIsValid } = require('../_lib/dispositionTrees');
 
 // Backstop against a request that can never finish, not an arbitrary business limit:
 // bulkDisposeDeliveryEscalationByAwb now runs 8 row-updates at a time (see its own comment)
@@ -255,14 +257,14 @@ module.exports = async (req, res) => {
     const clean = view === 'new_order_placed'
       ? rows
         .map((r) => ({
-          awb: String(r.awb || '').trim(),
+          line: r.line, awb: String(r.awb || '').trim(),
           newOrderAwb: String(r.newOrderAwb || '').trim(),
           outcome: r.outcome ? String(r.outcome).trim() : '',
           remarks: r.remarks ? String(r.remarks).trim() : '',
         }))
         .filter((r) => r.awb && r.newOrderAwb)
       : rows
-        .map((r) => ({ awb: String(r.awb || '').trim(), outcome: String(r.outcome || '').trim(), remarks: r.remarks ? String(r.remarks).trim() : '' }))
+        .map((r) => ({ line: r.line, awb: String(r.awb || '').trim(), outcome: String(r.outcome || '').trim(), remarks: r.remarks ? String(r.remarks).trim() : '' }))
         .filter((r) => r.awb && r.outcome);
     if (!clean.length) {
       res.status(400).json({
@@ -272,17 +274,45 @@ module.exports = async (req, res) => {
       });
       return;
     }
+
+    // Every non-blank Outcome must be a real value from the uploader's OWN disposition tree -
+    // same role-scoped tree (Partner vs shared) their own Excel dropdown/single-dispose picker
+    // was built from (see the admin GET route's own dispRoleScope resolution). Checked here so a
+    // row with a typo'd or made-up Outcome never reaches bulkDisposeDeliveryEscalationByAwb's own
+    // UPDATE at all, rather than silently writing garbage into a live ticket's outcome column -
+    // see outcomePathIsValid's own comment for why a flat valid-values list isn't enough (a
+    // multi/text disposition has no fixed value to check membership against).
+    const rowsWithOutcome = clean.filter((r) => r.outcome);
+    const rejected = [];
+    let toWrite = clean;
+    if (rowsWithOutcome.length) {
+      const roleScope = (await getDeliveryEscalationUserRoleByEmail(callerEmail)) === 'Partner' ? 'Partner' : null;
+      const tree = await getProcessDispositions('deliveryescalation', null, null, false, roleScope);
+      toWrite = [];
+      for (const row of clean) {
+        if (row.outcome && !outcomePathIsValid(row.outcome, tree)) {
+          rejected.push({ line: row.line, awb: row.awb, reason: `Skipped - "${row.outcome}" is not a valid Outcome for this process` });
+        } else {
+          toWrite.push(row);
+        }
+      }
+    }
+    if (!toWrite.length) {
+      res.status(400).json({ error: 'No valid rows - every row had an invalid Outcome.', rejected });
+      return;
+    }
+
     // new_order_placed's own UPDATE only touches agent_email when a row also carries an Outcome
     // (it's then a real disposal, same as fresh/forced_rto) - a plain AWB-fill-in row needs no
     // attribution at all.
-    const needsCallerEmail = view !== 'new_order_placed' || clean.some((r) => r.outcome);
+    const needsCallerEmail = view !== 'new_order_placed' || toWrite.some((r) => r.outcome);
     if (needsCallerEmail && !callerEmail) {
       res.status(400).json({ error: 'agent (an email) is required' });
       return;
     }
     try {
-      const results = await bulkDisposeDeliveryEscalationByAwb(clean, callerEmail, view);
-      res.status(200).json({ results });
+      const results = await bulkDisposeDeliveryEscalationByAwb(toWrite, callerEmail, view);
+      res.status(200).json({ results, rejected });
     } catch (e) {
       console.error('api/delivery-escalation/record bulkDispose error:', e);
       res.status(500).json({ error: e.message || 'Bulk upload failed' });
