@@ -8,6 +8,7 @@ const assert = require('assert');
 const {
   deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS,
   UNRESOLVED_AGE_BUCKET_SQL, UNRESOLVED_AGE_BUCKETS,
+  DE_DAY_BUCKET_COLUMN, DE_CONTACT_BUCKET_COLUMN, buildDeliveryEscalationDaywiseResult,
   bulkDisposeDeliveryEscalationByAwb,
 } = require('./db');
 
@@ -149,6 +150,50 @@ assert.throws(() => deWhere('everything', {}), /Unknown Delivery-Escalation view
   const { where, params } = deWhere('fresh', { ageBucket: 'open Within 48 hrs' });
   assert.ok(where.includes(UNRESOLVED_AGE_BUCKET_SQL), 'ageBucket must filter on UNRESOLVED_AGE_BUCKET_SQL');
   assert.ok(params.includes('open Within 48 hrs'), 'ageBucket value must be bound, not interpolated');
+}
+
+// 6d. buildDeliveryEscalationDaywiseResult (the pure half of fetchDeliveryEscalationDaywiseStats,
+// split out so this runs with no database - see its own comment in db.js) - the column names
+// must match scripts/alter_delivery_escalation_add_bucket_columns.py's DDL (hand-kept in sync,
+// there's no import across JS/Python), and folding the two queries (main breakdown + age split,
+// scoped to 'unresolved' rows only) back together must reproduce the same shape the single query
+// used to return before the split.
+{
+  assert.strictEqual(DE_DAY_BUCKET_COLUMN, 'de_day_bucket');
+  assert.strictEqual(DE_CONTACT_BUCKET_COLUMN, 'de_contact_bucket');
+
+  const rows = [
+    { d: '2026-09-01', partner: 'Delhivery', category: 'Damaged', contactBucket: '1 time', bucket: 'unresolved', c: 3 },
+    { d: '2026-09-01', partner: 'Delhivery', category: 'Damaged', contactBucket: '1 time', bucket: 'Within 48 hrs', c: 5 },
+    { d: '2026-09-02', partner: 'Ecom', category: 'Lost', contactBucket: '2-4 times', bucket: 'Forced to be marked as RTO', c: 2 },
+  ];
+  const ageRows = [
+    { d: '2026-09-01', ageBucket: 'open Within 48 hrs', c: 3 },
+  ];
+  const result = buildDeliveryEscalationDaywiseResult(rows, ageRows, 1);
+
+  // Totals: the 10 counted rows (3+5+2) plus the 1 no-date row, the latter landing under
+  // 'unresolved' the same way the single-query version's `grandTotal.unresolved +=
+  // missingDateCount` did.
+  assert.strictEqual(result.grandTotalAll, 11);
+  assert.strictEqual(result.grandTotal.unresolved, 4);
+  assert.strictEqual(result.grandTotal['Within 48 hrs'], 5);
+  assert.strictEqual(result.grandTotal['Forced to be marked as RTO'], 2);
+  assert.strictEqual(result.missingDateCount, 1);
+
+  // Age split lands on the SAME date entry the main loop already seeded from `rows` - this is
+  // the join point that only works because every ageRows date is guaranteed to already exist in
+  // byDate (an 'unresolved' row for that date was necessarily counted in `rows` too).
+  const sep1 = result.rows.find((r) => r.date === '2026-09-01');
+  assert.ok(sep1, 'age query must land on a date the main query already produced');
+  assert.strictEqual(sep1.ageTotal, 3);
+  assert.strictEqual(sep1.ageCounts['open Within 48 hrs'], 3);
+  assert.strictEqual(sep1.total, 8, 'ageBucket must not be a GROUP BY dimension in the main query - both bucket rows for 09-01 (3+5) fold into one date entry');
+
+  // A date with no 'unresolved' rows at all must show a real zero, not a missing key.
+  const sep2 = result.rows.find((r) => r.date === '2026-09-02');
+  assert.strictEqual(sep2.ageTotal, 0);
+  assert.deepStrictEqual(sep2.ageCounts, Object.fromEntries(UNRESOLVED_AGE_BUCKETS.map((b) => [b, 0])));
 }
 
 // 7. Bulk upload's view guard runs BEFORE any query - a bulk upload must be scoped to Fresh or

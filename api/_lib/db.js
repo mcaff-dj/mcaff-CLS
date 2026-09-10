@@ -2648,6 +2648,17 @@ const DE_CONTACT_BUCKET_SQL = `CASE
     ELSE '10+ times'
   END`;
 
+// Indexed VIRTUAL generated columns mirroring DE_DAYWISE_BUCKET_SQL/DE_CONTACT_BUCKET_SQL exactly
+// (DDL in scripts/alter_delivery_escalation_add_bucket_columns.py, kept in sync with the CASEs
+// above by hand since MySQL can't import a JS string). Both CASEs are fully deterministic from
+// stored columns (outcome/tat/disposed_at/added_date/contact_count) - no CURDATE()/NOW(), so a
+// VIRTUAL column is safe and MySQL keeps it current on every write with no cron. Grouping by the
+// column name below instead of re-embedding the CASE lets fetchDeliveryEscalationDaywiseStats use
+// the column's own index rather than computing + sorting the CASE over the whole table on every
+// Overview request - the single biggest cost that query had (see its own comment).
+const DE_DAY_BUCKET_COLUMN = 'de_day_bucket';
+const DE_CONTACT_BUCKET_COLUMN = 'de_contact_bucket';
+
 // Which date column a query groups/filters rows by - 'added_date' (the Query date shown
 // elsewhere on this page) or 'order_date' (when the underlying order was placed, per
 // sync_delivery_tickets_to_sheet.py). A whitelist, not user-supplied SQL, since callers below
@@ -3095,16 +3106,43 @@ async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
   // contact AWB gets a fresh ticket_number per day it's still flagged, so row count double-
   // (or triple-, ...) counts it. Ignores NULL/blank awb_code the same way COUNT(DISTINCT) does
   // there too - a ticket with no AWB at all doesn't land in any bucket.
+  //
+  // Two queries, not one: this one groups by the indexed DE_DAY_BUCKET_COLUMN/
+  // DE_CONTACT_BUCKET_COLUMN generated columns instead of re-embedding their CASE, so MySQL can
+  // use the index for the GROUP BY. ageBucket is deliberately NOT a dimension here anymore (it
+  // used to be, needlessly splitting every resolved/forced-RTO group by a value that's only
+  // meaningful for 'unresolved' rows - see the age query below) - dropping it shrinks the group
+  // count without changing any total.
   const [rows] = await pool.execute(`
-    SELECT /*+ MAX_EXECUTION_TIME(${DE_MAX_EXEC_MS}) */ DATE_FORMAT(${col}, '%Y-%m-%d') AS d, COALESCE(delivery_partner, 'Unknown') AS partner, COALESCE(query_category, 'Unknown') AS category, ${DE_CONTACT_BUCKET_SQL} AS contactBucket, ${DE_DAYWISE_BUCKET_SQL} AS bucket, ${UNRESOLVED_AGE_BUCKET_SQL} AS ageBucket, COUNT(DISTINCT awb_code) AS c
+    SELECT /*+ MAX_EXECUTION_TIME(${DE_MAX_EXEC_MS}) */ DATE_FORMAT(${col}, '%Y-%m-%d') AS d, COALESCE(delivery_partner, 'Unknown') AS partner, COALESCE(query_category, 'Unknown') AS category, ${DE_CONTACT_BUCKET_COLUMN} AS contactBucket, ${DE_DAY_BUCKET_COLUMN} AS bucket, COUNT(DISTINCT awb_code) AS c
     FROM Delivery_escalation
     WHERE ${col} IS NOT NULL${extra}${floorClause}${rangeClause}
-    GROUP BY d, partner, category, contactBucket, bucket, ageBucket
+    GROUP BY d, partner, category, contactBucket, bucket
     ORDER BY d
+  `, [...params, ...floorParams, ...rangeParams]);
+  // UNRESOLVED_AGE_BUCKET_SQL is CURDATE()-relative, so unlike the two buckets above it can never
+  // be a generated column - but it only ever means anything for 'unresolved' rows (see the loop
+  // below in the original version of this function), so scoping this query to
+  // DE_DAY_BUCKET_COLUMN = 'unresolved' via its own index cuts what the CASE has to run over from
+  // the whole table down to just that population, instead of computing it for every row and
+  // discarding most of the results.
+  const [ageRows] = await pool.execute(`
+    SELECT /*+ MAX_EXECUTION_TIME(${DE_MAX_EXEC_MS}) */ DATE_FORMAT(${col}, '%Y-%m-%d') AS d, ${UNRESOLVED_AGE_BUCKET_SQL} AS ageBucket, COUNT(DISTINCT awb_code) AS c
+    FROM Delivery_escalation
+    WHERE ${col} IS NOT NULL AND ${DE_DAY_BUCKET_COLUMN} = 'unresolved'${extra}${floorClause}${rangeClause}
+    GROUP BY d, ageBucket
   `, [...params, ...floorParams, ...rangeParams]);
   const [[{ noDateCount }]] = await pool.execute(
     `SELECT /*+ MAX_EXECUTION_TIME(${DE_MAX_EXEC_MS}) */ COUNT(DISTINCT awb_code) AS noDateCount FROM Delivery_escalation WHERE ${col} IS NULL${extra}`, params);
 
+  return buildDeliveryEscalationDaywiseResult(rows, ageRows, noDateCount);
+}
+
+// Pure result-shaping half of fetchDeliveryEscalationDaywiseStats, split out so it's testable
+// without a database (see db.deliveryEscalation.test.js) - the query above decides WHAT rows come
+// back, this decides how they fold into the table's nested per-date/partner/category/
+// contactBucket shape.
+function buildDeliveryEscalationDaywiseResult(rows, ageRows, noDateCount) {
   const zeroCounts = () => Object.fromEntries(DE_DAYWISE_BUCKETS.map((b) => [b, 0]));
   const pctOf = (counts, total) => Object.fromEntries(DE_DAYWISE_BUCKETS.map((b) => [
     b, total ? Math.round((counts[b] / total) * 100) : 0,
@@ -3152,15 +3190,19 @@ async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
     contactBucketPartnerEntry.total += c;
     grandTotal[r.bucket] += c;
     grandTotalAll += c;
-    // Age split only means anything for the 'unresolved' population - ageBucket is still a real
-    // (harmless) value for resolved/forced-RTO rows since UNRESOLVED_AGE_BUCKET_SQL runs
-    // unconditionally, just not one worth counting.
-    if (r.bucket === 'unresolved') {
+  }
+  // Age split comes from its own query now (scoped to 'unresolved' rows only - see the caller) -
+  // every date it can mention was already seeded into byDate by the main loop above, since an
+  // 'unresolved' row for that date is counted there too.
+  for (const r of ageRows) {
+    const c = Number(r.c) || 0;
+    const entry = byDate.get(r.d);
+    if (entry) {
       entry.ageCounts[r.ageBucket] += c;
       entry.ageTotal += c;
-      grandTotalAge[r.ageBucket] += c;
-      grandTotalAgeAll += c;
     }
+    grandTotalAge[r.ageBucket] += c;
+    grandTotalAgeAll += c;
   }
   const missingDateCount = Number(noDateCount) || 0;
   grandTotal.unresolved += missingDateCount;
@@ -5776,6 +5818,7 @@ module.exports = {
   // Exported for api/_lib/db.cache.test.js, db.refundExport.test.js and
   // db.deliveryEscalation.test.js only - nothing in the app calls these directly.
   deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS, UNRESOLVED_AGE_BUCKET_SQL, UNRESOLVED_AGE_BUCKETS,
+  DE_DAY_BUCKET_COLUMN, DE_CONTACT_BUCKET_COLUMN, buildDeliveryEscalationDaywiseResult,
   cachedRead, invalidateCache, CACHE_TTL_MS,
   deCacheKey, DE_OVERVIEW_CACHE_TTL_MS, // exported for db.deliveryEscalation.cache.test.js
   buildRefundExportWhere,

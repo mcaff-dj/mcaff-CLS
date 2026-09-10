@@ -39,6 +39,9 @@ INDEXES = [
     ("idx_added_date", "added_date"),
     ("idx_order_date", "order_date"),
     ("idx_disposed_at", "disposed_at"),
+    # getDeliveryEscalationRepeatStats' own GROUP BY awb_code (db.js) had nothing to use either -
+    # same full-scan-forced-by-missing-index problem as the rest of this list.
+    ("idx_awb_code", "awb_code"),
 ]
 
 
