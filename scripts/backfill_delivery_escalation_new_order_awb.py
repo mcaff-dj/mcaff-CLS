@@ -101,13 +101,21 @@ def execute_with_retry(conn, sql, params):
     MySQL server during query', mid-scan - well within read_timeout's own 900s, so this is the
     server/network dropping an idle-looking-but-still-scanning connection, not a client timeout).
     Returns (rows, conn): a retry replaces conn with a fresh connection, and the caller must keep
-    using the one this returns, including for its own eventual close()."""
+    using the one this returns, including for its own eventual close().
+
+    The reconnect itself can also fail (a local DNS/network blip on `connect()`, caught live
+    2026-09-10 running this by hand off the office network - `getaddrinfo failed`) - that used to
+    escape uncaught and abort the whole run after a single attempt instead of spending the retry
+    budget. Catching `pymysql.err.Error` (OperationalError's own base class) around the reconnect
+    too, and leaving `conn` as its stale closed self on failure, folds that failure into the same
+    loop: the next iteration's `conn.cursor()` raises `Error: Already closed`, which is caught the
+    same way and consumes the next attempt."""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             cur = conn.cursor()
             cur.execute(sql, params)
             return cur.fetchall(), conn
-        except pymysql.err.OperationalError as e:
+        except pymysql.err.Error as e:
             if attempt == MAX_ATTEMPTS:
                 raise
             print(f"  query failed ({e}) - reconnecting and retrying (attempt {attempt + 1}/{MAX_ATTEMPTS})")
@@ -116,7 +124,10 @@ def execute_with_retry(conn, sql, params):
             except Exception:
                 pass
             time.sleep(RETRY_DELAY_SECONDS)
-            conn = connect()
+            try:
+                conn = connect()
+            except pymysql.err.Error as reconnect_err:
+                print(f"  reconnect failed too ({reconnect_err}) - will retry")
 
 
 def main():
