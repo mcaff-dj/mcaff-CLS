@@ -25,7 +25,8 @@ from report_context import (ci_key, fnum, h_enc, index_map, j_enc, n0, pretty_mo
 
 
 def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mode, dim2_pct_label, dim2_cap, coverage_mode,
-                              month_key="month", months=None, month_index=None, pfx_suffix="", include_extras=True, return_parts=False):
+                              month_key="month", months=None, month_index=None, pfx_suffix="", include_extras=True, return_parts=False,
+                              pct_decimals=1):
     """month_key/months/month_index let a class render this panel a second time on an
     alternate month axis (Delivery's Order Month view, gen_panels.py:assemble_report) -
     default args reproduce today's Ticket Month behavior exactly. pfx_suffix keeps the two
@@ -285,10 +286,10 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
     for(var i=0;i<DT.length;i++){ var t=DT[i]; if(!passOther(t,'dim2'))continue; dm[t[2]][t[0]]++; } return dm; }
   function filteredTotals(){ var tot=new Array(N).fill(0),tc=0; for(var i=0;i<DT.length;i++){ var t=DT[i]; if(!passOther(t,null))continue; tot[t[0]]++; tc++; } return {tot:tot,tc:tc}; }
   function rct(){ var cm=catBreakdown(), tot=new Array(N).fill(0);
-    for(var ci=0;ci<CATS.length;ci++){ for(var mi=0;mi<N;mi++){ var cnt=cm[ci][mi],sm=SALES[mi],p=sm>0?Math.round(cnt/sm*1000)/10:0; tot[mi]+=cnt;
+    for(var ci=0;ci<CATS.length;ci++){ for(var mi=0;mi<N;mi++){ var cnt=cm[ci][mi],sm=SALES[mi],p=sm>0?Math.round(cnt/sm*__PCTMULT__)/__PCTDIV__:0; tot[mi]+=cnt;
       var ce=document.getElementById('xf-__PFX__-cat-'+ci+'-mo-'+mi+'-cnt'); if(ce)ce.textContent=cnt>0?fmt(cnt):'-';
       var pe=document.getElementById('xf-__PFX__-cat-'+ci+'-mo-'+mi+'-pct'); if(pe)pe.textContent=cnt>0?(p+'%'):'-'; } }
-    for(var m=0;m<N;m++){ var sm2=SALES[m],p2=sm2>0?Math.round(tot[m]/sm2*1000)/10:0;
+    for(var m=0;m<N;m++){ var sm2=SALES[m],p2=sm2>0?Math.round(tot[m]/sm2*__PCTMULT__)/__PCTDIV__:0;
       var ce2=document.getElementById('xf-__PFX__-cat-total-mo-'+m+'-cnt'); if(ce2)ce2.textContent=fmt(tot[m]);
       var pe2=document.getElementById('xf-__PFX__-cat-total-mo-'+m+'-pct'); if(pe2)pe2.textContent=p2+'%'; } }
   function rdt(){ var dm=dimBreakdown(), tot=new Array(N).fill(0);
@@ -341,6 +342,7 @@ def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mod
             .replace("__PADL__", str(pad_l)).replace("__PADR__", str(pad_r)).replace("__PADT__", str(pad_t)).replace("__PADB__", str(pad_b))
             .replace("__BARCOLOR__", bar_color).replace("__LINECOLOR__", line_color)
             .replace("__PCTMODE__", pct_mode)
+            .replace("__PCTMULT__", str(10 ** (pct_decimals + 2))).replace("__PCTDIV__", str(10 ** pct_decimals))
             .replace("__CLSLABEL__", h_enc(cls["label"])).replace("__DIM2LABEL__", h_enc(dim2_label))
             .replace("__PFX__", pfx))
 
@@ -412,7 +414,7 @@ def _build_category_pivot(ctx, subset, title):
             cnt = cat_month[cat].get(mo, 0)
             totals[mo] = totals.get(mo, 0) + cnt
             sm = ctx.sales_m.get(mo, 0)
-            pct = round1(cnt / sm * 100) if sm > 0 else 0
+            pct = round(cnt / sm * 100, 3) if sm > 0 else 0
             cd = n0(cnt) if cnt > 0 else "-"
             pd = f"{fnum(pct)}%" if cnt > 0 else "-"
             yr = year_of(mo)
@@ -422,7 +424,7 @@ def _build_category_pivot(ctx, subset, title):
     for mo in months:
         t = totals.get(mo, 0)
         sm = ctx.sales_m.get(mo, 0)
-        pct = round1(t / sm * 100) if sm > 0 else 0
+        pct = round(t / sm * 100, 3) if sm > 0 else 0
         yr = year_of(mo)
         parts.append(f"<td class='num' data-yr='{yr}'>{n0(t)}</td><td class='pct' data-yr='{yr}'>{fnum(pct)}%</td>")
     parts.append("</tr></tbody></table></div></div>")
@@ -555,10 +557,10 @@ def build_combo2(rows, title, score_label, score_max):
 def build_top_rated_area_panel(ctx):
     """Top Rated Area: four dedicated per-question CSAT columns on nps_delivery (Product,
     Delivery, Customer support, Website/app experience - see nps_source.AREA_RATING_COLUMNS),
-    scored %positive (top-2-box on a 1-5 scale, after normalizing raw 1-10 values) by month
-    (ctx.top_rated_area_by_month, see nps_source.fetch_top_rated_area_by_month) as a plain
-    area x month table - same pivot-table shape as _build_prodwise_heatmap, minus the heatmap
-    coloring."""
+    scored %Promoter - %Detractor (NPS-style, 4-5/3/1-2 on a 1-5 scale, after normalizing raw
+    1-10 values) by month (ctx.top_rated_area_by_month, see
+    nps_source.fetch_top_rated_area_by_month) as a plain area x month table - same
+    pivot-table shape as _build_prodwise_heatmap, minus the heatmap coloring."""
     rows = ctx.top_rated_area_by_month or []
     if not rows:
         return ""
@@ -578,8 +580,8 @@ def build_top_rated_area_panel(ctx):
         body_rows.append(f"<tr class='{z}'><td class='rowlabel'>{h_enc(r['area'])}</td>{''.join(cells)}</tr>")
     return (
         "<div class='pivot-wrap'><div class='pivot-title'>Top Rated Area</div>"
-        "<p class='desc'>%positive (top-2-box, rated 4 or 5 of 5 after normalizing to a 1-5 scale) per "
-        "area's CSAT question, per month. Blank cells had no responses to that question that month.</p>"
+        "<p class='desc'>%Promoter (rated 4-5 of 5) minus %Detractor (rated 1-2 of 5), after normalizing to a "
+        "1-5 scale, per area's CSAT question, per month. Blank cells had no responses to that question that month.</p>"
         f"<div class='pivot-scroll'><table class='pivot-table'><thead><tr>"
         f"<th class='corner'>Area</th>{head_cells}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
     )
@@ -1658,7 +1660,7 @@ def assemble_report(ctx, here_dir, lap=None):
         elif c["id"] == "warehouse":
             detail = build_cross_filter_panel(ctx, c, "wh", "Warehouse Facility", f"{h_enc(c['label'])} Complaints by Warehouse Facility", "sales", "wrt sales", 9999, "none")
         elif c["id"] == "product":
-            detail = build_cross_filter_panel(ctx, c, "prod", "Product Name", f"{h_enc(c['label'])} Complaints by Product", "sales", "wrt sales", 25, "none")
+            detail = build_cross_filter_panel(ctx, c, "prod", "Product Name", f"{h_enc(c['label'])} Complaints by Product", "sales", "wrt sales", 25, "none", pct_decimals=3)
         elif c["id"] == "suggestion":
             detail = build_cross_filter_panel(ctx, c, "prod", "Product Name", f"{h_enc(c['label'])} Complaints by Product", "sales", "wrt sales", 25, "sparsePct")
         else:
