@@ -13,6 +13,14 @@ click through thousands of tickets whose answer nobody needs to decide. Two inde
                      2-hourly sync: the courier feed is refreshed by a separate pipeline, so
                      re-checking it 12x a day would find nothing 11 of those times.
 
+Fake Order RTO is the one category the categories rule does NOT map blindly (see
+auto_dispose_fake_order_rto): GoKwik is asked whether the order was actually refunded, reusing
+assign_leads.py's own refund-check pipeline (vendor resolution, platform-order-id lookup, live
+call, concurrency/time budget, and the gokwik_refund_checks cache) wholesale rather than a
+second client. Refunded -> 'Resolved > Refunded-CX'; not refunded (including any lookup/API
+failure - same fail-open convention as the rest of this file) -> 'Escalated > New order placed',
+same as before. Runs as part of --rule categories, same 2-hourly cadence.
+
 Both are idempotent, so either can also be run standalone with --apply over the history that
 predates it. The filename predates the delivered rule; kept as-is because
 sync_delivery_tickets_to_sheet.py imports it by name.
@@ -67,6 +75,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mysql_lib
+from assign_leads import (
+    _cached_refund_status,
+    fetch_gokwik_refund_cache,
+    flush_gokwik_refund_cache,
+    resolve_refund_statuses,
+)
 
 AUTO_AGENT = "auto@system"
 PROCESS_KEY = "deliveryescalation"
@@ -79,14 +93,28 @@ PROCESS_KEY = "deliveryescalation"
 # have no single correct answer, so they stay in Fresh for an agent. 'Delivery Suggestion',
 # 'Hub Address Request' and 'Expedite/Urgent Delivery' also have rules in principle but zero
 # rows in this table (they exist only in the report dumps), so there is nothing to map.
+#
+# Also absent: Fake Order RTO. Unlike every category here, it has no single correct answer
+# either - it depends on whether GoKwik says the order was actually refunded - so it gets its
+# own rule (auto_dispose_fake_order_rto) instead of a static entry here.
 CATEGORY_DISPOSITION = {
-    "Fake Order RTO": "Escalated > New order placed",
     "Pickup Exception": "Escalated > New order placed",
     "Lost/Damaged/Destroyed": "Escalated > New order placed",
     "Marked Delivered but customer did not receive order": "Resolved > POD requested",
     "Pincode not serviceable": "Resolved > Cancelled and refunded",
     "others": "Resolved",
 }
+
+# Fake Order RTO's two possible outcomes, keyed by the GoKwik refunded verdict. Same nesting
+# rule as CATEGORY_DISPOSITION's own outcomes (see module docstring's note on why 'New order
+# placed' sits under 'Escalated' and not 'Resolved').
+FAKE_ORDER_RTO_OUTCOMES = {
+    True: "Resolved > Refunded-CX",
+    False: "Escalated > New order placed",
+}
+FAKE_ORDER_RTO_CATEGORY = "Fake Order RTO"
+FAKE_ORDER_RTO_REFUNDED_REMARKS = "[Auto-disposed: Fake Order RTO, GoKwik confirmed refund]"
+FAKE_ORDER_RTO_NOT_REFUNDED_REMARKS = "[Auto-disposed: Fake Order RTO]"
 
 # Kept byte-identical to DE_FORCED_RTO_WHERE in api/_lib/db.js (which itself now builds this
 # from DE_RTO_ROOT_SQL - RTO_MBP is the Partner-role variant of the same disposal, see
@@ -174,7 +202,7 @@ def seed_dispositions(dry_run=True):
         raise RuntimeError("MYSQL_* credentials not configured - cannot seed dispositions.")
 
     roots_needed = {}
-    for outcome in CATEGORY_DISPOSITION.values():
+    for outcome in list(CATEGORY_DISPOSITION.values()) + list(FAKE_ORDER_RTO_OUTCOMES.values()):
         root, _, child = outcome.partition(" > ")
         roots_needed.setdefault(root, set())
         if child:
@@ -232,6 +260,97 @@ def auto_dispose(dry_run=True):
                 raise RuntimeError("MYSQL_* credentials not configured - cannot auto-dispose.")
             print(f"  set '{outcome}' on {n} row(s) {categories}")
         total += n
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Rule 3: Fake Order RTO - ask GoKwik whether it was actually refunded
+# ---------------------------------------------------------------------------
+
+def fake_order_rto_select_sql():
+    return f"SELECT id, order_id FROM Delivery_escalation WHERE query_category = %s AND {eligible_where()}"
+
+
+def fake_order_rto_update_sql(ids):
+    placeholders = ", ".join(["%s"] * len(ids))
+    return f"""
+        UPDATE Delivery_escalation
+        SET outcome = %s,
+            disposed_at = NOW(),
+            agent_email = %s,
+            agent_remarks = %s
+        WHERE id IN ({placeholders})
+          AND {eligible_where()}
+    """
+
+
+def auto_dispose_fake_order_rto(dry_run=True):
+    """Returns rows touched (or, on a dry run, rows that would be touched).
+
+    Unlike auto_dispose()'s dry run (a cheap COUNT), this makes the same GoKwik round trip a
+    real run would - the whole point of Fake Order RTO's own rule is that query_category alone
+    doesn't decide the outcome, so a dry-run count of eligible rows wouldn't say which outcome
+    they'd get. Read-only towards Delivery_escalation either way; the cache write still happens
+    (see flush_gokwik_refund_cache) since a live verdict is real evidence worth keeping
+    regardless of --apply."""
+    rows = mysql_lib.query(fake_order_rto_select_sql(), params=(FAKE_ORDER_RTO_CATEGORY,),
+                            database="PEP_CLS")
+    if rows is None:
+        raise RuntimeError("MYSQL_* credentials not configured - cannot auto-dispose.")
+    if not rows:
+        print("  no eligible Fake Order RTO row(s)")
+        return 0
+
+    # Grouped by order_id: several Delivery_escalation rows can share one order_id, and GoKwik
+    # only needs to be asked about the order once. A blank order_id can never be checked, so it
+    # fails open straight to 'not refunded' without entering the cache/GoKwik path at all -
+    # resolve_refund_statuses sorts its input, and sorting a list containing None alongside
+    # strings raises in Python 3.
+    by_order_id = {}
+    no_order_id_row_ids = []
+    for row_id, order_id in rows:
+        if not order_id:
+            no_order_id_row_ids.append(row_id)
+        else:
+            by_order_id.setdefault(order_id, []).append(row_id)
+
+    cache = fetch_gokwik_refund_cache()
+    verdicts = {}
+    to_check = []
+    for order_id in by_order_id:
+        cached = _cached_refund_status(order_id, cache)
+        if cached is None:
+            to_check.append(order_id)
+        else:
+            verdicts[order_id] = cached
+
+    dirty = {}
+    if to_check:
+        verdicts.update(resolve_refund_statuses(to_check, dirty))
+    flush_gokwik_refund_cache(dirty)
+
+    refunded_ids = []  # a blank order_id is never checkable, so never lands here
+    not_refunded_ids = list(no_order_id_row_ids)
+    for order_id, row_ids in by_order_id.items():
+        (refunded_ids if verdicts.get(order_id) else not_refunded_ids).extend(row_ids)
+
+    total = 0
+    for ids, outcome, remarks in (
+        (refunded_ids, FAKE_ORDER_RTO_OUTCOMES[True], FAKE_ORDER_RTO_REFUNDED_REMARKS),
+        (not_refunded_ids, FAKE_ORDER_RTO_OUTCOMES[False], FAKE_ORDER_RTO_NOT_REFUNDED_REMARKS),
+    ):
+        if not ids:
+            continue
+        if dry_run:
+            print(f"  would set '{outcome}' on {len(ids)} row(s) (Fake Order RTO)")
+        else:
+            n = mysql_lib.execute(fake_order_rto_update_sql(ids),
+                                   params=(outcome, AUTO_AGENT, remarks, *ids),
+                                   database="PEP_CLS")
+            if n is None:
+                raise RuntimeError("MYSQL_* credentials not configured - cannot auto-dispose.")
+            print(f"  set '{outcome}' on {n} row(s) (Fake Order RTO)")
+        total += len(ids)
     return total
 
 
@@ -322,8 +441,9 @@ def self_check():
     assert child_of("Resolved > A > B") == "A > B"
 
     groups = group_by_outcome()
+    assert "Fake Order RTO" not in CATEGORY_DISPOSITION  # has its own rule - see below
     assert groups["Escalated > New order placed"] == [
-        "Fake Order RTO", "Lost/Damaged/Destroyed", "Pickup Exception"]
+        "Lost/Damaged/Destroyed", "Pickup Exception"]
     assert groups["Resolved > POD requested"] == [
         "Marked Delivered but customer did not receive order"]
     assert groups["Resolved > Cancelled and refunded"] == ["Pincode not serviceable"]
@@ -336,7 +456,7 @@ def self_check():
     # Every outcome this writes must be matched by the widened DE_RESOLVED_WHERE or
     # DE_NEW_ORDER_PLACED_WHERE, or the row vanishes from every tab. Mirrors those clauses'
     # shape rather than importing them from JS.
-    for outcome in groups:
+    for outcome in list(groups) + list(FAKE_ORDER_RTO_OUTCOMES.values()):
         assert (outcome == "Resolved" or outcome.startswith("Resolved > ")
                 or outcome == "Escalated > New order placed"), outcome
 
@@ -386,6 +506,23 @@ def self_check():
     # The count query must select exactly the rows the update would touch, or the dry run lies.
     assert eligible_where("d.") in delivered_count_sql()
     assert "t.uni_Shipping_Package_Status = %s" in delivered_count_sql()
+
+    # --- rule 3: Fake Order RTO refund check via GoKwik ---
+    assert FAKE_ORDER_RTO_OUTCOMES == {
+        True: "Resolved > Refunded-CX", False: "Escalated > New order placed"}
+    fsql = fake_order_rto_select_sql()
+    assert "query_category = %s" in fsql
+    assert "outcome IS NULL OR outcome = ''" in fsql
+    assert "Forced to be marked as RTO" in fsql
+
+    fusql = fake_order_rto_update_sql(["1", "2", "3"])
+    assert "outcome IS NULL OR outcome = ''" in fusql
+    assert "Forced to be marked as RTO" in fusql
+    assert "disposed_at = NOW()" in fusql
+    # Same generated-column trap as rules 1 and 2 - error 3105.
+    assert "child_disposition" not in fusql
+    # outcome, agent_email, agent_remarks, then one placeholder per id.
+    assert fusql.count("%s") == 3 + 3
     print("self-check ok")
 
 
@@ -408,6 +545,7 @@ def main():
         if not args.skip_seed:
             seed_dispositions(dry_run=dry_run)
         total += auto_dispose(dry_run=dry_run)
+        total += auto_dispose_fake_order_rto(dry_run=dry_run)
     if args.rule in ("delivered", "all"):
         total += auto_dispose_delivered(dry_run=dry_run)
     verb = "would auto-dispose" if dry_run else "auto-disposed"
