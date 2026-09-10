@@ -22,6 +22,7 @@ re-run (e.g. from the 2-hourly sync-delivery-tickets.yml cron) as new reshipment
 lmd_courier_tracking.
 """
 import argparse
+import socket
 import sys
 import time
 from pathlib import Path
@@ -57,11 +58,27 @@ def connect():
     # index on uni_Display_Order_Code (3.7M rows, no ALTER rights on that table to add one - see
     # add_index_lmd_courier_tracking_order_code.py's own comment) - each batched IN() lookup is a
     # full table scan, not an indexed one.
-    return pymysql.connect(
+    conn = pymysql.connect(
         host=cred["host"], user=cred["user"], password=cred["password"],
         database=SCHEMA, port=cred["port"], ssl={"ssl": {}}, connect_timeout=15,
         read_timeout=900, write_timeout=900,
     )
+    _enable_tcp_keepalive(conn)
+    return conn
+
+
+def _enable_tcp_keepalive(conn):
+    """A full scan of lmd_courier_tracking's 3.7M rows sends no packets for minutes at a
+    time - something on the path between runner and RDS mistakes that silence for an idle
+    connection and kills it mid-scan (see execute_with_retry's own comment, caught live
+    2026-09-10). Keepalive probes keep packets flowing so nothing on the path drops it.
+    TCP_KEEPIDLE/INTVL/CNT are Linux-only (fine - CI runs ubuntu-latest); skip quietly elsewhere."""
+    sock = conn._sock
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    if hasattr(socket, "TCP_KEEPIDLE"):
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
 
 
 def self_check():
@@ -156,7 +173,15 @@ def main():
             conn.commit()
         print(f"Done - updated {len(to_update)} row(s) in {SCHEMA}.{TABLE}.")
     finally:
-        conn.close()
+        # conn may already be closed by execute_with_retry's own retry-close on a failed
+        # attempt (main()'s `conn` only gets rebound to the reconnected one when a call
+        # *succeeds* - on the raise that ends retries, this stays pointed at a dead
+        # connection). Closing that twice raised its own `pymysql.err.Error: Already closed`,
+        # masking the real OperationalError above it in the traceback.
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
