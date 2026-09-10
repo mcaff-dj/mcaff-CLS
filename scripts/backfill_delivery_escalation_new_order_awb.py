@@ -23,10 +23,12 @@ lmd_courier_tracking.
 """
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mysql_lib import get_credential
+import pymysql
 
 SCHEMA = "PEP_CLS"
 TABLE = "Delivery_escalation"
@@ -51,7 +53,6 @@ def connect():
     cred = get_credential()
     if cred is None:
         raise SystemExit("MYSQL_* credentials not configured.")
-    import pymysql
     # read_timeout is generous (not the pymysql default) because lmd_courier_tracking has no
     # index on uni_Display_Order_Code (3.7M rows, no ALTER rights on that table to add one - see
     # add_index_lmd_courier_tracking_order_code.py's own comment) - each batched IN() lookup is a
@@ -71,6 +72,36 @@ def self_check():
     print("self-check ok")
 
 
+MAX_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 5
+
+
+def execute_with_retry(conn, sql, params):
+    """Runs one query, reconnecting and retrying on a lost connection - lmd_courier_tracking has
+    no index on uni_Display_Order_Code (see connect()'s own comment), so each batch lookup is a
+    full 3.7M-row scan that occasionally outlives the connection even with a generous
+    read_timeout (caught live 2026-09-10: pymysql.err.OperationalError 2013 'Lost connection to
+    MySQL server during query', mid-scan - well within read_timeout's own 900s, so this is the
+    server/network dropping an idle-looking-but-still-scanning connection, not a client timeout).
+    Returns (rows, conn): a retry replaces conn with a fresh connection, and the caller must keep
+    using the one this returns, including for its own eventual close()."""
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            cur = conn.cursor()
+            cur.execute(sql, params)
+            return cur.fetchall(), conn
+        except pymysql.err.OperationalError as e:
+            if attempt == MAX_ATTEMPTS:
+                raise
+            print(f"  query failed ({e}) - reconnecting and retrying (attempt {attempt + 1}/{MAX_ATTEMPTS})")
+            try:
+                conn.close()
+            except Exception:
+                pass
+            time.sleep(RETRY_DELAY_SECONDS)
+            conn = connect()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="Perform the backfill (default is a dry run).")
@@ -81,13 +112,12 @@ def main():
 
     conn = connect()
     try:
-        cur = conn.cursor()
-        cur.execute(
+        tickets, conn = execute_with_retry(
+            conn,
             f"SELECT id, order_id, awb_code FROM `{TABLE}` "
             f"WHERE outcome = %s AND order_id IS NOT NULL AND order_id <> ''",
             (NEW_ORDER_PLACED_OUTCOME,),
         )
-        tickets = cur.fetchall()  # [(id, order_id, awb_code), ...]
         order_ids = sorted({t[1] for t in tickets})
         print(f"{len(tickets)} New Order Placed ticket(s) across {len(order_ids)} distinct order_id(s).")
 
@@ -102,14 +132,15 @@ def main():
         for i in range(0, len(order_ids), BATCH_SIZE):
             batch = order_ids[i:i + BATCH_SIZE]
             placeholders = ",".join(["%s"] * len(batch))
-            cur.execute(
+            rows, conn = execute_with_retry(
+                conn,
                 f"SELECT uni_Display_Order_Code, awb_number FROM {SOURCE} "
                 f"WHERE uni_Display_Order_Code IN ({placeholders}) "
                 f"AND awb_number IS NOT NULL AND awb_number <> '' "
                 f"ORDER BY uni_Order_Date DESC, created_at DESC",
                 batch,
             )
-            latest_by_order.update(latest_awb_by_order_id(cur.fetchall()))
+            latest_by_order.update(latest_awb_by_order_id(rows))
             print(f"  lookup batch {i // BATCH_SIZE + 1}/{total_batches}: "
                   f"{len(latest_by_order)} order_id(s) resolved so far")
 
@@ -120,6 +151,7 @@ def main():
         ]
         print(f"\n{len(to_update)} ticket(s) have a newer AWB than their own awb_code.")
         if to_update:
+            cur = conn.cursor()
             cur.executemany(f"UPDATE `{TABLE}` SET `{COLUMN}` = %s WHERE id = %s", to_update)
             conn.commit()
         print(f"Done - updated {len(to_update)} row(s) in {SCHEMA}.{TABLE}.")
