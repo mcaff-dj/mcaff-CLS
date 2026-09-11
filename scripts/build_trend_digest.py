@@ -354,9 +354,9 @@ def build_packaging(brands, baseline, window):
 
 
 def build_repeat_offenders(brands, baseline, window):
-    """Couriers that stay bad across the window, and the SKUs that recur - the deck's
-    final two tables. A courier is included on window volume, then shown month by month
-    with its single worst issue category, which is what makes the pattern legible."""
+    """Couriers that stay bad across the window - the deck's final table. A courier is
+    included on window volume, then shown month by month with its single worst issue
+    category, which is what makes the pattern legible."""
     couriers = []
     for b in brands:
         wsales = sum(sales_for(b, window))
@@ -383,33 +383,7 @@ def build_repeat_offenders(brands, baseline, window):
         ranked.sort(key=lambda r: -(r["window_rate"] or 0))
         couriers.append({"brand": b["brand"], "title": b["title"], "rows": ranked[:TOP_COURIERS]})
 
-    skus = []
-    for b in brands:
-        wsales = sum(sales_for(b, window))
-        agg = {}
-        for key, pm in (b.get("product_cats") or {}).items():
-            prod, cat = key.split(SEP, 1)
-            months_present = sum(1 for e in window if pm.get(e["labels"].get(b["brand"]), 0) > 0)
-            wc = sum(pm.get(e["labels"].get(b["brand"]), 0) for e in window)
-            if wc < MIN_WINDOW_CASES_SKU:
-                continue
-            d = agg.setdefault(prod, {"issues": [], "window_cases": 0, "recur": 0})
-            d["issues"].append({"issue": cat, "cases": wc, "months_present": months_present})
-            d["window_cases"] += wc
-            d["recur"] = max(d["recur"], months_present)
-        rows = []
-        for prod, d in agg.items():
-            d["issues"].sort(key=lambda i: -i["cases"])
-            rows.append({
-                "product": prod, "window_cases": d["window_cases"],
-                "window_rate": _fmt_pct(rate(d["window_cases"], wsales)),
-                "months_recurring": d["recur"], "issues": d["issues"][:4],
-            })
-        # Recurrence first, then volume: the deck's point about these SKUs is that they
-        # come back every month, not that they're the single biggest in one month.
-        rows.sort(key=lambda r: (-r["months_recurring"], -r["window_cases"]))
-        skus.append({"brand": b["brand"], "title": b["title"], "rows": rows[:12]})
-    return {"couriers": couriers, "skus": skus}
+    return {"couriers": couriers}
 
 
 def build_raw(brands, history, window):

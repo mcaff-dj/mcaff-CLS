@@ -267,35 +267,6 @@ function RepeatOffenders({ repeat, windowMonths }) {
           ))}
         </div>
       </div>
-
-      <div className="og-card">
-        <div className="og-card-title">Repeat Offenders — SKUs</div>
-        <p className="og-card-sub">Ranked by how many of the window&apos;s months a SKU recurred in, then by volume.</p>
-        <div className="og-grid-2">
-          {repeat.skus.map((brand) => (
-            <div key={brand.brand}>
-              <div className="og-card-sub" style={{ fontWeight: 600, marginBottom: 8 }}>{brand.title}</div>
-              {brand.rows.length === 0 ? (
-                <p className="og-note">No SKU crossed the volume floor this window.</p>
-              ) : brand.rows.map((r) => (
-                <div className="og-sku-block" key={r.product}>
-                  <div className="og-sku-name">
-                    {r.product}
-                    <span className="og-sku-meta">
-                      {fmtNum(r.window_cases)} cases &middot; {r.window_rate}% of orders &middot; recurred {r.months_recurring}/{windowMonths.length} months
-                    </span>
-                  </div>
-                  <ul className="og-sku-issues">
-                    {r.issues.map((iss, i) => (
-                      <li key={i}>{iss.issue}: {fmtNum(iss.cases)} cases ({iss.months_present} months)</li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-      </div>
     </>
   );
 }
