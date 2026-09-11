@@ -2665,6 +2665,23 @@ import CallTrendChart from './CallTrendChart';
           ? heatmapAgentData.filter(isMyAgent) : heatmapAgentData
         ).filter(a => a.bucketCounts.size > 0); // no columns at all this range - pure noise, same as the table above
 
+        // Agent-wise Converted table (below Time-of-Day Distribution) - dialled/connected/
+        // converted totals straight from bucketsByAgent, independent of heatmapMetric/
+        // heatmapIntervalMinutes (those two only reshape the heatmap grid above).
+        const agentConvertedSummary = (userRole === 'Agent' && !isProcessAdmin
+          ? effectiveAgentRoster.filter(isMyAgent) : effectiveAgentRoster
+        ).map(ag => {
+          const buckets = bucketsByAgent.get(ag.email.toLowerCase()) || [];
+          const dialled = buckets.reduce((s, b) => s + (b.dialled || 0), 0);
+          const connected = buckets.reduce((s, b) => s + (b.connected || 0), 0);
+          const converted = buckets.reduce((s, b) => s + (b.converted || 0), 0);
+          return { ...ag, dialled, connected, converted };
+        }).filter(a => a.dialled > 0);
+        const agentConvertedTotals = agentConvertedSummary.reduce((acc, a) => {
+          acc.dialled += a.dialled; acc.connected += a.connected; acc.converted += a.converted;
+          return acc;
+        }, { dialled: 0, connected: 0, converted: 0 });
+
         // Columns span only the buckets SOMEONE actually has activity in (not a fixed
         // full-day grid, which for a 15-min interval would be 96 mostly-empty columns) -
         // the narrowest range that still shows every non-zero cell.
@@ -3496,6 +3513,56 @@ import CallTrendChart from './CallTrendChart';
                                       : timeOfDayState.error
                                         ? `Could not load time-of-day data: ${timeOfDayState.error}`
                                         : `No ${heatmapMetricOptions.find(o => o.value === heatmapMetric)?.label.toLowerCase()} activity in this date range.`}
+                                  </td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {/* Agent-wise Converted - same server buckets as Time-of-Day Distribution
+                          above, just summed per agent instead of per time-of-day column. */}
+                      <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
+                        <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">✅ Agent-wise Converted</h3>
+                        <div className="overflow-x-auto custom-scroll">
+                          <table className="w-full text-[12.5px] border-collapse">
+                            <thead>
+                              <tr className="text-left text-zinc-500 uppercase text-[10px] tracking-wider border-b border-zinc-800">
+                                <th className="py-2 pr-3 font-bold whitespace-nowrap sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Agent Name</th>
+                                <th className="py-2 px-3 font-bold text-right">Total Dialled</th>
+                                <th className="py-2 px-3 font-bold text-right">Total Connected</th>
+                                <th className="py-2 px-3 font-bold text-right">Total Converted</th>
+                                <th className="py-2 pl-3 font-bold text-right">Converted %</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {agentConvertedSummary.map(a => (
+                                <tr key={a.email} className="group border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
+                                  <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800 border-r border-zinc-800 transition-colors">{a.name}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{a.dialled}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{a.connected}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-indigo-400">{a.converted}</td>
+                                  <td className="py-2.5 pl-3 text-right tabular-nums text-indigo-300">{formatPct(a.converted, a.dialled)}</td>
+                                </tr>
+                              ))}
+                              {agentConvertedSummary.length > 0 && (
+                                <tr className="border-t-2 border-zinc-700 bg-zinc-900/80 font-bold">
+                                  <td className="py-2.5 pr-3 text-zinc-100 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Team Total</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{agentConvertedTotals.dialled}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{agentConvertedTotals.connected}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-indigo-300">{agentConvertedTotals.converted}</td>
+                                  <td className="py-2.5 pl-3 text-right tabular-nums text-indigo-200">{formatPct(agentConvertedTotals.converted, agentConvertedTotals.dialled)}</td>
+                                </tr>
+                              )}
+                              {agentConvertedSummary.length === 0 && (
+                                <tr>
+                                  <td colSpan={5} className="py-6 text-center text-zinc-500">
+                                    {timeOfDayState.loading
+                                      ? 'Loading…'
+                                      : timeOfDayState.error
+                                        ? `Could not load time-of-day data: ${timeOfDayState.error}`
+                                        : 'No dialled activity in this date range.'}
                                   </td>
                                 </tr>
                               )}
