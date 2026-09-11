@@ -359,7 +359,8 @@ def build_repeat_offenders(brands, baseline, window):
     category, which is what makes the pattern legible."""
     couriers = []
     for b in brands:
-        wsales = sum(sales_for(b, window))
+        msales = sales_for(b, window)
+        wsales = sum(msales)
         ranked = []
         for partner, per_month in (b.get("partners") or {}).items():
             if partner == "(blank)":
@@ -375,9 +376,11 @@ def build_repeat_offenders(brands, baseline, window):
                 n = sum(pm.get(e["labels"].get(b["brand"]), 0) for e in window)
                 if n > top_n:
                     top_cat, top_n = cat, n
+            month_counts = [per_month.get(e["labels"].get(b["brand"]), 0) for e in window]
             ranked.append({
                 "courier": partner, "window_cases": wc, "window_rate": _fmt_pct(rate(wc, wsales)),
-                "months": [per_month.get(e["labels"].get(b["brand"]), 0) for e in window],
+                "months": month_counts,
+                "month_rates": [_fmt_pct(rate(n, s)) for n, s in zip(month_counts, msales)],
                 "top_issue": top_cat, "top_issue_cases": top_n,
             })
         ranked.sort(key=lambda r: -(r["window_rate"] or 0))
