@@ -256,7 +256,7 @@ function RepeatOffenders({ repeat, windowMonths }) {
                           <td className="og-rowlabel">{r.courier}</td>
                           <td>{fmtPct(r.window_rate)}</td>
                           {r.months.map((n, i) => (
-                            <td key={i}>{fmtNum(n)} <span className="og-card-sub">({fmtPct(r.month_rates[i])})</span></td>
+                            <td key={i}>{fmtNum(n)} <span className="og-card-sub">({fmtPct(r.month_rates?.[i])})</span></td>
                           ))}
                           <td>{r.top_issue ? `${r.top_issue} (${fmtNum(r.top_issue_cases)})` : '–'}</td>
                         </tr>
