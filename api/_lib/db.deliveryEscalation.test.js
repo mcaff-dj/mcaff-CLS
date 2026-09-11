@@ -101,12 +101,12 @@ assert.throws(() => deWhere('everything', {}), /Unknown Delivery-Escalation view
   // when ee10e50 reordered the buckets.
   assert.deepStrictEqual(DE_DAYWISE_BUCKETS, [
     'Within 48 hrs', 'Within 2-4 days', '4-8 days', '8-10 days', 'Greater than 10 days',
-    'Forced to be marked as RTO', 'unresolved',
+    'Forced to be marked as RTO', 'Resolved Refunded', 'unresolved',
   ]);
   // Every bucket the CASE can emit must appear in the display list, or a date whose only tickets
   // land in the missing bucket renders a row of zeros with the count silently dropped.
   for (const label of ['Within 48 hrs', 'Within 2-4 days', '4-8 days', '8-10 days',
-    'Greater than 10 days', 'Forced to be marked as RTO', 'unresolved']) {
+    'Greater than 10 days', 'Forced to be marked as RTO', 'Resolved Refunded', 'unresolved']) {
     assert.ok(DE_DAYWISE_BUCKET_SQL.includes(`'${label}'`),
       `bucket ${label} is listed for display but never emitted by the CASE`);
   }

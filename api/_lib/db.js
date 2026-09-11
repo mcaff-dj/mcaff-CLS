@@ -2518,6 +2518,11 @@ const DE_FRESH_WHERE = `((outcome IS NULL OR outcome = ''
 // this clause to accidentally double-count.
 const DE_RESOLVED_WHERE = `(outcome = 'Delivered' OR outcome LIKE 'Delivered > %'
    OR outcome = 'Resolved' OR outcome LIKE 'Resolved > %')`;
+// A resolved sub-case, not a whole view: admin's disposition tree has 'Refunded' as a child of
+// Resolved, so this is already a subset of DE_RESOLVED_WHERE above - just given its own label in
+// DE_TAT_BUCKET_SQL/DE_DAYWISE_BUCKET_SQL instead of falling into the TAT-day buckets like the
+// rest of Resolved.
+const DE_RESOLVED_REFUNDED_WHERE = `(outcome = 'Resolved > Refunded')`;
 // Its own tab: agent- or auto_dispose_de_categories.py-marked 'Escalated > New order placed' is
 // common enough (Fake Order RTO/Pickup Exception/Lost-Damaged-Destroyed all map to it) to want
 // its own queue rather than being buried in the wider Escalated list.
@@ -2552,6 +2557,7 @@ const DE_ESCALATION_TAGS = ['Founder escalation', 'Highly Aggressive', 'Social M
 const DE_TAT_BUCKET_SQL = `CASE
     WHEN NOT (${DE_RESOLVED_WHERE}) THEN 'unresolved'
     WHEN disposed_at IS NULL OR added_date IS NULL THEN 'unresolved'
+    WHEN ${DE_RESOLVED_REFUNDED_WHERE} THEN 'Resolved Refunded'
     WHEN DATEDIFF(disposed_at, added_date) <= 2 THEN 'Within 48 hrs'
     WHEN DATEDIFF(disposed_at, added_date) <= 4 THEN 'Within 2-4 days'
     WHEN DATEDIFF(disposed_at, added_date) <= 8 THEN '4-8 days'
@@ -2583,6 +2589,7 @@ const DE_DAYWISE_BUCKET_SQL = `CASE
     WHEN ${DE_FORCED_RTO_WHERE} THEN 'Forced to be marked as RTO'
     WHEN NOT (${DE_RESOLVED_WHERE}) THEN 'unresolved'
     WHEN disposed_at IS NULL OR added_date IS NULL THEN 'unresolved'
+    WHEN ${DE_RESOLVED_REFUNDED_WHERE} THEN 'Resolved Refunded'
     WHEN DATEDIFF(disposed_at, added_date) <= 2 THEN 'Within 48 hrs'
     WHEN DATEDIFF(disposed_at, added_date) <= 4 THEN 'Within 2-4 days'
     WHEN DATEDIFF(disposed_at, added_date) <= 8 THEN '4-8 days'
@@ -2594,7 +2601,7 @@ const DE_DAYWISE_BUCKET_SQL = `CASE
 // column vanishing for that row.
 const DE_DAYWISE_BUCKETS = [
   'Within 48 hrs', 'Within 2-4 days', '4-8 days', '8-10 days', 'Greater than 10 days',
-  'Forced to be marked as RTO', 'unresolved',
+  'Forced to be marked as RTO', 'Resolved Refunded', 'unresolved',
 ];
 
 // Age-since-added_date split of the day-wise table's own 'unresolved' bucket above - how long
