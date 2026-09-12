@@ -2992,6 +2992,7 @@ import CallTrendChart from './CallTrendChart';
 
         return {
           visibleTableAgentMetrics, visibleHeatmapAgentData, heatmapBucketIndexes, heatmapCellStyle,
+          agentConvertedSummary, agentConvertedTotals,
           downloadConvertedOrdersCsv, convertedOrdersList,
           trendAgentOptions, trendDefaultAgents,
           timeOfDayState: { loading: timeOfDay.loading, error: timeOfDay.error },
@@ -3189,6 +3190,7 @@ import CallTrendChart from './CallTrendChart';
                 {(() => {
                   const {
                     visibleTableAgentMetrics, visibleHeatmapAgentData, heatmapBucketIndexes, heatmapCellStyle,
+                    agentConvertedSummary, agentConvertedTotals,
                     downloadConvertedOrdersCsv, convertedOrdersList,
                     trendAgentOptions, trendDefaultAgents,
                     timeOfDayState,
