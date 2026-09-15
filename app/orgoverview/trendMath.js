@@ -275,7 +275,7 @@ function buildPackagingBaseline(raw, packaging, baselineMonths, windowMonths) {
       return { ...row, baseline_rate: fmtPct3(br), window_rate: fmtPct3(wr), delta: fmtPct3(wr - br) };
     });
     skus.sort((a, b) => (b.delta ?? 0) - (a.delta ?? 0));
-    return { ...brandPkg, skus };
+    return { ...brandPkg, skus: skus.slice(0, 5) };
   });
 }
 
