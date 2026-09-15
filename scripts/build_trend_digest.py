@@ -285,7 +285,6 @@ def build_worst_trends(brands, baseline, window):
         ("class", "classes", "Query class", MIN_WINDOW_CASES),
         ("category", "cats", "Complaint category", MIN_WINDOW_CASES),
         ("courier", "partner_cats", "Courier x issue", MIN_WINDOW_CASES),
-        ("sku", "product_cats", "SKU x issue", MIN_WINDOW_CASES_SKU),
     ]
     for dim, store_key, title, floor in specs:
         by_brand = []
