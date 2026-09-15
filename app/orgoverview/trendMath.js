@@ -171,7 +171,27 @@ function commaNum(n) {
   return n.toLocaleString('en-US');
 }
 
-function candidates(brand, store, dimension, baselineMonths, windowMonths, minCases) {
+function metricFor(store, key, sb, sw, baselineMonths, windowMonths, dimension) {
+  const perMonth = store[key];
+  if (!perMonth) return null;
+  const bc = sum(baselineMonths.map((m) => perMonth[m] ?? 0));
+  const wc = sum(windowMonths.map((m) => perMonth[m] ?? 0));
+  const br = rate(bc, sb);
+  const wr = rate(wc, sw);
+  return {
+    dimension,
+    key,
+    parts: key.split(SEP),
+    baseline_rate: fmtPct3(br),
+    window_rate: fmtPct3(wr),
+    delta: fmtPct3(wr - br),
+    baseline_cases: bc,
+    window_cases: wc,
+    multiplier: br > 0.005 ? roundTo(wr / br, 1) : null,
+  };
+}
+
+function candidates(brand, store, dimension, baselineMonths, windowMonths, minCases, alwaysInclude) {
   const sb = sum(salesFor(brand, baselineMonths));
   const sw = sum(salesFor(brand, windowMonths));
   const found = [];
@@ -197,7 +217,19 @@ function candidates(brand, store, dimension, baselineMonths, windowMonths, minCa
     });
   }
   found.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
-  return found.slice(0, MAX_TRENDS_PER_DIMENSION);
+  const top = found.slice(0, MAX_TRENDS_PER_DIMENSION);
+  // Packaging and Operational + Product are always business-relevant even when their
+  // swing is too small or too low-volume to clear the generic ranking floor - append
+  // them (never displacing anything the ranking already surfaced) so they stay visible.
+  if (alwaysInclude) {
+    const present = new Set(top.map((c) => c.key));
+    for (const key of alwaysInclude) {
+      if (present.has(key)) continue;
+      const m = metricFor(store, key, sb, sw, baselineMonths, windowMonths, dimension);
+      if (m) top.push(m);
+    }
+  }
+  return top;
 }
 
 // Python's str(float) always shows at least one decimal ("0.0", "3.0"), unlike JS's
@@ -229,15 +261,15 @@ function buildWorstTrends(raw, baselineMonths, windowMonths) {
   const baselineLabel = rangeLabel(baselineMonths);
   const windowLabel = rangeLabel(windowMonths);
   const specs = [
-    ['class', 'classes', 'Query class', MIN_WINDOW_CASES],
+    ['class', 'classes', 'Query class', MIN_WINDOW_CASES, ['Packaging and Operational', 'Product']],
     ['category', 'cats', 'Complaint category', MIN_WINDOW_CASES],
     ['courier', 'partner_cats', 'Courier x issue', MIN_WINDOW_CASES],
   ];
   const groups = [];
-  for (const [dim, storeKey, title, floor] of specs) {
+  for (const [dim, storeKey, title, floor, alwaysInclude] of specs) {
     const byBrand = [];
     for (const brand of raw) {
-      const items = candidates(brand, brand[storeKey] || {}, dim, baselineMonths, windowMonths, floor).map((c) => {
+      const items = candidates(brand, brand[storeKey] || {}, dim, baselineMonths, windowMonths, floor, alwaysInclude).map((c) => {
         const withBrand = { ...c, brand: brand.brand, brand_title: brand.title };
         withBrand.sentence = sentence(withBrand, baselineLabel, windowLabel);
         return withBrand;

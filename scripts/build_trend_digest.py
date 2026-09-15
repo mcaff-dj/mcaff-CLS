@@ -224,7 +224,27 @@ def _verb(delta):
     return "rose" if delta > 0 else "fell"
 
 
-def _candidates(b, store, dimension, baseline, window, min_cases):
+def _metric_for(store, key, sb, sw, brand, dimension, baseline, window):
+    per_month = store.get(key)
+    if not per_month:
+        return None
+    bc = sum(counts_for(store, key, brand, baseline))
+    wc = sum(counts_for(store, key, brand, window))
+    br, wr = rate(bc, sb), rate(wc, sw)
+    return {
+        "dimension": dimension,
+        "key": key,
+        "parts": key.split(SEP),
+        "baseline_rate": _fmt_pct(br),
+        "window_rate": _fmt_pct(wr),
+        "delta": _fmt_pct(wr - br),
+        "baseline_cases": bc,
+        "window_cases": wc,
+        "multiplier": round(wr / br, 1) if br > 0.005 else None,
+    }
+
+
+def _candidates(b, store, dimension, baseline, window, min_cases, always_include=None):
     bsales, wsales = sales_for(b, baseline), sales_for(b, window)
     sb, sw = sum(bsales), sum(wsales)
     found = []
@@ -250,7 +270,19 @@ def _candidates(b, store, dimension, baseline, window, min_cases):
             "multiplier": round(wr / br, 1) if br > 0.005 else None,
         })
     found.sort(key=lambda c: -abs(c["delta"]))
-    return found[:MAX_TRENDS_PER_DIMENSION]
+    top = found[:MAX_TRENDS_PER_DIMENSION]
+    # Packaging and Operational + Product are always business-relevant even when their
+    # swing is too small or too low-volume to clear the generic ranking floor - append
+    # them (never displacing anything the ranking already surfaced) so they stay visible.
+    if always_include:
+        present = {c["key"] for c in top}
+        for key in always_include:
+            if key in present:
+                continue
+            m = _metric_for(store, key, sb, sw, b["brand"], dimension, baseline, window)
+            if m:
+                top.append(m)
+    return top
 
 
 def _sentence(b, c, baseline_label, window_label):
@@ -282,21 +314,20 @@ def build_worst_trends(brands, baseline, window):
     window_label = f"{pretty(window[0])}-{pretty(window[-1])}" if len(window) > 1 else pretty(window[0])
     groups = []
     specs = [
-        ("class", "classes", "Query class", MIN_WINDOW_CASES),
-        ("category", "cats", "Complaint category", MIN_WINDOW_CASES),
-        ("courier", "partner_cats", "Courier x issue", MIN_WINDOW_CASES),
+        ("class", "classes", "Query class", MIN_WINDOW_CASES, ("Packaging and Operational", "Product")),
+        ("category", "cats", "Complaint category", MIN_WINDOW_CASES, None),
+        ("courier", "partner_cats", "Courier x issue", MIN_WINDOW_CASES, None),
     ]
-    for dim, store_key, title, floor in specs:
+    for dim, store_key, title, floor, always_include in specs:
         by_brand = []
         for b in brands:
             items = []
-            for c in _candidates(b, b.get(store_key) or {}, dim, baseline, window, floor):
+            for c in _candidates(b, b.get(store_key) or {}, dim, baseline, window, floor, always_include):
                 c = dict(c)
                 c["brand"] = b["brand"]
                 c["brand_title"] = b["title"]
                 c["sentence"] = _sentence(b, c, baseline_label, window_label)
                 items.append(c)
-            items.sort(key=lambda c: -abs(c["delta"]))
             if items:
                 by_brand.append({"brand": b["brand"], "title": b["title"], "items": items})
         if by_brand:
