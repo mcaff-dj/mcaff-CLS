@@ -2521,8 +2521,12 @@ const DE_RESOLVED_WHERE = `(outcome = 'Delivered' OR outcome LIKE 'Delivered > %
 // A resolved sub-case, not a whole view: admin's disposition tree has 'Refunded' as a child of
 // Resolved, so this is already a subset of DE_RESOLVED_WHERE above - just given its own label in
 // DE_TAT_BUCKET_SQL/DE_DAYWISE_BUCKET_SQL instead of falling into the TAT-day buckets like the
-// rest of Resolved.
-const DE_RESOLVED_REFUNDED_WHERE = `(outcome = 'Resolved > Refunded')`;
+// rest of Resolved. LIKE 'Resolved > Refunded%' (not an exact match) because
+// auto_dispose_de_categories.py's own GoKwik-confirmed rule writes 'Resolved > Refunded-CX', not
+// the plain 'Resolved > Refunded' - an exact match here silently missed every one of those rows.
+// 'Resolved > Cancelled and refunded' is the same script's Pincode-not-serviceable rule and is
+// also a refund, so it's covered explicitly too.
+const DE_RESOLVED_REFUNDED_WHERE = `(outcome LIKE 'Resolved > Refunded%' OR outcome = 'Resolved > Cancelled and refunded')`;
 // Its own tab: agent- or auto_dispose_de_categories.py-marked 'Escalated > New order placed' is
 // common enough (Fake Order RTO/Pickup Exception/Lost-Damaged-Destroyed all map to it) to want
 // its own queue rather than being buried in the wider Escalated list.
