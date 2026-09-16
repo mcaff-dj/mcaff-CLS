@@ -80,8 +80,8 @@ export default function ProductCallingClient() {
   };
   const closeDispose = () => setDetailTkt(null);
 
-  const categories = (disp.processDispositions || []).filter((n) => !n.parent_id);
-  const leaves = (disp.processDispositions || []).filter((n) => String(n.parent_id) === String(categoryId));
+  const categories = disp.processDispositions || [];
+  const leaves = categories.find((c) => String(c.id) === String(categoryId))?.children || [];
   const selectedLeaf = leaves.find((l) => String(l.id) === String(leafId));
 
   const submitDispose = async () => {
