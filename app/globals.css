@@ -324,20 +324,25 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
 .admin-page .msg { font-size: 12.5px; color: var(--a-sub); margin-top: 10px; min-height: 16px; }
 
 /* users card list */
-.admin-page .ucard { display: flex; align-items: center; gap: 14px; padding: 14px 4px; border-bottom: 1px solid var(--a-border); flex-wrap: wrap; }
+.admin-page .ucard { position: relative; padding: 14px 4px; border-bottom: 1px solid var(--a-border); }
 .admin-page .ucard:last-child { border-bottom: none; }
+.admin-page .ucard-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; cursor: pointer; padding-right: 64px; user-select: none; }
 .admin-page .avatar { width: 38px; height: 38px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: #fff; flex: none; }
 .admin-page .uinfo { flex: 1; min-width: 160px; }
 .admin-page .uname { font-size: 14px; font-weight: 700; }
 .admin-page .uname .admin-star { font-size: 13px; margin-left: 4px; }
 .admin-page .uemail { font-size: 12px; color: var(--a-sub); }
-.admin-page .utags { display: flex; gap: 6px; flex-wrap: wrap; max-width: 320px; }
+.admin-page .perm-count { font-size: 11.5px; color: var(--a-sub); white-space: nowrap; }
+.admin-page .chevron { font-size: 12px; color: var(--a-muted); flex: none; transition: transform 0.15s ease-out; }
+.admin-page .ucard.expanded .chevron { transform: rotate(180deg); }
+.admin-page .utags { display: none; gap: 6px; flex-wrap: wrap; padding: 14px 0 0 52px; }
+.admin-page .ucard.expanded .utags { display: flex; }
 .admin-page .card-perm-block { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .admin-page .perm-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 700; padding: 4px 10px; border-radius: 999px; color: #fff; cursor: pointer; border: none; box-shadow: none; margin: 0; transition: transform 0.1s ease-out, opacity 0.15s ease-out; }
 .admin-page .perm-toggle:hover { opacity: .85; }
 .admin-page .perm-toggle:active { transform: scale(0.94); }
 .admin-page .perm-toggle.off { background: var(--a-bg); color: var(--a-muted); border: 1px dashed var(--a-border); }
-.admin-page .delete-user-link { font-size: 11.5px; color: var(--a-muted); text-decoration: none; margin-left: auto; }
+.admin-page .delete-user-link { position: absolute; top: 14px; right: 4px; font-size: 11.5px; color: var(--a-muted); text-decoration: none; }
 .admin-page .delete-user-link:hover { color: #c1443a; text-decoration: underline; }
 .admin-page .tab-toggle-link, .admin-page .tabs-edit-link { font-size: 11px; font-weight: 600; color: var(--a-accent2); text-decoration: none; white-space: nowrap; }
 .admin-page .tab-toggle-link:hover, .admin-page .tabs-edit-link:hover { text-decoration: underline; }

@@ -117,11 +117,13 @@ export default function AdminPage() {
     }
 
     var ALL_USERS = [];
+    var EXPANDED = {}; // uid -> bool, survives loadUsers() re-renders so an open row stays open
 
     function renderUsersTable(users) {
         var body = document.getElementById('users-body');
         var rows = [];
         users.forEach(function (u) {
+          var grantedCount = u.permissions.length;
           var badges = CARD_KEYS.map(function (k) {
             var on = u.permissions.indexOf(k) !== -1;
             var tabs = CARD_TABS[k];
@@ -129,12 +131,16 @@ export default function AdminPage() {
             var style = on ? ' style="background:' + colorForKey(k) + '"' : '';
             return '<span class="perm-toggle' + (on ? '' : ' off') + '"' + style + ' data-uid="' + u.id + '" data-key="' + esc(k) + '" data-on="' + on + '">' + esc(k) + '</span>' + tabsLink;
           }).join('');
-          rows.push('<div class="ucard">' +
+          rows.push('<div class="ucard' + (EXPANDED[u.id] ? ' expanded' : '') + '" data-uid="' + u.id + '">' +
+            '<div class="ucard-head" data-uid="' + u.id + '">' +
             '<span class="avatar" style="background:' + colorForKey(u.email) + '">' + esc(initials(u.name || u.email)) + '</span>' +
             '<div class="uinfo"><div class="uname">' + esc(u.name || u.email) + (u.is_admin ? ' <span class="admin-star" title="Admin">⭐</span>' : '') + '</div>' +
             '<div class="uemail">' + esc(u.email) + '</div></div>' +
-            '<div class="utags">' + badges + '</div>' +
+            '<span class="perm-count">' + grantedCount + ' of ' + CARD_KEYS.length + ' reports</span>' +
+            '<span class="chevron">&#8964;</span>' +
+            '</div>' +
             '<a href="#" class="delete-user-link" data-uid="' + u.id + '" data-email="' + esc(u.email) + '">Remove</a>' +
+            '<div class="utags">' + badges + '</div>' +
             '</div>');
           // One hidden edit-row per restrictable card, pre-checked from the user's
           // current tabPermissions - revealed by the "tabs" link above.
@@ -152,6 +158,12 @@ export default function AdminPage() {
           });
         });
         body.innerHTML = rows.join('');
+        body.querySelectorAll('.ucard-head').forEach(function (el) {
+          el.addEventListener('click', function () {
+            var card = el.closest('.ucard');
+            EXPANDED[el.dataset.uid] = card.classList.toggle('expanded');
+          });
+        });
         body.querySelectorAll('.perm-toggle').forEach(function (el) {
           el.addEventListener('click', function () {
             togglePerm(el.dataset.uid, el.dataset.key, el.dataset.on === 'true');
