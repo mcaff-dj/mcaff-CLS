@@ -183,6 +183,19 @@ function WorstTrends({ worst }) {
   );
 }
 
+// Groups items by product while preserving each product's existing category order (items
+// arrives sorted by window_cases desc across every product+category pair, so a product's
+// own categories stay ranked within its group too) - avoids repeating the product name
+// once per category the way a flat list of items would.
+function groupDemographicsByProduct(items) {
+  const byProduct = new Map();
+  for (const item of items) {
+    if (!byProduct.has(item.product)) byProduct.set(item.product, []);
+    byProduct.get(item.product).push(item);
+  }
+  return Array.from(byProduct.entries());
+}
+
 function ProductDemographicsSection({ demographics }) {
   return (
     <div className="og-stack">
@@ -196,20 +209,24 @@ function ProductDemographicsSection({ demographics }) {
                 : "No demographic breakdown available for this brand — its sheet doesn't track age/gender/skin type/first-time-vs-regular."}
             </p>
           ) : (
-            brand.items.map((item, i) => (
-              <div className="og-sku-block" key={i}>
-                <div className="og-sku-name">
-                  {item.product}
-                  <span className="og-sku-meta">{item.category} &middot; {fmtNum(item.window_cases)} cases in window</span>
-                </div>
-                <ul className="og-sku-issues">
-                  {Object.values(item.fields).map((f) => (
-                    <li key={f.label}>
-                      {f.label}: <strong>{f.top_value}</strong> &mdash; {fmtPct(f.window_share_pct)} of window
-                      {f.baseline_share_pct != null && ` (was ${fmtPct(f.baseline_share_pct)} at baseline)`}
-                    </li>
-                  ))}
-                </ul>
+            groupDemographicsByProduct(brand.items).map(([product, cats]) => (
+              <div className="og-sku-block" key={product}>
+                <div className="og-sku-name">{product}</div>
+                {cats.map((item, i) => (
+                  <div key={item.category} style={{ marginTop: i === 0 ? 6 : 14 }}>
+                    <div className="og-sku-meta" style={{ fontWeight: 600 }}>
+                      {item.category} &middot; {fmtNum(item.window_cases)} cases in window
+                    </div>
+                    <ul className="og-sku-issues">
+                      {Object.values(item.fields).map((f) => (
+                        <li key={f.label}>
+                          {f.label}: <strong>{f.top_value}</strong> &mdash; {fmtPct(f.window_share_pct)} of window
+                          {f.baseline_share_pct != null && ` (was ${fmtPct(f.baseline_share_pct)} at baseline)`}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
               </div>
             ))
           )}
