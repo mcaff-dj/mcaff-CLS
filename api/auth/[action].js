@@ -3,7 +3,7 @@
 // us which logical route was hit; URLs are unchanged.
 const { CARD_KEYS, CARD_LABELS, getUserByEmail, getUserPermissions, getUserTabPermissions, bootstrapAdminIfNeeded, logEvent, upsertAgentPresence, getAllAgentPresence, getAgentPresenceLogSummary, getAllLeadDates, getAllNdrLeadDates, getRecentLeadAssignments, recordLeadDisposition,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent, isCallingProcessAdmin, resolveCallerTeam, getDeliveryEscalationUserRoleByEmail,
-  topUpDetractorAgent } = require('../_lib/db');
+  topUpDetractorAgent, topUpProductCallingAgent } = require('../_lib/db');
 const { teamScopeFor } = require('../_lib/callingTeams');
 const CALLING_PROCESSES = require('../_lib/callingProcesses.json');
 const { getSession, setSessionCookie, clearSessionCookie } = require('../_lib/session');
@@ -18,6 +18,13 @@ function hasDetractorAccess(session) {
   const callingTabs = session.tabPerms && session.tabPerms.calling;
   return (session.perms || []).includes('calling')
     && !(Array.isArray(callingTabs) && callingTabs.length && !callingTabs.includes('detractor'));
+}
+// Same gate as hasDetractorAccess, keyed on the 'productkyc' tab instead - shared by every
+// Product Calling auto-assign trigger in this file.
+function hasProductCallingAccess(session) {
+  const callingTabs = session.tabPerms && session.tabPerms.calling;
+  return (session.perms || []).includes('calling')
+    && !(Array.isArray(callingTabs) && callingTabs.length && !callingTabs.includes('productkyc'));
 }
 const GH_REPO = 'mcaff-dj/mcaff-CLS';
 const RTO_ASSIGN_LAMBDA = 'mcaff-cls-assign-leads';
@@ -373,6 +380,14 @@ async function handlePresence(req, res) {
       console.error('handlePresence: detractor heartbeat top-up failed:', e.message || e);
     }
   }
+  if (body.processKey === 'productkyc' && body.status === 'Online'
+      && !(session.isAdmin && body.email) && hasProductCallingAccess(session)) {
+    try {
+      await topUpProductCallingAgent(session.email);
+    } catch (e) {
+      console.error('handlePresence: productkyc heartbeat top-up failed:', e.message || e);
+    }
+  }
   if (body.status === 'Online' && body.pendingBox === 0) {
     triggerImmediateLambdaAssignment(RTO_ASSIGN_LAMBDA).catch(() => {});
   }
@@ -604,6 +619,16 @@ async function handleProcessPresence(req, res) {
         await topUpDetractorAgent(session.email);
       } catch (e) {
         console.error('handleProcessPresence: detractor auto-fill failed:', e.message || e);
+      }
+    }
+  } else if (body.status === 'Online' && body.processKey === 'productkyc') {
+    // Same inline top-up as the detractor branch above - productkyc has no Lambda/workflow
+    // entry either, so it falls through to here rather than the two branches above.
+    if (hasProductCallingAccess(session)) {
+      try {
+        await topUpProductCallingAgent(session.email);
+      } catch (e) {
+        console.error('handleProcessPresence: productkyc auto-fill failed:', e.message || e);
       }
     }
   }
