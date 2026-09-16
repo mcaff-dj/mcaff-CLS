@@ -715,6 +715,7 @@ def _build_prodwise_heatmap(capped):
     body_rows = []
     for i, r in enumerate(capped):
         z = "zebra" if i % 2 == 1 else ""
+        total_responses = sum(m["responses"] for m in r["months"].values() if m)
         cells = []
         for ym in all_yms:
             m = r["months"].get(ym)
@@ -725,7 +726,7 @@ def _build_prodwise_heatmap(capped):
         spark_svg, spark_json = _prodwise_sparkline(r["months"])
         body_rows.append(
             f"<tr class='{z}' data-hm-spark='{spark_json}'>"
-            f"<td class='rowlabel'>{h_enc(r['product'])}</td>{''.join(cells)}"
+            f"<td class='rowlabel'>{h_enc(r['product'])}</td><td class='num'>{n0(total_responses)}</td>{''.join(cells)}"
             f"<td class='num' style='min-width:80px'>{spark_svg}</td></tr>"
         )
 
@@ -742,7 +743,7 @@ def _build_prodwise_heatmap(capped):
         "<p class='desc'>NPS% = (Promoters &minus; Detractors) &divide; Total &times; 100, per product per month. "
         "Color midpoint is 50 (excellent NPS threshold); blank cells had no survey responses that month.</p>"
         f"{legend}<div class='pivot-scroll'><table class='pivot-table'><thead><tr>"
-        f"<th class='corner'>Product</th>{head_cells}<th>Trend</th></tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
+        f"<th class='corner'>Product</th><th>Total Responses</th>{head_cells}<th>Trend</th></tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
     )
 
 
@@ -1002,6 +1003,20 @@ def _build_ppk_core(ctx, subset, period_list, period_index_fn, period_header_fn,
                 break
             except ValueError:
                 continue
+
+    # Pro Sales lags ticket entry - the live/current month's rows often carry no Pro
+    # Sales figure yet (still being filled in upstream), which left PROSALES[si][pidx]
+    # at its 0.0 initializer and forced complain% to a hard 0% even though the complaint
+    # count for that month was real. Carry the SKU's last known non-zero Pro Sales
+    # forward into any later blank month so the percent stays a real (if slightly
+    # stale) estimate instead of a misleading zero.
+    for si in range(len(SKUS)):
+        last = 0.0
+        for pidx in range(n):
+            if PROSALES[si][pidx] > 0:
+                last = PROSALES[si][pidx]
+            elif last > 0:
+                PROSALES[si][pidx] = last
 
     def lmk(arr, sku_idx):
         c = arr[LP]
