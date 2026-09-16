@@ -6,18 +6,19 @@ import {
   buildPackagingNarrativeBaseline, buildProductDemographicsBaseline,
 } from './trendMath';
 
-function fmtPct(v) {
+function fmtPct(v, digits) {
   if (v === null || v === undefined) return '–';
+  if (digits != null) return v.toFixed(digits) + '%';
   return v.toFixed(v < 1 ? 2 : 1) + '%';
 }
 function fmtNum(v) {
   if (v === null || v === undefined) return '–';
   return v.toLocaleString('en-IN');
 }
-function fmtDelta(v, unit) {
+function fmtDelta(v, unit, digits) {
   if (v === null || v === undefined) return '–';
   const sign = v > 0 ? '+' : '';
-  return sign + v.toFixed(2) + (unit === 'pts' ? ' pts' : '%');
+  return sign + v.toFixed(digits ?? 2) + (unit === 'pts' ? ' pts' : '%');
 }
 function fmtScore(v) {
   return (v === null || v === undefined) ? '–' : v;
@@ -212,8 +213,8 @@ function demoSentence(item) {
   if (f.first_time_regular) {
     const ft = f.first_time_regular;
     const shareClause = ft.baseline_share_pct != null
-      ? `${fmtPct(ft.baseline_share_pct)}→${fmtPct(ft.window_share_pct)}`
-      : fmtPct(ft.window_share_pct);
+      ? `${fmtPct(ft.baseline_share_pct, 3)}→${fmtPct(ft.window_share_pct, 3)}`
+      : fmtPct(ft.window_share_pct, 3);
     clauses.push(`almost entirely among ${ft.top_value.toLowerCase()} users (${shareClause})`);
   }
   if (f.age) clauses.push(`concentrated in ages ${f.age.top_value}`);
@@ -263,9 +264,9 @@ function ProductDemographicsSection({ demographics }) {
 function overviewSentence(overview) {
   if (!overview) return null;
   const cats = overview.top_categories.map((c) =>
-    `${c.category} ${fmtNum(c.baseline_cases)}→${fmtNum(c.window_cases)} cases (${fmtPct(c.baseline_rate)}→${fmtPct(c.window_rate)})`);
+    `${c.category} ${fmtNum(c.baseline_cases)}→${fmtNum(c.window_cases)} cases (${fmtPct(c.baseline_rate, 3)}→${fmtPct(c.window_rate, 3)})`);
   const verb = overview.window_rate >= overview.baseline_rate ? 'rose' : 'fell';
-  return `Overall packaging & operational complaints ${verb} ${fmtPct(overview.baseline_rate)}→${fmtPct(overview.window_rate)}` +
+  return `Overall packaging & operational complaints ${verb} ${fmtPct(overview.baseline_rate, 3)}→${fmtPct(overview.window_rate, 3)}` +
     ` (${fmtNum(overview.baseline_cases)}→${fmtNum(overview.window_cases)} cases)${cats.length ? `: ${cats.join('; ')}.` : '.'}`;
 }
 
@@ -274,7 +275,7 @@ function multiDimensionSentence(row, batch) {
   const issues = (row.issues || []).map((iss) => `${iss.issue} (${fmtNum(iss.window_cases)} cases)`);
   const batchPart = batch ? ` Batch ${batch.batch} accounts for ${fmtNum(batch.window_cases)} of these cases.` : '';
   return `${row.product} failed across ${row.issues.length} packaging dimensions at once: overall ` +
-    `${fmtPct(row.baseline_rate)}→${fmtPct(row.window_rate)} (${fmtNum(row.baseline_cases)}→${fmtNum(row.window_cases)} cases); ` +
+    `${fmtPct(row.baseline_rate, 3)}→${fmtPct(row.window_rate, 3)} (${fmtNum(row.baseline_cases)}→${fmtNum(row.window_cases)} cases); ` +
     `${issues.join(', ')}.${batchPart}`;
 }
 
@@ -297,8 +298,8 @@ function packagingBottomLine(narr) {
   const drivers = Array.from(new Set([narr.multi_dimension?.product, narr.persistent?.product].filter(Boolean)));
   if (!drivers.length) return null;
   const verb = narr.overview.window_rate >= narr.overview.baseline_rate ? 'rose' : 'fell';
-  return `${narr.title}: packaging & operational complaints ${verb} ${fmtPct(narr.overview.baseline_rate)}→` +
-    `${fmtPct(narr.overview.window_rate)} this window, led by ${drivers.join(' and ')}.`;
+  return `${narr.title}: packaging & operational complaints ${verb} ${fmtPct(narr.overview.baseline_rate, 3)}→` +
+    `${fmtPct(narr.overview.window_rate, 3)} this window, led by ${drivers.join(' and ')}.`;
 }
 
 function PackagingSection({ packaging, narrative, windowMonths }) {
@@ -361,9 +362,9 @@ function PackagingSection({ packaging, narrative, windowMonths }) {
                           </details>
                         )}
                       </td>
-                      <td>{fmtPct(s.baseline_rate)}</td>
-                      <td>{fmtPct(s.window_rate)}</td>
-                      <td className={deltaClass(s.delta)}>{fmtDelta(s.delta)}</td>
+                      <td>{fmtPct(s.baseline_rate, 3)}</td>
+                      <td>{fmtPct(s.window_rate, 3)}</td>
+                      <td className={deltaClass(s.delta)}>{fmtDelta(s.delta, undefined, 3)}</td>
                       {s.months.map((n, i) => <td key={i}>{fmtNum(n)}</td>)}
                     </tr>
                   ))}
@@ -407,7 +408,7 @@ function PackagingSection({ packaging, narrative, windowMonths }) {
                     {brand.dropped.map((d) => (
                       <tr key={d.product}>
                         <td className="og-rowlabel">{d.product}</td>
-                        <td>{fmtPct(d.baseline_rate)}</td>
+                        <td>{fmtPct(d.baseline_rate, 3)}</td>
                         <td>{fmtNum(d.baseline_cases)}</td>
                         <td>{fmtNum(d.window_cases)}</td>
                       </tr>
