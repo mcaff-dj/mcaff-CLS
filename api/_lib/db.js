@@ -526,6 +526,38 @@ async function bootstrapSchema() {
       UNIQUE KEY cls_nps_calling_live_response_key (live_response_id)
     )
   `;
+  // Product Calling ('productkyc' process key) - unlike CLS_NPS_calling this table has no
+  // read-only source table to copy from: leads arrive via admin CSV upload
+  // (api/productcalling/upload.js) directly as unassigned rows (agent_email IS NULL). Claiming
+  // a lead is therefore a single UPDATE...LIMIT 1, not an INSERT...SELECT copy - see
+  // claimNextProductCallingLead. live_lead_ref is the same live-cycle trick CLS_NPS_calling's
+  // live_response_id and CLS_RTO_calling's live_order_id already use (NULL once reassigned, so
+  // a retired cycle and its replacement can coexist under one UNIQUE KEY).
+  await sql`
+    CREATE TABLE IF NOT EXISTS CLS_productcalling (
+      id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      lead_ref VARCHAR(64) NOT NULL,
+      customer_name VARCHAR(255),
+      customer_phone VARCHAR(32) NOT NULL,
+      customer_email VARCHAR(255),
+      product_key VARCHAR(100),
+      product_category VARCHAR(100),
+      notes TEXT,
+      imported_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      imported_by VARCHAR(320),
+      agent_email VARCHAR(320) NULL,
+      assigned_at TIMESTAMP NULL,
+      reassigned_away_at TIMESTAMP NULL,
+      disposed_at TIMESTAMP NULL,
+      disposition TEXT,
+      agent_remarks TEXT,
+      connected VARCHAR(10),
+      attempt INT,
+      live_lead_ref VARCHAR(80) GENERATED ALWAYS AS
+        (IF(reassigned_away_at IS NULL, lead_ref, NULL)) VIRTUAL,
+      UNIQUE KEY cls_productcalling_live_lead_ref_key (live_lead_ref)
+    )
+  `;
   // A process's own admin-defined disposition list - moved here from Postgres (see
   // migrate_calling_process_dispositions_to_mysql.py). parent_id is self-referencing
   // (arbitrary nesting depth - see getProcessDispositions), ON DELETE CASCADE so removing a
