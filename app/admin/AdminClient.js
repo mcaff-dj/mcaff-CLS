@@ -8,6 +8,39 @@ export default function AdminPage() {
     var CARD_TABS = {}; // { cardKey: [{key,label}, ...] } - only cards with internal tabs appear here
     function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
 
+    var BADGE_COLORS = ['#e8863a', '#6b4a86', '#3f8f5f', '#2b7de0', '#c2740c', '#9333ea', '#c1447e', '#1b998b'];
+    function colorForKey(key) {
+      var hash = 0;
+      for (var i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+      return BADGE_COLORS[hash % BADGE_COLORS.length];
+    }
+
+    function initials(nameOrEmail) {
+      var s = (nameOrEmail || '').trim();
+      if (!s) return '?';
+      var parts = s.indexOf('@') !== -1 ? [s.split('@')[0]] : s.split(/\s+/);
+      var first = parts[0] ? parts[0][0] : '';
+      var second = parts[1] ? parts[1][0] : (parts[0] && parts[0][1] ? parts[0][1] : '');
+      return (first + second).toUpperCase();
+    }
+
+    var ACTION_META = {
+      view: { icon: '◎', color: '#3f8f5f', bg: '#e7f3ea' },
+      login: { icon: '⇥', color: '#6b4a86', bg: '#eee6f4' },
+      csv_export: { icon: '⇩', color: '#e8863a', bg: '#fbe6d4' },
+      raw_download: { icon: '⬇', color: '#2b7de0', bg: '#e3edfb' }
+    };
+    function timeAgo(iso) {
+      var diff = Date.now() - new Date(iso).getTime();
+      if (!(diff >= 0)) diff = 0;
+      var m = Math.floor(diff / 60000);
+      if (m < 1) return 'just now';
+      if (m < 60) return m + 'm ago';
+      var h = Math.floor(m / 60);
+      if (h < 24) return h + 'h ago';
+      return Math.floor(h / 24) + 'd ago';
+    }
+
     // One card's chip, plus - if that card has internal tabs (CARD_TABS[key]) - a
     // "customize tabs" link revealing a checklist to restrict the grant to just
     // those tabs (UI-level convenience only, see report_tab_permissions in db.js).
@@ -89,14 +122,20 @@ export default function AdminPage() {
         var body = document.getElementById('users-body');
         var rows = [];
         users.forEach(function (u) {
-          var perms = CARD_KEYS.map(function (k) {
+          var badges = CARD_KEYS.map(function (k) {
             var on = u.permissions.indexOf(k) !== -1;
             var tabs = CARD_TABS[k];
             var tabsLink = (on && tabs && tabs.length) ? ' <a href="#" class="tabs-edit-link" data-uid="' + u.id + '" data-key="' + esc(k) + '">tabs</a>' : '';
-            return '<span class="perm-toggle' + (on ? ' on' : '') + '" data-uid="' + u.id + '" data-key="' + esc(k) + '" data-on="' + on + '">' + esc(k) + (on ? ' ✓' : ' +') + '</span>' + tabsLink;
+            var style = on ? ' style="background:' + colorForKey(k) + '"' : '';
+            return '<span class="perm-toggle' + (on ? '' : ' off') + '"' + style + ' data-uid="' + u.id + '" data-key="' + esc(k) + '" data-on="' + on + '">' + esc(k) + '</span>' + tabsLink;
           }).join('');
-          rows.push('<tr><td>' + esc(u.email) + '</td><td>' + esc(u.name || '') + '</td><td>' + (u.is_admin ? 'Yes' : '') + '</td><td>' + perms + '</td>' +
-            '<td><a href="#" class="delete-user-link" data-uid="' + u.id + '" data-email="' + esc(u.email) + '">Delete</a></td></tr>');
+          rows.push('<div class="ucard">' +
+            '<span class="avatar" style="background:' + colorForKey(u.email) + '">' + esc(initials(u.name || u.email)) + '</span>' +
+            '<div class="uinfo"><div class="uname">' + esc(u.name || u.email) + (u.is_admin ? ' <span class="admin-star" title="Admin">⭐</span>' : '') + '</div>' +
+            '<div class="uemail">' + esc(u.email) + '</div></div>' +
+            '<div class="utags">' + badges + '</div>' +
+            '<a href="#" class="delete-user-link" data-uid="' + u.id + '" data-email="' + esc(u.email) + '">Remove</a>' +
+            '</div>');
           // One hidden edit-row per restrictable card, pre-checked from the user's
           // current tabPermissions - revealed by the "tabs" link above.
           CARD_KEYS.forEach(function (k) {
@@ -107,9 +146,9 @@ export default function AdminPage() {
               var checked = current.indexOf(t.key) !== -1;
               return '<label class="tab-chip"><input type="checkbox" class="edit-tab-chk" value="' + esc(t.key) + '"' + (checked ? ' checked' : '') + '> ' + esc(t.label) + '</label>';
             }).join('');
-            rows.push('<tr class="tab-edit-row" data-uid="' + u.id + '" data-key="' + esc(k) + '" style="display:none;"><td colspan="5">' +
+            rows.push('<div class="tab-edit-row" data-uid="' + u.id + '" data-key="' + esc(k) + '" style="display:none;">' +
               '<b>' + esc(k) + '</b> tabs (none checked = full access): ' + checks +
-              '<button type="button" class="save-tabs-btn" data-uid="' + u.id + '" data-key="' + esc(k) + '">Save</button></td></tr>');
+              '<button type="button" class="save-tabs-btn" data-uid="' + u.id + '" data-key="' + esc(k) + '">Save</button></div>');
           });
         });
         body.innerHTML = rows.join('');
@@ -122,12 +161,12 @@ export default function AdminPage() {
           el.addEventListener('click', function (e) {
             e.preventDefault();
             var row = body.querySelector('.tab-edit-row[data-uid="' + el.dataset.uid + '"][data-key="' + el.dataset.key + '"]');
-            if (row) row.style.display = (row.style.display === 'none') ? 'table-row' : 'none';
+            if (row) row.style.display = (row.style.display === 'none') ? 'block' : 'none';
           });
         });
         body.querySelectorAll('.save-tabs-btn').forEach(function (el) {
           el.addEventListener('click', function () {
-            var row = el.closest('tr');
+            var row = el.closest('.tab-edit-row');
             var tabKeys = Array.prototype.slice.call(row.querySelectorAll('.edit-tab-chk:checked')).map(function (c) { return c.value; });
             fetch('/api/admin/permissions', {
               method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -157,6 +196,9 @@ export default function AdminPage() {
         ALL_USERS = d.users || [];
         renderInvitePerms();
         renderUsersTable(filterUsers(document.getElementById('user-search').value));
+        document.getElementById('stat-users').textContent = ALL_USERS.length;
+        document.getElementById('stat-admins').textContent = ALL_USERS.filter(function (u) { return u.is_admin; }).length;
+        document.getElementById('stat-reports').textContent = CARD_KEYS.length;
       });
     }
 
@@ -173,14 +215,22 @@ export default function AdminPage() {
       renderUsersTable(filterUsers(this.value));
     });
 
-    var ACTION_LABELS = { view: 'View', login: 'Login', csv_export: 'CSV export', raw_download: 'Raw download' };
+    var ACTION_LABELS = { view: 'viewed', login: 'logged in', csv_export: 'exported CSV from', raw_download: 'downloaded raw data from' };
     function loadAudit() {
       fetch('/api/admin/audit').then(function (r) { return r.json(); }).then(function (d) {
+        var entries = d.entries || [];
         var body = document.getElementById('audit-body');
-        body.innerHTML = (d.entries || []).map(function (e) {
-          var action = ACTION_LABELS[e.action] || e.action || 'View';
-          return '<tr><td>' + esc(e.email) + '</td><td>' + esc(action) + '</td><td>' + esc(e.cardLabel) + '</td><td>' + esc(e.detail || '') + '</td><td>' + esc(new Date(e.accessed_at).toLocaleString()) + '</td><td>' + esc(e.ip || '') + '</td></tr>';
+        body.innerHTML = entries.map(function (e) {
+          var meta = ACTION_META[e.action] || { icon: '•', color: '#7d7061', bg: '#efe4d3' };
+          var verb = ACTION_LABELS[e.action] || esc(e.action || 'viewed');
+          var what = verb + (e.cardLabel ? ' ' + esc(e.cardLabel) : '') + (e.detail ? ' — ' + esc(e.detail) : '');
+          return '<div class="feed-row"><span class="feed-icon" style="background:' + meta.bg + ';color:' + meta.color + '">' + meta.icon + '</span>' +
+            '<span class="feed-who">' + esc(e.email) + '</span>' +
+            '<span class="feed-what">' + what + '</span>' +
+            '<span class="feed-when" title="' + esc(new Date(e.accessed_at).toLocaleString()) + '">' + timeAgo(e.accessed_at) + '</span></div>';
         }).join('');
+        var dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+        document.getElementById('stat-events').textContent = entries.filter(function (e) { return new Date(e.accessed_at).getTime() >= dayAgo; }).length;
       });
     }
 
@@ -244,6 +294,13 @@ export default function AdminPage() {
         <h1>Access Management</h1>
         <p className="sub">Invite people, grant/revoke per-report access, and see who&apos;s viewed what.</p>
 
+        <div className="stats">
+          <div className="stat"><div className="stat-v" id="stat-users" style={{ color: '#e8863a' }}>&mdash;</div><div className="stat-l">Users</div></div>
+          <div className="stat"><div className="stat-v" id="stat-admins" style={{ color: '#6b4a86' }}>&mdash;</div><div className="stat-l">Admins</div></div>
+          <div className="stat"><div className="stat-v" id="stat-reports" style={{ color: '#3f8f5f' }}>&mdash;</div><div className="stat-l">Reports</div></div>
+          <div className="stat"><div className="stat-v" id="stat-events" style={{ color: '#c2740c' }}>&mdash;</div><div className="stat-l">Events / 24h</div></div>
+        </div>
+
         <section>
           <h2>Invite a user</h2>
           <div className="row">
@@ -278,18 +335,12 @@ export default function AdminPage() {
             <h2>Users &amp; permissions</h2>
             <input type="text" id="user-search" className="search-input" placeholder="Search email or name…" />
           </div>
-          <table>
-            <thead><tr><th>Email</th><th>Name</th><th>Admin</th><th>Reports</th><th></th></tr></thead>
-            <tbody id="users-body"></tbody>
-          </table>
+          <div id="users-body"></div>
         </section>
 
         <section>
           <h2>Recent access (last 200)</h2>
-          <table>
-            <thead><tr><th>Email</th><th>Action</th><th>Report</th><th>Detail</th><th>When</th><th>IP</th></tr></thead>
-            <tbody id="audit-body"></tbody>
-          </table>
+          <div id="audit-body"></div>
         </section>
       </div>
       <div id="denied" className="denied" style={{ display: 'none' }}>
