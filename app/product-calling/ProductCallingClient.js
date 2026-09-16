@@ -8,7 +8,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import { XIcon, CheckIcon, PhoneIcon, CustomSelect, Overlay } from '../_calling/ui';
 import { useCallingSession } from '../_calling/useCallingSession';
-import { useProcessDispositions } from '../_calling/CallingAdminPanel';
+import {
+  useBusinessHours, CallingHoursCard, useDefaultQuota, DefaultQuotaCard,
+  useLeadOrder, LeadOrderCard, useProcessDispositions, ProcessDispositionsCard,
+} from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
 import { scopeToDateBounds } from '../_calling/util';
 
@@ -21,6 +24,9 @@ export default function ProductCallingClient() {
   const { googleUser, sessionIsAdmin, isProcessAdmin, showToast } = session;
 
   const disp = useProcessDispositions(PROCESS_KEY, { googleUser, showToast, strict: true });
+  const hours = useBusinessHours(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
+  const defaultQuota = useDefaultQuota(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
+  const leadOrder = useLeadOrder(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
 
   useEffect(() => {
     document.documentElement.className = 'light';
@@ -112,6 +118,38 @@ export default function ProductCallingClient() {
     }
   };
 
+  const [csvText, setCsvText] = useState('');
+  const [uploadResult, setUploadResult] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const submitUpload = async () => {
+    if (!csvText.trim()) { showToast('⚠️ Paste or load a CSV first'); return; }
+    setUploading(true);
+    setUploadResult(null);
+    try {
+      const r = await fetch('/api/productcalling/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ csv: csvText }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { showToast(`⚠️ ${d.error || 'Upload failed'}`); return; }
+      setUploadResult(d);
+      showToast(`✅ Imported ${d.inserted} lead(s)`);
+      setCsvText('');
+    } catch (e) {
+      showToast(`⚠️ ${e.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+  const onCsvFile = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setCsvText(String(reader.result || ''));
+    reader.readAsText(file);
+  };
+
   return (
     <div className="min-h-screen bg-zinc-50">
       <CallingShell
@@ -165,8 +203,43 @@ export default function ProductCallingClient() {
           )}
 
           {tab === 'admin' && canAdminTab && (
-            <div id="product-calling-admin-tab" className="text-sm text-zinc-500">
-              {/* Populated by Task 11: roster/hours/quota/lead-order/dispositions cards + CSV upload. */}
+            <div className="space-y-4">
+              <div className="bg-white rounded-xl border border-zinc-200 p-4">
+                <h3 className="font-bold text-zinc-800 mb-2 text-sm">Upload Leads (CSV)</h3>
+                <p className="text-xs text-zinc-500 mb-2">
+                  Required columns: Customer Name, Customer Phone. Optional: Lead Ref, Customer Email, Product, Product Category, Notes.
+                </p>
+                <input type="file" accept=".csv" onChange={onCsvFile} className="text-xs mb-2 block" />
+                <textarea
+                  value={csvText}
+                  onChange={(e) => setCsvText(e.target.value)}
+                  placeholder="Or paste CSV text here"
+                  className="w-full border border-zinc-200 rounded-lg p-2 text-xs mb-2 font-mono"
+                  rows={4}
+                />
+                <button
+                  onClick={submitUpload}
+                  disabled={uploading}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-semibold disabled:opacity-50"
+                >
+                  {uploading ? 'Uploading…' : 'Upload'}
+                </button>
+                {uploadResult && (
+                  <div className="mt-2 text-xs text-zinc-600">
+                    Imported {uploadResult.inserted}, duplicates {uploadResult.duplicates}, missing phone {uploadResult.missingPhone}, of {uploadResult.total} rows.
+                    {uploadResult.errors?.length > 0 && (
+                      <ul className="mt-1 list-disc pl-4 text-rose-600">
+                        {uploadResult.errors.slice(0, 10).map((e, i) => <li key={i}>Line {e.line}: {e.reason}</li>)}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <CallingHoursCard processKey={PROCESS_KEY} processLabel="Product Calling" hours={hours} />
+              <DefaultQuotaCard processLabel="Product Calling" fallback={15} quota={defaultQuota} />
+              <LeadOrderCard processLabel="Product Calling" order={leadOrder} />
+              <ProcessDispositionsCard processLabel="Product Calling" disp={disp} />
             </div>
           )}
         </div>
