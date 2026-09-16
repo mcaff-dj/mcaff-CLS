@@ -16,6 +16,7 @@
 const SEP = '||';
 const MIN_WINDOW_CASES = 40;
 const MIN_WINDOW_CASES_SKU = 20;
+const TOP_PACKAGING_SKUS = 12;
 const MIN_RATE_DELTA_PP = 0.02;
 const MAX_TRENDS_PER_DIMENSION = 6;
 const PACKAGING_WORDS = ['spill', 'broken', 'seal', 'damage', 'leak', 'packaging', 'tamper'];
@@ -306,7 +307,7 @@ function buildPackagingBaseline(raw, packaging, baselineMonths, windowMonths) {
       return { ...row, baseline_rate: fmtPct3(br), window_rate: fmtPct3(wr), delta: fmtPct3(wr - br) };
     });
     skus.sort((a, b) => (b.delta ?? 0) - (a.delta ?? 0));
-    return { ...brandPkg, skus: skus.slice(0, 5) };
+    return { ...brandPkg, skus: skus.slice(0, TOP_PACKAGING_SKUS) };
   });
 }
 

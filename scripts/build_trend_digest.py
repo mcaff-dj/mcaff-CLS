@@ -355,10 +355,21 @@ def build_packaging(brands, baseline, window):
                 d[mo] = d.get(mo, 0) + n
         bsales, wsales = sum(sales_for(b, baseline)), sum(sales_for(b, window))
         rows = []
+        # SKUs that cleared the reporting floor at baseline but fell back below it this
+        # window - i.e. they'd have been a named offender before, and have gone quiet
+        # since. Surfaced separately so a SKU doesn't just silently vanish from the table;
+        # a CAPA landing and a SKU merely falling below the volume cutoff look identical
+        # unless this is called out.
+        dropped = []
         for prod, per_month in skus.items():
             bc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in baseline)
             wc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in window)
             if wc < MIN_WINDOW_CASES_SKU:
+                if bc >= MIN_WINDOW_CASES_SKU:
+                    dropped.append({
+                        "product": prod, "baseline_rate": _fmt_pct(rate(bc, bsales)),
+                        "baseline_cases": bc, "window_cases": wc,
+                    })
                 continue
             br, wr = rate(bc, bsales), rate(wc, wsales)
             rows.append({
@@ -367,6 +378,7 @@ def build_packaging(brands, baseline, window):
                 "months": [per_month.get(e["labels"].get(b["brand"]), 0) for e in window],
             })
         rows.sort(key=lambda r: -(r["delta"] or 0))
+        dropped.sort(key=lambda r: -r["baseline_cases"])
 
         batch_rows = []
         for key, per_month in (b.get("batches") or {}).items():
@@ -379,7 +391,8 @@ def build_packaging(brands, baseline, window):
         batch_rows.sort(key=lambda r: -r["window_cases"])
         out.append({"brand": b["brand"], "title": b["title"],
                     "packaging_classes": pack_classes,
-                    "skus": rows[:TOP_PACKAGING_SKUS], "batches": batch_rows[:10]})
+                    "skus": rows[:TOP_PACKAGING_SKUS], "batches": batch_rows[:10],
+                    "dropped": dropped[:5]})
     return out
 
 

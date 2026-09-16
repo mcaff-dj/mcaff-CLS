@@ -24,6 +24,20 @@ function deltaClass(v) {
   return v > 0 ? 'og-up' : (v < 0 ? 'og-down' : '');
 }
 
+// Null, not "still climbing" - a courier still at its worst month within the window
+// gets no note; only a genuine pull-back from a peak is worth calling out, and only
+// when it's not just noise (peak has to be materially above the latest month).
+function peakEaseNote(monthRates, windowMonths) {
+  const present = monthRates
+    .map((v, i) => [i, v])
+    .filter(([, v]) => v !== null && v !== undefined);
+  if (present.length < 2) return null;
+  const [peakIdx, peakVal] = present.reduce((a, b) => (b[1] > a[1] ? b : a));
+  const [lastIdx, lastVal] = present[present.length - 1];
+  if (lastIdx === peakIdx || lastVal >= peakVal * 0.8) return null;
+  return `eased from peak ${fmtPct(peakVal)} in ${windowMonths[peakIdx]}`;
+}
+
 function MetricTables({ metrics, windowMonths }) {
   return (
     <div className="og-grid-2">
@@ -221,6 +235,31 @@ function PackagingSection({ packaging, windowMonths }) {
               </div>
             </>
           )}
+          {brand.dropped && brand.dropped.length > 0 && (
+            <>
+              <div className="og-card-sub" style={{ marginTop: 16, fontWeight: 600 }}>Dropped off this window</div>
+              <p className="og-note" style={{ marginBottom: 8 }}>
+                Cleared the reporting floor at baseline but fell below it this window &mdash; confirm resolved rather than assuming fixed.
+              </p>
+              <div className="og-table-scroll">
+                <table className="og-table">
+                  <thead>
+                    <tr><th>SKU</th><th>Baseline Rate</th><th>Baseline cases</th><th>Window cases</th></tr>
+                  </thead>
+                  <tbody>
+                    {brand.dropped.map((d) => (
+                      <tr key={d.product}>
+                        <td className="og-rowlabel">{d.product}</td>
+                        <td>{fmtPct(d.baseline_rate)}</td>
+                        <td>{fmtNum(d.baseline_cases)}</td>
+                        <td>{fmtNum(d.window_cases)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
         </div>
       ))}
     </div>
@@ -248,6 +287,7 @@ function RepeatOffenders({ repeat, windowMonths }) {
                         <th>Window Rate</th>
                         {windowMonths.map((m) => <th key={m}>{m}</th>)}
                         <th>Top Issue</th>
+                        <th>Trend</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -259,6 +299,7 @@ function RepeatOffenders({ repeat, windowMonths }) {
                             <td key={i}>{fmtNum(n)} <span className="og-card-sub">({fmtPct(r.month_rates?.[i])})</span></td>
                           ))}
                           <td>{r.top_issue ? `${r.top_issue} (${fmtNum(r.top_issue_cases)})` : '–'}</td>
+                          <td className="og-note">{peakEaseNote(r.month_rates || [], windowMonths) || '–'}</td>
                         </tr>
                       ))}
                     </tbody>
