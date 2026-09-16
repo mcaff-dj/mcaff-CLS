@@ -105,10 +105,10 @@
     },
     {
       "key": "productkyc",
-      "label": "Product KYC Calling",
+      "label": "Product Calling",
       "icon": "🧪",
-      "implemented": false,
-      "blurb": "Product feedback KYC calls. Source is the \"Product feedback KYC\" workbook (see scripts/productkyc_config.py), where every product tab has its own bespoke question schema - so the calling form is per-product, not one fixed set of fields.",
+      "implemented": true,
+      "blurb": "Product feedback follow-up calls. Leads arrive via admin CSV upload into CLS_productcalling (app/product-calling/) until the real lead source - eventually the \"Product feedback KYC\" workbook, see scripts/productkyc_config.py - is confirmed and wired in. Disposition tree is admin-configured from scratch, not the per-product bespoke question schema that workbook implies.",
       "businessHours": {
         "timezone": "IST",
         "days": ["mon", "tue", "wed", "thu", "fri", "sat"],

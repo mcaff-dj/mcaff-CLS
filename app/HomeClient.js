@@ -78,6 +78,9 @@ var CALLING_TEAM_SUBITEMS = {
   // object's keys double as tab_key values checked against userTabPerms.calling, so it must match
   // the process key exactly even though the user-facing label is "NPS-Calling".
   detractor: { label: 'NPS-Calling', text: 'NPS Detractor Calling Agent Portal', url: '/nps-calling' },
+  // Key is 'productkyc' (the process key from api/_lib/callingProcesses.json), same tab_key
+  // convention as 'detractor' above - the user-facing label is "Product Calling".
+  productkyc: { label: 'Product Calling', text: 'Product Calling Agent Portal', url: '/product-calling' },
   exports: { label: 'Exports', text: 'Exports', url: '/exports' }
 };
 
