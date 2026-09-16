@@ -20,6 +20,9 @@ const TOP_PACKAGING_SKUS = 12;
 const MIN_RATE_DELTA_PP = 0.02;
 const MAX_TRENDS_PER_DIMENSION = 6;
 const PACKAGING_WORDS = ['spill', 'broken', 'seal', 'damage', 'leak', 'packaging', 'tamper'];
+// A suggestion/recommendation isn't a complaint - excluded from the class comparison
+// regardless of volume, not because it fails the noise floor below.
+const EXCLUDED_CLASSES = new Set(['Product Suggestion/Recommendation']);
 
 function rate(count, sales) {
   if (!sales) return null;
@@ -129,7 +132,7 @@ function buildClassTables(raw, baselineMonths, windowMonths) {
     const wsales = salesFor(brand, windowMonths);
     const rows = [];
     for (const cls of brand.classes_order || []) {
-      if (!brand.classes[cls]) continue;
+      if (!brand.classes[cls] || EXCLUDED_CLASSES.has(cls)) continue;
       const bc = countsFor(brand.classes, cls, baselineMonths);
       const wc = countsFor(brand.classes, cls, windowMonths);
       if (sum(bc) + sum(wc) < MIN_WINDOW_CASES) continue;
@@ -197,6 +200,7 @@ function candidates(brand, store, dimension, baselineMonths, windowMonths, minCa
   const sw = sum(salesFor(brand, windowMonths));
   const found = [];
   for (const key of Object.keys(store)) {
+    if (dimension === 'class' && EXCLUDED_CLASSES.has(key)) continue;
     const perMonth = store[key];
     const bc = sum(baselineMonths.map((m) => perMonth[m] ?? 0));
     const wc = sum(windowMonths.map((m) => perMonth[m] ?? 0));

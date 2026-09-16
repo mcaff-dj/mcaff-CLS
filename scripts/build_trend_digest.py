@@ -34,6 +34,9 @@ MIN_RATE_DELTA_PP = 0.02
 MAX_TRENDS_PER_DIMENSION = 6
 TOP_COURIERS = 6
 TOP_PACKAGING_SKUS = 12
+# A suggestion/recommendation isn't a complaint - excluded from the class comparison
+# regardless of volume, not because it fails the noise floor below.
+EXCLUDED_CLASSES = {"Product Suggestion/Recommendation"}
 TOP_PRODUCT_DEMOGRAPHIC_ITEMS = 30
 
 DEMO_FIELD_LABELS = {
@@ -198,6 +201,8 @@ def build_class_tables(brands, baseline, window):
         bsales, wsales = sales_for(b, baseline), sales_for(b, window)
         rows = []
         for cls in sorted(b["classes"], key=lambda c: -sum(b["classes"][c].values())):
+            if cls in EXCLUDED_CLASSES:
+                continue
             bc = counts_for(b["classes"], cls, b["brand"], baseline)
             wc = counts_for(b["classes"], cls, b["brand"], window)
             if sum(bc) + sum(wc) < MIN_WINDOW_CASES:
@@ -255,6 +260,8 @@ def _candidates(b, store, dimension, baseline, window, min_cases, always_include
     sb, sw = sum(bsales), sum(wsales)
     found = []
     for key in store:
+        if dimension == "class" and key in EXCLUDED_CLASSES:
+            continue
         bc = sum(counts_for(store, key, b["brand"], baseline))
         wc = sum(counts_for(store, key, b["brand"], window))
         if wc < min_cases:
