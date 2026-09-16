@@ -13,7 +13,7 @@ import {
   useLeadOrder, LeadOrderCard, useProcessDispositions, ProcessDispositionsCard,
 } from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
-import { scopeToDateBounds } from '../_calling/util';
+import { scopeToDateBounds, formatLeadDate } from '../_calling/util';
 
 const PROCESS_KEY = 'productkyc';
 
@@ -36,7 +36,7 @@ export default function ProductCallingClient() {
   const canAdminTab = sessionIsAdmin || isProcessAdmin;
   const [tab, setTab] = useState('fresh');
   useEffect(() => {
-    if (tab === 'admin' && !canAdminTab) setTab('fresh');
+    if ((tab === 'admin' || tab === 'all') && !canAdminTab) setTab('fresh');
   }, [tab, canAdminTab]);
 
   const [tickets, setTickets] = useState([]);
@@ -61,8 +61,41 @@ export default function ProductCallingClient() {
   }, [showToast]);
   useEffect(() => { if (googleUser?.email) fetchMyTickets(); }, [googleUser, fetchMyTickets]);
 
+  // Every agent's tickets, admin/process-admin only - "All Leads" tab. Same shape as
+  // NpsCallingClient.js's own fetchAllTickets/allTickets pair.
+  const [allTickets, setAllTickets] = useState(null);
+  const fetchAllTickets = useCallback(async () => {
+    try {
+      const r = await fetch('/api/productcalling/tickets?scope=all');
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) setAllTickets(d.tickets || []);
+      else showToast(`⚠️ ${d.error || 'Could not load all tickets'}`);
+    } catch (e) {
+      showToast(`⚠️ ${e.message}`);
+    }
+  }, [showToast]);
+  useEffect(() => { if (canAdminTab) fetchAllTickets(); }, [canAdminTab, fetchAllTickets]);
+
   const freshTickets = tickets.filter((t) => !t.disposed_at);
   const disposedTickets = tickets.filter((t) => t.disposed_at);
+  const listByTab = { fresh: freshTickets, disposed: disposedTickets, all: allTickets || [] };
+
+  // Unassigned pool preview for the Admin tab - fetched once when the tab is first opened, not
+  // on every render (same lazy-once pattern as NpsCallingClient.js's predictedLeads).
+  const [unassignedLeads, setUnassignedLeads] = useState(null);
+  useEffect(() => {
+    if (tab !== 'admin' || unassignedLeads !== null) return;
+    (async () => {
+      try {
+        const r = await fetch('/api/productcalling/tickets?scope=unassigned');
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) setUnassignedLeads(d.leads || []);
+        else showToast(`⚠️ ${d.error || 'Could not load unassigned pool'}`);
+      } catch (e) {
+        showToast(`⚠️ ${e.message}`);
+      }
+    })();
+  }, [tab, unassignedLeads, showToast]);
 
   // Dispose modal state - a simple two-level pick (category, then leaf) against the admin-
   // configured disposition tree, rather than NPS-Calling's multi-select-with-path tree: this
@@ -103,7 +136,7 @@ export default function ProductCallingClient() {
           disposition: selectedLeaf.label,
           agentRemarks: dispRemarks,
           connected,
-          attempt,
+          attempt: Number(attempt) || 1,
         }),
       });
       const d = await r.json().catch(() => ({}));
@@ -169,20 +202,27 @@ export default function ProductCallingClient() {
               Disposed ({disposedTickets.length})
             </button>
             {canAdminTab && (
+              <button onClick={() => setTab('all')} className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${tab === 'all' ? 'bg-indigo-600 text-white' : 'bg-white text-zinc-600 border border-zinc-200'}`}>
+                All Leads ({(allTickets || []).length})
+              </button>
+            )}
+            {canAdminTab && (
               <button onClick={() => setTab('admin')} className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${tab === 'admin' ? 'bg-indigo-600 text-white' : 'bg-white text-zinc-600 border border-zinc-200'}`}>
                 Admin
               </button>
             )}
           </div>
 
-          {(tab === 'fresh' || tab === 'disposed') && (
+          {(tab === 'fresh' || tab === 'disposed' || tab === 'all') && (
             <div className="bg-white rounded-xl border border-zinc-200 divide-y divide-zinc-100">
-              {(tab === 'fresh' ? freshTickets : disposedTickets).length === 0 && (
+              {listByTab[tab].length === 0 && (
                 <div className="p-8 text-center text-sm text-zinc-400">
-                  {ticketsLoading ? 'Loading…' : (tab === 'fresh' ? 'No leads assigned yet.' : 'Nothing disposed yet.')}
+                  {tab === 'all'
+                    ? (allTickets === null ? 'Loading…' : 'No tickets yet.')
+                    : (ticketsLoading ? 'Loading…' : (tab === 'fresh' ? 'No leads assigned yet.' : 'Nothing disposed yet.'))}
                 </div>
               )}
-              {(tab === 'fresh' ? freshTickets : disposedTickets).map((t) => (
+              {listByTab[tab].map((t) => (
                 <div key={t.id} className="p-3 sm:p-4 flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <div className="font-semibold text-sm text-zinc-800 truncate">{t.customer_name || '—'}</div>
@@ -190,6 +230,9 @@ export default function ProductCallingClient() {
                       <PhoneIcon /> {t.customer_phone}
                       {t.product_key && <span className="ml-2 px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600">{t.product_key}</span>}
                     </div>
+                    {tab === 'all' && (
+                      <div className="text-xs text-zinc-400 mt-1">{t.agent_email || 'Unassigned'} · {t.disposed_at ? 'Disposed' : 'Pending'}</div>
+                    )}
                     {t.disposed_at && <div className="text-xs text-emerald-600 mt-1">{t.disposition}</div>}
                   </div>
                   {tab === 'fresh' && (
@@ -204,6 +247,25 @@ export default function ProductCallingClient() {
 
           {tab === 'admin' && canAdminTab && (
             <div className="space-y-4">
+              <div className="bg-white rounded-xl border border-zinc-200 p-4">
+                <h3 className="font-bold text-zinc-800 mb-2 text-sm">
+                  Unassigned Pool {unassignedLeads !== null && `(${unassignedLeads.length})`}
+                </h3>
+                <p className="text-xs text-zinc-500 mb-2">Oldest unclaimed leads, preview only - not paginated.</p>
+                {unassignedLeads === null && <div className="text-xs text-zinc-400">Loading…</div>}
+                {unassignedLeads?.length === 0 && <div className="text-xs text-zinc-400">Nothing waiting.</div>}
+                {!!unassignedLeads?.length && (
+                  <div className="divide-y divide-zinc-100">
+                    {unassignedLeads.map((l) => (
+                      <div key={l.id} className="py-1.5 text-xs text-zinc-600 flex items-center justify-between gap-2">
+                        <span className="truncate">{l.customer_name || '—'} · {l.customer_phone}</span>
+                        <span className="text-zinc-400 shrink-0">{l.product_key || '—'} · {formatLeadDate(l.imported_at)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <div className="bg-white rounded-xl border border-zinc-200 p-4">
                 <h3 className="font-bold text-zinc-800 mb-2 text-sm">Upload Leads (CSV)</h3>
                 <p className="text-xs text-zinc-500 mb-2">
@@ -260,6 +322,15 @@ export default function ProductCallingClient() {
               options={[{ value: 'Yes', label: 'Connected' }, { value: 'No', label: 'Not Connected' }]}
               placeholder="Select…"
               className="mb-3 w-full"
+            />
+
+            <label className="block text-xs font-semibold text-zinc-500 mb-1">Attempt</label>
+            <input
+              type="number"
+              min="1"
+              value={attempt}
+              onChange={(e) => setAttempt(e.target.value)}
+              className="w-full border border-zinc-200 rounded-lg p-2 text-sm mb-3"
             />
 
             <label className="block text-xs font-semibold text-zinc-500 mb-1">Category</label>
