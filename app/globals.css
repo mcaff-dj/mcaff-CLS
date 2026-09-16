@@ -230,6 +230,10 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
   --active-fg: var(--mcaff);
   --brand-accent: var(--mcaff);
   --sidebar-width: 280px;
+  /* Fixed regardless of light/dark page theme - a report table's header bar reads as
+     its own surface, not something that should invert with the rest of the page. */
+  --og-thead-bg: #362a7d;
+  --og-thead-fg: #ffffff;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -847,17 +851,17 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
 .orgoverview-page .tab-panel.active { display: block; }
 
 .og-wrap { display: flex; flex-direction: column; gap: 28px; }
-.og-header { text-align: center; margin-bottom: 4px; }
+.og-header { text-align: left; margin-bottom: 4px; padding-bottom: 18px; border-bottom: 1px solid var(--border); }
 .og-badge {
   display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
   color: var(--mom); background: color-mix(in srgb, var(--mom) 14%, transparent); border-radius: 999px; padding: 4px 12px; margin-bottom: 14px;
 }
-.og-header h2 { font-size: clamp(20px, 3.6vw, 26px); margin: 0 0 10px; letter-spacing: -0.01em; }
-.og-header p { margin: 0 auto; max-width: 760px; color: var(--text-secondary); font-size: 13.5px; line-height: 1.6; }
+.og-header h2 { font-size: clamp(22px, 3.6vw, 30px); font-weight: 800; margin: 0 0 6px; letter-spacing: -0.01em; }
+.og-header p { margin: 0; max-width: 760px; color: var(--text-secondary); font-size: 13.5px; line-height: 1.6; font-style: italic; }
 .og-header .filterbar {
-  display: flex; gap: 20px; flex-wrap: wrap; align-items: center; justify-content: center;
+  display: flex; gap: 20px; flex-wrap: wrap; align-items: center; justify-content: flex-start;
   background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
-  padding: 12px 16px; margin: 14px auto 0; max-width: 760px; font-size: 13px;
+  padding: 12px 16px; margin: 14px 0 0; max-width: 760px; font-size: 13px;
 }
 .og-header .filter-group { display: flex; align-items: center; }
 .og-header .filterbar label { color: var(--text-secondary); margin-right: 6px; }
@@ -873,8 +877,8 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
   background: var(--surface-1); color: var(--text-primary);
 }
 
-.og-section-title { font-size: 15px; font-weight: 700; margin: 0 0 14px; }
-.og-note { font-size: 12.5px; color: var(--text-muted); margin: 0; }
+.og-section-title { font-size: 16px; font-weight: 800; color: var(--accent); margin: 0 0 14px; }
+.og-note { font-size: 12.5px; color: var(--text-muted); margin: 0; font-style: italic; }
 .og-error { color: var(--bad); }
 
 .og-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
@@ -894,7 +898,7 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
 
 .og-table-scroll { overflow-x: auto; }
 .og-table { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
-.og-table th { background: var(--page); text-align: right; padding: 7px 10px; border: 1px solid var(--grid); font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
+.og-table th { background: var(--og-thead-bg); text-align: right; padding: 7px 10px; border: 1px solid var(--og-thead-bg); font-weight: 600; color: var(--og-thead-fg); white-space: nowrap; }
 .og-table th:first-child { text-align: left; }
 .og-table td { text-align: right; padding: 7px 10px; border: 1px solid var(--grid); color: var(--text-secondary); white-space: nowrap; }
 /* Long free-text cells (Top Issue, Trend) - let these wrap instead of forcing the whole
