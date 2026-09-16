@@ -122,8 +122,10 @@
   .nps-heatmap-table th,.nps-heatmap-table td{padding:4px 5px;white-space:normal;}
   /* Fixed layout no longer needs a sticky first column (no horizontal scroll to pin it
      against) - sticky here fought the wrapped multi-line text and overlapped the next
-     column's number, so drop it back to a normal static cell. */
-  .nps-heatmap-table th.corner,.nps-heatmap-table td.rowlabel{width:130px;word-break:break-word;position:static;}
+     column's number, so drop it back to a normal static cell. ".pivot-table td.rowlabel"
+     above sets white-space:nowrap at the same specificity, so it must be re-targeted by
+     class+class here, not just the generic td selector two rules up. */
+  .nps-heatmap-table th.corner,.nps-heatmap-table td.rowlabel{width:130px;word-break:break-word;position:static;white-space:normal;}
   .nps-heatmap-table th.sub-hdr{font-size:9px;line-height:1.15;}
 
   section{margin-bottom:32px;max-width:100%;min-width:0;}
