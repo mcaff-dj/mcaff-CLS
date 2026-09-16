@@ -2362,6 +2362,202 @@ async function getAllDetractorTickets() {
   return rows;
 }
 
+// Falls back to this only when no admin has ever set calling_process_settings.default_quota for
+// 'productkyc' - same pattern as DETRACTOR_FALLBACK_QUOTA above.
+const PRODUCTCALLING_FALLBACK_QUOTA = 15;
+
+async function getProductCallingAgentQuota(email) {
+  try {
+    await ensureSchema();
+    const { rows } = await sql`
+      SELECT max_quota FROM calling_agent_process
+      WHERE process_key = 'productkyc' AND LOWER(email) = LOWER(${email})
+    `;
+    return rows.length && rows[0].max_quota != null ? rows[0].max_quota : null;
+  } catch (e) {
+    console.error('getProductCallingAgentQuota: calling_agent_process unavailable, using default quota:', e.message);
+    return null;
+  }
+}
+
+async function getProductCallingAgentAvailability(email) {
+  try {
+    await ensureSchema();
+    const { rows } = await sql`
+      SELECT status FROM calling_agent_process
+      WHERE process_key = 'productkyc' AND LOWER(email) = LOWER(${email})
+    `;
+    return rows.length ? rows[0].status : 'Offline';
+  } catch (e) {
+    console.error('getProductCallingAgentAvailability: calling_agent_process unavailable:', e.message);
+    return null;
+  }
+}
+
+async function getProductCallingLoadByAgent(email) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT COUNT(*) AS n FROM CLS_productcalling
+    WHERE LOWER(agent_email) = LOWER(${email}) AND live_lead_ref IS NOT NULL AND disposed_at IS NULL
+  `;
+  return Number(rows[0].n) || 0;
+}
+
+async function getProductCallingQuotaAndLoad(email) {
+  const quotaOverride = await getProductCallingAgentQuota(email);
+  const processDefault = await getCallingDefaultQuota('productkyc');
+  const quota = quotaOverride != null ? quotaOverride : (processDefault != null ? processDefault : PRODUCTCALLING_FALLBACK_QUOTA);
+  const load = await getProductCallingLoadByAgent(email);
+  return { quota, load };
+}
+
+// Unlike getNextDetractorLead (peek a read-only source table, then INSERT a copy), leads here
+// already live in this table from the CSV import - claiming is a single UPDATE...LIMIT 1
+// against the unassigned rows, then a SELECT (MySQL has no UPDATE...RETURNING). The UPDATE
+// alone is not race-free across two concurrent callers picking the same row - the ER_DUP_ENTRY
+// retry in assignProductCallingLeadsToAgent's loop (same shape as
+// assignDetractorLeadsToAgent's) covers that, same reasoning as RTO's claim path.
+async function claimNextProductCallingLead(email) {
+  await ensureSchema();
+  const sortDirection = (await getCallingLeadOrder('productkyc')) === 'newest' ? 'DESC' : 'ASC';
+  const { rows: candidates } = await sql`
+    SELECT id, lead_ref FROM CLS_productcalling
+    WHERE agent_email IS NULL
+    ORDER BY ${raw(sortDirection === 'DESC' ? 'imported_at DESC' : 'imported_at ASC')}
+    LIMIT 1
+  `;
+  if (!candidates.length) return null;
+  const { id, lead_ref: leadRef } = candidates[0];
+  const { affectedRows } = await sql`
+    UPDATE CLS_productcalling SET agent_email = ${email}, assigned_at = NOW()
+    WHERE id = ${id} AND agent_email IS NULL
+  `;
+  // Someone else claimed this exact row between the SELECT and the UPDATE - report it as a dup
+  // race so the caller's retry loop (assignProductCallingLeadsToAgent) tries the next row rather
+  // than silently returning nothing for a pool that isn't actually empty.
+  if (!affectedRows) {
+    const e = new Error(`Duplicate claim race on lead ${leadRef}`);
+    e.code = 'ER_DUP_ENTRY';
+    throw e;
+  }
+  const { rows: claimed } = await sql`SELECT * FROM CLS_productcalling WHERE id = ${id}`;
+  return claimed[0];
+}
+
+// Same claim-loop shape as assignDetractorLeadsToAgent (db.js:2215) - stops at maxCount, retries
+// a duplicate-claim race on the same slot, gives up on that one slot after
+// DETRACTOR_CLAIM_DUP_RETRIES retries without aborting the whole batch, stops immediately (no
+// more retries) the moment claimFn cleanly returns null (pool genuinely empty).
+async function assignProductCallingLeadsToAgent(email, maxCount, claimFn = claimNextProductCallingLead) {
+  const claimed = [];
+  for (let i = 0; i < maxCount; i++) {
+    let lead = null;
+    let gaveUpOnDup = false;
+    for (let attempt = 0; attempt <= DETRACTOR_CLAIM_DUP_RETRIES; attempt++) {
+      try {
+        lead = await claimFn(email);
+        break;
+      } catch (e) {
+        if (!(e && e.code === 'ER_DUP_ENTRY')) throw e;
+        if (attempt === DETRACTOR_CLAIM_DUP_RETRIES) { gaveUpOnDup = true; break; }
+      }
+    }
+    if (gaveUpOnDup) continue;
+    if (!lead) break;
+    claimed.push(lead);
+  }
+  return claimed;
+}
+
+// Same shape as topUpDetractorAgent (db.js:2261) - the shared entry point both auto-assign
+// triggers (going Online, 2-minute heartbeat) go through. deps exists only for this file's own
+// test, same injectable-seam reasoning as claimFn above.
+async function topUpProductCallingAgent(email, deps = {}) {
+  const availabilityFn = deps.availabilityFn || getProductCallingAgentAvailability;
+  const quotaLoadFn = deps.quotaLoadFn || getProductCallingQuotaAndLoad;
+  const assignFn = deps.assignFn || assignProductCallingLeadsToAgent;
+  if (!email) return [];
+  if ((await availabilityFn(email)) !== 'Online') return [];
+  const { quota, load } = await quotaLoadFn(email);
+  if (load >= quota) return [];
+  return assignFn(email, quota - load);
+}
+
+// Same shape as disposeDetractorLead (db.js:2326). Ownership + not-already-disposed enforced in
+// the WHERE clause; allowAnyAgent (admin/process-admin override, checked by the caller - see
+// api/productcalling/lead-assignment.js) drops the ownership check. Returns the lead's
+// agent_email either way so the caller can log an override.
+async function disposeProductCallingLead(leadRef, disposition, agentRemarks, connected, attempt, email, { allowAnyAgent = false } = {}) {
+  await ensureSchema();
+  const { rows: existing } = await sql`SELECT agent_email FROM CLS_productcalling WHERE lead_ref = ${leadRef}`;
+  const originalAgentEmail = existing.length ? existing[0].agent_email : null;
+  if (allowAnyAgent) {
+    await sql`
+      UPDATE CLS_productcalling
+      SET disposed_at = NOW(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null},
+          connected = ${connected || null}, attempt = ${attempt || null}
+      WHERE lead_ref = ${leadRef} AND disposed_at IS NULL
+    `;
+  } else {
+    await sql`
+      UPDATE CLS_productcalling
+      SET disposed_at = NOW(), disposition = ${disposition || null}, agent_remarks = ${agentRemarks || null},
+          connected = ${connected || null}, attempt = ${attempt || null}
+      WHERE lead_ref = ${leadRef} AND LOWER(agent_email) = LOWER(${email}) AND disposed_at IS NULL
+    `;
+  }
+  return { originalAgentEmail };
+}
+
+// Bulk-inserts CSV-imported rows as unassigned leads (agent_email left NULL). INSERT IGNORE on
+// lead_ref (via CLS_productcalling's own UNIQUE KEY on live_lead_ref, which for a fresh row
+// equals lead_ref since reassigned_away_at is NULL) means a re-upload of the same export does
+// not duplicate live rows - same convention every CSV importer in this codebase uses. Sequential,
+// not a single multi-row statement - this codebase's other per-row importers (e.g. NDR's
+// disposeNdrLead insert loop, db.js:1871) follow the same shape, and admin CSV uploads here are
+// expected to be small (tens to low hundreds of rows), not RTO/NDR's thousands.
+async function insertProductCallingLeads(rows, importedBy) {
+  await ensureSchema();
+  let inserted = 0;
+  let duplicates = 0;
+  for (const row of rows) {
+    const { affectedRows } = await sql`
+      INSERT IGNORE INTO CLS_productcalling
+        (lead_ref, customer_name, customer_phone, customer_email, product_key, product_category, notes, imported_by)
+      VALUES (${row.leadRef}, ${row.customerName || null}, ${row.customerPhone}, ${row.customerEmail || null},
+              ${row.productKey || null}, ${row.productCategory || null}, ${row.notes || null}, ${importedBy || null})
+    `;
+    if (affectedRows) inserted += 1; else duplicates += 1;
+  }
+  return { inserted, duplicates };
+}
+
+async function getProductCallingTicketsForAgent(email) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT * FROM CLS_productcalling WHERE LOWER(agent_email) = LOWER(${email}) ORDER BY assigned_at DESC
+  `;
+  return rows;
+}
+
+async function getAllProductCallingTickets() {
+  await ensureSchema();
+  const { rows } = await sql`SELECT * FROM CLS_productcalling ORDER BY assigned_at DESC`;
+  return rows;
+}
+
+async function getUnassignedProductCallingLeads(limit = 20) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT id, lead_ref, customer_name, customer_phone, product_key, product_category, imported_at
+    FROM CLS_productcalling
+    WHERE agent_email IS NULL
+    ORDER BY imported_at ASC
+    LIMIT ${raw(safeLimit(limit, 20))}
+  `;
+  return rows;
+}
+
 // Delivery-Escalation's own durable record on MySQL (see
 // scripts/create_delivery_escalation_table.py) - the same role CLS_RTO_calling plays for RTO,
 // but written only once a ticket reaches a TERMINAL outcome (Delivered or RTO - see
@@ -5950,6 +6146,11 @@ module.exports = {
   getDetractorAgentQuota, getDetractorAgentAvailability, getDetractorLoadByAgent, getDetractorQuotaAndLoad,
   getNextDetractorLead, getUnassignedDetractorLeads, disposeDetractorLead, getDetractorTicketsForAgent, getAllDetractorTickets,
   assignDetractorLeadsToAgent, topUpDetractorAgent, safeLimit, raw, buildSqlText,
+  PRODUCTCALLING_FALLBACK_QUOTA, getProductCallingAgentQuota, getProductCallingAgentAvailability,
+  getProductCallingLoadByAgent, getProductCallingQuotaAndLoad, claimNextProductCallingLead,
+  assignProductCallingLeadsToAgent, topUpProductCallingAgent, disposeProductCallingLead,
+  insertProductCallingLeads, getProductCallingTicketsForAgent, getAllProductCallingTickets,
+  getUnassignedProductCallingLeads,
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
