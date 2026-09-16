@@ -855,9 +855,11 @@ async function setTabPermissions(userId, cardKey, tabKeys) {
 // doesn't restrict. Empty array = unrestricted (every partner), same convention as
 // getUserTabPermissions' own "no rows" meaning.
 async function getDeliveryPartnerAccess(userId) {
-  await ensureSchema();
-  const { rows } = await sql`SELECT delivery_partner FROM delivery_escalation_partner_access WHERE user_id = ${userId}`;
-  return rows.map((r) => r.delivery_partner);
+  return cachedRead(deAccessCacheKey('partners', userId), async () => {
+    await ensureSchema();
+    const { rows } = await sql`SELECT delivery_partner FROM delivery_escalation_partner_access WHERE user_id = ${userId}`;
+    return rows.map((r) => r.delivery_partner);
+  }, DE_ACCESS_CACHE_TTL_MS);
 }
 
 // One query for every user's own allowlist at once - what the admin picker (api/admin/[action].js's
@@ -881,6 +883,10 @@ async function setDeliveryPartnerAccess(userId, partners) {
   for (const partner of partners) {
     await sql`INSERT IGNORE INTO delivery_escalation_partner_access (user_id, delivery_partner) VALUES (${userId}, ${partner})`;
   }
+  // Whole prefix, not just this user's key: an admin edit is rare and both allowlists are tiny to
+  // re-read, so there is nothing to gain from being surgical and something to lose if a second
+  // key for the same user is ever added and forgotten here.
+  invalidateCache(DE_ACCESS_CACHE_PREFIX);
 }
 
 // Every distinct delivery_partner value actually in the table - what the admin picker offers to
@@ -899,9 +905,11 @@ async function getDeliveryEscalationPartnerOptions() {
 // unrestricted" convention as getDeliveryPartnerAccess/setDeliveryPartnerAccess above, just keyed
 // on query_category instead of delivery_partner.
 async function getDeliveryEscalationQueryCategoryAccess(userId) {
-  await ensureSchema();
-  const { rows } = await sql`SELECT query_category FROM delivery_escalation_query_category_access WHERE user_id = ${userId}`;
-  return rows.map((r) => r.query_category);
+  return cachedRead(deAccessCacheKey('categories', userId), async () => {
+    await ensureSchema();
+    const { rows } = await sql`SELECT query_category FROM delivery_escalation_query_category_access WHERE user_id = ${userId}`;
+    return rows.map((r) => r.query_category);
+  }, DE_ACCESS_CACHE_TTL_MS);
 }
 
 async function getAllDeliveryEscalationQueryCategoryAccess() {
@@ -920,6 +928,7 @@ async function setDeliveryEscalationQueryCategoryAccess(userId, categories) {
   for (const category of categories) {
     await sql`INSERT IGNORE INTO delivery_escalation_query_category_access (user_id, query_category) VALUES (${userId}, ${category})`;
   }
+  invalidateCache(DE_ACCESS_CACHE_PREFIX); // see setDeliveryPartnerAccess' own comment
 }
 
 // Every distinct query_category value actually in the table - same cached-DISTINCT-scan
@@ -2928,12 +2937,39 @@ async function getDeliveryEscalationPage(view, opts = {}) {
 //    retry/refresh storm onto ONE query per key (cachedRead shares an in-flight promise), instead
 //    of one per request per viewer.
 //
+// That TTL was 60000 - exactly the tab's own auto-refresh interval (DeliveryEscalationClient.js's
+// refresh loop), so every scheduled poll arrived a hair PAST expiry and missed. The cache still
+// collapsed a mount's concurrent duplicates, but did nothing at all for the steady-state refresh
+// traffic it was mainly added for. 180s lets two of every three polls hit. Freshness does not
+// depend on this number: every write path here (claim/dispose/bulk dispose/tags) calls
+// invalidateCache('de-'), so an agent's own action still moves the tiles on their very next read;
+// the only writer that does NOT is the 2-hourly sync cron, against which 180s is nothing.
+//
 // The key must carry every input that changes the result - allowedPartners above all, since that
 // is the per-session access floor (see deFilterSql), and omitting it would serve a partner-
 // restricted agent another caller's whole-desk numbers. Sorted so two sessions with the same
 // floor in a different order still share one entry.
 const DE_MAX_EXEC_MS = 25000;
-const DE_OVERVIEW_CACHE_TTL_MS = 60000;
+const DE_OVERVIEW_CACHE_TTL_MS = 180000;
+
+// Per-user access allowlists (getDeliveryPartnerAccess / getDeliveryEscalationQueryCategoryAccess)
+// ran on EVERY request to api/delivery-escalation/record.js - two uncached queries in front of
+// every stats/daywise/geo/page read, for a pair of tables an admin edits maybe once a month.
+//
+// Deliberately NOT the 'de-' prefix deCacheKey builds: a dispose's invalidateCache('de-') has no
+// reason to throw an access floor away, and if it did, the request right after every dispose
+// would be back to paying for both queries - the exact cost this cache exists to remove. Their
+// own setters invalidate 'deAccess:' instead (see setDeliveryPartnerAccess below).
+//
+// 60s matches session.js's SESSION_CACHE_TTL_MS, and for the same reason: this is access-bearing
+// data, so a NARROWED allowlist must take effect within a minute even if the admin edit landed on
+// a different Lambda container than the one serving the affected agent.
+const DE_ACCESS_CACHE_TTL_MS = 60000;
+const DE_ACCESS_CACHE_PREFIX = 'deAccess:';
+
+function deAccessCacheKey(name, userId) {
+  return `${DE_ACCESS_CACHE_PREFIX}${name}:${userId}`;
+}
 
 function deCacheKey(name, parts) {
   const norm = { ...parts };
@@ -3063,7 +3099,13 @@ async function getDeliveryEscalationDaywiseStats(opts = {}) {
     DE_OVERVIEW_CACHE_TTL_MS);
 }
 
-async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
+// Every WHERE fragment the day-wise table's queries share, built once. Extracted so the lazy
+// contact-bucket x partner op below (getDeliveryEscalationDaywiseContactPartners) is filtered by
+// EXACTLY the same brand/agent/partner/payment-mode/access-floor/date-range rules as the table
+// whose row it expands - a drill that silently applied a different filter than the total it sits
+// under would be worse than no drill at all, and keeping that guarantee in one place is the only
+// way it can't drift.
+function deDaywiseScope(opts = {}) {
   const { brand, agent, dateField, partner, paymentMode, allowedPartners, allowedQueryCategories, dateFrom, dateTo } = opts;
   const col = DE_DAYWISE_DATE_FIELDS[dateField] || 'added_date';
   const extraClauses = [];
@@ -3091,7 +3133,6 @@ async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
   }
   if (paymentMode) { extraClauses.push('Payment_Mode = ?'); params.push(paymentMode); }
   const extra = extraClauses.length ? ` AND ${extraClauses.join(' AND ')}` : '';
-  const pool = await getPool();
   // The floor only ever applies to the dated rows query, never to noDateCount below - that one
   // counts order_date IS NULL rows, which "order_date >= floor" would always contradict and
   // silently zero out.
@@ -3112,6 +3153,12 @@ async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
   // scripts/alter_delivery_escalation_add_indexes.py) actually gets used.
   const rangeClause = dateFrom && dateTo ? ` AND ${col} >= ? AND ${col} < DATE_ADD(?, INTERVAL 1 DAY)` : '';
   const rangeParams = dateFrom && dateTo ? [dateFrom, dateTo] : [];
+  return { col, extra, params, floorClause, floorParams, rangeClause, rangeParams };
+}
+
+async function fetchDeliveryEscalationDaywiseStats(opts = {}) {
+  const { col, extra, params, floorClause, floorParams, rangeClause, rangeParams } = deDaywiseScope(opts);
+  const pool = await getPool();
   // COUNT(DISTINCT awb_code), not COUNT(*) - same "how many parcels, not how many rows" fix
   // getDeliveryEscalationStats' own Fresh tile already applies (see its comment): a repeat-
   // contact AWB gets a fresh ticket_number per day it's still flagged, so row count double-
@@ -3177,18 +3224,15 @@ function buildDeliveryEscalationDaywiseResult(rows, ageRows, noDateCount) {
     if (!entry.categories.has(r.category)) entry.categories.set(r.category, { category: r.category, counts: zeroCounts(), total: 0 });
     const categoryEntry = entry.categories.get(r.category);
     if (!entry.contactBuckets.has(r.contactBucket)) {
-      entry.contactBuckets.set(r.contactBucket, { contactBucket: r.contactBucket, counts: zeroCounts(), total: 0, partners: new Map() });
+      entry.contactBuckets.set(r.contactBucket, { contactBucket: r.contactBucket, counts: zeroCounts(), total: 0 });
     }
     const contactBucketEntry = entry.contactBuckets.get(r.contactBucket);
-    // Same raw row already carries partner alongside contactBucket (the SELECT above groups by
-    // both together) - folding that pairing into its own map here, instead of throwing it away
-    // like the two flat breakdowns above do, is what lets the Repeat Contacts table drill
-    // Times Contacted -> Delivery Partner (see groupContactBucketPartnerwiseRows) without a
-    // second query.
-    if (!contactBucketEntry.partners.has(r.partner)) {
-      contactBucketEntry.partners.set(r.partner, { partner: r.partner, counts: zeroCounts(), total: 0 });
-    }
-    const contactBucketPartnerEntry = contactBucketEntry.partners.get(r.partner);
+    // The contact-bucket x partner pairing that used to be folded in here (so Repeat Contacts
+    // could drill Times Contacted -> Delivery Partner without a second query) is gone: at
+    // 4 buckets x ~25 raw courier values x ~78 dates it was ~72% of this whole response, for a
+    // breakdown nobody sees until they expand a row three levels deep. It has its own op now
+    // (getDeliveryEscalationDaywiseContactPartners), fetched on expand exactly the way
+    // getDeliveryEscalationGeoCategoryStats' own levels already are.
     entry.counts[r.bucket] += c;
     entry.total += c;
     partnerEntry.counts[r.bucket] += c;
@@ -3197,8 +3241,6 @@ function buildDeliveryEscalationDaywiseResult(rows, ageRows, noDateCount) {
     categoryEntry.total += c;
     contactBucketEntry.counts[r.bucket] += c;
     contactBucketEntry.total += c;
-    contactBucketPartnerEntry.counts[r.bucket] += c;
-    contactBucketPartnerEntry.total += c;
     grandTotal[r.bucket] += c;
     grandTotalAll += c;
   }
@@ -3218,6 +3260,22 @@ function buildDeliveryEscalationDaywiseResult(rows, ageRows, noDateCount) {
   const missingDateCount = Number(noDateCount) || 0;
   grandTotal.unresolved += missingDateCount;
   grandTotalAll += missingDateCount;
+  // `pct` survives on the DATE row and nowhere else, and the asymmetry is deliberate.
+  //
+  // pct is Math.round(counts[b] / total * 100) - pure arithmetic over two fields sitting in the
+  // same object - but as a second full-width object keyed by the same long bucket labels it was
+  // exactly half the bytes of every entry this builder emits. The breakdown arrays are where
+  // that mattered: ~25 partners + ~8 categories + 4 contact buckets PER DATE, against one date
+  // row. Dropping those three and keeping the date's own costs ~200 bytes a date and saves the
+  // other ~7.8 KB.
+  //
+  // It is also the only split that is safe to ship. api/ (Lambda) and app/ (Amplify) deploy
+  // independently, so a browser running the OLD bundle will read these responses for a while:
+  // that bundle indexes day.pct[bucket]/day.agePct[bucket] directly when it renders the date
+  // table's leaf rows (a missing pct there is a TypeError, not a blank cell), but it never reads
+  // a breakdown entry's own pct - groupPartnerwiseRows/groupCategorywiseRows/
+  // groupContactBucketwiseRows all funnel through mergeDayRowsByDate/sumDaywiseRows, which
+  // recompute pct from counts regardless of what the server sent.
   const rowsOut = [...byDate.values()].map((entry) => ({
     date: entry.date,
     total: entry.total,
@@ -3228,18 +3286,13 @@ function buildDeliveryEscalationDaywiseResult(rows, ageRows, noDateCount) {
     agePct: pctOfAge(entry.ageCounts, entry.ageTotal),
     partners: [...entry.partners.values()]
       .sort((a, b) => b.total - a.total)
-      .map((p) => ({ partner: p.partner, total: p.total, counts: p.counts, pct: pctOf(p.counts, p.total) })),
+      .map((p) => ({ partner: p.partner, total: p.total, counts: p.counts })),
     categories: [...entry.categories.values()]
       .sort((a, b) => b.total - a.total)
-      .map((c) => ({ category: c.category, total: c.total, counts: c.counts, pct: pctOf(c.counts, c.total) })),
+      .map((c) => ({ category: c.category, total: c.total, counts: c.counts })),
     contactBuckets: [...entry.contactBuckets.values()]
       .sort((a, b) => b.total - a.total)
-      .map((cb) => ({
-        contactBucket: cb.contactBucket, total: cb.total, counts: cb.counts, pct: pctOf(cb.counts, cb.total),
-        partners: [...cb.partners.values()]
-          .sort((a, b) => b.total - a.total)
-          .map((p) => ({ partner: p.partner, total: p.total, counts: p.counts, pct: pctOf(p.counts, p.total) })),
-      })),
+      .map((cb) => ({ contactBucket: cb.contactBucket, total: cb.total, counts: cb.counts })),
   }));
   return {
     buckets: DE_DAYWISE_BUCKETS, rows: rowsOut, grandTotal, grandTotalAll, missingDateCount,
@@ -3251,6 +3304,59 @@ function buildDeliveryEscalationDaywiseResult(rows, ageRows, noDateCount) {
     // handful of rows.
     unresolvedAgeBuckets: UNRESOLVED_AGE_BUCKETS, grandTotalAge, grandTotalAgeAll,
   };
+}
+
+// One contact bucket's own Delivery Partner x date split - the level that used to ride along
+// inside every op=daywise response as contactBuckets[].partners (see the builder above for why
+// it no longer does). Fetched only when a Repeat Contacts row is actually expanded, the same
+// fetch-on-expand model getDeliveryEscalationGeoCategoryStats and getDeliveryEscalationAwbHistory
+// already use.
+//
+// Scoped by the INDEXED de_contact_bucket generated column, not a re-embedded
+// DE_CONTACT_BUCKET_SQL CASE - so this reads only the one bucket's population rather than
+// computing the CASE over the whole table and discarding three quarters of it, the same
+// reasoning the age query in fetchDeliveryEscalationDaywiseStats already documents.
+//
+// Filters come from deDaywiseScope, byte for byte the same ones the row being expanded was
+// totalled under - see its own comment.
+async function getDeliveryEscalationDaywiseContactPartners(opts = {}) {
+  return cachedRead(deCacheKey('daywiseContactPartners', opts),
+    () => fetchDeliveryEscalationDaywiseContactPartners(opts), DE_OVERVIEW_CACHE_TTL_MS);
+}
+
+async function fetchDeliveryEscalationDaywiseContactPartners(opts = {}) {
+  const { contactBucket } = opts;
+  if (!contactBucket) throw new Error('contactBucket is required');
+  const { col, extra, params, floorClause, floorParams, rangeClause, rangeParams } = deDaywiseScope(opts);
+  const pool = await getPool();
+  const [rows] = await pool.execute(`
+    SELECT /*+ MAX_EXECUTION_TIME(${DE_MAX_EXEC_MS}) */ DATE_FORMAT(${col}, '%Y-%m-%d') AS d, COALESCE(delivery_partner, 'Unknown') AS partner, ${DE_DAY_BUCKET_COLUMN} AS bucket, COUNT(DISTINCT awb_code) AS c
+    FROM Delivery_escalation
+    WHERE ${col} IS NOT NULL AND ${DE_CONTACT_BUCKET_COLUMN} = ?${extra}${floorClause}${rangeClause}
+    GROUP BY d, partner, bucket
+    ORDER BY d
+  `, [contactBucket, ...params, ...floorParams, ...rangeParams]);
+  return buildDeliveryEscalationContactPartnerResult(rows);
+}
+
+// Pure result-shaping half of the above, split out for the same reason
+// buildDeliveryEscalationDaywiseResult is (see its comment) - testable with no database.
+// The query is already scoped to ONE contact bucket, so unlike that builder there is no bucket
+// dimension to fold out: this only merges the per-(date, partner) bucket rows into one entry per
+// pair. Counts are left sparse - only the buckets a pair actually hit become keys - because a
+// zero-fill across all 8 buckets for every partner-date pair is the same shape of waste this op
+// was carved out to avoid, and the client's own zeroCounts() already reads a missing key as 0.
+function buildDeliveryEscalationContactPartnerResult(rows) {
+  const byKey = new Map();
+  for (const r of rows) {
+    const key = `${r.d}::${r.partner}`;
+    if (!byKey.has(key)) byKey.set(key, { date: r.d, partner: r.partner, total: 0, counts: {} });
+    const entry = byKey.get(key);
+    const c = Number(r.c) || 0;
+    entry.counts[r.bucket] = (entry.counts[r.bucket] || 0) + c;
+    entry.total += c;
+  }
+  return { rows: [...byKey.values()] };
 }
 
 // State -> City -> Pincode x Query Category breakdown for the Overview's standalone geo table -
@@ -5815,7 +5921,8 @@ module.exports = {
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
-  getDeliveryEscalationDaywiseStats, getDeliveryEscalationAwbHistory,
+  getDeliveryEscalationDaywiseStats, getDeliveryEscalationDaywiseContactPartners,
+  getDeliveryEscalationAwbHistory,
   getDeliveryEscalationGeoCategoryStats,
   claimDeliveryEscalationTicketById, disposeDeliveryEscalationTicketById,
   bulkDisposeDeliveryEscalationByAwb,
@@ -5830,8 +5937,10 @@ module.exports = {
   // db.deliveryEscalation.test.js only - nothing in the app calls these directly.
   deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS, UNRESOLVED_AGE_BUCKET_SQL, UNRESOLVED_AGE_BUCKETS,
   DE_DAY_BUCKET_COLUMN, DE_CONTACT_BUCKET_COLUMN, buildDeliveryEscalationDaywiseResult,
+  buildDeliveryEscalationContactPartnerResult,
   cachedRead, invalidateCache, CACHE_TTL_MS,
   deCacheKey, DE_OVERVIEW_CACHE_TTL_MS, // exported for db.deliveryEscalation.cache.test.js
+  deAccessCacheKey, DE_ACCESS_CACHE_TTL_MS, // same
   buildRefundExportWhere,
   resolveStatusForDeletion,
   getMomBoardsForUser, createMomBoard, getMomBoardRole, isMomBoardArchived, getMomBoardDetail,

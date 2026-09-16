@@ -16,6 +16,8 @@
 //                                                       queryCategories, childDispositions }
 //   ?op=export&view=...(+ same filters)                  -> { rows, capped }
 //   ?op=awbHistory&awb&brand                             -> { rows } (every ticket for that parcel)
+//   ?op=daywiseContactPartners&contactBucket(+ the same filters op=daywise takes)
+//                                                       -> { rows } (that bucket's partner x date split)
 //   ?op=geoCategory&month&level=state|city|pincode(&state)(&city)(&brand)(&agent)(&partner)(&paymentMode)
 //                                                       -> { categories, rows, grandTotal, grandTotalAll }
 //
@@ -42,7 +44,8 @@ const {
   disposeDeliveryEscalationTicket,
   getDeliveryEscalationPage, getDeliveryEscalationStats, getDeliveryEscalationAgents,
   getDeliveryEscalationExport, DELIVERY_ESCALATION_MAX_EXPORT, getDeliveryEscalationRepeatStats,
-  getDeliveryEscalationDaywiseStats, getDeliveryEscalationAwbHistory,
+  getDeliveryEscalationDaywiseStats, getDeliveryEscalationDaywiseContactPartners,
+  getDeliveryEscalationAwbHistory,
   getDeliveryEscalationGeoCategoryStats, getDeliveryPartnerAccess,
   getDeliveryEscalationQueryCategoryAccess,
   getDeliveryEscalationQueryCategoryOptions, getDeliveryEscalationChildDispositionOptions,
@@ -61,6 +64,20 @@ const { outcomePathIsValid } = require('../_lib/dispositionTrees');
 // far; if a real upload legitimately needs more than this, the fix is a background-job
 // pattern (see api/rto/upload-start.js's own for exactly that reason), not a bigger number here.
 const MAX_BULK_ROWS = 10000;
+
+// The day-wise table's own filter set, shared by op=daywise and op=daywiseContactPartners so a
+// drill into one of that table's rows is filtered by exactly what produced the row. `view` is
+// deliberately absent: this table spans Fresh+Resolved+Forced RTO at once.
+function daywiseOpts(q, filters, allowedPartners, allowedQueryCategories) {
+  return {
+    brand: filters.brand, agent: filters.agent, dateField: q.dateField,
+    partner: q.partner ? String(q.partner).split(',').filter(Boolean) : undefined,
+    paymentMode: q.paymentMode && q.paymentMode !== 'ALL' ? q.paymentMode : '',
+    dateFrom: q.dateFrom || '', dateTo: q.dateTo || '',
+    allowedPartners,
+    allowedQueryCategories,
+  };
+}
 
 module.exports = async (req, res) => {
   // Best-effort only - never blocks the request. Just lets a cookie-carrying browser call skip
@@ -167,15 +184,23 @@ module.exports = async (req, res) => {
         // dateFrom/dateTo are this table's OWN date-range filter, independent of the ticket
         // list's own `date`/`dateTo` (q.date/q.dateTo) - the day-wise table has no `view`, so it
         // can't share deWhere/deFilterSql, hence separate query params.
-        const daywise = await getDeliveryEscalationDaywiseStats({
-          brand: filters.brand, agent: filters.agent, dateField: q.dateField,
-          partner: q.partner ? String(q.partner).split(',').filter(Boolean) : undefined,
-          paymentMode: q.paymentMode && q.paymentMode !== 'ALL' ? q.paymentMode : '',
-          dateFrom: q.dateFrom || '', dateTo: q.dateTo || '',
-          allowedPartners,
-          allowedQueryCategories,
-        });
+        const daywise = await getDeliveryEscalationDaywiseStats(daywiseOpts(q, filters, allowedPartners, allowedQueryCategories));
         res.status(200).json(daywise);
+        return;
+      }
+
+      if (q.op === 'daywiseContactPartners') {
+        // One Repeat Contacts row's own Delivery Partner split, fetched when that row is
+        // expanded rather than shipped inside every op=daywise response - see
+        // getDeliveryEscalationDaywiseContactPartners' own comment for what that cost.
+        // Takes the IDENTICAL filter params op=daywise does (same daywiseOpts), so the drill can
+        // never be scoped differently from the total it opens under.
+        if (!q.contactBucket) { res.status(400).json({ error: 'contactBucket is required' }); return; }
+        const split = await getDeliveryEscalationDaywiseContactPartners({
+          ...daywiseOpts(q, filters, allowedPartners, allowedQueryCategories),
+          contactBucket: q.contactBucket,
+        });
+        res.status(200).json(split);
         return;
       }
 

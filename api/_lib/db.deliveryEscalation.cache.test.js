@@ -8,7 +8,10 @@
 // per-session access floor (see deFilterSql), so a key that ignores it would serve a partner-
 // restricted agent another caller's whole-desk numbers. Case 1 is that check.
 const assert = require('assert');
-const { cachedRead, invalidateCache, deCacheKey, DE_OVERVIEW_CACHE_TTL_MS, rtoMbpOutcome, diffEscalationTags } = require('./db');
+const {
+  cachedRead, invalidateCache, deCacheKey, DE_OVERVIEW_CACHE_TTL_MS,
+  deAccessCacheKey, DE_ACCESS_CACHE_TTL_MS, rtoMbpOutcome, diffEscalationTags,
+} = require('./db');
 
 (async () => {
   // 0. rtoMbpOutcome: a Partner-role RTO dispose is relabeled to RTO_MBP, preserving any
@@ -77,9 +80,31 @@ const { cachedRead, invalidateCache, deCacheKey, DE_OVERVIEW_CACHE_TTL_MS, rtoMb
   // ...and the two ops never collide with each other.
   assert.notStrictEqual(deCacheKey('stats', {}), deCacheKey('daywise', {}));
 
-  // 4. The Overview TTL is short enough that a stale tile can't outlive the tab's own 60s
-  //    refresh by much - the whole point of the per-key override.
-  assert.ok(DE_OVERVIEW_CACHE_TTL_MS <= 60000, 'Overview TTL must stay <= the 60s refresh');
+  // 4. The Overview TTL must be LONGER than the tab's own 60s auto-refresh, not equal to it.
+  //    It used to be exactly 60000, which meant every scheduled poll landed a hair past expiry
+  //    and missed - the cache collapsed a mount's concurrent duplicates but did nothing at all
+  //    for the steady-state refresh traffic it was mainly added for. Freshness does not depend
+  //    on this number: every write path (claim/dispose/bulk/tags) calls invalidateCache('de-')
+  //    (case 7 below), so an agent's own action still moves the tiles immediately; the only
+  //    other writer is the 2-hourly sync cron.
+  assert.ok(DE_OVERVIEW_CACHE_TTL_MS > 60000,
+    'Overview TTL must outlast the 60s refresh, or every poll misses the cache');
+  assert.ok(DE_OVERVIEW_CACHE_TTL_MS <= 300000,
+    'Overview TTL must stay well under the 5-minute default - a dispose invalidates, but the sync cron does not');
+
+  // 4b. The per-user access allowlists are cached under their OWN prefix, not 'de-'. They are
+  //     an access floor, not a tile: a dispose has no reason to throw them away, and if they
+  //     shared the 'de-' prefix every dispose would put the next request back to two extra
+  //     uncached queries - which is the cost this cache exists to remove.
+  assert.ok(deAccessCacheKey('partners', 'u1').startsWith('deAccess:'));
+  assert.ok(!deAccessCacheKey('partners', 'u1').startsWith('de-'),
+    "a dispose's invalidateCache('de-') must not clear access allowlists");
+  assert.notStrictEqual(deAccessCacheKey('partners', 'u1'), deAccessCacheKey('partners', 'u2'),
+    'two users must never share an access-allowlist cache entry');
+  assert.notStrictEqual(deAccessCacheKey('partners', 'u1'), deAccessCacheKey('categories', 'u1'),
+    'the two allowlists must not collide with each other');
+  assert.ok(DE_ACCESS_CACHE_TTL_MS <= 60000,
+    'a narrowed access allowlist must take effect within a minute, same bound as SESSION_CACHE_TTL_MS');
 
   // 5. The storm case: N concurrent reads for one key collapse onto ONE query. This is what
   //    turns a mount's duplicate + retry traffic back into a single full-table scan.

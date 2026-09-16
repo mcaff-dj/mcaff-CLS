@@ -9,6 +9,7 @@ const {
   deWhere, DE_DAYWISE_BUCKET_SQL, DE_DAYWISE_BUCKETS,
   UNRESOLVED_AGE_BUCKET_SQL, UNRESOLVED_AGE_BUCKETS,
   DE_DAY_BUCKET_COLUMN, DE_CONTACT_BUCKET_COLUMN, buildDeliveryEscalationDaywiseResult,
+  buildDeliveryEscalationContactPartnerResult,
   bulkDisposeDeliveryEscalationByAwb,
 } = require('./db');
 
@@ -194,6 +195,64 @@ assert.throws(() => deWhere('everything', {}), /Unknown Delivery-Escalation view
   const sep2 = result.rows.find((r) => r.date === '2026-09-02');
   assert.strictEqual(sep2.ageTotal, 0);
   assert.deepStrictEqual(sep2.ageCounts, Object.fromEntries(UNRESOLVED_AGE_BUCKETS.map((b) => [b, 0])));
+
+  // 6d-i. pct is derivable (Math.round(counts[b] / total * 100)) and, as a second full-width
+  // object keyed by the same long bucket labels, was half the bytes of every entry emitted here.
+  // It is dropped from the three BREAKDOWN arrays - ~37 entries per date against one date row,
+  // which is where the bytes actually were - and kept on the date row itself.
+  //
+  // Keeping it there is a compatibility requirement, not an oversight: api/ and app/ deploy
+  // independently, and the old bundle indexes day.pct[bucket]/day.agePct[bucket] directly when
+  // rendering the date table's leaf rows. It never reads a breakdown entry's own pct (those all
+  // route through mergeDayRowsByDate/sumDaywiseRows, which recompute it), which is exactly why
+  // this split is the safe one.
+  assert.ok('pct' in sep1, "the date row's own pct must stay - an older client indexes it directly");
+  assert.ok('agePct' in sep1, "the date row's own agePct must stay, same reason");
+  assert.strictEqual(sep1.pct['Within 48 hrs'], 63, "pct must be a whole-percent share of that date's own total");
+  for (const p of sep1.partners) assert.ok(!('pct' in p), 'partner breakdown must not carry pct');
+  for (const c of sep1.categories) assert.ok(!('pct' in c), 'category breakdown must not carry pct');
+  for (const cb of sep1.contactBuckets) assert.ok(!('pct' in cb), 'contact-bucket breakdown must not carry pct');
+
+  // 6d-ii. contactBuckets[].partners was ~72% of this response on its own (4 buckets x ~25 raw
+  // courier values x ~78 dates) and is only ever read after a reader expands a Repeat Contacts
+  // row - three levels deep. It now has its own op (daywiseContactPartners), fetched on expand
+  // the same way toggleGeoState/awbHistory already fetch their own levels.
+  for (const cb of sep1.contactBuckets) {
+    assert.ok(!('partners' in cb),
+      'the contact-bucket x partner split must be fetched on expand, not shipped with every Overview load');
+  }
+}
+
+// 6e. buildDeliveryEscalationContactPartnerResult - the pure half of the lazy op above. Its
+// query is already scoped to ONE contact bucket (de_contact_bucket = ?), so unlike the daywise
+// builder it has no bucket dimension to fold: it only has to merge the per-(date, partner)
+// rows into one entry per partner-date pair and total them.
+{
+  const rows = [
+    { d: '2026-09-01', partner: 'Delhivery', bucket: 'unresolved', c: 3 },
+    { d: '2026-09-01', partner: 'Delhivery', bucket: 'Within 48 hrs', c: 5 },
+    { d: '2026-09-01', partner: 'Ecom', bucket: 'Within 48 hrs', c: 1 },
+    { d: '2026-09-02', partner: 'Delhivery', bucket: 'Resolved Refunded', c: 2 },
+  ];
+  const out = buildDeliveryEscalationContactPartnerResult(rows);
+  assert.strictEqual(out.rows.length, 3, 'one entry per (date, partner) pair, not per bucket row');
+
+  const sep1Dl = out.rows.find((r) => r.date === '2026-09-01' && r.partner === 'Delhivery');
+  assert.strictEqual(sep1Dl.total, 8, "a partner-date's buckets must sum into one total");
+  assert.strictEqual(sep1Dl.counts.unresolved, 3);
+  assert.strictEqual(sep1Dl.counts['Within 48 hrs'], 5);
+  // Same "derivable, so not serialized" rule as 6d-i - the client's own sumDaywiseRows/
+  // mergeDayRowsByDate recompute pct for every level of this table anyway.
+  assert.ok(!('pct' in sep1Dl), 'pct must not be serialized here either');
+  // Only the buckets this partner-date actually hit are keys - a zero-fill across all 8 buckets
+  // for every one of ~25 partners x ~78 dates is exactly the bloat this op exists to avoid, and
+  // the client's own zeroCounts() already treats a missing key as 0.
+  assert.ok(!('8-10 days' in sep1Dl.counts), 'unhit buckets must not be zero-filled on the wire');
+
+  assert.deepStrictEqual(
+    buildDeliveryEscalationContactPartnerResult([]).rows, [],
+    'a contact bucket with no rows must return an empty list, not throw',
+  );
 }
 
 // 7. Bulk upload's view guard runs BEFORE any query - a bulk upload must be scoped to Fresh or

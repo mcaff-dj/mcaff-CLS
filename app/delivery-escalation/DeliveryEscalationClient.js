@@ -520,6 +520,27 @@ function groupCategorywiseRows(dayRows, buckets) {
   }).sort((a, b) => b.total - a.total);
 }
 
+// Every filter this page persists to localStorage, as key -> default. One list, because the
+// useState initializers below and resetFilters both have to agree on it: a key added to the
+// initializers but forgotten in the reset would come back on the next page load, which reads to
+// an agent as "Reset filters didn't work" rather than as a missed key.
+const DE_FILTER_STORAGE_DEFAULTS = {
+  de_brand_filter: 'ALL',
+  de_daywise_partner_filter: 'ALL',
+  de_daywise_payment_mode_filter: 'ALL',
+  de_daywise_date_basis: 'added_date',
+  de_daywise_date_range_preset: 'all',
+  de_partner_filter: 'ALL',
+  de_outcome_filter: 'ALL',
+  de_date_range_preset: 'all',
+  de_date_filter_basis: 'added_date',
+};
+
+// Reading a persisted filter through the map above, rather than each initializer repeating its
+// own default inline, is what actually makes that map load-bearing - a key can no longer exist
+// in one place and not the other.
+const storedFilter = (key) => safeStorage.getItem(key) || DE_FILTER_STORAGE_DEFAULTS[key];
+
 // Natural 1 -> 2-4 -> 5-9 -> 10+ order (an ordinal scale), not by total - unlike partner/category
 // this dimension has a real order the reader expects, same labels
 // getDeliveryEscalationRepeatStats/DE_CONTACT_BUCKET_SQL already use.
@@ -545,18 +566,22 @@ function groupContactBucketwiseRows(dayRows, buckets) {
 
 // One contact bucket's own Delivery Partner breakdown, Month -> Week -> Day underneath - same
 // re-grouping groupPartnerwiseRows does from r.partners directly, just sourced from that
-// bucket's own nested partner split (r.contactBuckets[].partners, from the server) so Repeat
-// Contacts can drill Times Contacted -> Delivery Partner -> Month/Week/Day instead of straight
-// to Month. `label` (not `partner`) so TatBreakdownTable's sub-row rendering stays generic.
-function groupContactBucketPartnerwiseRows(dayRows, buckets, contactBucket) {
+// bucket's own split so Repeat Contacts can drill Times Contacted -> Delivery Partner ->
+// Month/Week/Day instead of straight to Month. `label` (not `partner`) so TatBreakdownTable's
+// sub-row rendering stays generic.
+//
+// `splitRows` is op=daywiseContactPartners' own flat [{date, partner, total, counts}] response,
+// fetched when this bucket's row is expanded (see fetchDaywiseContactPartners). It used to be
+// read out of every op=daywise response's r.contactBuckets[].partners instead - 4 buckets x ~25
+// raw courier values x ~78 dates riding along on every single Overview load, ~72% of that
+// response, for a table three expands deep. Its counts are sparse (only buckets that actually
+// fired are keys); every helper below already reads a missing bucket as 0.
+function groupContactBucketPartnerwiseRows(splitRows, buckets, contactBucket) {
   const partners = new Map();
-  for (const r of dayRows) {
-    const cb = (r.contactBuckets || []).find((c) => c.contactBucket === contactBucket);
-    for (const p of (cb?.partners || [])) {
-      const partner = mapPartnerName(p.partner);
-      if (!partners.has(partner)) partners.set(partner, []);
-      partners.get(partner).push({ date: r.date, counts: p.counts, total: p.total });
-    }
+  for (const r of splitRows) {
+    const partner = mapPartnerName(r.partner);
+    if (!partners.has(partner)) partners.set(partner, []);
+    partners.get(partner).push({ date: r.date, counts: r.counts || {}, total: r.total || 0 });
   }
   return [...partners.entries()].map(([partner, rows]) => {
     const merged = mergeDayRowsByDate(rows, buckets);
@@ -994,16 +1019,40 @@ async function fetchStats() {
   };
 }
 
-// Overview's day-wise TAT table - unlike fetchStats above, this DOES take the page's current
-// brand/agent filters (see record.js's own op=daywise comment on why).
-async function fetchDaywiseStats({ brand, agent, dateField, partner, paymentMode, dateFrom, dateTo }) {
-  const p = new URLSearchParams({ op: 'daywise' });
+// The day-wise table's own filter params, shared by the table itself and by the lazy
+// per-contact-bucket partner split below, so a drill can never be scoped differently from the
+// row it opens under - the client half of record.js's own daywiseOpts.
+function daywiseQuery(op, { brand, agent, dateField, partner, paymentMode, dateFrom, dateTo }) {
+  const p = new URLSearchParams({ op });
   if (brand && brand !== 'ALL') p.set('brand', brand);
   if (agent && agent !== 'ALL') p.set('agent', agent);
   if (dateField) p.set('dateField', dateField);
   if (partner && partner !== 'ALL') p.set('partner', (CANONICAL_TO_RAW_PARTNER[partner] || [partner]).join(','));
   if (paymentMode && paymentMode !== 'ALL') p.set('paymentMode', paymentMode);
   if (dateFrom && dateTo) { p.set('dateFrom', dateFrom); p.set('dateTo', dateTo); }
+  return p;
+}
+
+// One Repeat Contacts row's Delivery Partner split, fetched when that row is expanded (see
+// groupContactBucketPartnerwiseRows for what this replaced and why).
+//
+// The filter is load-bearing, not defensive. api/ (Lambda) and app/ (Amplify) deploy
+// independently, so this bundle can reach a Lambda that predates op=daywiseContactPartners -
+// and that older handler does not reject an op it doesn't know, it falls through to the ticket
+// LIST query and answers with a page of tickets. Ticket rows have no `counts`, so requiring one
+// turns that into an empty split (a row that expands to nothing for one deploy window) instead
+// of ticket rows rendered as courier names.
+async function fetchDaywiseContactPartners({ contactBucket, ...filters }) {
+  const p = daywiseQuery('daywiseContactPartners', filters);
+  p.set('contactBucket', contactBucket);
+  const d = await getJson(`/api/delivery-escalation/record?${p}`);
+  return (d.rows || []).filter((r) => r && typeof r.partner === 'string' && r.counts);
+}
+
+// Overview's day-wise TAT table - unlike fetchStats above, this DOES take the page's current
+// brand/agent filters (see record.js's own op=daywise comment on why).
+async function fetchDaywiseStats(filters) {
+  const p = daywiseQuery('daywise', filters);
   const d = await getJson(`/api/delivery-escalation/record?${p}`);
   return {
     buckets: d.buckets || [],
@@ -1687,19 +1736,19 @@ export default function DeliveryEscalationClient() {
     }
   }, [allowedDeTabs]);
   const [search, setSearch] = useState('');
-  const [brandFilter, setBrandFilter] = useState(() => safeStorage.getItem('de_brand_filter') || 'ALL');
+  const [brandFilter, setBrandFilter] = useState(() => storedFilter('de_brand_filter'));
   // Daywise-table-only filters (unlike brandFilter/agentFilter below, these don't touch the
   // Fresh/Resolved ticket list - see fetchDaywiseStats, the only place they're read).
-  const [daywisePartnerFilter, setDaywisePartnerFilter] = useState(() => safeStorage.getItem('de_daywise_partner_filter') || 'ALL');
-  const [daywisePaymentModeFilter, setDaywisePaymentModeFilter] = useState(() => safeStorage.getItem('de_daywise_payment_mode_filter') || 'ALL');
+  const [daywisePartnerFilter, setDaywisePartnerFilter] = useState(() => storedFilter('de_daywise_partner_filter'));
+  const [daywisePaymentModeFilter, setDaywisePaymentModeFilter] = useState(() => storedFilter('de_daywise_payment_mode_filter'));
   // Which date column the TAT-by-date table's rows are grouped under - 'added_date' (labeled
   // Query Date here, same as the rest of this page) or 'order_date' (when the order was placed).
-  const [daywiseDateBasis, setDaywiseDateBasis] = useState(() => safeStorage.getItem('de_daywise_date_basis') || 'added_date');
+  const [daywiseDateBasis, setDaywiseDateBasis] = useState(() => storedFilter('de_daywise_date_basis'));
   // The day-wise table's OWN date-range filter - independent of the ticket list's dateRangePreset/
   // dateFilter/dateFilterTo below (this table has no `view`, spans Fresh+Resolved+Forced RTO at
   // once, and filters the DATE-GROUPED rows themselves rather than a ticket list). Same
   // preset/custom shape and same istTodayParts/dateRangeForPreset helpers, just its own state.
-  const [daywiseDateRangePreset, setDaywiseDateRangePreset] = useState(() => safeStorage.getItem('de_daywise_date_range_preset') || 'all');
+  const [daywiseDateRangePreset, setDaywiseDateRangePreset] = useState(() => storedFilter('de_daywise_date_range_preset'));
   const [daywiseDateFrom, setDaywiseDateFrom] = useState('');
   const [daywiseDateTo, setDaywiseDateTo] = useState('');
   const [agentFilter, setAgentFilter] = useState('ALL');
@@ -1709,12 +1758,12 @@ export default function DeliveryEscalationClient() {
   // filterQuery. Separate from allowedPartners (the admin-set access floor, always enforced,
   // never shown as a filter) - this one narrows further, same relationship
   // getDeliveryEscalationDaywiseStats' own partner/allowedPartners pair already has.
-  const [partnerFilter, setPartnerFilter] = useState(() => safeStorage.getItem('de_partner_filter') || 'ALL');
+  const [partnerFilter, setPartnerFilter] = useState(() => storedFilter('de_partner_filter'));
   // Ticket list's own Outcome filter (all list tabs share this one bar, same as partnerFilter
   // above) - matches the outcome ROOT (see OUTCOME_FILTER_OPTIONS's own comment), not the full
   // ' > '-joined path - childDispositionFilter below is the sub-level's own filter, at the same
   // granularity Fresh/Forced RTO/Resolved/New Order Placed are already split by.
-  const [outcomeFilter, setOutcomeFilter] = useState(() => safeStorage.getItem('de_outcome_filter') || 'ALL');
+  const [outcomeFilter, setOutcomeFilter] = useState(() => storedFilter('de_outcome_filter'));
   // Per-column header filters (the small funnel icon next to each <th> label) - Delivery
   // Partner/Agent/Outcome/Times Contacted/dates reuse the filters above (their funnel just opens
   // the SAME control, not a second one); these four have no other filter yet. tagFilter is
@@ -1728,12 +1777,12 @@ export default function DeliveryEscalationClient() {
   // effectiveFilters below) - dateRangePreset is purely a UI convenience that fills them in.
   // 'custom' leaves them for the agent to type by hand; any other preset (over)writes both from
   // handleDateRangePresetChange.
-  const [dateRangePreset, setDateRangePreset] = useState(() => safeStorage.getItem('de_date_range_preset') || 'all');
+  const [dateRangePreset, setDateRangePreset] = useState(() => storedFilter('de_date_range_preset'));
   const [dateFilter, setDateFilter] = useState('');
   const [dateFilterTo, setDateFilterTo] = useState('');
   // Which date column the ticket list's date filter (and its Excel export) matches against -
   // same 'added_date'/'order_date' choice as the Overview tab's day-wise table.
-  const [dateFilterBasis, setDateFilterBasis] = useState(() => safeStorage.getItem('de_date_filter_basis') || 'added_date');
+  const [dateFilterBasis, setDateFilterBasis] = useState(() => storedFilter('de_date_filter_basis'));
   // Set by clicking a bucket cell in the Overview day-wise table (see drillIntoDaywise) or the
   // Unresolved Leads Funnel (see drillIntoUnresolvedAge) - { dateFrom, dateTo, dateField,
   // tatBucket, ageBucket, bucket, view } overrides dateFilter/dateFilterBasis entirely while
@@ -2034,6 +2083,113 @@ export default function DeliveryEscalationClient() {
     if (range) { setDaywiseDateFrom(range.from); setDaywiseDateTo(range.to); }
   };
 
+  // Every filter the day-wise table's own reads are scoped by, as ONE memoized object - shared
+  // by loadDaywise below and by the lazy per-contact-bucket partner split, so the drill and the
+  // total it opens under can never be scoped differently. Memoized on the primitives (same
+  // reasoning as effectiveDateFilter above): an unstable identity here would refire loadDaywise
+  // on every render.
+  const daywiseFilters = useMemo(() => ({
+    brand: brandFilter, agent: agentFilter, dateField: daywiseDateBasis,
+    partner: daywisePartnerFilter, paymentMode: daywisePaymentModeFilter,
+    dateFrom: daywiseDateFrom, dateTo: daywiseDateTo,
+  }), [brandFilter, agentFilter, daywiseDateBasis, daywisePartnerFilter, daywisePaymentModeFilter,
+    daywiseDateFrom, daywiseDateTo]);
+
+  // contactBucket -> { status, rows } for the Repeat Contacts table's Delivery Partner split.
+  // This used to arrive inside every op=daywise response (r.contactBuckets[].partners) and was
+  // ~72% of it, for a level nobody reaches without expanding a row - it is fetched on expand
+  // now, cached by bucket so collapsing and re-expanding doesn't refetch, exactly the shape
+  // geoCities/awbHistory already use above.
+  const [contactBucketPartners, setContactBucketPartners] = useState(() => new Map());
+  // Any change to the filters those rows were counted under invalidates every cached split -
+  // keeping them would show one filter's partner breakdown under another's totals.
+  useEffect(() => {
+    setContactBucketPartners(new Map());
+    setExpandedContactBucketPartners(new Set());
+  }, [daywiseFilters]);
+
+  const toggleContactBucket = useCallback((bucket) => {
+    toggleExpanded(setExpandedContactBuckets, bucket);
+    setContactBucketPartners((prev) => {
+      if (prev.has(bucket)) return prev;
+      fetchDaywiseContactPartners({ ...daywiseFilters, contactBucket: bucket })
+        .then((rows) => setContactBucketPartners((m) => new Map(m).set(bucket, { status: 'loaded', rows })))
+        .catch((e) => {
+          setContactBucketPartners((m) => new Map(m).set(bucket, { status: 'error', rows: [] }));
+          if (isSessionExpired(e)) setSessionExpired(true);
+        });
+      return new Map(prev).set(bucket, { status: 'loading', rows: [] });
+    });
+  }, [daywiseFilters]);
+
+  // A bucket that hasn't answered yet still has to render SOMETHING through
+  // TatBreakdownTable's generic sub-row markup - a single placeholder row with no months and
+  // empty counts reads as 0 in every cell there and needs no extra props on that component.
+  const contactBucketPartnerRows = useMemo(() => {
+    const out = new Map();
+    for (const [bucket, entry] of contactBucketPartners) {
+      out.set(bucket, entry.status === 'loaded'
+        ? groupContactBucketPartnerwiseRows(entry.rows, daywise.buckets, bucket)
+        : [{
+          key: `${bucket}::pending`,
+          label: entry.status === 'error' ? 'Could not load partner split' : 'Loading…',
+          months: [], counts: {}, pct: {}, total: 0,
+        }]);
+    }
+    return out;
+  }, [contactBucketPartners, daywise.buckets]);
+
+  // Reset filters: EVERY filter on the page, not just the currently visible tab's. The two sets
+  // (the Overview table's own Brand/Partner/Payment Mode/date range, and the ticket list's
+  // search/agent/outcome/header-column filters) share brandFilter and persist independently, so
+  // a per-tab reset would leave an agent who switches tabs still looking at a filtered view they
+  // thought they had cleared. It also removes the saved keys rather than only resetting state -
+  // otherwise the old values reappear on the next page load.
+  //
+  // dateDrill is included: it is a filter in every way that matters (it overrides the date
+  // picker entirely - see effectiveDateFilter), it just happens to be set by clicking a chart
+  // cell instead of a dropdown.
+  const resetFilters = useCallback(() => {
+    for (const key of Object.keys(DE_FILTER_STORAGE_DEFAULTS)) safeStorage.removeItem(key);
+    setSearch('');
+    setBrandFilter('ALL');
+    setAgentFilter('ALL');
+    setDaywisePartnerFilter('ALL');
+    setDaywisePaymentModeFilter('ALL');
+    setDaywiseDateBasis('added_date');
+    setDaywiseDateRangePreset('all');
+    setDaywiseDateFrom('');
+    setDaywiseDateTo('');
+    setPartnerFilter('ALL');
+    setOutcomeFilter('ALL');
+    setQueryCategoryFilter('ALL');
+    setChildDispositionFilter('ALL');
+    setTatFilter('ALL');
+    setTagFilter([]);
+    setContactBucketFilter([]);
+    setDateRangePreset('all');
+    setDateFilter('');
+    setDateFilterTo('');
+    setDateFilterBasis('added_date');
+    setDateDrill(null);
+    setPage(1);
+  }, []);
+
+  // Keeps the button from being a control that visibly does nothing - and doubles as the
+  // "is anything filtered right now" answer, which is not otherwise obvious once a filter is set
+  // on one tab and the agent is looking at another.
+  const filtersActive = (
+    search !== '' || brandFilter !== 'ALL' || agentFilter !== 'ALL'
+    || daywisePartnerFilter !== 'ALL' || daywisePaymentModeFilter !== 'ALL'
+    || daywiseDateBasis !== 'added_date' || daywiseDateRangePreset !== 'all'
+    || daywiseDateFrom !== '' || daywiseDateTo !== ''
+    || partnerFilter !== 'ALL' || outcomeFilter !== 'ALL' || queryCategoryFilter !== 'ALL'
+    || childDispositionFilter !== 'ALL' || tatFilter !== 'ALL'
+    || tagFilter.length > 0 || contactBucketFilter.length > 0
+    || dateRangePreset !== 'all' || dateFilter !== '' || dateFilterTo !== ''
+    || dateFilterBasis !== 'added_date' || dateDrill !== null
+  );
+
   // Guards against a slow earlier request landing after a faster later one and overwriting the
   // newer rows - only the most recent request is allowed to apply its result.
   const reqIdRef = useRef(0);
@@ -2089,18 +2245,14 @@ export default function DeliveryEscalationClient() {
     if (tab !== 'overview') return;
     setDaywiseLoading(true);
     try {
-      setDaywise(await fetchDaywiseStats({
-        brand: brandFilter, agent: agentFilter, dateField: daywiseDateBasis,
-        partner: daywisePartnerFilter, paymentMode: daywisePaymentModeFilter,
-        dateFrom: daywiseDateFrom, dateTo: daywiseDateTo,
-      }));
+      setDaywise(await fetchDaywiseStats(daywiseFilters));
     } catch (e) {
       console.error('Delivery-Escalation daywise stats failed:', e);
       if (isSessionExpired(e)) setSessionExpired(true);
     } finally {
       setDaywiseLoading(false);
     }
-  }, [tab, brandFilter, agentFilter, daywiseDateBasis, daywisePartnerFilter, daywisePaymentModeFilter, daywiseDateFrom, daywiseDateTo]);
+  }, [tab, daywiseFilters]);
 
   // Clicking a bucket cell in the day-wise table (a month/week's rolled-up count, or a single
   // day once expanded) jumps to the tab that actually holds those rows and filters the list down
@@ -2674,6 +2826,16 @@ export default function DeliveryEscalationClient() {
                       options={[{ value: 'ALL', label: 'All Payment Modes' }, ...PAYMENT_MODES.map(m => ({ value: m, label: m }))]}
                       placeholder="Payment Mode"
                     />
+                    <button
+                      onClick={resetFilters}
+                      disabled={!filtersActive}
+                      title={filtersActive
+                        ? 'Clear every filter on this page - both tables and the ticket list - including the ones saved for next visit'
+                        : 'No filters applied'}
+                      className="h-8 px-3 rounded-lg border border-zinc-800 bg-zinc-900/90 text-[13px] text-zinc-400 transition-colors enabled:hover:text-white enabled:hover:border-indigo-500/50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Reset filters
+                    </button>
                   </div>
                 </div>
               )}
@@ -3006,14 +3168,14 @@ export default function DeliveryEscalationClient() {
                   buckets={daywise.buckets}
                   loading={daywiseLoading}
                   expandedRows={expandedContactBuckets}
-                  toggleRow={(key) => toggleExpanded(setExpandedContactBuckets, key)}
+                  toggleRow={toggleContactBucket}
                   expandedMonths={expandedMonths}
                   toggleMonth={(key) => toggleExpanded(setExpandedMonths, key)}
                   expandedWeeks={expandedWeeks}
                   toggleWeek={(key) => toggleExpanded(setExpandedWeeks, key)}
                   getLabel={(row) => row.contactBucket}
                   onDrill={drillIntoDaywise}
-                  subRowsFor={(row) => groupContactBucketPartnerwiseRows(daywise.rows, daywise.buckets, row.contactBucket)}
+                  subRowsFor={(row) => contactBucketPartnerRows.get(row.contactBucket) || []}
                   expandedSubRows={expandedContactBucketPartners}
                   toggleSubRow={(key) => toggleExpanded(setExpandedContactBucketPartners, key)}
                 />
@@ -3149,6 +3311,16 @@ export default function DeliveryEscalationClient() {
                         placeholder="Total times user came"
                         itemNoun="buckets"
                       />
+                    <button
+                        onClick={resetFilters}
+                        disabled={!filtersActive}
+                        title={filtersActive
+                          ? 'Clear every filter on this page - both tables and the ticket list - including the ones saved for next visit'
+                          : 'No filters applied'}
+                        className="h-8 px-3 rounded-lg border border-zinc-800 bg-zinc-900/90 text-[13px] text-zinc-400 transition-colors enabled:hover:text-white enabled:hover:border-indigo-500/50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        Reset filters
+                      </button>
                       {(tab === 'fresh' || tab === 'forced_rto' || tab === 'new_order_placed') && (
                         <>
                           <input
