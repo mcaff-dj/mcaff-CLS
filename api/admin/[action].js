@@ -75,7 +75,8 @@
 const { sql, ensureSchema, CARD_KEYS, CARD_LABELS, setTabPermissions, deleteUser,
   getUserByEmail, getUserTabPermissions,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
-  getCallingDefaultQuota, setCallingDefaultQuota, getCallingLeadOrder, setCallingLeadOrder, logEvent,
+  getCallingDefaultQuota, setCallingDefaultQuota, getCallingLeadOrder, setCallingLeadOrder,
+  getCallingDateRange, setCallingDateRange, logEvent,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
   isCallingProcessAdmin, getAdministeredProcesses, resolveCallerTeam,
   listCallingTeams, createCallingTeam, updateCallingTeam,
@@ -454,6 +455,52 @@ async function handleLeadOrder(req, res, session) {
       res.status(200).json({ order });
     } catch (e) {
       res.status(400).json({ error: e.message || 'Could not save lead order' });
+    }
+    return;
+  }
+
+  res.status(405).json({ error: 'Method not allowed' });
+}
+
+// One process's admin-set lead recency window - both 'YYYY-MM-DD', or both null/unset (falls
+// back to that process's own built-in default window; detractor's is resolveDetractorRecencyBounds's
+// 30-day-back-from-today). Same shape as handleLeadOrder above.
+async function handleDateRange(req, res, session) {
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
+  const known = CALLING_PROCESSES.processes.map((p) => p.key);
+  const body = parseBody(req);
+
+  if (req.method === 'GET') {
+    const processKey = (req.query && req.query.process) || '';
+    if (!known.includes(processKey)) {
+      res.status(400).json({ error: `process must be one of: ${known.join(', ')}` });
+      return;
+    }
+    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, processKey))) {
+      res.status(403).json({ error: 'You do not administer that process' });
+      return;
+    }
+    const range = await getCallingDateRange(processKey);
+    res.status(200).json(range);
+    return;
+  }
+
+  if (req.method === 'POST') {
+    if (!known.includes(body.processKey)) {
+      res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
+      return;
+    }
+    if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, body.processKey))) {
+      res.status(403).json({ error: 'You do not administer that process' });
+      return;
+    }
+    try {
+      const range = await setCallingDateRange(body.processKey, body.dateFrom, body.dateTo, session.email);
+      const detail = range.dateFrom ? `${body.processKey}: date range -> ${range.dateFrom} to ${range.dateTo}` : `${body.processKey}: date range -> (cleared)`;
+      await logEvent(session.uid, session.email, 'calling', 'lead-date-range', detail, ip);
+      res.status(200).json(range);
+    } catch (e) {
+      res.status(400).json({ error: e.message || 'Could not save date range' });
     }
     return;
   }
@@ -1127,7 +1174,7 @@ module.exports = async (req, res) => {
   // being read or written; passing this gate alone authorises nothing. 'calling-teams' is
   // listed here only for its GET branch (a team lead reading its own team name) - the handler
   // itself still turns every POST/PUT away from anyone but a full admin.
-  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'default-quota', 'lead-order', 'calling-agents', 'calling-assign-now', 'dispositions', 'calling-teams', 'delivery-partner-access'];
+  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'default-quota', 'lead-order', 'lead-date-range', 'calling-agents', 'calling-assign-now', 'dispositions', 'calling-teams', 'delivery-partner-access'];
   if (!session.isAdmin && !PROCESS_ADMIN_ACTIONS.includes(action)) {
     res.status(403).json({ error: 'Forbidden' });
     return;
@@ -1139,6 +1186,7 @@ module.exports = async (req, res) => {
   if (action === 'business-hours') return handleBusinessHours(req, res, session);
   if (action === 'default-quota') return handleDefaultQuota(req, res, session);
   if (action === 'lead-order') return handleLeadOrder(req, res, session);
+  if (action === 'lead-date-range') return handleDateRange(req, res, session);
   if (action === 'calling-agents') return handleCallingAgents(req, res, session);
   if (action === 'calling-assign-now') return handleCallingAssignNow(req, res, session);
   if (action === 'dispositions') return handleDispositions(req, res, session);

@@ -6,7 +6,7 @@
 // configuration (which anyone able to view the function, not just invoke it, can read).
 const mysql = require('mysql2/promise');
 const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
-const { pickOlderDetractorCandidate, parseDdMmYyyy, poolAllowedByLeadTypeFilter } = require('./detractorMerge');
+const { pickOlderDetractorCandidate, parseDdMmYyyy, poolAllowedByLeadTypeFilter, ymd, resolveDetractorRecencyBounds } = require('./detractorMerge');
 
 const secretsClient = new SecretsManagerClient({});
 let pool = null;
@@ -576,6 +576,14 @@ async function bootstrapSchema() {
       -- 'oldest' (default when NULL) or 'newest' - which unclaimed lead a pull hands out first.
       -- Added by scripts/add_lead_order_to_calling_process_settings.py.
       lead_order VARCHAR(10),
+      -- Admin-set recency window a lead's submitted_date must fall within to be eligible
+      -- (Admin Panel's "Lead Date Range" card, detractor process only today). Both NULL (the
+      -- default) means "use this process's own built-in fallback window" - see
+      -- resolveDetractorRecencyBounds. Always both-set or both-NULL together; never one alone -
+      -- setCallingDateRange enforces that. Added by
+      -- scripts/add_date_range_to_calling_process_settings.py.
+      date_from DATE,
+      date_to DATE,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_by VARCHAR(320)
     )
@@ -1968,6 +1976,7 @@ async function peekDeliveryDetractorCandidates({ email = null, limit = 1 } = {})
   if (!poolAllowedByLeadTypeFilter('delivery', await _detractorLeadTypeFilterFor(email))) return [];
   const sortDirection = (await getCallingLeadOrder('detractor')) === 'newest' ? -1 : 1;
   const brandFilter = await _detractorBrandFilterFor(email);
+  const { from, to } = await _detractorRecencyBounds();
   const { rows } = await sql`
     SELECT d.response_id, d.brand, d.channel_order_id, d.customer_name, d.customer_phone,
            d.customer_email, d.address_city, d.address_state, d.address_pincode, d.nps_score,
@@ -1991,7 +2000,7 @@ async function peekDeliveryDetractorCandidates({ email = null, limit = 1 } = {})
     LEFT JOIN CLS_NPS_calling c ON c.response_id = d.response_id
     WHERE d.nps_category = 'Detractor' AND c.response_id IS NULL
       AND (${brandFilter} = '' OR d.brand = ${brandFilter})
-      AND STR_TO_DATE(d.submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      AND STR_TO_DATE(d.submitted_date, '%d/%m/%Y') BETWEEN ${from} AND ${to}
     ORDER BY TO_DAYS(STR_TO_DATE(d.submitted_date, '%d/%m/%Y')) * ${sortDirection} ASC
     LIMIT ${raw(safeLimit(limit, 1))}
   `;
@@ -2056,13 +2065,14 @@ async function peekProductDetractorCandidates({ email = null, limit = 1 } = {}) 
   if (!poolAllowedByLeadTypeFilter('product', await _detractorLeadTypeFilterFor(email))) return [];
   const sortDirection = (await getCallingLeadOrder('detractor')) === 'newest' ? -1 : 1;
   const brandFilter = await _detractorBrandFilterFor(email);
+  const { from, to } = await _detractorRecencyBounds();
   const { rows } = await sql`
     SELECT p.response_id, MIN(p.submitted_date) AS submitted_date, MIN(p.nps_category) AS nps_category
     FROM nps_product p
     LEFT JOIN CLS_NPS_calling c ON c.response_id = p.response_id
     WHERE c.response_id IS NULL
       AND (${brandFilter} = '' OR p.brand = ${brandFilter})
-      AND STR_TO_DATE(p.submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      AND STR_TO_DATE(p.submitted_date, '%d/%m/%Y') BETWEEN ${from} AND ${to}
     GROUP BY p.response_id
     HAVING MIN(p.nps_category) = 'Detractor'
     ORDER BY TO_DAYS(STR_TO_DATE(MIN(p.submitted_date), '%d/%m/%Y')) * ${sortDirection} ASC
@@ -2243,13 +2253,14 @@ async function topUpDetractorAgent(email, deps = {}) {
 // instead).
 async function getUnassignedDetractorLeads(limit = 20) {
   await ensureSchema();
+  const { from, to } = await _detractorRecencyBounds();
   const { rows: deliveryRows } = await sql`
     SELECT d.response_id, d.brand, d.channel_order_id, d.customer_name, d.nps_score, d.nps_category,
            d.category, d.sub_category, d.submitted_date
     FROM nps_delivery d
     LEFT JOIN CLS_NPS_calling c ON c.response_id = d.response_id
     WHERE d.nps_category = 'Detractor' AND c.response_id IS NULL
-      AND STR_TO_DATE(d.submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      AND STR_TO_DATE(d.submitted_date, '%d/%m/%Y') BETWEEN ${from} AND ${to}
     ORDER BY STR_TO_DATE(d.submitted_date, '%d/%m/%Y') ASC
     LIMIT ${raw(safeLimit(limit, 20))}
   `;
@@ -2260,7 +2271,7 @@ async function getUnassignedDetractorLeads(limit = 20) {
     FROM nps_product p
     LEFT JOIN CLS_NPS_calling c ON c.response_id = p.response_id
     WHERE c.response_id IS NULL
-      AND STR_TO_DATE(p.submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      AND STR_TO_DATE(p.submitted_date, '%d/%m/%Y') BETWEEN ${from} AND ${to}
     GROUP BY p.response_id
     HAVING MIN(p.nps_category) = 'Detractor'
     ORDER BY STR_TO_DATE(MIN(p.submitted_date), '%d/%m/%Y') ASC
@@ -4217,6 +4228,62 @@ async function setCallingLeadOrder(processKey, order, updatedBy) {
   return value;
 }
 
+// Admin-set recency window for a process's leads - 'YYYY-MM-DD' strings, or {dateFrom: null,
+// dateTo: null} when never set (caller falls back to a built-in default window; see
+// resolveDetractorRecencyBounds). A DATE column comes back from mysql2 as a JS Date - ymd()
+// formats it the same way getCallingHourlyStats already does for a DATE result.
+async function getCallingDateRange(processKey) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT date_from, date_to FROM calling_process_settings WHERE process_key = ${processKey}
+  `;
+  if (!rows.length) return { dateFrom: null, dateTo: null };
+  return {
+    dateFrom: rows[0].date_from ? ymd(rows[0].date_from) : null,
+    dateTo: rows[0].date_to ? ymd(rows[0].date_to) : null,
+  };
+}
+
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
+async function setCallingDateRange(processKey, dateFrom, dateTo, updatedBy) {
+  await ensureSchema();
+  if (!processKey) throw new Error('processKey is required');
+  const from = dateFrom === null || dateFrom === '' ? null : dateFrom;
+  const to = dateTo === null || dateTo === '' ? null : dateTo;
+  // Both set or both cleared - a one-sided range is never a state this table is allowed to hold,
+  // so resolveDetractorRecencyBounds never has to guess what a lone bound means.
+  if ((from == null) !== (to == null)) {
+    throw new Error('Set both a start and end date, or clear both');
+  }
+  if (from != null) {
+    if (!YMD_RE.test(from) || !YMD_RE.test(to)) {
+      throw new Error('Dates must be in YYYY-MM-DD format');
+    }
+    if (from > to) {
+      throw new Error('Start date must not be after end date');
+    }
+  }
+  await sql`
+    INSERT INTO calling_process_settings (process_key, date_from, date_to, updated_at, updated_by)
+    VALUES (${processKey}, ${from}, ${to}, NOW(), ${updatedBy || null})
+    ON DUPLICATE KEY UPDATE
+      date_from = VALUES(date_from),
+      date_to = VALUES(date_to),
+      updated_at = VALUES(updated_at),
+      updated_by = VALUES(updated_by)
+  `;
+  return { dateFrom: from, dateTo: to };
+}
+
+// Delegates to the pure resolveDetractorRecencyBounds (detractorMerge.js) with this process's
+// own admin-set range - the single place every detractor-pool query reads its eligibility window
+// from, so the delivery pool, product pool, and getUnassignedDetractorLeads's own inline queries
+// can't drift on the fallback.
+async function _detractorRecencyBounds() {
+  const { dateFrom, dateTo } = await getCallingDateRange('detractor');
+  return resolveDetractorRecencyBounds(dateFrom, dateTo);
+}
+
 // ── Per-process calling roster ─────────────────────────────────────────────────────────
 // 'Busy' (UI label "On Break") predates this file's own naming conventions - kept as-is
 // rather than renamed, since it's already load-bearing history in agent_presence_log and
@@ -5908,6 +5975,7 @@ module.exports = {
   getCallingOverviewStats, getCallingHourlyStats, getCallingOverviewData,
   BUSINESS_HOUR_DAYS, getCallingBusinessHours, setCallingBusinessHours,
   getCallingDefaultQuota, setCallingDefaultQuota, getCallingLeadOrder, setCallingLeadOrder,
+  getCallingDateRange, setCallingDateRange,
   CALLING_STATUSES, getCallingProcessAgents, setCallingProcessAgent,
   isCallingProcessAdmin, getAdministeredProcesses,
   listCallingTeams, getCallingTeam, createCallingTeam, updateCallingTeam, resolveCallerTeam,

@@ -388,6 +388,145 @@ export function LeadOrderCard({ processLabel, order }) {
   );
 }
 
+// Admin-set recency window for a process's leads (calling_process_settings.date_from/date_to,
+// via /api/admin/lead-date-range) - same load-on-open/save shape as useLeadOrder above. Both
+// dates cleared means "use this process's own built-in fallback window".
+export function useDateRange(processKey, { userRole, isProcessAdmin, showToast } = {}) {
+  const [range, setRange] = useState({ dateFrom: null, dateTo: null });
+  const [loaded, setLoaded] = useState(false);
+  const [draftFrom, setDraftFrom] = useState('');
+  const [draftTo, setDraftTo] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const loadRange = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/admin/lead-date-range?process=${encodeURIComponent(processKey)}`);
+      if (!r.ok) return;
+      const d = await r.json();
+      setRange({ dateFrom: d.dateFrom || null, dateTo: d.dateTo || null });
+      setDraftFrom(d.dateFrom || '');
+      setDraftTo(d.dateTo || '');
+      setLoaded(true);
+    } catch { /* leave unloaded - the card just won't render */ }
+  }, [processKey]);
+
+  useEffect(() => {
+    if ((userRole === 'Admin' || userRole === 'Team Lead' || isProcessAdmin) && !loaded) {
+      loadRange();
+    }
+  }, [userRole, isProcessAdmin, loaded, loadRange]);
+
+  const saveRange = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      const r = await fetch('/api/admin/lead-date-range', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ processKey, dateFrom: draftFrom || null, dateTo: draftTo || null }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setError(d.error || `Could not save (${r.status})`);
+        return;
+      }
+      setRange({ dateFrom: d.dateFrom || null, dateTo: d.dateTo || null });
+      if (showToast) showToast('📅 Lead date range saved');
+    } catch (e) {
+      setError(e.message || 'Could not save date range');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const clearRange = async () => {
+    setDraftFrom('');
+    setDraftTo('');
+    setSaving(true);
+    setError('');
+    try {
+      const r = await fetch('/api/admin/lead-date-range', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ processKey, dateFrom: null, dateTo: null }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setError(d.error || `Could not clear (${r.status})`);
+        return;
+      }
+      setRange({ dateFrom: null, dateTo: null });
+      if (showToast) showToast('📅 Lead date range cleared');
+    } catch (e) {
+      setError(e.message || 'Could not clear date range');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return { range, loaded, draftFrom, setDraftFrom, draftTo, setDraftTo, saving, error, saveRange, clearRange };
+}
+
+// range = a useDateRange() return value; processLabel = display name (e.g. "NPS-Calling");
+// fallbackDays = the process's built-in window when no range is set (e.g. 30).
+export function DateRangeCard({ processLabel, fallbackDays, range }) {
+  const { loaded, draftFrom, setDraftFrom, draftTo, setDraftTo, saving, error, saveRange, clearRange } = range;
+  if (!loaded) return null;
+  return (
+    <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
+      <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
+        <div className="flex items-start gap-3">
+          <span className="h-9 w-9 shrink-0 rounded-xl bg-indigo-950/60 border border-indigo-800/60 flex items-center justify-center text-indigo-300">📅</span>
+          <div>
+            <h2 className="text-lg font-bold text-zinc-100">
+              Lead Date Range &mdash; {processLabel}
+            </h2>
+            <p className="text-[13px] text-zinc-500">
+              Only leads submitted within this window are eligible for assignment. Blank uses
+              this process&apos;s built-in fallback of the last {fallbackDays} days.
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <input
+            type="date"
+            value={draftFrom}
+            onChange={(e) => setDraftFrom(e.target.value)}
+            className="h-8 px-2 rounded-lg bg-zinc-950 border border-zinc-800 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+          />
+          <span className="text-zinc-500 text-[13px]">to</span>
+          <input
+            type="date"
+            value={draftTo}
+            onChange={(e) => setDraftTo(e.target.value)}
+            className="h-8 px-2 rounded-lg bg-zinc-950 border border-zinc-800 text-[13px] text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+          />
+          <button
+            onClick={saveRange}
+            disabled={saving || !draftFrom || !draftTo}
+            className="h-8 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[13px] font-bold transition-colors shadow-md shadow-indigo-950/50 disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+          <button
+            onClick={clearRange}
+            disabled={saving || (!draftFrom && !draftTo)}
+            className="h-8 px-3 rounded-lg border border-zinc-700 text-zinc-400 hover:border-zinc-500 text-[13px] font-bold transition-colors disabled:opacity-50"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+      {error && (
+        <p className="mt-3 text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // Per-process TEAM registry (see calling_teams) - the self-serve half of NDR's per-team
 // isolation feature (docs/superpowers/specs/2026-08-26-ndr-per-team-isolation-design.md). A
 // team is a dimension INSIDE a process, not a process of its own: two NDR teams share this

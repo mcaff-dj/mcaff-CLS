@@ -1,7 +1,7 @@
 // Pure-function tests for merging NPS-Calling's two detractor pools (nps_delivery,
 // nps_product) into one claim order. No DB, no network. Run: node api/_lib/detractorMerge.test.js
 const assert = require('assert');
-const { parseDdMmYyyy, pickOlderDetractorCandidate, poolAllowedByLeadTypeFilter } = require('./detractorMerge');
+const { parseDdMmYyyy, pickOlderDetractorCandidate, poolAllowedByLeadTypeFilter, ymd, resolveDetractorRecencyBounds } = require('./detractorMerge');
 
 // parseDdMmYyyy
 assert.strictEqual(parseDdMmYyyy('27/04/2026'), new Date(2026, 3, 27).getTime());
@@ -39,5 +39,32 @@ assert.strictEqual(poolAllowedByLeadTypeFilter('delivery', 'delivery'), true);
 assert.strictEqual(poolAllowedByLeadTypeFilter('product', 'delivery'), false);
 assert.strictEqual(poolAllowedByLeadTypeFilter('product', 'product'), true);
 assert.strictEqual(poolAllowedByLeadTypeFilter('delivery', 'product'), false);
+
+// ymd
+assert.strictEqual(ymd(new Date(2026, 0, 5)), '2026-01-05');
+assert.strictEqual(ymd(new Date(2026, 11, 31)), '2026-12-31');
+
+// resolveDetractorRecencyBounds: both set -> used as-is, no 30-day fallback consulted
+assert.deepStrictEqual(
+  resolveDetractorRecencyBounds('2026-08-01', '2026-08-31', new Date(2026, 8, 16)),
+  { from: '2026-08-01', to: '2026-08-31' },
+);
+
+// neither set -> 30-day-back-from-today fallback
+assert.deepStrictEqual(
+  resolveDetractorRecencyBounds(null, null, new Date(2026, 8, 16)),
+  { from: '2026-08-17', to: '2026-09-16' },
+);
+
+// one-sided (shouldn't happen via setCallingDateRange, but must not crash or half-apply) ->
+// falls back exactly like neither being set
+assert.deepStrictEqual(
+  resolveDetractorRecencyBounds('2026-08-01', null, new Date(2026, 8, 16)),
+  { from: '2026-08-17', to: '2026-09-16' },
+);
+assert.deepStrictEqual(
+  resolveDetractorRecencyBounds(null, '2026-08-31', new Date(2026, 8, 16)),
+  { from: '2026-08-17', to: '2026-09-16' },
+);
 
 console.log('detractorMerge.test.js: all assertions passed');

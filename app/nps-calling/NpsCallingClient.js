@@ -9,7 +9,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { XIcon, CheckIcon, PhoneIcon, CustomSelect, Overlay, CalendarIcon, SearchIcon } from '../_calling/ui';
 import { useCallingSession, ROSTER_STATUS_OPTIONS, STATUS_OPTIONS } from '../_calling/useCallingSession';
-import { useBusinessHours, CallingHoursCard, useDefaultQuota, DefaultQuotaCard, useLeadOrder, LeadOrderCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
+import { useBusinessHours, CallingHoursCard, useDefaultQuota, DefaultQuotaCard, useLeadOrder, LeadOrderCard, useDateRange, DateRangeCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
 import { scopeToDateBounds } from '../_calling/util';
 
@@ -308,6 +308,7 @@ export default function NpsCallingClient() {
   const hours = useBusinessHours(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
   const defaultQuota = useDefaultQuota(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
   const leadOrder = useLeadOrder(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
+  const dateRange = useDateRange(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
   // Which tree the Admin Panel's Disposition List editor is currently showing/editing - null
   // (Delivery, today's shared tree) or 'product'. Independent of any ticket's own lead_type;
   // an admin picks this explicitly to configure either tree.
@@ -627,6 +628,28 @@ export default function NpsCallingClient() {
     });
   }, [processAgents, allTickets]);
   const visibleAgentMetrics = agentMetrics.filter((a) => rosterStatusFilter === 'All' || a.status === rosterStatusFilter);
+
+  // Best-effort "who would get this" for the Next to Assign preview below - real assignment is
+  // demand-pulled (an agent's own going-Online/heartbeat/self-refill claims whatever their own
+  // brand+lead-type filter allows, oldest first), not a batch plan against this exact list, so
+  // this is a live eligibility snapshot, not a guarantee: an eligible agent's own claim can beat
+  // this page's next 30s poll, and TWO eligible agents can both be shown for one lead when only
+  // one will actually win it. currentLoad mirrors getDetractorLoadByAgent (mine minus disposed,
+  // i.e. still-undisposed) and quota falls back the same way getDetractorQuotaAndLoad does
+  // (per-agent override -> admin default -> FALLBACK_QUOTA) so this agrees with the server's
+  // own quota-load check in topUpDetractorAgent, not just the roster table's own quota column.
+  const eligibleAgentsFor = useCallback((lead) => {
+    if (!lead) return [];
+    return agentMetrics.filter((a) => {
+      if (a.status !== 'Online') return false;
+      const quota = a.maxQuota != null ? a.maxQuota : (defaultQuota.quota != null ? defaultQuota.quota : FALLBACK_QUOTA);
+      const currentLoad = a.assigned - a.disposed;
+      if (currentLoad >= quota) return false;
+      if (a.detractorBrandFilter && a.detractorBrandFilter !== lead.brand) return false;
+      if (a.detractorLeadTypeFilter && a.detractorLeadTypeFilter !== lead.lead_type) return false;
+      return true;
+    });
+  }, [agentMetrics, defaultQuota.quota]);
 
   const renderTicketCard = (t, { showDisposeButton }) => (
     <div key={t.response_id} className="bg-zinc-900/90 border border-zinc-800/90 rounded-xl p-4 space-y-2.5">
@@ -1011,9 +1034,12 @@ export default function NpsCallingClient() {
                           <th className="py-2.5 px-4 text-left font-medium">NPS</th>
                           <th className="py-2.5 px-4 text-left font-medium">Category</th>
                           <th className="py-2.5 px-4 text-left font-medium">Submitted</th>
+                          <th className="py-2.5 px-4 text-left font-medium" title="Best-effort - whichever eligible agent claims first actually gets it">Likely Agent</th>
                         </tr></thead>
                         <tbody className="divide-y divide-zinc-800/50">
-                          {predictedLeads.map((t, i) => (
+                          {predictedLeads.map((t, i) => {
+                            const eligible = eligibleAgentsFor(t);
+                            return (
                             <tr key={t.response_id} className="hover:bg-zinc-900/40 transition-colors">
                               <td className="py-2.5 px-4 text-zinc-500">{i + 1}</td>
                               <td className="py-2.5 px-4 text-zinc-200">{t.customer_name || '—'}</td>
@@ -1021,8 +1047,14 @@ export default function NpsCallingClient() {
                               <td className="py-2.5 px-4 text-zinc-400">{t.nps_score ?? '—'}</td>
                               <td className="py-2.5 px-4 text-zinc-400">{[t.category, t.sub_category].filter(Boolean).join(' · ') || '—'}</td>
                               <td className="py-2.5 px-4 text-zinc-500 text-[11px]">{t.submitted_date || '—'}</td>
+                              <td className="py-2.5 px-4 text-[12px]">
+                                {eligible.length
+                                  ? <span className="text-emerald-400">{eligible.map((a) => a.name).join(', ')}</span>
+                                  : <span className="text-zinc-600">— none online</span>}
+                              </td>
                             </tr>
-                          ))}
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -1073,6 +1105,7 @@ export default function NpsCallingClient() {
                   <CallingHoursCard processKey={PROCESS_KEY} processLabel="NPS-Calling" hours={hours} />
                   <DefaultQuotaCard processLabel="NPS-Calling" fallback={FALLBACK_QUOTA} quota={defaultQuota} />
                   <LeadOrderCard processLabel="NPS-Calling" order={leadOrder} />
+                  <DateRangeCard processLabel="NPS-Calling" fallbackDays={30} range={dateRange} />
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-[12px] text-zinc-400 font-semibold">Editing tree:</span>
                     <button

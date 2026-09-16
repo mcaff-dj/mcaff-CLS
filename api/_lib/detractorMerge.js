@@ -41,4 +41,28 @@ function poolAllowedByLeadTypeFilter(pool, leadTypeFilter) {
   return !leadTypeFilter || leadTypeFilter === pool;
 }
 
-module.exports = { parseDdMmYyyy, pickOlderDetractorCandidate, poolAllowedByLeadTypeFilter };
+// 'YYYY-MM-DD' from a JS Date, using its LOCAL getters (not toISOString, which converts to UTC
+// first and can shift the day for a caller running behind UTC) - same convention
+// getCallingHourlyStats already uses for a DATE column coming back from mysql2.
+function ymd(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Effective recency window for detractor lead eligibility: the admin's explicit date_from/date_to
+// (calling_process_settings, Admin Panel's "Lead Date Range" card) when BOTH are set, else the
+// 30-day-back-from-today window this process used before that control existed. A one-sided value
+// (only one of dateFrom/dateTo set) is never a state setCallingDateRange allows to be saved, but
+// this still falls back safely rather than trusting a half-set pair. `today` is injected so this
+// is testable without mocking the system clock.
+function resolveDetractorRecencyBounds(dateFrom, dateTo, today = new Date()) {
+  if (dateFrom && dateTo) return { from: dateFrom, to: dateTo };
+  const to = new Date(today);
+  const from = new Date(today);
+  from.setDate(from.getDate() - 30);
+  return { from: ymd(from), to: ymd(to) };
+}
+
+module.exports = {
+  parseDdMmYyyy, pickOlderDetractorCandidate, poolAllowedByLeadTypeFilter,
+  ymd, resolveDetractorRecencyBounds,
+};
