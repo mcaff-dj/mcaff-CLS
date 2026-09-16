@@ -311,6 +311,32 @@ function buildPackagingBaseline(raw, packaging, baselineMonths, windowMonths) {
   });
 }
 
+function buildProductDemographicsBaseline(raw, productDemographics, baselineMonths) {
+  return productDemographics.map((brandDemo) => {
+    const brand = raw.find((r) => r.brand === brandDemo.brand);
+    const productDemo = (brand && brand.product_demo) || {};
+    const items = brandDemo.items.map((item) => {
+      const fields = {};
+      for (const [field, f] of Object.entries(item.fields)) {
+        // The field's baseline TOTAL (every value, not just top_value) is needed for a
+        // share - recompute it the same way build_trend_digest.py does, from every key
+        // sharing this (product, category, field) prefix.
+        const prefix = `${item.product}${SEP}${item.category}${SEP}${field}${SEP}`;
+        let btotal = 0;
+        for (const key of Object.keys(productDemo)) {
+          if (!key.startsWith(prefix)) continue;
+          btotal += sum(baselineMonths.map((m) => productDemo[key][m] ?? 0));
+        }
+        const topKey = prefix + f.top_value;
+        const bc = sum(baselineMonths.map((m) => (productDemo[topKey] || {})[m] ?? 0));
+        fields[field] = { ...f, baseline_share_pct: btotal ? fmtPct3((bc / btotal) * 100.0) : null };
+      }
+      return { ...item, fields };
+    });
+    return { ...brandDemo, items };
+  });
+}
+
 module.exports = {
   rate,
   avg,
@@ -320,4 +346,5 @@ module.exports = {
   buildClassTables,
   buildWorstTrends,
   buildPackagingBaseline,
+  buildProductDemographicsBaseline,
 };

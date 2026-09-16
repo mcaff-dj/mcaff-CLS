@@ -1,7 +1,10 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { buildMetrics, buildRatio, buildClassTables, buildWorstTrends, buildPackagingBaseline } from './trendMath';
+import {
+  buildMetrics, buildRatio, buildClassTables, buildWorstTrends, buildPackagingBaseline,
+  buildProductDemographicsBaseline,
+} from './trendMath';
 
 function fmtPct(v) {
   if (v === null || v === undefined) return '–';
@@ -174,6 +177,40 @@ function WorstTrends({ worst }) {
               </ol>
             </div>
           ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ProductDemographicsSection({ demographics }) {
+  return (
+    <div className="og-stack">
+      {demographics.map((brand) => (
+        <div className="og-card" key={brand.brand}>
+          <div className="og-card-title">{brand.title} — Product-Efficacy Demographics</div>
+          {brand.items.length === 0 ? (
+            <p className="og-note">
+              No demographic breakdown available for this brand &mdash; its sheet doesn&rsquo;t track age/gender/skin type/first-time-vs-regular.
+            </p>
+          ) : (
+            brand.items.map((item, i) => (
+              <div className="og-sku-block" key={i}>
+                <div className="og-sku-name">
+                  {item.product}
+                  <span className="og-sku-meta">{item.category} &middot; {fmtNum(item.window_cases)} cases in window</span>
+                </div>
+                <ul className="og-sku-issues">
+                  {Object.values(item.fields).map((f) => (
+                    <li key={f.label}>
+                      {f.label}: <strong>{f.top_value}</strong> &mdash; {fmtPct(f.window_share_pct)} of window
+                      {f.baseline_share_pct != null && ` (was ${fmtPct(f.baseline_share_pct)} at baseline)`}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))
+          )}
         </div>
       ))}
     </div>
@@ -377,6 +414,16 @@ export default function OrgKycTrendsTab() {
     return historyMonths.slice(baselineRange.fromIdx, baselineRange.toIdx + 1);
   }, [digest, historyMonths, baselineRange]);
 
+  // Everything after the chosen baseline's last month, through the most recent month
+  // available - so picking an earlier baseline end (e.g. Apr instead of the default) pulls
+  // the comparison window forward to start right after it (May-Sep), rather than the
+  // window staying pinned to its original fixed months regardless of the baseline picked.
+  // Falls back to the fixed window when there's no raw/axis to recompute from.
+  const dynamicWindowMonths = useMemo(() => {
+    if (!digest || !digest.axis || !baselineRange) return windowMonths;
+    return historyMonths.concat(windowMonths).slice(baselineRange.toIdx + 1);
+  }, [digest, historyMonths, windowMonths, baselineRange]);
+
   // Old cached JSON (pre-filter deploy) has no raw/axis to recompute from - fall back to
   // the server's own precomputed default view rather than crashing until the next refresh.
   const computed = useMemo(() => {
@@ -385,16 +432,27 @@ export default function OrgKycTrendsTab() {
       return {
         metrics: digest.metrics, ratio: digest.ratio, classTables: digest.class_tables,
         worstTrends: digest.worst_trends, packaging: digest.packaging,
+        productDemographics: digest.product_demographics || [],
       };
     }
     return {
-      metrics: buildMetrics(digest.raw, baselineMonths, windowMonths),
-      ratio: buildRatio(digest.raw, baselineMonths, windowMonths),
-      classTables: buildClassTables(digest.raw, baselineMonths, windowMonths),
-      worstTrends: buildWorstTrends(digest.raw, baselineMonths, windowMonths),
+      metrics: buildMetrics(digest.raw, baselineMonths, dynamicWindowMonths),
+      ratio: buildRatio(digest.raw, baselineMonths, dynamicWindowMonths),
+      classTables: buildClassTables(digest.raw, baselineMonths, dynamicWindowMonths),
+      worstTrends: buildWorstTrends(digest.raw, baselineMonths, dynamicWindowMonths),
+      // Packaging Deep Dive and Product-Efficacy Demographics stay pinned to the fixed
+      // window: their item lists (SKU list, dropped-off list, top-issue/top-demographic
+      // breakdown) are only computed server-side for that fixed range, so recomputing just
+      // the rate/share against a different window would show numbers next to a stale item
+      // list and mismatched month columns. Repeat Offenders (below) has the same limitation.
       packaging: buildPackagingBaseline(digest.raw, digest.packaging, baselineMonths, windowMonths),
+      // digest.product_demographics is absent on a digest built before this field existed
+      // (pre-regen) - fall back to no items rather than crashing until the next refresh.
+      productDemographics: digest.product_demographics
+        ? buildProductDemographicsBaseline(digest.raw, digest.product_demographics, baselineMonths)
+        : [],
     };
-  }, [digest, baselineMonths, windowMonths]);
+  }, [digest, baselineMonths, dynamicWindowMonths, windowMonths]);
 
   if (error) return <p className="og-note og-error">{error}</p>;
   if (!digest || !computed) return <p className="og-note">Loading...</p>;
@@ -408,7 +466,7 @@ export default function OrgKycTrendsTab() {
         <h2>KYC Complaint Trends</h2>
         <p>
           mCaffeine &amp; Hyphen &middot; {baselineMonths[0]}&ndash;{baselineMonths[baselineMonths.length - 1]} baseline
-          vs {windowMonths[0]}&ndash;{windowMonths[windowMonths.length - 1]} window.
+          vs {dynamicWindowMonths[0]}&ndash;{dynamicWindowMonths[dynamicWindowMonths.length - 1]} window.
           Every number below is computed directly from ticket data on each refresh &mdash; no manually maintained figures.
         </p>
         {historyMonths.length > 0 && baselineRange && (
@@ -426,20 +484,27 @@ export default function OrgKycTrendsTab() {
             }}
           />
         )}
+        {dynamicWindowMonths[0] !== windowMonths[0] && (
+          <p className="og-note" style={{ marginTop: 10 }}>
+            Packaging Deep Dive, Product-Efficacy Demographics and Repeat Offenders below stay
+            pinned to their original {windowMonths[0]}&ndash;{windowMonths[windowMonths.length - 1]}
+            {' '}window regardless of this filter.
+          </p>
+        )}
       </header>
 
       <section>
         <h3 className="og-section-title">CSAT &amp; NPS</h3>
-        <MetricTables metrics={computed.metrics} windowMonths={windowMonths} />
+        <MetricTables metrics={computed.metrics} windowMonths={dynamicWindowMonths} />
       </section>
 
       <section>
         <h3 className="og-section-title">Complaint Trend</h3>
-        <RatioTable rows={computed.ratio} windowMonths={windowMonths} />
+        <RatioTable rows={computed.ratio} windowMonths={dynamicWindowMonths} />
       </section>
 
       <section>
-        <ClassTables classTables={computed.classTables} windowMonths={windowMonths} />
+        <ClassTables classTables={computed.classTables} windowMonths={dynamicWindowMonths} />
       </section>
 
       <section>
@@ -450,6 +515,11 @@ export default function OrgKycTrendsTab() {
       <section>
         <h3 className="og-section-title">Packaging Deep Dive</h3>
         <PackagingSection packaging={computed.packaging} windowMonths={windowMonths} />
+      </section>
+
+      <section>
+        <h3 className="og-section-title">Product-Efficacy Demographics</h3>
+        <ProductDemographicsSection demographics={computed.productDemographics} />
       </section>
 
       <section>

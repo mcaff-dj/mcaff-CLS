@@ -25,8 +25,15 @@ TOP_CATEGORIES = 150
 TOP_PARTNER_CATS = 300
 TOP_PRODUCT_CATS = 300
 TOP_BATCHES = 80
+TOP_PRODUCT_DEMO = 600
 
 SEP = "||"
+
+# Demographic fields behind a complaint - only present in brands.py's "col" map for
+# brands whose sheet actually tracks them (Hyphen only, as of writing). col.get(field)
+# is None for a brand without it, so this loop is a no-op there rather than needing a
+# brand-specific branch.
+DEMO_FIELDS = ("age", "gender", "skin_type", "first_time_regular")
 
 _MONTH_NUMS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
@@ -115,6 +122,7 @@ def build_facts(ctx):
 
     tickets, tickets_all, classes, cats = {}, {}, {}, {}
     partners, partner_cats, product_cats, batches = {}, {}, {}, {}
+    product_demo = {}
 
     for r in ctx.data_rows:
         mo = ctx.cell(r, col["month"])
@@ -148,6 +156,13 @@ def build_facts(ctx):
             batch = str(ctx.cell(r, col["batch"])).strip()
             if batch and batch.lower() not in ("na", "n/a", "-"):
                 _bump(batches, prod + SEP + batch, mo)
+            for field in DEMO_FIELDS:
+                idx = col.get(field)
+                if idx is None:
+                    continue
+                val = str(ctx.cell(r, idx)).strip()
+                if val and val.lower() not in ("na", "n/a", "-"):
+                    _bump(product_demo, prod + SEP + cat + SEP + field + SEP + val, mo)
 
     return {
         "brand": ctx.b["brand"],
@@ -167,6 +182,7 @@ def build_facts(ctx):
         "partner_cats": _prune(partner_cats, TOP_PARTNER_CATS),
         "product_cats": _prune(product_cats, TOP_PRODUCT_CATS),
         "batches": _prune(batches, TOP_BATCHES),
+        "product_demo": _prune(product_demo, TOP_PRODUCT_DEMO),
         "csat": series_by_month(ctx.agent, months),
         "ai_csat": series_by_month(ctx.ai, months),
         "nps_overall": series_by_month(ctx.mom, months),

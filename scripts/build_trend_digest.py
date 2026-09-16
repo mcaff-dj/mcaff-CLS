@@ -34,6 +34,12 @@ MIN_RATE_DELTA_PP = 0.02
 MAX_TRENDS_PER_DIMENSION = 6
 TOP_COURIERS = 6
 TOP_PACKAGING_SKUS = 12
+TOP_PRODUCT_DEMOGRAPHIC_ITEMS = 30
+
+DEMO_FIELD_LABELS = {
+    "age": "Age", "gender": "Gender", "skin_type": "Skin Type",
+    "first_time_regular": "First-Time / Regular",
+}
 
 
 def rate(count, sales):
@@ -444,6 +450,50 @@ def build_repeat_offenders(brands, baseline, window):
     return {"couriers": couriers}
 
 
+def build_product_demographics(brands, baseline, window):
+    """Demographic skew (age/gender/skin_type/first-time-vs-regular) behind each SKU's
+    complaints, for whichever brand's sheet actually tracks these fields - see brands.py's
+    Hyphen-only "col" entries. mCaffeine has none of these columns, so its product_demo
+    dict (from gen_digest_facts.py) stays empty and it simply contributes no items here,
+    rather than the UI needing a brand-specific special case."""
+    out = []
+    for b in brands:
+        # (product, category) -> field -> value -> {"baseline": n, "window": n}
+        buckets = {}
+        for key, per_month in (b.get("product_demo") or {}).items():
+            prod, cat, field, value = key.split(SEP, 3)
+            bc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in baseline)
+            wc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in window)
+            if not bc and not wc:
+                continue
+            values = buckets.setdefault((prod, cat), {}).setdefault(field, {})
+            values[value] = {"baseline": bc, "window": wc}
+
+        items = []
+        for (prod, cat), fields in buckets.items():
+            field_out = {}
+            window_cases = 0
+            for field, values in fields.items():
+                wtotal = sum(v["window"] for v in values.values())
+                btotal = sum(v["baseline"] for v in values.values())
+                window_cases = max(window_cases, wtotal)
+                if wtotal < MIN_WINDOW_CASES_SKU:
+                    continue
+                top_value, top = max(values.items(), key=lambda kv: kv[1]["window"])
+                field_out[field] = {
+                    "label": DEMO_FIELD_LABELS.get(field, field),
+                    "top_value": top_value,
+                    "window_cases": top["window"],
+                    "window_share_pct": _fmt_pct(top["window"] / wtotal * 100.0),
+                    "baseline_share_pct": _fmt_pct(top["baseline"] / btotal * 100.0) if btotal else None,
+                }
+            if field_out:
+                items.append({"product": prod, "category": cat, "window_cases": window_cases, "fields": field_out})
+        items.sort(key=lambda it: -it["window_cases"])
+        out.append({"brand": b["brand"], "title": b["title"], "items": items[:TOP_PRODUCT_DEMOGRAPHIC_ITEMS]})
+    return out
+
+
 def build_raw(brands, history, window):
     """Everything the frontend's baseline-range filter needs to recompute metrics/ratio/
     class-tables/worst-trends/packaging for any baseline sub-range the user picks, without
@@ -493,6 +543,7 @@ def build_raw(brands, history, window):
             "partner_cats": remap_keyed(b.get("partner_cats")),
             "product_cats": remap_keyed(b.get("product_cats")),
             "batches": remap_keyed(b.get("batches")),
+            "product_demo": remap_keyed(b.get("product_demo")),
             "csat": remap_series(b.get("csat")),
             "ai_csat": remap_series(b.get("ai_csat")),
             "nps_overall": remap_series(b.get("nps_overall")),
@@ -538,6 +589,7 @@ def main():
         "worst_trends": build_worst_trends(brands, baseline, window),
         "packaging": build_packaging(brands, baseline, window),
         "repeat_offenders": build_repeat_offenders(brands, baseline, window),
+        "product_demographics": build_product_demographics(brands, baseline, window),
         "raw": build_raw(brands, history, window),
     }
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)

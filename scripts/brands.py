@@ -90,10 +90,16 @@ BRANDS = [
             {"key": "Packaging and Operational", "id": "packaging", "label": "Packaging & Operational", "color": "var(--s4)"},
             {"key": "Product", "id": "product", "label": "Product", "color": "var(--s5)"},
         ],
+        # age/gender/skin_type/first_time_regular: Hyphen-only - mCaffeine's sheet has no
+        # equivalent columns at all (see its kyc_mysql_columns above, which stops at
+        # log_partner). Indices match this brand's kyc_mysql_columns position exactly, same
+        # as visdamage/outerpkg/statezone/platform below - verified by those four already
+        # matching their kyc_mysql_columns position.
         "col": {"prod": 6, "batch": 7, "sku": 8, "cls": 4, "cat": 5, "partner": 10, "month": 12, "week": 13,
                 "sales": 19, "salesW": 20, "alloc": 23, "uniq": 17, "created_date": 1,
                 "wh": 22, "prosales": 21, "lastsource": 3, "platform": 40, "visdamage": 33, "outerpkg": 32, "statezone": 34,
-                "order_id": 2, "awb": 9, "order_date": 11, "order_month": 14},
+                "order_id": 2, "awb": 9, "order_date": 11, "order_month": 14,
+                "age": 28, "gender": 29, "skin_type": 30, "first_time_regular": 31},
         "small_tabs": {"agent": "Hyp Agent Chart", "ai": "HYP AI Chart"},
         "nps_override_tabs": {"mom": "Hyp: MoM", "prodnps": "HYP:PRODUCT NPS"},
         "nps_mysql_brand": "Hyphen",
