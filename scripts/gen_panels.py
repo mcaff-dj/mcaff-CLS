@@ -687,8 +687,9 @@ def _prodwise_year_json(months, years):
 def _build_prodwise_heatmap(capped):
     """Product x month avg NPS score (1-10) heatmap. Color midpoint is 7.0 (NPS promoter
     threshold): below = red (--s6), above = aqua (--s2), normalized against the actual data
-    spread (floor 1.0 so a flat dataset still shows some color contrast). Month columns carry
-    data-yr so the Year-chip sweep hides out-of-range columns with no extra JS."""
+    spread (floor 1.0 so a flat dataset still shows some color contrast). Each month is a
+    colspan=2 group (Total Response, Total NPS), same two-row thead pattern as the category
+    pivots above; both sub-columns carry data-yr so the Year-chip sweep hides whole months."""
     all_yms = sorted({ym for r in capped for ym in r["months"]})
     if not all_yms:
         return ""
@@ -710,23 +711,32 @@ def _build_prodwise_heatmap(capped):
         mix = round(abs(t) * 70)
         return f" style=\"background:color-mix(in oklab, var(--grid) {100 - mix}%, var({slot}) {mix}%)\""
 
-    head_cells = "".join(f"<th class='month-hdr' data-yr='{ym[:4]}'>{h_enc(_nps_month_label(ym))}</th>" for ym in all_yms)
+    month_group_head = "".join(
+        f"<th colspan='2' class='month-hdr' data-yr='{ym[:4]}'>{h_enc(_nps_month_label(ym))}</th>" for ym in all_yms
+    )
+    sub_head = "".join(
+        f"<th class='sub-hdr' data-yr='{ym[:4]}'>Total Response</th><th class='sub-hdr' data-yr='{ym[:4]}'>Total NPS</th>"
+        for ym in all_yms
+    )
 
     body_rows = []
     for i, r in enumerate(capped):
         z = "zebra" if i % 2 == 1 else ""
-        total_responses = sum(m["responses"] for m in r["months"].values() if m)
         cells = []
         for ym in all_yms:
             m = r["months"].get(ym)
             avg = _nps(m)
-            label = fnum(avg) if avg is not None else "&ndash;"
+            resp_label = n0(m["responses"]) if m else "&ndash;"
+            nps_label = fnum(avg) if avg is not None else "&ndash;"
             title = f" title='{h_enc(r['product'])} &middot; {h_enc(_nps_month_label(ym))}: {n0(m['responses'])} responses'" if m else ""
-            cells.append(f"<td class='num hm-cell' data-yr='{ym[:4]}'{cell_style(avg)}{title}>{label}</td>")
+            cells.append(
+                f"<td class='num' data-yr='{ym[:4]}'{title}>{resp_label}</td>"
+                f"<td class='num hm-cell' data-yr='{ym[:4]}'{cell_style(avg)}{title}>{nps_label}</td>"
+            )
         spark_svg, spark_json = _prodwise_sparkline(r["months"])
         body_rows.append(
             f"<tr class='{z}' data-hm-spark='{spark_json}'>"
-            f"<td class='rowlabel'>{h_enc(r['product'])}</td><td class='num'>{n0(total_responses)}</td>{''.join(cells)}"
+            f"<td class='rowlabel'>{h_enc(r['product'])}</td>{''.join(cells)}"
             f"<td class='num' style='min-width:80px'>{spark_svg}</td></tr>"
         )
 
@@ -743,7 +753,8 @@ def _build_prodwise_heatmap(capped):
         "<p class='desc'>NPS% = (Promoters &minus; Detractors) &divide; Total &times; 100, per product per month. "
         "Color midpoint is 50 (excellent NPS threshold); blank cells had no survey responses that month.</p>"
         f"{legend}<div class='pivot-scroll'><table class='pivot-table'><thead><tr>"
-        f"<th class='corner'>Product</th><th>Total Responses</th>{head_cells}<th>Trend</th></tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
+        f"<th class='corner' rowspan='2'>Product</th>{month_group_head}<th rowspan='2'>Trend</th></tr>"
+        f"<tr>{sub_head}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
     )
 
 
