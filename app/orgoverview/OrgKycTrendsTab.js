@@ -191,7 +191,9 @@ function ProductDemographicsSection({ demographics }) {
           <div className="og-card-title">{brand.title} — Product-Efficacy Demographics</div>
           {brand.items.length === 0 ? (
             <p className="og-note">
-              No demographic breakdown available for this brand &mdash; its sheet doesn&rsquo;t track age/gender/skin type/first-time-vs-regular.
+              {brand.pending
+                ? 'Not populated yet — run the report pipeline (generate_report.py + build_trend_digest.py) to fill this section in.'
+                : "No demographic breakdown available for this brand — its sheet doesn't track age/gender/skin type/first-time-vs-regular."}
             </p>
           ) : (
             brand.items.map((item, i) => (
@@ -359,6 +361,13 @@ function RepeatOffenders({ repeat, windowMonths }) {
   );
 }
 
+// A digest built before product_demographics existed has no per-brand placeholder at all
+// - without this, the section would render zero cards (not even an empty-state message)
+// instead of "not populated yet" per brand, indistinguishable from a real bug.
+function pendingDemographics(digest) {
+  return (digest.brands || []).map((b) => ({ brand: b.brand, title: b.title, items: [], pending: true }));
+}
+
 function BaselineFilter({ historyMonths, fromIdx, toIdx, onFromChange, onToChange }) {
   return (
     <div className="filterbar">
@@ -432,7 +441,9 @@ export default function OrgKycTrendsTab() {
       return {
         metrics: digest.metrics, ratio: digest.ratio, classTables: digest.class_tables,
         worstTrends: digest.worst_trends, packaging: digest.packaging,
-        productDemographics: digest.product_demographics || [],
+        productDemographics: digest.product_demographics
+          ? digest.product_demographics
+          : pendingDemographics(digest),
       };
     }
     return {
@@ -447,10 +458,11 @@ export default function OrgKycTrendsTab() {
       // list and mismatched month columns. Repeat Offenders (below) has the same limitation.
       packaging: buildPackagingBaseline(digest.raw, digest.packaging, baselineMonths, windowMonths),
       // digest.product_demographics is absent on a digest built before this field existed
-      // (pre-regen) - fall back to no items rather than crashing until the next refresh.
+      // (pre-regen) - show a per-brand "not populated yet" placeholder instead of crashing
+      // or rendering nothing until the next refresh.
       productDemographics: digest.product_demographics
         ? buildProductDemographicsBaseline(digest.raw, digest.product_demographics, baselineMonths)
-        : [],
+        : pendingDemographics(digest),
     };
   }, [digest, baselineMonths, dynamicWindowMonths, windowMonths]);
 
