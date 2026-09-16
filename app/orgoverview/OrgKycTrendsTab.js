@@ -196,42 +196,63 @@ function groupDemographicsByProduct(items) {
   return Array.from(byProduct.entries());
 }
 
+// Renders one item (its product's top category) as a single narrative sentence, in the
+// same "count delta, then demographic skew" shape as the source deck's own bullets - but
+// built only from numbers this page already computes, never an added editorial claim
+// (a "reads as a formulation mismatch" conclusion needs business judgment ticket data
+// alone can't supply, so this stops at the numbers and lets the reader draw that).
+function demoSentence(item) {
+  const f = item.fields;
+  const cat = item.category.toLowerCase();
+  const b = item.baseline_cases, w = item.window_cases;
+  const countPart = b
+    ? `${cat} complaints ${w >= b ? 'rose' : 'fell'} ${fmtNum(b)}→${fmtNum(w)} cases`
+    : `${cat} complaints: ${fmtNum(w)} cases in the window`;
+  const clauses = [];
+  if (f.first_time_regular) {
+    const ft = f.first_time_regular;
+    const shareClause = ft.baseline_share_pct != null
+      ? `${fmtPct(ft.baseline_share_pct)}→${fmtPct(ft.window_share_pct)}`
+      : fmtPct(ft.window_share_pct);
+    clauses.push(`almost entirely among ${ft.top_value.toLowerCase()} users (${shareClause})`);
+  }
+  if (f.age) clauses.push(`concentrated in ages ${f.age.top_value}`);
+  if (f.gender) clauses.push(`skewed ${f.gender.top_value.toLowerCase()}`);
+  if (f.skin_type) clauses.push(`skewed ${f.skin_type.top_value.toLowerCase()}-skin`);
+  const tail = clauses.length ? `, ${clauses.join(', ')}` : '';
+  return `${item.product}: ${countPart}${tail}.`;
+}
+
 function ProductDemographicsSection({ demographics }) {
   return (
     <div className="og-stack">
-      {demographics.map((brand) => (
-        <div className="og-card" key={brand.brand}>
-          <div className="og-card-title">{brand.title} — Product-Efficacy Demographics</div>
-          {brand.items.length === 0 ? (
-            <p className="og-note">
-              {brand.pending
-                ? 'Not populated yet — run the report pipeline (generate_report.py + build_trend_digest.py) to fill this section in.'
-                : "No demographic breakdown available for this brand — its sheet doesn't track age/gender/skin type/first-time-vs-regular."}
-            </p>
-          ) : (
-            groupDemographicsByProduct(brand.items).map(([product, cats]) => (
-              <div className="og-sku-block" key={product}>
-                <div className="og-sku-name">{product}</div>
-                {cats.map((item, i) => (
-                  <div key={item.category} style={{ marginTop: i === 0 ? 6 : 14 }}>
-                    <div className="og-sku-meta" style={{ fontWeight: 600 }}>
-                      {item.category} &middot; {fmtNum(item.window_cases)} cases in window
-                    </div>
-                    <ul className="og-sku-issues">
-                      {Object.values(item.fields).map((f) => (
-                        <li key={f.label}>
-                          {f.label}: <strong>{f.top_value}</strong> &mdash; {fmtPct(f.window_share_pct)} of window
-                          {f.baseline_share_pct != null && ` (was ${fmtPct(f.baseline_share_pct)} at baseline)`}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ))}
-              </div>
-            ))
-          )}
-        </div>
-      ))}
+      {demographics.map((brand) => {
+        const top3 = groupDemographicsByProduct(brand.items).slice(0, 3);
+        return (
+          <div className="og-card" key={brand.brand}>
+            <div className="og-card-title">{brand.title} — Product-Efficacy Demographics</div>
+            {brand.items.length === 0 ? (
+              <p className="og-note">
+                {brand.pending
+                  ? 'Not populated yet — run the report pipeline (generate_report.py + build_trend_digest.py) to fill this section in.'
+                  : "No demographic breakdown available for this brand — its sheet doesn't track age/gender/skin type/first-time-vs-regular."}
+              </p>
+            ) : (
+              <>
+                <p className="og-card-sub" style={{ fontStyle: 'italic' }}>
+                  Top {top3.length} product{top3.length > 1 ? 's' : ''} by window case volume, with the
+                  demographic skew behind each complaint category.
+                </p>
+                <ul className="og-trend-list">
+                  {top3.map(([product, cats]) => (
+                    <li key={product}>{demoSentence(cats[0])}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

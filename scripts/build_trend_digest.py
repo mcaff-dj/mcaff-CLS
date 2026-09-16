@@ -472,11 +472,12 @@ def build_product_demographics(brands, baseline, window):
         items = []
         for (prod, cat), fields in buckets.items():
             field_out = {}
-            window_cases = 0
+            window_cases = baseline_cases = 0
             for field, values in fields.items():
                 wtotal = sum(v["window"] for v in values.values())
                 btotal = sum(v["baseline"] for v in values.values())
                 window_cases = max(window_cases, wtotal)
+                baseline_cases = max(baseline_cases, btotal)
                 if wtotal < MIN_WINDOW_CASES_SKU:
                     continue
                 top_value, top = max(values.items(), key=lambda kv: kv[1]["window"])
@@ -488,7 +489,11 @@ def build_product_demographics(brands, baseline, window):
                     "baseline_share_pct": _fmt_pct(top["baseline"] / btotal * 100.0) if btotal else None,
                 }
             if field_out:
-                items.append({"product": prod, "category": cat, "window_cases": window_cases, "fields": field_out})
+                items.append({
+                    "product": prod, "category": cat,
+                    "window_cases": window_cases, "baseline_cases": baseline_cases,
+                    "fields": field_out,
+                })
         items.sort(key=lambda it: -it["window_cases"])
         out.append({"brand": b["brand"], "title": b["title"], "items": items[:TOP_PRODUCT_DEMOGRAPHIC_ITEMS]})
     return out

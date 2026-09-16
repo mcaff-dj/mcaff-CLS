@@ -317,6 +317,7 @@ function buildProductDemographicsBaseline(raw, productDemographics, baselineMont
     const productDemo = (brand && brand.product_demo) || {};
     const items = brandDemo.items.map((item) => {
       const fields = {};
+      let baselineCases = 0;
       for (const [field, f] of Object.entries(item.fields)) {
         // The field's baseline TOTAL (every value, not just top_value) is needed for a
         // share - recompute it the same way build_trend_digest.py does, from every key
@@ -327,11 +328,12 @@ function buildProductDemographicsBaseline(raw, productDemographics, baselineMont
           if (!key.startsWith(prefix)) continue;
           btotal += sum(baselineMonths.map((m) => productDemo[key][m] ?? 0));
         }
+        baselineCases = Math.max(baselineCases, btotal);
         const topKey = prefix + f.top_value;
         const bc = sum(baselineMonths.map((m) => (productDemo[topKey] || {})[m] ?? 0));
         fields[field] = { ...f, baseline_share_pct: btotal ? fmtPct3((bc / btotal) * 100.0) : null };
       }
-      return { ...item, fields };
+      return { ...item, baseline_cases: baselineCases, fields };
     });
     return { ...brandDemo, items };
   });
