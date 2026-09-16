@@ -351,7 +351,9 @@ export default function OrgKycTrendsTab() {
   if (!digest || !computed) return <p className="og-note">Loading...</p>;
 
   return (
-    <div className="og-wrap">
+    <div className="og-wrap-outer">
+      <button className="og-download-btn" onClick={() => window.print()}>Download PDF</button>
+      <div className="og-wrap" id="printable-receipt">
       <header className="og-header">
         <span className="og-badge">Auto-refreshed</span>
         <h2>KYC Complaint Trends</h2>
@@ -405,6 +407,7 @@ export default function OrgKycTrendsTab() {
         <h3 className="og-section-title">Repeat Offenders</h3>
         <RepeatOffenders repeat={digest.repeat_offenders} windowMonths={windowMonths} />
       </section>
+      </div>
     </div>
   );
 }
