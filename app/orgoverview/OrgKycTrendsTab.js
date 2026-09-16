@@ -40,7 +40,7 @@ function peakEaseNote(monthRates, windowMonths) {
 
 function MetricTables({ metrics, windowMonths }) {
   return (
-    <div className="og-grid-2">
+    <div className="og-stack">
       {metrics.map((brand) => (
         <div className="og-card" key={brand.brand}>
           <div className="og-card-title">{brand.title}</div>
@@ -110,7 +110,7 @@ function RatioTable({ rows, windowMonths }) {
 
 function ClassTables({ classTables, windowMonths }) {
   return (
-    <div className="og-grid-2">
+    <div className="og-stack">
       {classTables.map((brand) => (
         <div className="og-card" key={brand.brand}>
           <div className="og-card-title">{brand.title} — Query Class-Wise Comparison</div>
@@ -182,7 +182,7 @@ function WorstTrends({ worst }) {
 
 function PackagingSection({ packaging, windowMonths }) {
   return (
-    <div className="og-grid-2">
+    <div className="og-stack">
       {packaging.map((brand) => (
         <div className="og-card" key={brand.brand}>
           <div className="og-card-title">{brand.title} — Packaging Deep Dive</div>

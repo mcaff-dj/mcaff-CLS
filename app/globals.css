@@ -883,6 +883,10 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
    column wider than the viewport even though .og-table-scroll below has overflow-x:
    auto - this is what actually lets that scroll box do its job instead of the page. */
 .og-grid-2 > * { min-width: 0; }
+/* Full-width stack, used instead of og-grid-2 wherever a per-brand table has enough
+   columns (4 window months + baseline/window/shift, or SKU rate/delta columns) that
+   putting two of them side by side forces a horizontal scrollbar on ordinary screens. */
+.og-stack { display: flex; flex-direction: column; gap: 18px; }
 
 .og-card { background: var(--surface-card); border: 1px solid var(--border); border-radius: 14px; padding: 20px 22px; }
 .og-card-title { font-size: 13.5px; font-weight: 700; margin-bottom: 4px; }
