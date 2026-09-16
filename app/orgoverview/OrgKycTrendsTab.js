@@ -203,7 +203,19 @@ function PackagingSection({ packaging, windowMonths }) {
                 <tbody>
                   {brand.skus.map((s) => (
                     <tr key={s.product}>
-                      <td className="og-rowlabel">{s.product}</td>
+                      <td className="og-rowlabel">
+                        {s.product}
+                        {s.issues && s.issues.length > 0 && (
+                          <details className="og-issue-dropdown">
+                            <summary>Top issue: {s.top_issue} ({fmtNum(s.top_issue_cases)})</summary>
+                            <ul>
+                              {s.issues.map((iss) => (
+                                <li key={iss.issue}>{iss.issue}: {fmtNum(iss.window_cases)}</li>
+                              ))}
+                            </ul>
+                          </details>
+                        )}
+                      </td>
                       <td>{fmtPct(s.baseline_rate)}</td>
                       <td>{fmtPct(s.window_rate)}</td>
                       <td className={deltaClass(s.delta)}>{fmtDelta(s.delta)}</td>

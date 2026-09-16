@@ -343,6 +343,10 @@ def build_packaging(brands, baseline, window):
     for b in brands:
         pack_classes = [c for c in b["classes"] if "packaging" in c.lower()]
         skus = {}
+        # Per-SKU defect-type breakdown (window only) - which specific packaging issue
+        # (spillage vs. broken cap vs. ...) is actually driving each product's numbers,
+        # since the merged per-month counts above lose that once summed together.
+        issues_by_sku = {}
         for key, per_month in (b.get("product_cats") or {}).items():
             prod, cat = key.split(SEP, 1)
             # product_cats is keyed by category, not class - match the defect vocabulary
@@ -353,6 +357,10 @@ def build_packaging(brands, baseline, window):
             d = skus.setdefault(prod, {})
             for mo, n in per_month.items():
                 d[mo] = d.get(mo, 0) + n
+            cat_wc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in window)
+            if cat_wc:
+                bucket = issues_by_sku.setdefault(prod, {})
+                bucket[cat] = bucket.get(cat, 0) + cat_wc
         bsales, wsales = sum(sales_for(b, baseline)), sum(sales_for(b, window))
         rows = []
         # SKUs that cleared the reporting floor at baseline but fell back below it this
@@ -372,10 +380,14 @@ def build_packaging(brands, baseline, window):
                     })
                 continue
             br, wr = rate(bc, bsales), rate(wc, wsales)
+            issues = sorted(issues_by_sku.get(prod, {}).items(), key=lambda kv: -kv[1])
             rows.append({
                 "product": prod, "baseline_rate": _fmt_pct(br), "window_rate": _fmt_pct(wr),
                 "delta": _fmt_pct(wr - br), "baseline_cases": bc, "window_cases": wc,
                 "months": [per_month.get(e["labels"].get(b["brand"]), 0) for e in window],
+                "top_issue": issues[0][0] if issues else None,
+                "top_issue_cases": issues[0][1] if issues else 0,
+                "issues": [{"issue": c, "window_cases": n} for c, n in issues[:5]],
             })
         rows.sort(key=lambda r: -(r["delta"] or 0))
         dropped.sort(key=lambda r: -r["baseline_cases"])
