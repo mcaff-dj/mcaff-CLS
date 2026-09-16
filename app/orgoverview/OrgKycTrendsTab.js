@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   buildMetrics, buildRatio, buildClassTables, buildWorstTrends, buildPackagingBaseline,
-  buildProductDemographicsBaseline,
+  buildPackagingNarrativeBaseline, buildProductDemographicsBaseline,
 } from './trendMath';
 
 function fmtPct(v) {
@@ -257,12 +257,80 @@ function ProductDemographicsSection({ demographics }) {
   );
 }
 
-function PackagingSection({ packaging, windowMonths }) {
+// Prose read of the packaging table below, built entirely from the same numbers -
+// no causal "manufacturing defect" claim, which needs business judgment ticket counts
+// alone can't supply. Stops at what the data actually shows.
+function overviewSentence(overview) {
+  if (!overview) return null;
+  const cats = overview.top_categories.map((c) =>
+    `${c.category} ${fmtNum(c.baseline_cases)}→${fmtNum(c.window_cases)} cases (${fmtPct(c.baseline_rate)}→${fmtPct(c.window_rate)})`);
+  const verb = overview.window_rate >= overview.baseline_rate ? 'rose' : 'fell';
+  return `Overall packaging & operational complaints ${verb} ${fmtPct(overview.baseline_rate)}→${fmtPct(overview.window_rate)}` +
+    ` (${fmtNum(overview.baseline_cases)}→${fmtNum(overview.window_cases)} cases)${cats.length ? `: ${cats.join('; ')}.` : '.'}`;
+}
+
+function multiDimensionSentence(row, batch) {
+  if (!row) return null;
+  const issues = (row.issues || []).map((iss) => `${iss.issue} (${fmtNum(iss.window_cases)} cases)`);
+  const batchPart = batch ? ` Batch ${batch.batch} accounts for ${fmtNum(batch.window_cases)} of these cases.` : '';
+  return `${row.product} failed across ${row.issues.length} packaging dimensions at once: overall ` +
+    `${fmtPct(row.baseline_rate)}→${fmtPct(row.window_rate)} (${fmtNum(row.baseline_cases)}→${fmtNum(row.window_cases)} cases); ` +
+    `${issues.join(', ')}.${batchPart}`;
+}
+
+function sharpestSentence(sharpest, windowMonths, brandTitle) {
+  if (!sharpest) return null;
+  const from = windowMonths[sharpest.from_month_idx] ?? `month ${sharpest.from_month_idx + 1}`;
+  const to = windowMonths[sharpest.to_month_idx] ?? `month ${sharpest.to_month_idx + 1}`;
+  return `${sharpest.product}: cases jumped ${sharpest.multiplier}x in a single month — ${from}→${to}` +
+    ` (${fmtNum(sharpest.from_cases)}→${fmtNum(sharpest.to_cases)} cases). Largest one-month multiple in ${brandTitle}'s packaging data this window.`;
+}
+
+function persistentSentence(row, windowMonths) {
+  if (!row) return null;
+  return `${row.product} shows up in every month of the window (${windowMonths.join(', ')}) — ` +
+    `${row.top_issue} is the recurring issue (${fmtNum(row.top_issue_cases)} cases).`;
+}
+
+function packagingBottomLine(narr) {
+  if (!narr || !narr.overview) return null;
+  const drivers = Array.from(new Set([narr.multi_dimension?.product, narr.persistent?.product].filter(Boolean)));
+  if (!drivers.length) return null;
+  const verb = narr.overview.window_rate >= narr.overview.baseline_rate ? 'rose' : 'fell';
+  return `${narr.title}: packaging & operational complaints ${verb} ${fmtPct(narr.overview.baseline_rate)}→` +
+    `${fmtPct(narr.overview.window_rate)} this window, led by ${drivers.join(' and ')}.`;
+}
+
+function PackagingSection({ packaging, narrative, windowMonths }) {
+  const narrByBrand = new Map((narrative || []).map((n) => [n.brand, n]));
   return (
     <div className="og-stack">
-      {packaging.map((brand) => (
+      {packaging.map((brand) => {
+        const narr = narrByBrand.get(brand.brand);
+        const overviewText = narr && !narr.pending ? overviewSentence(narr.overview) : null;
+        const bullets = narr && !narr.pending
+          ? [
+              multiDimensionSentence(narr.multi_dimension, narr.multi_dimension_batch),
+              sharpestSentence(narr.sharpest, windowMonths, brand.title),
+              persistentSentence(narr.persistent, windowMonths),
+            ].filter(Boolean)
+          : [];
+        const bottomLine = narr && !narr.pending ? packagingBottomLine(narr) : null;
+        return (
         <div className="og-card" key={brand.brand}>
           <div className="og-card-title">{brand.title} — Packaging Deep Dive</div>
+          {narr && narr.pending && (
+            <p className="og-note">
+              Not populated yet — run the report pipeline (generate_report.py + build_trend_digest.py) to fill the narrative in.
+            </p>
+          )}
+          {overviewText && <p className="og-card-sub" style={{ fontStyle: 'italic' }}>{overviewText}</p>}
+          {bullets.length > 0 && (
+            <ul className="og-trend-list" style={{ marginBottom: 14 }}>
+              {bullets.map((s, i) => <li key={i}>{s}</li>)}
+            </ul>
+          )}
+          {bottomLine && <p className="og-card-sub" style={{ fontWeight: 700, marginBottom: 14 }}>{bottomLine}</p>}
           {brand.skus.length === 0 ? (
             <p className="og-note">No SKU crossed the packaging-issue volume floor this window.</p>
           ) : (
@@ -350,7 +418,8 @@ function PackagingSection({ packaging, windowMonths }) {
             </>
           )}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -404,6 +473,16 @@ function RepeatOffenders({ repeat, windowMonths }) {
 // instead of "not populated yet" per brand, indistinguishable from a real bug.
 function pendingDemographics(digest) {
   return (digest.brands || []).map((b) => ({ brand: b.brand, title: b.title, items: [], pending: true }));
+}
+
+// Same reasoning as pendingDemographics - a digest built before packaging_narrative
+// existed has no placeholder, so the narrative block would just silently not render.
+function pendingPackagingNarrative(digest) {
+  return (digest.brands || []).map((b) => ({
+    brand: b.brand, title: b.title, overview: null,
+    multi_dimension: null, multi_dimension_batch: null, sharpest: null, persistent: null,
+    pending: true,
+  }));
 }
 
 function BaselineFilter({ historyMonths, fromIdx, toIdx, onFromChange, onToChange }) {
@@ -479,6 +558,7 @@ export default function OrgKycTrendsTab() {
       return {
         metrics: digest.metrics, ratio: digest.ratio, classTables: digest.class_tables,
         worstTrends: digest.worst_trends, packaging: digest.packaging,
+        packagingNarrative: digest.packaging_narrative || pendingPackagingNarrative(digest),
         productDemographics: digest.product_demographics
           ? digest.product_demographics
           : pendingDemographics(digest),
@@ -495,9 +575,12 @@ export default function OrgKycTrendsTab() {
       // the rate/share against a different window would show numbers next to a stale item
       // list and mismatched month columns. Repeat Offenders (below) has the same limitation.
       packaging: buildPackagingBaseline(digest.raw, digest.packaging, baselineMonths, windowMonths),
-      // digest.product_demographics is absent on a digest built before this field existed
-      // (pre-regen) - show a per-brand "not populated yet" placeholder instead of crashing
-      // or rendering nothing until the next refresh.
+      // digest.packaging_narrative/product_demographics are absent on a digest built
+      // before those fields existed (pre-regen) - show a per-brand "not populated yet"
+      // placeholder instead of crashing or rendering nothing until the next refresh.
+      packagingNarrative: digest.packaging_narrative
+        ? buildPackagingNarrativeBaseline(digest.raw, digest.packaging_narrative, baselineMonths, windowMonths)
+        : pendingPackagingNarrative(digest),
       productDemographics: digest.product_demographics
         ? buildProductDemographicsBaseline(digest.raw, digest.product_demographics, baselineMonths)
         : pendingDemographics(digest),
@@ -564,7 +647,7 @@ export default function OrgKycTrendsTab() {
 
       <section>
         <h3 className="og-section-title">Packaging Deep Dive</h3>
-        <PackagingSection packaging={computed.packaging} windowMonths={windowMonths} />
+        <PackagingSection packaging={computed.packaging} narrative={computed.packagingNarrative} windowMonths={windowMonths} />
       </section>
 
       <section>

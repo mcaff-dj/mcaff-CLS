@@ -23,6 +23,11 @@ const PACKAGING_WORDS = ['spill', 'broken', 'seal', 'damage', 'leak', 'packaging
 // A suggestion/recommendation isn't a complaint - excluded from the class comparison
 // regardless of volume, not because it fails the noise floor below.
 const EXCLUDED_CLASSES = new Set(['Product Suggestion/Recommendation']);
+// Every demographic field build_product_demographics.py tracks per (product, category) -
+// needed in full, not just the fields that survived its volume floor (see
+// buildProductDemographicsBaseline: baseline_cases is a max over ALL of these, mirroring
+// build_trend_digest.py's own loop, which updates it before that floor check skips a field).
+const DEMO_FIELDS = ['age', 'gender', 'skin_type', 'first_time_regular'];
 
 function rate(count, sales) {
   if (!sales) return null;
@@ -315,26 +320,68 @@ function buildPackagingBaseline(raw, packaging, baselineMonths, windowMonths) {
   });
 }
 
+function buildPackagingNarrativeBaseline(raw, packagingNarrative, baselineMonths, windowMonths) {
+  return packagingNarrative.map((brandNarr) => {
+    const brand = raw.find((r) => r.brand === brandNarr.brand);
+    const bsales = sum(salesFor(brand, baselineMonths));
+    const wsales = sum(salesFor(brand, windowMonths));
+
+    // multi_dimension/persistent are SKU rows, same shape as buildPackagingBaseline's - only
+    // their baseline side needs recomputing, window side (months/issues/window_cases) stays
+    // pinned to what build_packaging_narrative.py found. delta is recomputed from a FRESH
+    // window rate, not the already-3dp-rounded row.window_rate - subtracting a rounded
+    // value from an unrounded one double-rounds and drifts from Python's single rounding.
+    const recomputeSku = (row) => {
+      if (!row) return row;
+      const perMonth = skuPackagingPerMonth(brand, row.product);
+      const bc = sum(baselineMonths.map((m) => perMonth[m] ?? 0));
+      const wc = sum(windowMonths.map((m) => perMonth[m] ?? 0));
+      const br = rate(bc, bsales);
+      const wr = rate(wc, wsales);
+      return { ...row, baseline_rate: fmtPct3(br), baseline_cases: bc, delta: fmtPct3(wr - br) };
+    };
+
+    let overview = brandNarr.overview;
+    if (overview) {
+      const clsPerMonth = (brand.classes || {})[overview.class] || {};
+      const bc = sum(baselineMonths.map((m) => clsPerMonth[m] ?? 0));
+      const topCategories = overview.top_categories.map((cat) => {
+        const perMonth = (brand.cats || {})[`${overview.class}${SEP}${cat.category}`] || {};
+        const cbc = sum(baselineMonths.map((m) => perMonth[m] ?? 0));
+        return { ...cat, baseline_cases: cbc, baseline_rate: fmtPct3(rate(cbc, bsales)) };
+      });
+      overview = { ...overview, baseline_cases: bc, baseline_rate: fmtPct3(rate(bc, bsales)), top_categories: topCategories };
+    }
+
+    return {
+      ...brandNarr, overview,
+      multi_dimension: recomputeSku(brandNarr.multi_dimension),
+      persistent: recomputeSku(brandNarr.persistent),
+    };
+  });
+}
+
 function buildProductDemographicsBaseline(raw, productDemographics, baselineMonths) {
   return productDemographics.map((brandDemo) => {
     const brand = raw.find((r) => r.brand === brandDemo.brand);
     const productDemo = (brand && brand.product_demo) || {};
     const items = brandDemo.items.map((item) => {
-      const fields = {};
-      let baselineCases = 0;
-      for (const [field, f] of Object.entries(item.fields)) {
-        // The field's baseline TOTAL (every value, not just top_value) is needed for a
-        // share - recompute it the same way build_trend_digest.py does, from every key
-        // sharing this (product, category, field) prefix.
+      const btotalFor = (field) => {
         const prefix = `${item.product}${SEP}${item.category}${SEP}${field}${SEP}`;
-        let btotal = 0;
+        let total = 0;
         for (const key of Object.keys(productDemo)) {
           if (!key.startsWith(prefix)) continue;
-          btotal += sum(baselineMonths.map((m) => productDemo[key][m] ?? 0));
+          total += sum(baselineMonths.map((m) => productDemo[key][m] ?? 0));
         }
-        baselineCases = Math.max(baselineCases, btotal);
-        const topKey = prefix + f.top_value;
-        const bc = sum(baselineMonths.map((m) => (productDemo[topKey] || {})[m] ?? 0));
+        return total;
+      };
+      // Every field's total, even one below build_product_demographics.py's own volume
+      // floor (and so absent from item.fields) - baseline_cases is a max over ALL of them.
+      const baselineCases = Math.max(0, ...DEMO_FIELDS.map(btotalFor));
+      const fields = {};
+      for (const [field, f] of Object.entries(item.fields)) {
+        const btotal = btotalFor(field);
+        const bc = sum(baselineMonths.map((m) => (productDemo[`${item.product}${SEP}${item.category}${SEP}${field}${SEP}${f.top_value}`] || {})[m] ?? 0));
         fields[field] = { ...f, baseline_share_pct: btotal ? fmtPct3((bc / btotal) * 100.0) : null };
       }
       return { ...item, baseline_cases: baselineCases, fields };
@@ -352,5 +399,6 @@ module.exports = {
   buildClassTables,
   buildWorstTrends,
   buildPackagingBaseline,
+  buildPackagingNarrativeBaseline,
   buildProductDemographicsBaseline,
 };

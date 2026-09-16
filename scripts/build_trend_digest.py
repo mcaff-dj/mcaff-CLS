@@ -348,76 +348,174 @@ def build_worst_trends(brands, baseline, window):
     return {"baseline_label": baseline_label, "window_label": window_label, "groups": groups}
 
 
+def _packaging_for_brand(b, baseline, window):
+    """One brand's packaging rows, batches and dropped-off SKUs - shared by build_packaging()
+    (which truncates rows to TOP_PACKAGING_SKUS for the table) and
+    build_packaging_narrative() (which needs the full, untruncated list: a SKU with a real
+    single-month spike or every-month persistence can still rank outside the top-by-delta
+    cut the table shows)."""
+    pack_classes = [c for c in b["classes"] if "packaging" in c.lower()]
+    skus = {}
+    # Per-SKU defect-type breakdown (window only) - which specific packaging issue
+    # (spillage vs. broken cap vs. ...) is actually driving each product's numbers,
+    # since the merged per-month counts above lose that once summed together.
+    issues_by_sku = {}
+    for key, per_month in (b.get("product_cats") or {}).items():
+        prod, cat = key.split(SEP, 1)
+        # product_cats is keyed by category, not class - match the defect vocabulary
+        # the packaging class actually uses in this data.
+        if not any(w in cat.lower() for w in
+                   ("spill", "broken", "seal", "damage", "leak", "packaging", "tamper")):
+            continue
+        d = skus.setdefault(prod, {})
+        for mo, n in per_month.items():
+            d[mo] = d.get(mo, 0) + n
+        cat_wc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in window)
+        if cat_wc:
+            bucket = issues_by_sku.setdefault(prod, {})
+            bucket[cat] = bucket.get(cat, 0) + cat_wc
+    bsales, wsales = sum(sales_for(b, baseline)), sum(sales_for(b, window))
+    rows = []
+    # SKUs that cleared the reporting floor at baseline but fell back below it this
+    # window - i.e. they'd have been a named offender before, and have gone quiet
+    # since. Surfaced separately so a SKU doesn't just silently vanish from the table;
+    # a CAPA landing and a SKU merely falling below the volume cutoff look identical
+    # unless this is called out.
+    dropped = []
+    for prod, per_month in skus.items():
+        bc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in baseline)
+        wc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in window)
+        if wc < MIN_WINDOW_CASES_SKU:
+            if bc >= MIN_WINDOW_CASES_SKU:
+                dropped.append({
+                    "product": prod, "baseline_rate": _fmt_pct(rate(bc, bsales)),
+                    "baseline_cases": bc, "window_cases": wc,
+                })
+            continue
+        br, wr = rate(bc, bsales), rate(wc, wsales)
+        issues = sorted(issues_by_sku.get(prod, {}).items(), key=lambda kv: -kv[1])
+        rows.append({
+            "product": prod, "baseline_rate": _fmt_pct(br), "window_rate": _fmt_pct(wr),
+            "delta": _fmt_pct(wr - br), "baseline_cases": bc, "window_cases": wc,
+            "months": [per_month.get(e["labels"].get(b["brand"]), 0) for e in window],
+            "top_issue": issues[0][0] if issues else None,
+            "top_issue_cases": issues[0][1] if issues else 0,
+            "issues": [{"issue": c, "window_cases": n} for c, n in issues[:5]],
+        })
+    rows.sort(key=lambda r: -(r["delta"] or 0))
+    dropped.sort(key=lambda r: -r["baseline_cases"])
+
+    batch_rows = []
+    for key, per_month in (b.get("batches") or {}).items():
+        prod, batch = key.split(SEP, 1)
+        wc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in window)
+        if wc < MIN_WINDOW_CASES_SKU:
+            continue
+        batch_rows.append({"product": prod, "batch": batch, "window_cases": wc,
+                           "months": [per_month.get(e["labels"].get(b["brand"]), 0) for e in window]})
+    batch_rows.sort(key=lambda r: -r["window_cases"])
+    return {"brand": b["brand"], "title": b["title"], "packaging_classes": pack_classes,
+            "rows": rows, "batches": batch_rows, "dropped": dropped}
+
+
 def build_packaging(brands, baseline, window):
     """Packaging deep dive: SKU-level rates within each brand's own packaging query class,
     driven off the class label rather than a hardcoded list of defect names, plus the
     batch-level concentrations the deck flags by hand."""
     out = []
     for b in brands:
-        pack_classes = [c for c in b["classes"] if "packaging" in c.lower()]
-        skus = {}
-        # Per-SKU defect-type breakdown (window only) - which specific packaging issue
-        # (spillage vs. broken cap vs. ...) is actually driving each product's numbers,
-        # since the merged per-month counts above lose that once summed together.
-        issues_by_sku = {}
-        for key, per_month in (b.get("product_cats") or {}).items():
-            prod, cat = key.split(SEP, 1)
-            # product_cats is keyed by category, not class - match the defect vocabulary
-            # the packaging class actually uses in this data.
-            if not any(w in cat.lower() for w in
-                       ("spill", "broken", "seal", "damage", "leak", "packaging", "tamper")):
-                continue
-            d = skus.setdefault(prod, {})
-            for mo, n in per_month.items():
-                d[mo] = d.get(mo, 0) + n
-            cat_wc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in window)
-            if cat_wc:
-                bucket = issues_by_sku.setdefault(prod, {})
-                bucket[cat] = bucket.get(cat, 0) + cat_wc
-        bsales, wsales = sum(sales_for(b, baseline)), sum(sales_for(b, window))
-        rows = []
-        # SKUs that cleared the reporting floor at baseline but fell back below it this
-        # window - i.e. they'd have been a named offender before, and have gone quiet
-        # since. Surfaced separately so a SKU doesn't just silently vanish from the table;
-        # a CAPA landing and a SKU merely falling below the volume cutoff look identical
-        # unless this is called out.
-        dropped = []
-        for prod, per_month in skus.items():
-            bc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in baseline)
-            wc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in window)
-            if wc < MIN_WINDOW_CASES_SKU:
-                if bc >= MIN_WINDOW_CASES_SKU:
-                    dropped.append({
-                        "product": prod, "baseline_rate": _fmt_pct(rate(bc, bsales)),
-                        "baseline_cases": bc, "window_cases": wc,
-                    })
-                continue
-            br, wr = rate(bc, bsales), rate(wc, wsales)
-            issues = sorted(issues_by_sku.get(prod, {}).items(), key=lambda kv: -kv[1])
-            rows.append({
-                "product": prod, "baseline_rate": _fmt_pct(br), "window_rate": _fmt_pct(wr),
-                "delta": _fmt_pct(wr - br), "baseline_cases": bc, "window_cases": wc,
-                "months": [per_month.get(e["labels"].get(b["brand"]), 0) for e in window],
-                "top_issue": issues[0][0] if issues else None,
-                "top_issue_cases": issues[0][1] if issues else 0,
-                "issues": [{"issue": c, "window_cases": n} for c, n in issues[:5]],
-            })
-        rows.sort(key=lambda r: -(r["delta"] or 0))
-        dropped.sort(key=lambda r: -r["baseline_cases"])
+        p = _packaging_for_brand(b, baseline, window)
+        out.append({"brand": p["brand"], "title": p["title"], "packaging_classes": p["packaging_classes"],
+                    "skus": p["rows"][:TOP_PACKAGING_SKUS], "batches": p["batches"][:10],
+                    "dropped": p["dropped"][:5]})
+    return out
 
-        batch_rows = []
-        for key, per_month in (b.get("batches") or {}).items():
-            prod, batch = key.split(SEP, 1)
-            wc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in window)
-            if wc < MIN_WINDOW_CASES_SKU:
+
+def build_packaging_narrative(brands, baseline, window):
+    """Prose read of the Packaging Deep Dive table above: the overall class-level trend and
+    its top defect categories, the SKU currently failing across the most distinct defect
+    types at once, the sharpest single-month jump anywhere in the window, and a SKU flagged
+    every month running. Searches the FULL per-SKU rows _packaging_for_brand() computes, not
+    just the top-by-delta slice the table shows - a SKU with a real single-month spike or
+    every-month persistence can rank outside that cut on baseline-vs-window delta alone.
+    Stops at the numbers, no causal "manufacturing defect" claim, which needs business
+    judgment ticket counts alone can't supply."""
+    out = []
+    for b in brands:
+        bsales, wsales = sum(sales_for(b, baseline)), sum(sales_for(b, window))
+        pkg = _packaging_for_brand(b, baseline, window)
+        skus = pkg["rows"]
+        batches = pkg["batches"]
+
+        overview = None
+        for cls in pkg["packaging_classes"]:
+            bc = sum(counts_for(b["classes"], cls, b["brand"], baseline))
+            wc = sum(counts_for(b["classes"], cls, b["brand"], window))
+            if not bc and not wc:
                 continue
-            batch_rows.append({"product": prod, "batch": batch, "window_cases": wc,
-                               "months": [per_month.get(e["labels"].get(b["brand"]), 0) for e in window]})
-        batch_rows.sort(key=lambda r: -r["window_cases"])
-        out.append({"brand": b["brand"], "title": b["title"],
-                    "packaging_classes": pack_classes,
-                    "skus": rows[:TOP_PACKAGING_SKUS], "batches": batch_rows[:10],
-                    "dropped": dropped[:5]})
+            cats = []
+            for key, per_month in (b.get("cats") or {}).items():
+                k_cls, cat = key.split(SEP, 1)
+                if k_cls != cls:
+                    continue
+                cbc = sum(counts_for(b["cats"], key, b["brand"], baseline))
+                cwc = sum(counts_for(b["cats"], key, b["brand"], window))
+                if cwc < MIN_WINDOW_CASES_SKU:
+                    continue
+                cats.append({
+                    "category": cat, "baseline_cases": cbc, "window_cases": cwc,
+                    "baseline_rate": _fmt_pct(rate(cbc, bsales)), "window_rate": _fmt_pct(rate(cwc, wsales)),
+                })
+            cats.sort(key=lambda c: -c["window_cases"])
+            overview = {
+                "class": cls, "baseline_rate": _fmt_pct(rate(bc, bsales)), "window_rate": _fmt_pct(rate(wc, wsales)),
+                "baseline_cases": bc, "window_cases": wc, "top_categories": cats[:3],
+            }
+            break  # a brand has exactly one packaging-labelled class
+
+        # "Failed across every dimension at once" - the SKU with the most distinct defect
+        # categories clearing the floor simultaneously, not just the single top one.
+        multi_dimension = max(skus, key=lambda s: len(s.get("issues") or []), default=None)
+        if multi_dimension and len(multi_dimension.get("issues") or []) < 2:
+            multi_dimension = None
+        multi_dimension_batch = None
+        if multi_dimension:
+            for bt in batches:
+                if bt["product"] == multi_dimension["product"]:
+                    multi_dimension_batch = bt
+                    break
+
+        # Sharpest single-month jump: month-over-month multiple within the window itself,
+        # not baseline vs. window - a SKU can clear the delta floor gradually and still hide
+        # a single bad month, which is what this catches instead.
+        sharpest = None
+        for s in skus:
+            months = s.get("months") or []
+            for i in range(1, len(months)):
+                prev, cur = months[i - 1], months[i]
+                if cur < MIN_WINDOW_CASES_SKU or cur <= prev or not prev:
+                    continue
+                mult = cur / prev
+                if sharpest is None or mult > sharpest["multiplier"]:
+                    sharpest = {
+                        "product": s["product"], "from_month_idx": i - 1, "to_month_idx": i,
+                        "from_cases": prev, "to_cases": cur, "multiplier": round(mult, 1),
+                    }
+
+        # Flagged every month in the window running - never drops out, as opposed to a
+        # one-off spike.
+        persistent = None
+        for s in skus:
+            months = s.get("months") or []
+            if len(months) == len(window) and all(m > 0 for m in months):
+                if persistent is None or s["window_cases"] > persistent["window_cases"]:
+                    persistent = s
+
+        out.append({
+            "brand": b["brand"], "title": b["title"], "overview": overview,
+            "multi_dimension": multi_dimension, "multi_dimension_batch": multi_dimension_batch,
+            "sharpest": sharpest, "persistent": persistent,
+        })
     return out
 
 
@@ -586,6 +684,7 @@ def main():
     # The default (unfiltered) view uses the most recent slice of history as its baseline -
     # identical to what the old fixed-slice shared_axis used to hand back directly.
     baseline = history[-args.baseline:]
+    packaging = build_packaging(brands, baseline, window)
     digest = {
         "window_months": [pretty(e) for e in window],
         "baseline_months": [pretty(e) for e in baseline],
@@ -599,7 +698,8 @@ def main():
         "ratio": build_ratio_table(brands, baseline, window),
         "class_tables": build_class_tables(brands, baseline, window),
         "worst_trends": build_worst_trends(brands, baseline, window),
-        "packaging": build_packaging(brands, baseline, window),
+        "packaging": packaging,
+        "packaging_narrative": build_packaging_narrative(brands, baseline, window),
         "repeat_offenders": build_repeat_offenders(brands, baseline, window),
         "product_demographics": build_product_demographics(brands, baseline, window),
         "raw": build_raw(brands, history, window),
