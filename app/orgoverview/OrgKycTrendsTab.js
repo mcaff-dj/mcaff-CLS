@@ -35,7 +35,7 @@ function peakEaseNote(monthRates, windowMonths) {
   const [peakIdx, peakVal] = present.reduce((a, b) => (b[1] > a[1] ? b : a));
   const [lastIdx, lastVal] = present[present.length - 1];
   if (lastIdx === peakIdx || lastVal >= peakVal * 0.8) return null;
-  return `eased from peak ${fmtPct(peakVal)} in ${windowMonths[peakIdx]}`;
+  return `eased from peak ${fmtPct(peakVal)} (${windowMonths[peakIdx]})`;
 }
 
 function MetricTables({ metrics, windowMonths }) {
@@ -280,49 +280,45 @@ function PackagingSection({ packaging, windowMonths }) {
 
 function RepeatOffenders({ repeat, windowMonths }) {
   return (
-    <>
       <div className="og-card">
         <div className="og-card-title">Repeat Offenders — Couriers</div>
         <p className="og-card-sub">Window Rate = total complaint cases across the window &divide; total orders shipped in the window, per courier.</p>
-        <div className="og-grid-2">
-          {repeat.couriers.map((brand) => (
-            <div key={brand.brand}>
-              <div className="og-card-sub" style={{ fontWeight: 600, marginBottom: 8 }}>{brand.title}</div>
-              {brand.rows.length === 0 ? (
-                <p className="og-note">No courier crossed the volume floor this window.</p>
-              ) : (
-                <div className="og-table-scroll">
-                  <table className="og-table">
-                    <thead>
-                      <tr>
-                        <th>Courier</th>
-                        <th>Window Rate</th>
-                        {windowMonths.map((m) => <th key={m}>{m}</th>)}
-                        <th>Top Issue</th>
-                        <th>Trend</th>
+        {repeat.couriers.map((brand) => (
+          <div key={brand.brand} style={{ marginTop: 12 }}>
+            <div className="og-card-sub" style={{ fontWeight: 600, marginBottom: 8 }}>{brand.title}</div>
+            {brand.rows.length === 0 ? (
+              <p className="og-note">No courier crossed the volume floor this window.</p>
+            ) : (
+              <div className="og-table-scroll">
+                <table className="og-table">
+                  <thead>
+                    <tr>
+                      <th>Courier</th>
+                      <th>Window Rate</th>
+                      {windowMonths.map((m) => <th key={m}>{m}</th>)}
+                      <th className="og-wrap-cell">Top Issue</th>
+                      <th className="og-wrap-cell">Trend</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {brand.rows.map((r) => (
+                      <tr key={r.courier}>
+                        <td className="og-rowlabel">{r.courier}</td>
+                        <td>{fmtPct(r.window_rate)}</td>
+                        {r.months.map((n, i) => (
+                          <td key={i}>{fmtNum(n)} <span className="og-card-sub">({fmtPct(r.month_rates?.[i])})</span></td>
+                        ))}
+                        <td className="og-wrap-cell">{r.top_issue ? `${r.top_issue} (${fmtNum(r.top_issue_cases)})` : '–'}</td>
+                        <td className="og-note og-wrap-cell">{peakEaseNote(r.month_rates || [], windowMonths) || '–'}</td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {brand.rows.map((r) => (
-                        <tr key={r.courier}>
-                          <td className="og-rowlabel">{r.courier}</td>
-                          <td>{fmtPct(r.window_rate)}</td>
-                          {r.months.map((n, i) => (
-                            <td key={i}>{fmtNum(n)} <span className="og-card-sub">({fmtPct(r.month_rates?.[i])})</span></td>
-                          ))}
-                          <td>{r.top_issue ? `${r.top_issue} (${fmtNum(r.top_issue_cases)})` : '–'}</td>
-                          <td className="og-note">{peakEaseNote(r.month_rates || [], windowMonths) || '–'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        ))}
       </div>
-    </>
   );
 }
 

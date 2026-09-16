@@ -893,6 +893,9 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
 .og-table th { background: var(--page); text-align: right; padding: 7px 10px; border: 1px solid var(--grid); font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
 .og-table th:first-child { text-align: left; }
 .og-table td { text-align: right; padding: 7px 10px; border: 1px solid var(--grid); color: var(--text-secondary); white-space: nowrap; }
+/* Long free-text cells (Top Issue, Trend) - let these wrap instead of forcing the whole
+   table wider than the screen just to keep one cell on a single line. */
+.og-wrap-cell { white-space: normal !important; max-width: 170px; text-align: left !important; }
 .og-rowlabel { text-align: left !important; font-weight: 600; color: var(--text-primary); white-space: normal !important; }
 .og-total-row td { font-weight: 700; color: var(--text-primary); background: color-mix(in srgb, var(--text-primary) 4%, transparent); }
 .og-up { color: var(--bad); font-weight: 600; }
