@@ -736,7 +736,7 @@ def _build_prodwise_heatmap(capped):
         spark_svg, spark_json = _prodwise_sparkline(r["months"])
         body_rows.append(
             f"<tr class='{z}' data-hm-spark='{spark_json}'>"
-            f"<td class='rowlabel'>{h_enc(r['product'])}</td>{''.join(cells)}"
+            f"<td class='rowlabel' title=\"{h_enc(r['product'])}\">{h_enc(r['product'])}</td>{''.join(cells)}"
             f"<td class='num' style='min-width:80px'>{spark_svg}</td></tr>"
         )
 
@@ -752,7 +752,7 @@ def _build_prodwise_heatmap(capped):
         "<div class='pivot-wrap'><div class='pivot-title'>Product wise NPS &mdash; Monthly Heatmap</div>"
         "<p class='desc'>NPS% = (Promoters &minus; Detractors) &divide; Total &times; 100, per product per month. "
         "Color midpoint is 50 (excellent NPS threshold); blank cells had no survey responses that month.</p>"
-        f"{legend}<div class='pivot-scroll'><table class='pivot-table'><thead><tr>"
+        f"{legend}<div class='pivot-scroll'><table class='pivot-table nps-heatmap-table'><thead><tr>"
         f"<th class='corner' rowspan='2'>Product</th>{month_group_head}<th rowspan='2'>Trend</th></tr>"
         f"<tr>{sub_head}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
     )

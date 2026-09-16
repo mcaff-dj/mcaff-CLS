@@ -115,6 +115,13 @@
   .xf-row.active-filter td.rowlabel{font-weight:700;color:var(--text-primary);}
   .pivot-table tr.total-row td{font-weight:700;border-top:2px solid var(--text-primary);background:var(--surface-card);}
   .pivot-table td.pct{color:var(--text-secondary);font-size:11px;}
+  /* Product-wise NPS heatmap has too many columns (2 per month + Product + Trend) to fit
+     nowrap - table-layout:fixed forces it to stay within the page width instead of spilling
+     into pivot-scroll's horizontal scrollbar, wrapping the Product name and sub-headers instead. */
+  .nps-heatmap-table{table-layout:fixed;font-size:10.5px;}
+  .nps-heatmap-table th,.nps-heatmap-table td{padding:4px 5px;white-space:normal;}
+  .nps-heatmap-table th.corner,.nps-heatmap-table td.rowlabel{width:130px;word-break:break-word;}
+  .nps-heatmap-table th.sub-hdr{font-size:9px;line-height:1.15;}
 
   section{margin-bottom:32px;max-width:100%;min-width:0;}
   section h2{font-size:16px;margin:0 0 4px;}
