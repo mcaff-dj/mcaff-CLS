@@ -544,6 +544,7 @@ export default function NpsCallingClient() {
   // Leaves only ever come from whichever branch pickBranch chose (visibleDispositionNodes is
   // filtered to it), so cross-branch cleanup here is just a belt-and-suspenders guard.
   const toggleReason = (id, path) => {
+    const willCheck = !selectedReasons.has(id);
     setSelectedReasons((prev) => {
       const next = new Map(prev);
       if (next.has(id)) {
@@ -557,6 +558,15 @@ export default function NpsCallingClient() {
       next.set(id, { id, path });
       return next;
     });
+    // Pre-fill "which product?" with this ticket's own known product(s) - via
+    // product_name_list, already split into productOptions below - the moment a
+    // PRODUCT_FOLLOWUP_CATEGORIES reason is checked, instead of starting blank and making the
+    // agent re-pick what the data already told us. Only sets the initial default (guarded by
+    // `!prev[id]`) - never overwrites a pick the agent already made, e.g. re-checking after an
+    // uncheck, or a second reason under the same category with its own products.
+    if (willCheck && productOptions.length > 0 && path.some((p) => PRODUCT_FOLLOWUP_CATEGORIES.includes(p))) {
+      setProductsByReason((prev) => (prev[id] ? prev : { ...prev, [id]: productOptions }));
+    }
   };
 
   // Every checked leaf's breadcrumb, joined "Category > Reason", one per selection - lets one
