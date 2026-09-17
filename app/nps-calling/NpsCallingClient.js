@@ -211,12 +211,27 @@ function isUndisposed(t) {
 
 // Top-level disposition categories whose checked children need "which product?" follow-up -
 // same inline picker either way, just two different admin-configured category labels feeding
-// it: "Product Related Issue" under Delivery's tree, "Query Category" under Product's tree
-// (its three reasons - Product not effective / Reacted to Skin/Acne / Texture Issue - are all
-// per-product complaints same as Delivery's). Matched by label, not by lead_type, since
-// DispositionChecklist itself is lead_type-agnostic - whichever tree useProcessDispositions
-// handed it (see dispForTicket/visibleDispositionNodes below) is rendered the same way.
-const PRODUCT_FOLLOWUP_CATEGORIES = ['Product Related Issue', 'Query Category'];
+// it: "Product Related Issue" under Delivery's tree, "Query Class" under Product's tree (an
+// admin-renamed/restructured "Query Category" - it now nests two sub-groups, "Product issue"
+// and "Packaging issue", each with their own leaves - matched at the top level so any leaf
+// under EITHER sub-group still triggers the follow-up, without needing a matching entry per
+// sub-group name). Matched by label, not by lead_type, since DispositionChecklist itself is
+// lead_type-agnostic - whichever tree useProcessDispositions handed it (see dispForTicket/
+// visibleDispositionNodes below) is rendered the same way.
+//
+// This is the second time an admin has renamed this exact top-level category out from under a
+// hardcoded label match ("Product Related Issue" was fine, "Query Category" silently stopped
+// matching once renamed to "Query Class") - isProductFollowUpPath below does a normalized
+// (trimmed, case-insensitive) compare so whitespace/casing alone can't cause a repeat, but a
+// genuine rename still will. If this breaks a third time, the fix belongs in the admin editor
+// itself (a "triggers product follow-up" checkbox on the node in CallingAdminPanel.js, stored
+// as a real column on calling_process_dispositions) rather than another label to chase here.
+const PRODUCT_FOLLOWUP_CATEGORIES = ['Product Related Issue', 'Query Class'];
+
+function isProductFollowUpPath(path) {
+  const normalized = PRODUCT_FOLLOWUP_CATEGORIES.map((c) => c.trim().toLowerCase());
+  return (path || []).some((p) => normalized.includes(String(p || '').trim().toLowerCase()));
+}
 
 // Recursive multi-select over the admin-configured disposition tree (calling_process_
 // dispositions, shared across every process - see useProcessDispositions). A detractor often
@@ -273,7 +288,7 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], produ
         // picker below; a ticket with none (nothing to pick from - the ticket's own product name
         // never made it into product_name_list) still must not skip the question entirely, so it
         // falls back to a free-text box instead of silently showing nothing.
-        const showProductFollowUp = checked && path.some((p) => PRODUCT_FOLLOWUP_CATEGORIES.includes(p));
+        const showProductFollowUp = checked && isProductFollowUpPath(path);
         const picked = productsByReason[n.id] || [];
         return (
           <div key={n.id}>
@@ -564,7 +579,7 @@ export default function NpsCallingClient() {
     // agent re-pick what the data already told us. Only sets the initial default (guarded by
     // `!prev[id]`) - never overwrites a pick the agent already made, e.g. re-checking after an
     // uncheck, or a second reason under the same category with its own products.
-    if (willCheck && productOptions.length > 0 && path.some((p) => PRODUCT_FOLLOWUP_CATEGORIES.includes(p))) {
+    if (willCheck && productOptions.length > 0 && isProductFollowUpPath(path)) {
       setProductsByReason((prev) => (prev[id] ? prev : { ...prev, [id]: productOptions }));
     }
   };
@@ -610,7 +625,7 @@ export default function NpsCallingClient() {
   // contributes nothing, same "only what's relevant" shape used throughout this file).
   const affectedProductsText = useMemo(
     () => Array.from(selectedReasons.values())
-      .filter((r) => r.path.some((p) => PRODUCT_FOLLOWUP_CATEGORIES.includes(p)))
+      .filter((r) => isProductFollowUpPath(r.path))
       .map((r) => {
         const products = productsByReason[r.id];
         return products && products.length ? `${r.path[r.path.length - 1]}: ${products.join(', ')}` : null;
