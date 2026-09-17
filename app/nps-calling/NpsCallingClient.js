@@ -229,10 +229,12 @@ const PRODUCT_FOLLOWUP_CATEGORIES = ['Product Related Issue', 'Query Category'];
 // breadcrumb (e.g. ['Delivery Related', 'Late delivery']) for saveDisposition to join on.
 //
 // productOptions/productsByReason/onProductsChange: only meaningful under one of
-// PRODUCT_FOLLOWUP_CATEGORIES above - a checked reason there gets its OWN inline product picker
-// right below it (rather than one picker for the whole category), since different products on
-// the same order can each have a different problem and the agent needs to say which product
-// goes with which reason.
+// PRODUCT_FOLLOWUP_CATEGORIES above - a checked reason there gets its OWN inline "which
+// product?" follow-up right below it (rather than one for the whole category), since different
+// products on the same order can each have a different problem and the agent needs to say which
+// product goes with which reason. Always asked once checked, never skipped for lack of data -
+// productOptions empty (this ticket's own product_name_list has nothing usable) falls back to a
+// free-text box instead of the picker (see showProductFollowUp below).
 function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], productOptions = [], productsByReason = {}, onProductsChange }) {
   if (!nodes || !nodes.length) {
     return <p className="text-[12px] text-zinc-500">No disposition options configured yet - an admin can add some under Admin Panel.</p>;
@@ -266,7 +268,12 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], produ
           );
         }
         const checked = selected.has(n.id);
-        const showProductPicker = checked && productOptions.length > 0 && path.some((p) => PRODUCT_FOLLOWUP_CATEGORIES.includes(p));
+        // Always asked once checked - not gated on productOptions.length. Most tickets carry
+        // their own product_name_list (order/response line items), so the common case is the
+        // picker below; a ticket with none (nothing to pick from - the ticket's own product name
+        // never made it into product_name_list) still must not skip the question entirely, so it
+        // falls back to a free-text box instead of silently showing nothing.
+        const showProductFollowUp = checked && path.some((p) => PRODUCT_FOLLOWUP_CATEGORIES.includes(p));
         const picked = productsByReason[n.id] || [];
         return (
           <div key={n.id}>
@@ -282,20 +289,37 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], produ
               />
               {n.label}
             </label>
-            {showProductPicker && (
+            {showProductFollowUp && (
               <div className="pl-6 pb-1.5">
-                <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
-                  Which product(s)? {picked.length ? `· ${picked.length} selected` : ''}
-                </label>
-                <select
-                  multiple
-                  value={picked}
-                  onChange={(e) => onProductsChange(n.id, Array.from(e.target.selectedOptions, (o) => o.value))}
-                  size={Math.min(productOptions.length, 4)}
-                  className="w-full text-[12px] bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 p-1"
-                >
-                  {productOptions.map((p) => <option key={p} value={p}>{p}</option>)}
-                </select>
+                {productOptions.length > 0 ? (
+                  <>
+                    <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
+                      Which product(s)? {picked.length ? `· ${picked.length} selected` : ''}
+                    </label>
+                    <select
+                      multiple
+                      value={picked}
+                      onChange={(e) => onProductsChange(n.id, Array.from(e.target.selectedOptions, (o) => o.value))}
+                      size={Math.min(productOptions.length, 4)}
+                      className="w-full text-[12px] bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 p-1"
+                    >
+                      {productOptions.map((p) => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  </>
+                ) : (
+                  <>
+                    <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
+                      Which product? (not on this ticket's own product list - type it in)
+                    </label>
+                    <input
+                      type="text"
+                      value={picked[0] || ''}
+                      onChange={(e) => onProductsChange(n.id, e.target.value ? [e.target.value] : [])}
+                      placeholder="Product name"
+                      className="w-full text-[12px] bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 p-1.5"
+                    />
+                  </>
+                )}
               </div>
             )}
           </div>
