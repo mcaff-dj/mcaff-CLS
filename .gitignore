@@ -28,7 +28,9 @@ data/hyphen_primary_cache.json
 ~$*.xlsx
 .vercel
 .env*
+env.local
 .claude/settings.local.json
+.DS_Store
 
 # Subagent-driven-development scratch: task briefs, reports, review packages, ledgers
 .superpowers/
