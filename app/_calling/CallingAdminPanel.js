@@ -1057,7 +1057,7 @@ function DispRow({ d, list, index, parentId, depth, disp }) {
 // Recursive: renders d's own row, then (if expanded) every child at depth+1 plus an "add child"
 // input scoped to d - so any option, at any depth, can grow its own sub-options the same way a
 // top-level one does.
-function DispNode({ d, list, index, parentId, depth, disp, allowInputTypeControl }) {
+function DispNode({ d, list, index, parentId, depth, disp, allowInputTypeControl, allowProductFollowupControl }) {
   const { expandedDispIds, newChildDrafts, setNewChildDrafts, addDisposition, savingDisposition, saveDispositionEdit } = disp;
   const childrenInputType = d.childrenInputType || 'single';
   return (
@@ -1080,8 +1080,34 @@ function DispNode({ d, list, index, parentId, depth, disp, allowInputTypeControl
               </select>
             </div>
           )}
+          {allowProductFollowupControl && (
+            // Real, admin-configurable replacement for what used to be a hardcoded label match
+            // in app/nps-calling/NpsCallingClient.js (isProductFollowUpPath) - that broke every
+            // time this category got renamed (Product Related Issue was fine; Query Category ->
+            // Query Class silently stopped matching). This flag is walked as an ANCESTOR check
+            // there (see DispositionChecklist's ancestorNeedsProduct), so ticking it once on a
+            // top-level category (e.g. "Query Class") covers every descendant leaf underneath it,
+            // including ones nested under a further sub-category (e.g. "Packaging issue") - no
+            // need to flag every leaf individually, and no need to re-flag anything after a
+            // rename.
+            <div className="flex items-center gap-2" style={{ marginLeft: (depth + 1) * 32 }}>
+              <span className="w-[13px]" />
+              <label className="flex items-center gap-1.5 text-[11px] font-semibold text-zinc-500 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!!d.triggersProductFollowup}
+                  onChange={(e) => saveDispositionEdit(d.id, { triggersProductFollowup: e.target.checked })}
+                  className="accent-indigo-500 w-3.5 h-3.5"
+                />
+                Ask &quot;which product?&quot; when a descendant reason is checked
+              </label>
+            </div>
+          )}
           {d.children.map((c, ci) => (
-            <DispNode key={c.id} d={c} list={d.children} index={ci} parentId={d.id} depth={depth + 1} disp={disp} allowInputTypeControl={allowInputTypeControl} />
+            <DispNode
+              key={c.id} d={c} list={d.children} index={ci} parentId={d.id} depth={depth + 1} disp={disp}
+              allowInputTypeControl={allowInputTypeControl} allowProductFollowupControl={allowProductFollowupControl}
+            />
           ))}
           {childrenInputType === 'text' ? (
             <p className="text-[12px] text-zinc-500" style={{ marginLeft: (depth + 1) * 32 + 13 }}>
@@ -1124,7 +1150,7 @@ function DispNode({ d, list, index, parentId, depth, disp, allowInputTypeControl
 // calling_process_dispositions) - "highly customisable" per the ask: an admin can add, rename,
 // describe, nest (any depth), reorder, and remove options freely, with no seeded default and no
 // fixed count. disp = a useProcessDispositions() return value; processLabel = display name.
-export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeControl = false, teamName = '', headerExtra = null, helpText = null }) {
+export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeControl = false, allowProductFollowupControl = false, teamName = '', headerExtra = null, helpText = null }) {
   const { processDispositions, dispositionsError, savingDisposition, newDispLabel, setNewDispLabel, newDispDesc, setNewDispDesc, addDisposition, teamId, roleScope } = disp;
   return (
     <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
@@ -1174,7 +1200,10 @@ export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeCont
         ) : processDispositions.length === 0 ? (
           <p className="text-[13px] text-zinc-500">No options added yet - use &quot;+ Add Option&quot; below to add the first one.</p>
         ) : processDispositions.map((d, i) => (
-          <DispNode key={d.id} d={d} list={processDispositions} index={i} parentId={null} depth={0} disp={disp} allowInputTypeControl={allowInputTypeControl} />
+          <DispNode
+            key={d.id} d={d} list={processDispositions} index={i} parentId={null} depth={0} disp={disp}
+            allowInputTypeControl={allowInputTypeControl} allowProductFollowupControl={allowProductFollowupControl}
+          />
         ))}
       </div>
 

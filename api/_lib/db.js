@@ -4972,20 +4972,20 @@ async function getProcessDispositions(processKey, teamId = null, leadType = null
   const fetchRows = async (team, type, role) => (team == null
     ? (type == null
         ? (await sql`
-            SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
+            SELECT id, parent_id, label, description, sort_order, children_input_type, triggers_product_followup FROM calling_process_dispositions
             WHERE process_key = ${processKey} AND team_id IS NULL AND lead_type IS NULL AND (${role} IS NULL AND role_scope IS NULL OR role_scope = ${role})
             ORDER BY sort_order ASC, id ASC`).rows
         : (await sql`
-            SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
+            SELECT id, parent_id, label, description, sort_order, children_input_type, triggers_product_followup FROM calling_process_dispositions
             WHERE process_key = ${processKey} AND team_id IS NULL AND lead_type = ${type} AND (${role} IS NULL AND role_scope IS NULL OR role_scope = ${role})
             ORDER BY sort_order ASC, id ASC`).rows)
     : (type == null
         ? (await sql`
-            SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
+            SELECT id, parent_id, label, description, sort_order, children_input_type, triggers_product_followup FROM calling_process_dispositions
             WHERE process_key = ${processKey} AND team_id = ${team} AND lead_type IS NULL AND (${role} IS NULL AND role_scope IS NULL OR role_scope = ${role})
             ORDER BY sort_order ASC, id ASC`).rows
         : (await sql`
-            SELECT id, parent_id, label, description, sort_order, children_input_type FROM calling_process_dispositions
+            SELECT id, parent_id, label, description, sort_order, children_input_type, triggers_product_followup FROM calling_process_dispositions
             WHERE process_key = ${processKey} AND team_id = ${team} AND lead_type = ${type} AND (${role} IS NULL AND role_scope IS NULL OR role_scope = ${role})
             ORDER BY sort_order ASC, id ASC`).rows));
   let rows;
@@ -5050,7 +5050,7 @@ async function getProcessDispositions(processKey, teamId = null, leadType = null
   rows.forEach((r) => {
     byId[r.id] = {
       id: r.id, label: r.label, description: r.description || '', sortOrder: r.sort_order,
-      childrenInputType: r.children_input_type || 'single', children: [],
+      childrenInputType: r.children_input_type || 'single', triggersProductFollowup: !!r.triggers_product_followup, children: [],
     };
   });
   const roots = [];
@@ -5105,7 +5105,7 @@ async function addProcessDisposition(processKey, label, description, createdBy, 
 // label can never be blanked out this way since a disposition must always have a name.
 // Works the same regardless of whether id is a top-level option or a child - nesting depth
 // never changes once an option is created.
-async function updateProcessDisposition(processKey, id, { label, description, childrenInputType } = {}, teamId = null, leadType = null, roleScope = null) {
+async function updateProcessDisposition(processKey, id, { label, description, childrenInputType, triggersProductFollowup } = {}, teamId = null, leadType = null, roleScope = null) {
   await ensureSchema();
   if (!processKey || !id) throw new Error('processKey and id are required');
   const labelText = label === undefined ? null : String(label).trim();
@@ -5115,6 +5115,13 @@ async function updateProcessDisposition(processKey, id, { label, description, ch
   if (childrenInputType !== undefined && !['single', 'multi', 'text'].includes(childrenInputType)) {
     throw new Error("childrenInputType must be 'single', 'multi', or 'text'");
   }
+  if (triggersProductFollowup !== undefined && typeof triggersProductFollowup !== 'boolean') {
+    throw new Error('triggersProductFollowup must be a boolean');
+  }
+  // COALESCE-safe: null means "leave alone" (field omitted), 0/1 are real values to SET -
+  // ?? (not ||) so an explicit `false` (turning the flag off) survives instead of collapsing
+  // to the same null "leave alone" as an omitted field.
+  const followupVal = triggersProductFollowup === undefined ? null : (triggersProductFollowup ? 1 : 0);
   // Existence checked separately, not via affected-row count: MySQL's affectedRows only counts
   // rows actually CHANGED, not matched (unlike Postgres's RETURNING) - a no-op update (every
   // field already equal to what's being set) would otherwise look like "not found". The team
@@ -5130,7 +5137,8 @@ async function updateProcessDisposition(processKey, id, { label, description, ch
       UPDATE calling_process_dispositions
       SET label = COALESCE(${labelText}, label),
           description = COALESCE(${descText}, description),
-          children_input_type = COALESCE(${childrenInputType ?? null}, children_input_type)
+          children_input_type = COALESCE(${childrenInputType ?? null}, children_input_type),
+          triggers_product_followup = COALESCE(${followupVal}, triggers_product_followup)
       WHERE id = ${id} AND process_key = ${processKey} AND team_id IS NULL AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})
     `;
   } else {
@@ -5138,7 +5146,8 @@ async function updateProcessDisposition(processKey, id, { label, description, ch
       UPDATE calling_process_dispositions
       SET label = COALESCE(${labelText}, label),
           description = COALESCE(${descText}, description),
-          children_input_type = COALESCE(${childrenInputType ?? null}, children_input_type)
+          children_input_type = COALESCE(${childrenInputType ?? null}, children_input_type),
+          triggers_product_followup = COALESCE(${followupVal}, triggers_product_followup)
       WHERE id = ${id} AND process_key = ${processKey} AND team_id = ${teamId} AND (${leadType} IS NULL AND lead_type IS NULL OR lead_type = ${leadType}) AND (${roleScope} IS NULL AND role_scope IS NULL OR role_scope = ${roleScope})
     `;
   }

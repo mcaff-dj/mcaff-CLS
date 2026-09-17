@@ -209,48 +209,33 @@ function isUndisposed(t) {
   return !t.disposed_at;
 }
 
-// Top-level disposition categories whose checked children need "which product?" follow-up -
-// same inline picker either way, just two different admin-configured category labels feeding
-// it: "Product Related Issue" under Delivery's tree, "Query Class" under Product's tree (an
-// admin-renamed/restructured "Query Category" - it now nests two sub-groups, "Product issue"
-// and "Packaging issue", each with their own leaves - matched at the top level so any leaf
-// under EITHER sub-group still triggers the follow-up, without needing a matching entry per
-// sub-group name). Matched by label, not by lead_type, since DispositionChecklist itself is
-// lead_type-agnostic - whichever tree useProcessDispositions handed it (see dispForTicket/
-// visibleDispositionNodes below) is rendered the same way.
-//
-// This is the second time an admin has renamed this exact top-level category out from under a
-// hardcoded label match ("Product Related Issue" was fine, "Query Category" silently stopped
-// matching once renamed to "Query Class") - isProductFollowUpPath below does a normalized
-// (trimmed, case-insensitive) compare so whitespace/casing alone can't cause a repeat, but a
-// genuine rename still will. If this breaks a third time, the fix belongs in the admin editor
-// itself (a "triggers product follow-up" checkbox on the node in CallingAdminPanel.js, stored
-// as a real column on calling_process_dispositions) rather than another label to chase here.
-const PRODUCT_FOLLOWUP_CATEGORIES = ['Product Related Issue', 'Query Class'];
-
-function isProductFollowUpPath(path) {
-  const normalized = PRODUCT_FOLLOWUP_CATEGORIES.map((c) => c.trim().toLowerCase());
-  return (path || []).some((p) => normalized.includes(String(p || '').trim().toLowerCase()));
-}
-
 // Recursive multi-select over the admin-configured disposition tree (calling_process_
 // dispositions, shared across every process - see useProcessDispositions). A detractor often
 // raises more than one issue in a single call, so unlike RTO/NDR's single cascading pick, every
 // leaf (no children) is its own checkbox and any number can be checked - independently, across
 // categories - rather than the call being forced into one final label. A node WITH children is
 // just a section header; it's never itself selectable. `selected` is the Map from
-// id -> {id, path} kept in NpsCallingClient's own dispose-modal state; `ancestors` is the chain
-// of labels above `nodes` in this recursion, so a checked leaf's `path` carries its whole
-// breadcrumb (e.g. ['Delivery Related', 'Late delivery']) for saveDisposition to join on.
+// id -> {id, path, needsProduct} kept in NpsCallingClient's own dispose-modal state; `ancestors`
+// is the chain of labels above `nodes` in this recursion, so a checked leaf's `path` carries its
+// whole breadcrumb (e.g. ['Delivery Related', 'Late delivery']) for saveDisposition to join on.
 //
-// productOptions/productsByReason/onProductsChange: only meaningful under one of
-// PRODUCT_FOLLOWUP_CATEGORIES above - a checked reason there gets its OWN inline "which
-// product?" follow-up right below it (rather than one for the whole category), since different
-// products on the same order can each have a different problem and the agent needs to say which
-// product goes with which reason. Always asked once checked, never skipped for lack of data -
-// productOptions empty (this ticket's own product_name_list has nothing usable) falls back to a
-// free-text box instead of the picker (see showProductFollowUp below).
-function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], productOptions = [], productsByReason = {}, onProductsChange }) {
+// productOptions/productsByReason/onProductsChange: only meaningful under a node whose own
+// admin-configured triggersProductFollowup flag is set, OR that sits under an ancestor that has
+// it set (ancestorNeedsProduct, threaded down through the recursion below) - a checked reason
+// there gets its OWN inline "which product?" follow-up right below it (rather than one for the
+// whole category), since different products on the same order can each have a different problem
+// and the agent needs to say which product goes with which reason. Always asked once checked,
+// never skipped for lack of data - productOptions empty (this ticket's own product_name_list has
+// nothing usable) falls back to a free-text box instead of the picker (see showProductFollowUp
+// below).
+//
+// This flag replaced a hardcoded label match (isProductFollowUpPath, matching literal strings
+// like "Product Related Issue"/"Query Category"/"Query Class") that broke silently every time an
+// admin renamed the category it was chasing - twice, in production. It's now a real column
+// (calling_process_dispositions.triggers_product_followup), edited from a checkbox in
+// CallingAdminPanel.js's DispNode (allowProductFollowupControl), so a rename can no longer unhook
+// it - flip the checkbox back on after a rename instead of shipping a code change.
+function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], ancestorNeedsProduct = false, productOptions = [], productsByReason = {}, onProductsChange }) {
   if (!nodes || !nodes.length) {
     return <p className="text-[12px] text-zinc-500">No disposition options configured yet - an admin can add some under Admin Panel.</p>;
   }
@@ -262,11 +247,16 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], produ
     <div className="space-y-2.5">
       {nodes.map((n) => {
         const path = [...ancestors, n.label];
+        // Sticky once true - a descendant three levels down a flagged category still needs the
+        // follow-up even if none of ITS own ancestors between here and there are individually
+        // flagged (e.g. "Query Class" flagged, "Packaging issue" not, "Broken Nozzle" not - the
+        // leaf still needs it because Query Class does).
+        const needsProduct = ancestorNeedsProduct || !!n.triggersProductFollowup;
         const hasChildren = n.children && n.children.length > 0;
         if (hasChildren) {
           const body = (
             <DispositionChecklist
-              nodes={n.children} selected={selected} onToggle={onToggle} ancestors={path}
+              nodes={n.children} selected={selected} onToggle={onToggle} ancestors={path} ancestorNeedsProduct={needsProduct}
               productOptions={productOptions} productsByReason={productsByReason} onProductsChange={onProductsChange}
             />
           );
@@ -288,7 +278,7 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], produ
         // picker below; a ticket with none (nothing to pick from - the ticket's own product name
         // never made it into product_name_list) still must not skip the question entirely, so it
         // falls back to a free-text box instead of silently showing nothing.
-        const showProductFollowUp = checked && isProductFollowUpPath(path);
+        const showProductFollowUp = checked && needsProduct;
         const picked = productsByReason[n.id] || [];
         return (
           <div key={n.id}>
@@ -299,7 +289,7 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], produ
               <input
                 type="checkbox"
                 checked={checked}
-                onChange={() => onToggle(n.id, path)}
+                onChange={() => onToggle(n.id, path, needsProduct)}
                 className="accent-indigo-500 w-4 h-4"
               />
               {n.label}
@@ -558,7 +548,12 @@ export default function NpsCallingClient() {
 
   // Leaves only ever come from whichever branch pickBranch chose (visibleDispositionNodes is
   // filtered to it), so cross-branch cleanup here is just a belt-and-suspenders guard.
-  const toggleReason = (id, path) => {
+  // needsProduct comes from DispositionChecklist's own ancestor walk (whether this leaf or any
+  // ancestor of it has triggersProductFollowup set) - computed there, not re-derived here, since
+  // only that recursion still has the actual node objects; selectedReasons only ever stores the
+  // flat {id, path} breadcrumb, plus this bit, for every later reader (affectedProductsText,
+  // saveDisposition) to use without re-walking the tree.
+  const toggleReason = (id, path, needsProduct = false) => {
     const willCheck = !selectedReasons.has(id);
     setSelectedReasons((prev) => {
       const next = new Map(prev);
@@ -570,16 +565,16 @@ export default function NpsCallingClient() {
       for (const [existingId, existing] of next) {
         if (existing.path[0] !== branch) next.delete(existingId);
       }
-      next.set(id, { id, path });
+      next.set(id, { id, path, needsProduct });
       return next;
     });
     // Pre-fill "which product?" with this ticket's own known product(s) - via
-    // product_name_list, already split into productOptions below - the moment a
-    // PRODUCT_FOLLOWUP_CATEGORIES reason is checked, instead of starting blank and making the
-    // agent re-pick what the data already told us. Only sets the initial default (guarded by
-    // `!prev[id]`) - never overwrites a pick the agent already made, e.g. re-checking after an
-    // uncheck, or a second reason under the same category with its own products.
-    if (willCheck && productOptions.length > 0 && isProductFollowUpPath(path)) {
+    // product_name_list, already split into productOptions below - the moment a reason needing
+    // the follow-up is checked, instead of starting blank and making the agent re-pick what the
+    // data already told us. Only sets the initial default (guarded by `!prev[id]`) - never
+    // overwrites a pick the agent already made, e.g. re-checking after an uncheck, or a second
+    // reason under the same category with its own products.
+    if (willCheck && productOptions.length > 0 && needsProduct) {
       setProductsByReason((prev) => (prev[id] ? prev : { ...prev, [id]: productOptions }));
     }
   };
@@ -611,7 +606,8 @@ export default function NpsCallingClient() {
   }, [dispForTicket.processDispositions, branchChoice]);
 
   // This lead's own product_name_list ("Product A, Product B") split into options - only ever
-  // meaningful once a reason under one of PRODUCT_FOLLOWUP_CATEGORIES has been checked.
+  // meaningful once a reason with the product follow-up (triggersProductFollowup, see
+  // DispositionChecklist) has been checked.
   const productOptions = useMemo(() => {
     const list = detailTkt && detailTkt.product_name_list;
     return hasValue(list) ? splitProductNameList(list) : [];
@@ -621,11 +617,12 @@ export default function NpsCallingClient() {
   };
 
   // "<reason label>: <products>; <reason label>: <products>" - one entry per checked reason
-  // under PRODUCT_FOLLOWUP_CATEGORIES that actually has products picked (a reason with none
-  // contributes nothing, same "only what's relevant" shape used throughout this file).
+  // that needed the product follow-up (r.needsProduct, set by toggleReason from
+  // DispositionChecklist's own ancestor walk) and actually has products picked (a reason with
+  // none contributes nothing, same "only what's relevant" shape used throughout this file).
   const affectedProductsText = useMemo(
     () => Array.from(selectedReasons.values())
-      .filter((r) => isProductFollowUpPath(r.path))
+      .filter((r) => r.needsProduct)
       .map((r) => {
         const products = productsByReason[r.id];
         return products && products.length ? `${r.path[r.path.length - 1]}: ${products.join(', ')}` : null;
@@ -1713,7 +1710,8 @@ export default function NpsCallingClient() {
                     processLabel={`NPS-Calling${adminDispLeadType === 'product' ? ' · Product' : ''}`}
                     disp={disp}
                     allowInputTypeControl
-                    helpText={`The dispose modal only shows reasons nested under two top-level options named exactly "Connected" and "Non Connected" - anything added outside those two is saved but never shown to an agent. Add "Connected" and "Non Connected" as top-level options first, then expand each to add its own reasons as children.`}
+                    allowProductFollowupControl
+                    helpText={`The dispose modal only shows reasons nested under two top-level options named exactly "Connected" and "Non Connected" - anything added outside those two is saved but never shown to an agent. Add "Connected" and "Non Connected" as top-level options first, then expand each to add its own reasons as children. Tick "Ask which product?" on a category (e.g. "Product Related Issue") to prompt for a product whenever the agent checks any reason under it - flip it back on if you ever rename that category.`}
                   />
 
                   <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden">

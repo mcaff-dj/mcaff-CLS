@@ -894,7 +894,7 @@ async function handleDispositions(req, res, session) {
     try {
       const dispositions = Array.isArray(body.orderedIds)
         ? await reorderProcessDispositions(body.processKey, body.parentId, body.orderedIds, dispTeamId, dispLeadType, dispRoleScope)
-        : await updateProcessDisposition(body.processKey, body.id, { label: body.label, description: body.description, childrenInputType: body.childrenInputType }, dispTeamId, dispLeadType, dispRoleScope);
+        : await updateProcessDisposition(body.processKey, body.id, { label: body.label, description: body.description, childrenInputType: body.childrenInputType, triggersProductFollowup: body.triggersProductFollowup }, dispTeamId, dispLeadType, dispRoleScope);
       const treeLabel = `${dispTeamId == null ? 'shared' : `team #${dispTeamId}`}${dispLeadType === 'product' ? ' · product' : ''}${dispRoleScope === 'Partner' ? ' · partner' : ''}`;
       await logEvent(session.uid, session.email, 'calling', 'disposition-edit',
         Array.isArray(body.orderedIds) ? `${body.processKey} (${treeLabel}): reordered` : `${body.processKey} (${treeLabel}): edited #${body.id}`, ip);
