@@ -227,6 +227,44 @@ def fetch_product_wise_nps(mysql_brand):
     return out
 
 
+def fetch_product_dip_feedback(mysql_brand):
+    """Detractors' free-text additional_feedback, grouped by product name and month - feeds
+    the heatmap's click-to-expand "why did this dip" panel (see
+    docs/superpowers/specs/2026-09-17-nps-dip-reasons-design.md). Same brand/date-range
+    filter as fetch_product_wise_nps above, but scoped to nps_category='Detractor' only
+    (Promoters/Passives aren't why NPS fell) and to responses that actually left feedback.
+
+    additional_feedback is response-level, not product-slot-level (see this module's own
+    docstring) - a response that rated two products contributes the SAME feedback text to
+    both products' entries here. Disclosed in the report panel, not fixed here.
+
+    Returns {product_name: {ym 'YYYY-MM': [feedback_text, ...]}}, one query, not one per
+    flagged dip - the caller zips this against fetch_product_wise_nps's own per-product
+    "months" dict by (product, ym)."""
+    rows = mysql_lib.query(
+        """
+        SELECT product_name,
+               DATE_FORMAT(STR_TO_DATE(submitted_date, "%%d/%%m/%%Y"), "%%Y-%%m") AS ym,
+               additional_feedback
+        FROM nps_product
+        WHERE brand = %s AND nps_category = "Detractor"
+          AND product_name IS NOT NULL AND TRIM(product_name) NOT IN ('', 'NA')
+          AND additional_feedback IS NOT NULL AND TRIM(additional_feedback) != ''
+          AND STR_TO_DATE(submitted_date, '%%d/%%m/%%Y') >= '2026-04-01'
+        ORDER BY product_name, ym
+        """,
+        params=(mysql_brand,),
+        database=DWH_DATABASE,
+    )
+    if rows is None:
+        raise RuntimeError("MySQL credentials not configured - set MYSQL_HOST/USER/PASSWORD/DATABASE (or .env.local).")
+
+    out = {}
+    for product_name, ym, feedback in rows:
+        out.setdefault(product_name, {}).setdefault(ym, []).append(feedback)
+    return out
+
+
 AREA_RATING_COLUMNS = {
     "Product": "product_first_impression",
     "Delivery": "delivery_service_rating",
