@@ -735,14 +735,20 @@ def _build_prodwise_heatmap(capped, dip_feedback):
         dips.sort(key=lambda d: d[3])
         return dips
 
-    def _reason_cells(product, ym, cur_m):
+    def _reason_cells(product, ym, cur_m, is_current_month):
+        # The last month on the axis is still being collected live (see brands.py: the
+        # sheet's final month is the one still-moving month pulled live, everything before
+        # it is settled). A missing reason there just means the month isn't over yet, not a
+        # categorization gap - worth saying so, or it reads like a bug in every other row.
+        current_note = " &mdash; this is the current month, still collecting responses" if is_current_month else ""
         detractors = cur_m["detractors"]
         if detractors < LOW_SAMPLE_DETRACTORS:
             return (f"<td class='reasons-cell' colspan='2'><span class='pending'>"
-                    f"Not enough feedback (n&lt;{LOW_SAMPLE_DETRACTORS})</span></td>")
+                    f"Not enough feedback (n&lt;{LOW_SAMPLE_DETRACTORS}){current_note}</span></td>")
         texts = dip_feedback.get(product, {}).get(ym, [])
         if not texts:
-            return "<td class='reasons-cell' colspan='2'><span class='pending'>No feedback text left this month</span></td>"
+            return (f"<td class='reasons-cell' colspan='2'><span class='pending'>"
+                    f"No feedback text left this month{current_note}</span></td>")
         counts = Counter()
         by_category = {}
         for text in texts:
@@ -770,7 +776,7 @@ def _build_prodwise_heatmap(capped, dip_feedback):
             return ""
         lines = []
         for ym, prev_m, cur_m, delta in dips:
-            reason_html = _reason_cells(product, ym, cur_m)
+            reason_html = _reason_cells(product, ym, cur_m, ym == all_yms[-1])
             lines.append(
                 f"<tr data-yr='{ym[:4]}'><td class='rowlabel sub'>{h_enc(_nps_month_label(ym))}</td>"
                 f"<td class='num'>{fnum(prev_m['nps_pct'])} &rarr; {fnum(cur_m['nps_pct'])}</td>"
@@ -818,8 +824,13 @@ def _build_prodwise_heatmap(capped, dip_feedback):
         chevron = "<span class='chevron'>&#9656;</span>" if dips else ""
         row_class = (f"{z} dip-row").strip() if dips else z
         row_attr = f" data-row-id='{row_id}'" if dips else ""
+        total_responses = sum(m["responses"] for m in r["months"].values())
+        total_promoters = sum(m["promoters"] for m in r["months"].values())
+        total_detractors = sum(m["detractors"] for m in r["months"].values())
+        overall_nps = round((total_promoters - total_detractors) / total_responses * 100, 1) if total_responses else 0
         body_rows.append(
-            f"<tr class='{row_class}' data-hm-spark='{spark_json}'{row_attr}>"
+            f"<tr class='{row_class}' data-hm-spark='{spark_json}'{row_attr}"
+            f" data-total-responses='{total_responses}' data-overall-nps='{overall_nps}'>"
             f"<td class='rowlabel' title=\"{h_enc(r['product'])}\">{chevron}{h_enc(r['product'])}</td>{''.join(cells)}"
             f"<td class='num' style='min-width:80px'>{spark_svg}</td></tr>"
         )
@@ -832,6 +843,38 @@ def _build_prodwise_heatmap(capped, dip_feedback):
         "background:linear-gradient(to right, var(--s6), var(--grid), var(--s2));'></span>"
         "<span class='lname'>&gt; 50 (excellent)</span></div>"
     )
+
+    # Rows already arrive sorted by lifetime responses desc (the query's own default), so
+    # "Responses" starts active and needs no re-sort on first load - only "NPS" does anything
+    # until clicked. total-responses/overall-nps are lifetime sums across every month on the
+    # axis, not just the visible window, matching how the table was capped to begin with.
+    sort_row = (
+        "<div class='legend-row nps-heatmap-sort' style='justify-content:center;gap:8px;margin-top:6px;'>"
+        "<span class='lname'>Sort by:</span>"
+        "<button type='button' class='month-chip active' data-sort-key='total-responses'>Responses</button>"
+        "<button type='button' class='month-chip' data-sort-key='overall-nps'>NPS</button></div>"
+    )
+    sort_script = """<script>
+(function(){
+  document.querySelectorAll('.nps-heatmap-sort .month-chip').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      document.querySelectorAll('.nps-heatmap-sort .month-chip').forEach(function(b){ b.classList.remove('active'); });
+      btn.classList.add('active');
+      var attr = 'data-' + btn.getAttribute('data-sort-key');
+      var table = document.querySelector('.nps-heatmap-table');
+      var tbody = table.tBodies[0];
+      var mainRows = Array.prototype.filter.call(tbody.children, function(tr){ return !tr.classList.contains('dip-detail'); });
+      mainRows.sort(function(a, b){ return parseFloat(b.getAttribute(attr)) - parseFloat(a.getAttribute(attr)); });
+      mainRows.forEach(function(row){
+        tbody.appendChild(row);
+        var id = row.getAttribute('data-row-id');
+        var detail = id ? tbody.querySelector("tr.dip-detail[data-for='" + id + "']") : null;
+        if (detail) tbody.appendChild(detail);
+      });
+    });
+  });
+})();
+</script>"""
 
     dip_script = "" if not any_dips else """<script>
 (function(){
@@ -854,9 +897,9 @@ def _build_prodwise_heatmap(capped, dip_feedback):
         "Color midpoint is 50 (excellent NPS threshold); blank cells had no survey responses that month. "
         "Click a product with a &#9656; to see which months it dipped and why (mined from Detractors&#39; "
         "free-text feedback; a response that rated more than one product may show the same feedback under each).</p>"
-        f"{legend}<div class='pivot-scroll'><table class='pivot-table nps-heatmap-table'><thead><tr>"
+        f"{legend}{sort_row}<div class='pivot-scroll'><table class='pivot-table nps-heatmap-table'><thead><tr>"
         f"<th class='corner' rowspan='2'>Product</th>{month_group_head}<th rowspan='2'>Trend</th></tr>"
-        f"<tr>{sub_head}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>{dip_script}"
+        f"<tr>{sub_head}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>{sort_script}{dip_script}"
     )
 
 
