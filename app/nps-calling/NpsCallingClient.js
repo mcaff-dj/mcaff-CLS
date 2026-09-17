@@ -209,6 +209,15 @@ function isUndisposed(t) {
   return !t.disposed_at;
 }
 
+// Top-level disposition categories whose checked children need "which product?" follow-up -
+// same inline picker either way, just two different admin-configured category labels feeding
+// it: "Product Related Issue" under Delivery's tree, "Query Category" under Product's tree
+// (its three reasons - Product not effective / Reacted to Skin/Acne / Texture Issue - are all
+// per-product complaints same as Delivery's). Matched by label, not by lead_type, since
+// DispositionChecklist itself is lead_type-agnostic - whichever tree useProcessDispositions
+// handed it (see dispForTicket/visibleDispositionNodes below) is rendered the same way.
+const PRODUCT_FOLLOWUP_CATEGORIES = ['Product Related Issue', 'Query Category'];
+
 // Recursive multi-select over the admin-configured disposition tree (calling_process_
 // dispositions, shared across every process - see useProcessDispositions). A detractor often
 // raises more than one issue in a single call, so unlike RTO/NDR's single cascading pick, every
@@ -219,10 +228,11 @@ function isUndisposed(t) {
 // of labels above `nodes` in this recursion, so a checked leaf's `path` carries its whole
 // breadcrumb (e.g. ['Delivery Related', 'Late delivery']) for saveDisposition to join on.
 //
-// productOptions/productsByReason/onProductsChange: only meaningful under "Product Related
-// Issue" - a checked reason there gets its OWN inline product picker right below it (rather
-// than one picker for the whole category), since different products on the same order can each
-// have a different problem and the agent needs to say which product goes with which reason.
+// productOptions/productsByReason/onProductsChange: only meaningful under one of
+// PRODUCT_FOLLOWUP_CATEGORIES above - a checked reason there gets its OWN inline product picker
+// right below it (rather than one picker for the whole category), since different products on
+// the same order can each have a different problem and the agent needs to say which product
+// goes with which reason.
 function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], productOptions = [], productsByReason = {}, onProductsChange }) {
   if (!nodes || !nodes.length) {
     return <p className="text-[12px] text-zinc-500">No disposition options configured yet - an admin can add some under Admin Panel.</p>;
@@ -256,7 +266,7 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], produ
           );
         }
         const checked = selected.has(n.id);
-        const showProductPicker = checked && productOptions.length > 0 && path.includes('Product Related Issue');
+        const showProductPicker = checked && productOptions.length > 0 && path.some((p) => PRODUCT_FOLLOWUP_CATEGORIES.includes(p));
         const picked = productsByReason[n.id] || [];
         return (
           <div key={n.id}>
@@ -552,7 +562,7 @@ export default function NpsCallingClient() {
   }, [dispForTicket.processDispositions, branchChoice]);
 
   // This lead's own product_name_list ("Product A, Product B") split into options - only ever
-  // meaningful once "Product Related Issue" has a reason checked.
+  // meaningful once a reason under one of PRODUCT_FOLLOWUP_CATEGORIES has been checked.
   const productOptions = useMemo(() => {
     const list = detailTkt && detailTkt.product_name_list;
     return hasValue(list) ? splitProductNameList(list) : [];
@@ -561,12 +571,12 @@ export default function NpsCallingClient() {
     setProductsByReason((prev) => ({ ...prev, [reasonId]: products }));
   };
 
-  // "<reason label>: <products>; <reason label>: <products>" - one entry per checked "Product
-  // Related Issue" reason that actually has products picked (a reason with none contributes
-  // nothing, same "only what's relevant" shape used throughout this file).
+  // "<reason label>: <products>; <reason label>: <products>" - one entry per checked reason
+  // under PRODUCT_FOLLOWUP_CATEGORIES that actually has products picked (a reason with none
+  // contributes nothing, same "only what's relevant" shape used throughout this file).
   const affectedProductsText = useMemo(
     () => Array.from(selectedReasons.values())
-      .filter((r) => r.path.includes('Product Related Issue'))
+      .filter((r) => r.path.some((p) => PRODUCT_FOLLOWUP_CATEGORIES.includes(p)))
       .map((r) => {
         const products = productsByReason[r.id];
         return products && products.length ? `${r.path[r.path.length - 1]}: ${products.join(', ')}` : null;
