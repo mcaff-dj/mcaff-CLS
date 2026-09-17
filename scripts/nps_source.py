@@ -293,10 +293,11 @@ def fetch_top_rated_area_by_month(mysql_brand):
     # already-1-5 and skip the halving - matches the one real transition seen (all-or-nothing
     # switch, not a slow blend); revisit with a per-response_id scale flag if that changes.
 
-    Cell value is %positive (value 4 or 5, post-normalization) of non-null, non-"NA" answers
-    to that column, per month. One GROUP BY per column (four total) rather than a single
-    pivoted query, since the four raw columns differ and the bucket step is Python-side
-    either way.
+    Cell value is %Promoter - %Detractor (NPS-style) of non-null, non-"NA" answers to that
+    column, per month, bucketed on the post-normalization 1-5 scale as 4-5 promoter, 3
+    passive, 1-2 detractor - the same top-2/bottom-2 split used elsewhere on a 1-5 scale.
+    One GROUP BY per column (four total) rather than a single pivoted query, since the four
+    raw columns differ and the bucket step is Python-side either way.
 
     Returns [{"area": "Product", "months": {"2026-04": {"score": 56.0, "responses": 1234}, ...}}, ...]
     in AREA_RATING_COLUMNS order (the survey's own question order)."""
@@ -329,14 +330,16 @@ def fetch_top_rated_area_by_month(mysql_brand):
         months = {}
         for ym, vals in by_ym.items():
             is_ten_scale = any(v > 5 for v, _ in vals)
-            bucket = months.setdefault(ym, {"pos": 0, "tot": 0})
+            bucket = months.setdefault(ym, {"promoters": 0, "detractors": 0, "tot": 0})
             for v, c in vals:
                 mapped = -(-v // 2) if is_ten_scale else v  # ceil(v/2) on a 1-10 scale, raw on a 1-5 scale
                 bucket["tot"] += c
                 if mapped in (4, 5):
-                    bucket["pos"] += c
+                    bucket["promoters"] += c
+                elif mapped in (1, 2):
+                    bucket["detractors"] += c
         by_area[area] = {
-            ym: {"score": round(b["pos"] / b["tot"] * 100, 1), "responses": b["tot"]}
+            ym: {"score": round((b["promoters"] - b["detractors"]) / b["tot"] * 100, 1), "responses": b["tot"]}
             for ym, b in months.items() if b["tot"]
         }
 
