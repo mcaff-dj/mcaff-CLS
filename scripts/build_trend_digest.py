@@ -33,7 +33,7 @@ MIN_WINDOW_CASES_SKU = 20
 MIN_RATE_DELTA_PP = 0.02
 MAX_TRENDS_PER_DIMENSION = 6
 TOP_COURIERS = 6
-TOP_PACKAGING_SKUS = 12
+TOP_PACKAGING_SKUS = 3
 # A suggestion/recommendation isn't a complaint - excluded from the class comparison
 # regardless of volume, not because it fails the noise floor below.
 EXCLUDED_CLASSES = {"Product Suggestion/Recommendation"}

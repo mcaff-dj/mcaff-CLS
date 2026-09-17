@@ -16,7 +16,7 @@
 const SEP = '||';
 const MIN_WINDOW_CASES = 40;
 const MIN_WINDOW_CASES_SKU = 20;
-const TOP_PACKAGING_SKUS = 12;
+const TOP_PACKAGING_SKUS = 3;
 const MIN_RATE_DELTA_PP = 0.02;
 const MAX_TRENDS_PER_DIMENSION = 6;
 const PACKAGING_WORDS = ['spill', 'broken', 'seal', 'damage', 'leak', 'packaging', 'tamper'];

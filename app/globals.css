@@ -197,6 +197,22 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
   body * { visibility: hidden; }
   #printable-receipt, #printable-receipt * { visibility: visible; }
   #printable-receipt { position: absolute; left: 0; top: 0; width: 100%; color: #000; background: #fff; padding: 32px; }
+  /* .og-table th sets its own white-on-dark-purple (--og-thead-bg/--og-thead-fg) for the
+     screen. Most browsers don't print background colors unless the user has explicitly
+     enabled "background graphics" in the print dialog - default off - so without this,
+     the header row becomes invisible white text on white paper. Border + bold weight
+     keeps the header row legible from structure alone, with no dependence on a
+     background actually rendering, on any printer or PDF driver. */
+  #printable-receipt .og-table th {
+    background: #fff !important;
+    color: #000 !important;
+    border: 1px solid #000 !important;
+    font-weight: 700;
+  }
+  #printable-receipt .og-table td {
+    color: #000 !important;
+    border: 1px solid #000 !important;
+  }
 }
 
 /* ── Shared theme variables for login/admin/dashboard/home ──────────────
