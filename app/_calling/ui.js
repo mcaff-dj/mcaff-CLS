@@ -112,8 +112,9 @@ export function CustomSelect({ value, onChange, options, icon: IconComponent, pl
 // build_assignment_queue substring-matches against - a category name would match nothing.
 // groupOrder (optional): category names in display order; any category not listed follows, in
 // first-seen order, so a new keyword bucket can never silently vanish from the list.
-export function MultiSelectDropdown({ value, onChange, options, placeholder = 'None', groupBy, groupOrder, itemNoun = 'reasons', disabled = false }) {
+export function MultiSelectDropdown({ value, onChange, options, placeholder = 'None', groupBy, groupOrder, itemNoun = 'reasons', disabled = false, searchable = false }) {
   const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState('');
   const ref = useRef(null);
 
   useEffect(() => {
@@ -122,23 +123,34 @@ export function MultiSelectDropdown({ value, onChange, options, placeholder = 'N
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Cleared on close (not on select) so the next open starts from the full list rather than
+  // wherever the last search left off - same convention as CustomSelect's own searchable mode.
+  useEffect(() => { if (!isOpen) setSearch(''); }, [isOpen]);
+
   const selected = value || [];
   const label = selected.length === 0 ? placeholder : selected.length === 1 ? selected[0] : `${selected.length} ${itemNoun}`;
   const toggle = (opt) => {
     onChange(selected.includes(opt) ? selected.filter(o => o !== opt) : [...selected, opt]);
   };
+  // Filters the option list itself (not just which ones render checked) - existing callers
+  // (RTO's Priority Reasons, NDR's Attempts) never pass searchable, so this is always `options`
+  // for them and nothing below changes. Added for a catalog too big to browse unfiltered (NPS-
+  // Calling's product-name picker, thousands of entries) - a plain client-side substring filter
+  // is enough since the whole list is already in memory by the time this opens.
+  const q = search.trim().toLowerCase();
+  const visibleOptions = searchable && q ? options.filter(o => String(o).toLowerCase().includes(q)) : options;
   // [[category, opts]] preserving groupOrder first, then first-seen order for the rest.
   // Null (not an empty list) when ungrouped, so the flat render path below stays untouched.
   const groups = useMemo(() => {
     if (!groupBy) return null;
     const byCat = new Map((groupOrder || []).map(c => [c, []]));
-    for (const opt of options) {
+    for (const opt of visibleOptions) {
       const cat = groupBy(opt);
       if (!byCat.has(cat)) byCat.set(cat, []);
       byCat.get(cat).push(opt);
     }
     return [...byCat].filter(([, opts]) => opts.length);
-  }, [options, groupBy, groupOrder]);
+  }, [visibleOptions, groupBy, groupOrder]);
   // Header click: clear the group if every member is already selected, else add the missing
   // ones. Add (not replace) so selections in other groups survive.
   const toggleGroup = (opts) => {
@@ -147,9 +159,10 @@ export function MultiSelectDropdown({ value, onChange, options, placeholder = 'N
   };
   // Select-all, grouped mode only. The ungrouped callers are the NDR roster's Attempts picker,
   // whose own 'All' option already means unrestricted (see ndrAttemptFilterOnChange) - a second
-  // select-all there would be two controls for one idea. toggleGroup over every option, so it
-  // clears only when literally everything is on.
-  const allOptionsSelected = options.length > 0 && options.every(o => selected.includes(o));
+  // select-all there would be two controls for one idea. toggleGroup over every VISIBLE option
+  // (all of them, unless a search is narrowing things down), so it clears only when everything
+  // currently shown is on, and a search never silently selects something out of view.
+  const allOptionsSelected = visibleOptions.length > 0 && visibleOptions.every(o => selected.includes(o));
 
   return (
     <div className="relative inline-block w-44" ref={ref}>
@@ -166,11 +179,25 @@ export function MultiSelectDropdown({ value, onChange, options, placeholder = 'N
 
       {isOpen && (
         <div className="absolute left-0 mt-1.5 min-w-[240px] bg-[#141417] border border-zinc-800/90 rounded-xl shadow-2xl z-50 overflow-hidden animate-fadeIn py-1 custom-scroll max-h-60 overflow-y-auto">
+          {searchable && (
+            <div className="sticky top-0 z-10 bg-[#141417] px-2 pb-1.5 pt-0.5 border-b border-zinc-800/80">
+              <input
+                autoFocus
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search…"
+                className="w-full h-7 px-2 bg-zinc-900/90 border border-zinc-800 rounded-md text-[12px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+              />
+            </div>
+          )}
+          {searchable && visibleOptions.length === 0 && (
+            <div className="px-3 py-2 text-[13px] text-zinc-600">No match</div>
+          )}
           {groups && (
             <button
               type="button"
-              onClick={() => toggleGroup(options)}
-              title={allOptionsSelected ? 'Clear every reason' : `Select all ${options.length} reasons, every category`}
+              onClick={() => toggleGroup(visibleOptions)}
+              title={allOptionsSelected ? 'Clear every reason' : `Select all ${visibleOptions.length} reasons, every category`}
               className="sticky top-0 z-10 w-full text-left px-3 py-2 text-[12px] font-semibold flex items-center justify-between gap-2 bg-[#141417] border-b border-zinc-800/80 hover:bg-zinc-800/70 transition-colors text-zinc-200"
             >
               <span className="flex items-center gap-2">
@@ -180,10 +207,10 @@ export function MultiSelectDropdown({ value, onChange, options, placeholder = 'N
                 </span>
                 {allOptionsSelected ? 'Clear all' : 'All categories'}
               </span>
-              <span className="shrink-0 text-zinc-600 font-normal">{selected.length}/{options.length}</span>
+              <span className="shrink-0 text-zinc-600 font-normal">{selected.length}/{visibleOptions.length}</span>
             </button>
           )}
-          {(groups || [[null, options]]).map(([cat, opts]) => (
+          {(groups || [[null, visibleOptions]]).map(([cat, opts]) => (
             <div key={cat || '_'}>
               {cat && (() => {
                 // Tri-state, like a file-tree parent: ticked when the whole category is on, a

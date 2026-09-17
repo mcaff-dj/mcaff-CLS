@@ -2408,6 +2408,38 @@ async function getDetractorTimeOfDayData(query) {
   return { buckets: await getDetractorTimeOfDay({ dateFrom, dateTo }) };
 }
 
+// Fallback catalog for NPS-Calling's "which product?" follow-up (see NpsCallingClient.js's
+// DispositionChecklist) when the ticket's OWN product_name_list has nothing usable - every
+// distinct real product_name rated in nps_product in the last 3 months, scoped by brand so an
+// mCaffeine ticket is never offered a Hyphen product or vice versa. 3 months, not all-time:
+// nps_product has 6,900+ distinct names across its whole history (old SKUs, one-off typos,
+// discontinued lines), which would swamp a search box; scoped to what customers have actually
+// been rating recently, the two brands run 93-166 names each - small enough to hand the browser
+// the whole list and let it filter client-side, no pagination needed.
+//
+// Ordered most-rated first (COUNT(*) over the same 3-month window, one row per product_slot
+// response), not alphabetically - an agent guessing from a long, otherwise-unsorted list should
+// see the products customers are actually buying/rating right now at the top, not wherever their
+// name happens to fall alphabetically. Ties broken alphabetically only for stable ordering across
+// requests, not because it matters which of two equally-rated products sorts first.
+async function getDetractorProductNames({ brand } = {}) {
+  await ensureSchema();
+  const { rows } = await sql`
+    SELECT product_name, COUNT(*) AS response_count FROM nps_product
+    WHERE product_name IS NOT NULL AND TRIM(product_name) NOT IN ('', 'NA')
+      AND (${brand || ''} = '' OR brand = ${brand})
+      AND STR_TO_DATE(submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH)
+    GROUP BY product_name
+    ORDER BY response_count DESC, product_name ASC
+  `;
+  return rows.map((r) => r.product_name);
+}
+
+async function getDetractorProductNamesData(query) {
+  const { brand } = query || {};
+  return { productNames: await getDetractorProductNames({ brand }) };
+}
+
 // Falls back to this only when no admin has ever set calling_process_settings.default_quota for
 // 'productkyc' - same pattern as DETRACTOR_FALLBACK_QUOTA above.
 const PRODUCTCALLING_FALLBACK_QUOTA = 15;
@@ -6258,6 +6290,7 @@ module.exports = {
   getDetractorAgentQuota, getDetractorAgentAvailability, getDetractorLoadByAgent, getDetractorQuotaAndLoad,
   getNextDetractorLead, getUnassignedDetractorLeads, disposeDetractorLead, getDetractorTicketsForAgent, getAllDetractorTickets,
   getDetractorTimeOfDay, getDetractorTimeOfDayData,
+  getDetractorProductNames, getDetractorProductNamesData,
   assignDetractorLeadsToAgent, topUpDetractorAgent, safeLimit, raw, buildSqlText,
   PRODUCTCALLING_FALLBACK_QUOTA, getProductCallingAgentQuota, getProductCallingAgentAvailability,
   getProductCallingLoadByAgent, getProductCallingQuotaAndLoad, claimNextProductCallingLead,

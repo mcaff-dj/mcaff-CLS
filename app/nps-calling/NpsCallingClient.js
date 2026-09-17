@@ -7,7 +7,7 @@
 // api/_lib/db.js's getNextDetractorLead/disposeDetractorLead. So this file has no sync-from-
 // sheet loop, no upload modal, and no team split (single shared queue/disposition tree for v1).
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { XIcon, CheckIcon, PhoneIcon, CustomSelect, Overlay, CalendarIcon, SearchIcon, DownloadIcon } from '../_calling/ui';
+import { XIcon, CheckIcon, PhoneIcon, CustomSelect, Overlay, CalendarIcon, SearchIcon, DownloadIcon, MultiSelectDropdown } from '../_calling/ui';
 import { useCallingSession, ROSTER_STATUS_OPTIONS, STATUS_OPTIONS } from '../_calling/useCallingSession';
 import { useBusinessHours, CallingHoursCard, useDefaultQuota, DefaultQuotaCard, useLeadOrder, LeadOrderCard, useDateRange, DateRangeCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
@@ -226,8 +226,10 @@ function isUndisposed(t) {
 // whole category), since different products on the same order can each have a different problem
 // and the agent needs to say which product goes with which reason. Always asked once checked,
 // never skipped for lack of data - productOptions empty (this ticket's own product_name_list has
-// nothing usable) falls back to a free-text box instead of the picker (see showProductFollowUp
-// below).
+// nothing usable) falls back to catalogProductNames, a searchable multi-select over every
+// product actually rated for this ticket's brand in the last 3 months (see showProductFollowUp
+// below and getDetractorProductNames's own comment) - catalogLoading distinguishes "still
+// fetching" from "brand genuinely has nothing recent" while it's empty.
 //
 // This flag replaced a hardcoded label match (isProductFollowUpPath, matching literal strings
 // like "Product Related Issue"/"Query Category"/"Query Class") that broke silently every time an
@@ -235,7 +237,11 @@ function isUndisposed(t) {
 // (calling_process_dispositions.triggers_product_followup), edited from a checkbox in
 // CallingAdminPanel.js's DispNode (allowProductFollowupControl), so a rename can no longer unhook
 // it - flip the checkbox back on after a rename instead of shipping a code change.
-function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], ancestorNeedsProduct = false, productOptions = [], productsByReason = {}, onProductsChange }) {
+function DispositionChecklist({
+  nodes, selected, onToggle, ancestors = [], ancestorNeedsProduct = false,
+  productOptions = [], productsByReason = {}, onProductsChange,
+  catalogProductNames = [], catalogLoading = false,
+}) {
   if (!nodes || !nodes.length) {
     return <p className="text-[12px] text-zinc-500">No disposition options configured yet - an admin can add some under Admin Panel.</p>;
   }
@@ -258,6 +264,7 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], ances
             <DispositionChecklist
               nodes={n.children} selected={selected} onToggle={onToggle} ancestors={path} ancestorNeedsProduct={needsProduct}
               productOptions={productOptions} productsByReason={productsByReason} onProductsChange={onProductsChange}
+              catalogProductNames={catalogProductNames} catalogLoading={catalogLoading}
             />
           );
           return isTopLevel ? (
@@ -311,19 +318,24 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], ances
                       {productOptions.map((p) => <option key={p} value={p}>{p}</option>)}
                     </select>
                   </>
-                ) : (
+                ) : catalogProductNames.length > 0 ? (
                   <>
                     <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
-                      Which product? (not on this ticket's own product list - type it in)
+                      Which product(s)? (not on this ticket's own list - search the recent catalog below)
                     </label>
-                    <input
-                      type="text"
-                      value={picked[0] || ''}
-                      onChange={(e) => onProductsChange(n.id, e.target.value ? [e.target.value] : [])}
-                      placeholder="Product name"
-                      className="w-full text-[12px] bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 p-1.5"
+                    <MultiSelectDropdown
+                      value={picked}
+                      onChange={(vals) => onProductsChange(n.id, vals)}
+                      options={catalogProductNames}
+                      searchable
+                      placeholder="Search products…"
+                      itemNoun="products"
                     />
                   </>
+                ) : (
+                  <p className="text-[11px] text-zinc-500">
+                    {catalogLoading ? 'Loading product catalog…' : 'No recent products found for this brand.'}
+                  </p>
                 )}
               </div>
             )}
@@ -615,6 +627,25 @@ export default function NpsCallingClient() {
   const setReasonProducts = (reasonId, products) => {
     setProductsByReason((prev) => ({ ...prev, [reasonId]: products }));
   };
+
+  // Fallback catalog for the "which product?" follow-up when productOptions above is empty -
+  // every product this ticket's own brand has actually been rated on in the last 3 months (see
+  // getDetractorProductNames's own comment), most-rated first. Fetched lazily: only when a
+  // dispose modal is actually open AND its ticket's own product list came up empty, so the
+  // common case (a ticket that already knows its product) never makes this call at all.
+  const [catalogProductNames, setCatalogProductNames] = useState([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  useEffect(() => {
+    if (!detailTkt || productOptions.length > 0) { setCatalogProductNames([]); return; }
+    let cancelled = false;
+    setCatalogLoading(true);
+    fetch(`/api/report/data/detractor-product-names?brand=${encodeURIComponent(detailTkt.brand || '')}`)
+      .then((r) => (r.ok ? r.json() : { productNames: [] }))
+      .then((d) => { if (!cancelled) setCatalogProductNames(d.productNames || []); })
+      .catch(() => { if (!cancelled) setCatalogProductNames([]); })
+      .finally(() => { if (!cancelled) setCatalogLoading(false); });
+    return () => { cancelled = true; };
+  }, [detailTkt, productOptions]);
 
   // "<reason label>: <products>; <reason label>: <products>" - one entry per checked reason
   // that needed the product follow-up (r.needsProduct, set by toggleReason from
@@ -1921,6 +1952,7 @@ export default function NpsCallingClient() {
                   <DispositionChecklist
                     nodes={visibleDispositionNodes} selected={selectedReasons} onToggle={toggleReason}
                     productOptions={productOptions} productsByReason={productsByReason} onProductsChange={setReasonProducts}
+                    catalogProductNames={catalogProductNames} catalogLoading={catalogLoading}
                   />
                 )
                 : <p className="text-[12px] text-zinc-500">Pick Connected or Non Connected above to see reasons.</p>}
