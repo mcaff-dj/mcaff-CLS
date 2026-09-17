@@ -772,7 +772,7 @@ def _build_prodwise_heatmap(capped, dip_feedback):
         for ym, prev_m, cur_m, delta in dips:
             reason_html = _reason_cells(product, ym, cur_m)
             lines.append(
-                f"<tr><td class='rowlabel sub'>{h_enc(_nps_month_label(ym))}</td>"
+                f"<tr data-yr='{ym[:4]}'><td class='rowlabel sub'>{h_enc(_nps_month_label(ym))}</td>"
                 f"<td class='num'>{fnum(prev_m['nps_pct'])} &rarr; {fnum(cur_m['nps_pct'])}</td>"
                 f"<td class='delta-down'>{delta}</td><td class='num'>{n0(cur_m['responses'])}</td>{reason_html}</tr>"
             )

@@ -314,7 +314,7 @@ def main():
             nps_source.fetch_product_nps(b["nps_mysql_brand"]), sheet_prodnps, NPS_SHEET_OVERRIDE_MONTHS)
         # Product wise NPS (per product name, not per month) - no sheet override, MySQL-only.
         prodwise_nps = nps_source.fetch_product_wise_nps(b["nps_mysql_brand"])
-        # Top Rated Area breakdown (per-question CSAT %positive by month) - also no sheet override, MySQL-only.
+        # Top Rated Area breakdown (per-question %Promoter - %Detractor (NPS-style) by month) - also no sheet override, MySQL-only.
         top_rated_area = nps_source.fetch_top_rated_area_by_month(b["nps_mysql_brand"])
         # Detractors' free-text feedback, for the heatmap's click-to-expand dip reasons.
         prodwise_dip_feedback = nps_source.fetch_product_dip_feedback(b["nps_mysql_brand"])

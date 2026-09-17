@@ -70,13 +70,13 @@ force-fit into the wrong bucket:
 |---|---|
 | Product Efficacy/Results | "no result", "didn't work", "no effect", "not effective", "no change" |
 | Fragrance | "smell", "fragrance", "odour", "odor", "stink" |
-| Texture/Consistency | "texture", "sticky", "greasy", "runny", "thick", "watery" |
+| Texture/Consistency | "texture", "sticky", "greasy", "runny", "watery" |
 | Packaging/Leakage | "leak", "packaging", "spill", "broken bottle", "cap", "pump" |
 | Skin Reaction/Suitability | "irritation", "allergy", "breakout", "rash", "burning", "not suitable" |
 | Price/Value | "expensive", "price", "costly", "value for money", "overpriced" |
 | Delivery/Logistics | "late", "delay", "delivery", "courier", "damaged in transit", "wrong item" |
 | Quantity/Size | "quantity", "size", "small", "less product", "short" |
-| Customer Service | "support", "customer care", "response", "no reply", "rude" |
+| Customer Service | "customer care", "customer support", "no reply", "rude", "support team" |
 | Other/Unclear | (fallback — no keyword rule matched) |
 
 ```python
