@@ -1124,7 +1124,7 @@ function DispNode({ d, list, index, parentId, depth, disp, allowInputTypeControl
 // calling_process_dispositions) - "highly customisable" per the ask: an admin can add, rename,
 // describe, nest (any depth), reorder, and remove options freely, with no seeded default and no
 // fixed count. disp = a useProcessDispositions() return value; processLabel = display name.
-export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeControl = false, teamName = '', headerExtra = null }) {
+export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeControl = false, teamName = '', headerExtra = null, helpText = null }) {
   const { processDispositions, dispositionsError, savingDisposition, newDispLabel, setNewDispLabel, newDispDesc, setNewDispDesc, addDisposition, teamId, roleScope } = disp;
   return (
     <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
@@ -1142,9 +1142,13 @@ export function ProcessDispositionsCard({ processLabel, disp, allowInputTypeCont
               {roleScope != null && <span className="text-zinc-400 font-medium"> · {roleScope}</span>}
             </h2>
             <p className="text-[13px] text-zinc-500">
-              What an agent may select when disposing a lead on this process. Unlike RTO Calling
-              (a fixed, built-in list), this one starts empty - add whatever this process needs.
-              Expand an option to give it its own child reasons.
+              {helpText || (
+                <>
+                  What an agent may select when disposing a lead on this process. Unlike RTO Calling
+                  (a fixed, built-in list), this one starts empty - add whatever this process needs.
+                  Expand an option to give it its own child reasons.
+                </>
+              )}
             </p>
           </div>
         </div>

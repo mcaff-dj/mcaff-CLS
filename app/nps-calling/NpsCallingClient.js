@@ -1131,6 +1131,7 @@ export default function NpsCallingClient() {
                     processLabel={`NPS-Calling${adminDispLeadType === 'product' ? ' · Product' : ''}`}
                     disp={disp}
                     allowInputTypeControl
+                    helpText={`The dispose modal only shows reasons nested under two top-level options named exactly "Connected" and "Non Connected" - anything added outside those two is saved but never shown to an agent. Add "Connected" and "Non Connected" as top-level options first, then expand each to add its own reasons as children.`}
                   />
 
                   <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden">
