@@ -6,7 +6,7 @@
 // the Vercel Hobby plan's 12-serverless-function cap. req.query.key selects which
 // data source/permission-card this request is for.
 const { getSession } = require('../../_lib/session');
-const { logAccess, getCallingOverviewData, getCallingTrendData, getCallingTimeOfDayData } = require('../../_lib/db');
+const { logAccess, getCallingOverviewData, getCallingTrendData, getCallingTimeOfDayData, getDetractorTimeOfDayData } = require('../../_lib/db');
 const { signedReportUrl } = require('../../_lib/reportUrls');
 
 const DATA_ROUTES = {
@@ -30,6 +30,10 @@ const DATA_ROUTES = {
   // dynamic route exists at all.
   'calling-trend': { card: 'calling', tab: 'rto', page: '/rto-crm', query: getCallingTrendData },
   'calling-timeofday': { card: 'calling', tab: 'rto', page: '/rto-crm', query: getCallingTimeOfDayData },
+  // Served to the NPS-Calling page itself (tab 'detractor'), same reasoning as calling-
+  // timeofday above - one more RTO-shaped table this repo's 12-function Vercel Hobby cap
+  // rules out as its own api/detractor/timeofday.js.
+  'detractor-timeofday': { card: 'calling', tab: 'detractor', page: '/nps-calling', query: getDetractorTimeOfDayData },
   'trend-digest': { file: 'trend_digest.json', card: 'orgoverview', page: '/orgoverview', redirect: true },
   'repeat-rate': { file: 'repeat_rate.json', card: 'orgoverview', page: '/orgoverview', redirect: true },
   'csat-repeat-rate': { file: 'csat_repeat_rate.json', card: 'orgoverview', page: '/orgoverview', redirect: true },

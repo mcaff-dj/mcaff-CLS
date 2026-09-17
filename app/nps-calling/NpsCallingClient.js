@@ -7,11 +7,14 @@
 // api/_lib/db.js's getNextDetractorLead/disposeDetractorLead. So this file has no sync-from-
 // sheet loop, no upload modal, and no team split (single shared queue/disposition tree for v1).
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { XIcon, CheckIcon, PhoneIcon, CustomSelect, Overlay, CalendarIcon, SearchIcon } from '../_calling/ui';
+import { XIcon, CheckIcon, PhoneIcon, CustomSelect, Overlay, CalendarIcon, SearchIcon, DownloadIcon } from '../_calling/ui';
 import { useCallingSession, ROSTER_STATUS_OPTIONS, STATUS_OPTIONS } from '../_calling/useCallingSession';
 import { useBusinessHours, CallingHoursCard, useDefaultQuota, DefaultQuotaCard, useLeadOrder, LeadOrderCard, useDateRange, DateRangeCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
-import { scopeToDateBounds } from '../_calling/util';
+import { safeStorage as localStorage, scopeToDateBounds, isLeadDateInScope, istMinutesSinceMidnightClient, istDayKeyClient, formatTimeOfDay, formatBreakMinutes, formatFrt, formatPct } from '../_calling/util';
+// "Avg Time to Dispose" - the gap BETWEEN consecutive disposals, shared/tested the same way RTO's
+// own Overview uses it (see that module's own comment).
+import { disposalGaps } from '../../api/_lib/disposalGaps';
 
 const PROCESS_KEY = 'detractor';
 // Keep in sync with api/_lib/db.js's own DETRACTOR_FALLBACK_QUOTA - shown in the admin card so
@@ -293,16 +296,19 @@ function DispositionChecklist({ nodes, selected, onToggle, ancestors = [], produ
 }
 
 export default function NpsCallingClient() {
-  // No date-scope filter UI in v1 (unlike RTO/NDR's Overview date picker) - Overview below is
-  // roster-wide, all-time counts. getDateBounds is still wired through so Logged In At/Total
-  // Break Time in the shared session hook have a sane (unbounded) answer.
+  // Overview tab's date-scope filter (Today/Yesterday/7 Days/30 Days/Custom) - same shape as
+  // RTO/NDR's own. getDateBounds is a getter (not the values themselves), same "temporal dead
+  // zone" reasoning as useCallingSession's own comment: dateScope/customDateFrom/customDateTo
+  // are declared further down this component, but nothing actually CALLS this closure until a
+  // later effect, by which point this render pass has already run every line below and the
+  // state exists.
   const session = useCallingSession(PROCESS_KEY, {
-    getDateBounds: () => scopeToDateBounds('ALL_TIME', '', ''),
+    getDateBounds: () => scopeToDateBounds(dateScope, customDateFrom, customDateTo),
   });
   const {
     googleUser, sessionIsAdmin, invitedProcessKeys, processPermsLoaded,
     processAgents, isProcessAdmin, saveProcessAgent, savingAgentEmail,
-    setStatusForAgent, showToast,
+    setStatusForAgent, showToast, serverPresence,
   } = session;
 
   const hours = useBusinessHours(PROCESS_KEY, { userRole: session.userRole, isProcessAdmin, showToast });
@@ -325,6 +331,38 @@ export default function NpsCallingClient() {
   useEffect(() => {
     if ((tab === 'admin' || tab === 'predicted') && !canAdminTab) setTab('fresh');
   }, [tab, canAdminTab]);
+  // Overview tab's date-scope filter, persisted per-browser like RTO's own (rto_date_scope)
+  // under its own key so the two pages don't stomp each other's last-picked scope.
+  const [dateScope, setDateScope] = useState(() => localStorage.getItem('nps_calling_date_scope') || 'ALL_TIME');
+  const [customDateFrom, setCustomDateFrom] = useState(() => localStorage.getItem('nps_calling_custom_date_from') || '');
+  const [customDateTo, setCustomDateTo] = useState(() => localStorage.getItem('nps_calling_custom_date_to') || '');
+
+  // Time-of-Day Distribution table's own two filters (below the Agent Performance Summary) -
+  // local to that one table, not the page-wide date-scope filter above. No 'converted' metric
+  // option (unlike RTO's) - NPS-Calling has no order/conversion concept, just Connected/Non
+  // Connected dispositions.
+  const [heatmapMetric, setHeatmapMetric] = useState(() => localStorage.getItem('nps_calling_heatmap_metric') || 'dialled');
+  const [heatmapIntervalMinutes, setHeatmapIntervalMinutes] = useState(() => Number(localStorage.getItem('nps_calling_heatmap_interval')) || 30);
+  // Server-side (MySQL CLS_NPS_calling via getDetractorTimeOfDay), not computed from
+  // allTickets/tickets - same "the client can't see everything, and doesn't need to re-derive
+  // what MySQL can already aggregate" reasoning as RTO's own timeOfDay state, just simpler (see
+  // getDetractorTimeOfDay's own comment for why). Fetched at 15-minute grain with both metrics
+  // per bucket, so changing either dropdown above is then a pure re-render, not a refetch.
+  const [timeOfDay, setTimeOfDay] = useState({ buckets: [], loading: true, error: null });
+  useEffect(() => {
+    let cancelled = false;
+    const { dateFrom, dateTo } = scopeToDateBounds(dateScope, customDateFrom, customDateTo);
+    const qs = new URLSearchParams();
+    if (dateFrom) qs.set('dateFrom', dateFrom);
+    if (dateTo) qs.set('dateTo', dateTo);
+    setTimeOfDay((prev) => ({ ...prev, loading: true }));
+    fetch(`/api/report/data/detractor-timeofday?${qs}`)
+      .then((r) => (r.ok ? r.json() : r.json().then((j) => Promise.reject(new Error(j.error || `HTTP ${r.status}`)))))
+      .then((d) => { if (!cancelled) setTimeOfDay({ buckets: d.buckets || [], loading: false, error: null }); })
+      .catch((e) => { if (!cancelled) setTimeOfDay({ buckets: [], loading: false, error: e.message || 'Could not load' }); });
+    return () => { cancelled = true; };
+  }, [dateScope, customDateFrom, customDateTo]);
+
   const [rosterStatusFilter, setRosterStatusFilter] = useState('All');
   const [allLeadsSearch, setAllLeadsSearch] = useState('');
   const [allLeadsAgentFilter, setAllLeadsAgentFilter] = useState('ALL');
@@ -600,8 +638,29 @@ export default function NpsCallingClient() {
   const freshCount = canAdminTab ? (allTickets || []).filter(isUndisposed).length : pendingTickets.length;
   const allDisposedCount = canAdminTab ? (allTickets || []).filter((t) => !isUndisposed(t)).length : disposedTickets.length;
 
+  // Overview tab's date-scope selector - same options as RTO/NDR's own.
+  const dateOptions = [
+    { value: 'ALL_TIME', label: 'All time' },
+    { value: 'TODAY', label: 'Today' },
+    { value: 'YESTERDAY', label: 'Yesterday' },
+    { value: '7_DAYS', label: 'Last 7 days' },
+    { value: '30_DAYS', label: 'Last 30 days' },
+    { value: 'CUSTOM', label: 'Custom range' },
+  ];
+  // Time-of-Day Distribution table's own two filters - no 'converted' option (unlike RTO's),
+  // NPS-Calling has no order/conversion concept.
+  const heatmapIntervalOptions = [
+    { value: 15, label: '15 min' },
+    { value: 30, label: '30 min' },
+    { value: 60, label: '1 hour' },
+  ];
+  const heatmapMetricOptions = [
+    { value: 'dialled', label: 'Total Dialled' },
+    { value: 'connected', label: 'Total Connected' },
+  ];
+
   const tabsList = [
-    { key: 'overview', label: 'Overview (Agents Data)', count: (processAgents || []).length },
+    { key: 'overview', label: canAdminTab ? 'Overview (Agents Data)' : 'My Overview', count: (processAgents || []).length },
     { key: 'all', label: 'All Leads (Disposed)', count: allDisposedCount },
     { key: 'fresh', label: 'Fresh Leads (Assigned)', count: freshCount },
     ...(canAdminTab ? [{ key: 'admin', label: 'Admin Panel & Roster', count: (processAgents || []).length }] : []),
@@ -628,6 +687,240 @@ export default function NpsCallingClient() {
     });
   }, [processAgents, allTickets]);
   const visibleAgentMetrics = agentMetrics.filter((a) => rosterStatusFilter === 'All' || a.status === rosterStatusFilter);
+
+  // Overview tab's per-agent KPI/table/heatmap/export data - the date-scoped counterpart to
+  // agentMetrics above (which stays all-time, for the Admin Panel roster table). Unlike RTO,
+  // an NPS-Calling ticket carries its own real assigned_at/disposed_at timestamps directly (no
+  // separate Calling Date/Order Date sheet column, and no Postgres leadDates lookup needed), so
+  // one metrics pass covers both the KPI tiles and the Agent Performance Summary table, where
+  // RTO needs two (computeAgentMetrics vs computeTableAgentMetrics) to reconcile its sheet-
+  // derived scope against Postgres's real assignedAt/disposedAt scope.
+  const overviewMetrics = useMemo(() => {
+    const assignedDateInScope = (t) => isLeadDateInScope(t.assigned_at, dateScope, customDateFrom, customDateTo);
+    const disposedDateInScope = (t) => isLeadDateInScope(t.disposed_at, dateScope, customDateFrom, customDateTo);
+
+    const computeAgentMetrics = (ag, ticketSource) => {
+      const email = ag.email.toLowerCase();
+      const mineAll = ticketSource.filter((t) => (t.agent_email || '').toLowerCase() === email);
+
+      const assigned = mineAll.filter(assignedDateInScope);
+      const pending = assigned.filter((t) => !t.disposed_at);
+      const disposed = mineAll.filter((t) => t.disposed_at && disposedDateInScope(t));
+      const connected = disposed.filter((t) => t.connected === 'Yes');
+
+      // First/Last Called At: average time-of-day of the first/last disposition across the
+      // range's active days - an average across different calendar days can only be expressed
+      // as a time-of-day, not one specific instant (same reasoning as RTO's own).
+      const firstCallMinutesByDay = new Map();
+      const lastCallMinutesByDay = new Map();
+      for (const t of disposed) {
+        const at = new Date(t.disposed_at);
+        if (Number.isNaN(at.getTime())) continue;
+        const dayKey = istDayKeyClient(at);
+        const mins = istMinutesSinceMidnightClient(at);
+        if (!firstCallMinutesByDay.has(dayKey) || mins < firstCallMinutesByDay.get(dayKey)) firstCallMinutesByDay.set(dayKey, mins);
+        if (!lastCallMinutesByDay.has(dayKey) || mins > lastCallMinutesByDay.get(dayKey)) lastCallMinutesByDay.set(dayKey, mins);
+      }
+      const firstCallMinutesList = [...firstCallMinutesByDay.values()];
+      const firstCalledAtMinutes = firstCallMinutesList.length
+        ? Math.round(firstCallMinutesList.reduce((s, m) => s + m, 0) / firstCallMinutesList.length) : null;
+      const lastCallMinutesList = [...lastCallMinutesByDay.values()];
+      const lastCalledAtMinutes = lastCallMinutesList.length
+        ? Math.round(lastCallMinutesList.reduce((s, m) => s + m, 0) / lastCallMinutesList.length) : null;
+
+      // FRT: disposed_at - assigned_at, averaged in minutes over disposed tickets with both
+      // timestamps. Negative gaps (bad data - disposed logged before assigned) are dropped
+      // rather than dragging the average down.
+      const frtMinutesList = [];
+      for (const t of disposed) {
+        if (!t.assigned_at || !t.disposed_at) continue;
+        const diffMin = (new Date(t.disposed_at).getTime() - new Date(t.assigned_at).getTime()) / 60000;
+        if (diffMin >= 0) frtMinutesList.push(diffMin);
+      }
+      const frtMinutes = frtMinutesList.length
+        ? Math.round(frtMinutesList.reduce((s, m) => s + m, 0) / frtMinutesList.length) : null;
+
+      // Avg Time to Dispose: gap between one disposition and this agent's next, same-day only.
+      const { averageMinutes: disposeGapMinutes } = disposalGaps(disposed.map((t) => ({
+        key: t.response_id, disposedAt: t.disposed_at,
+      })));
+
+      return {
+        ...ag,
+        assigned: assigned.length,
+        disposed: disposed.length,
+        pending: pending.length,
+        connected: connected.length,
+        connectRate: disposed.length ? Math.round((connected.length / disposed.length) * 100) : 0,
+        firstCalledAtMinutes, lastCalledAtMinutes, frtMinutes, disposeGapMinutes,
+      };
+    };
+
+    // A plain Agent's Overview must only ever reflect their own performance - ticketSource
+    // stays `tickets` (their own fetch; allTickets is admin/process-admin only and stays null
+    // for them), and the roster below is trimmed to just their own entry.
+    const myEmailLower = (googleUser?.email || '').toLowerCase();
+    const roster = canAdminTab
+      ? (processAgents || [])
+      : (processAgents || []).filter((a) => a.email.toLowerCase() === myEmailLower);
+    const ticketSource = canAdminTab ? (allTickets || []) : tickets;
+    const agentRows = roster.map((ag) => computeAgentMetrics(ag, ticketSource));
+    const summaryRows = agentRows.filter((am) => am.assigned > 0 || am.disposed > 0);
+
+    // Team Total row - team aggregates per column, not a per-agent row total (this table mixes
+    // counts, percentages and times). Logged In At/Total Break Time/Total Busy Time average
+    // across agents that have a real value (null excluded, not treated as 0), same as RTO's own.
+    const summaryTotals = summaryRows.reduce((acc, am) => {
+      acc.assigned += am.assigned; acc.disposed += am.disposed; acc.pending += am.pending; acc.connected += am.connected;
+      return acc;
+    }, { assigned: 0, disposed: 0, pending: 0, connected: 0 });
+    const summaryLoggedInList = summaryRows.map((am) => serverPresence[am.email.toLowerCase()]?.loggedInMinutes).filter((m) => m !== null && m !== undefined);
+    const summaryBreakList = summaryRows.map((am) => serverPresence[am.email.toLowerCase()]?.breakMinutes).filter((m) => m !== null && m !== undefined);
+    const summaryBusyList = summaryRows.map((am) => serverPresence[am.email.toLowerCase()]?.busyMinutes).filter((m) => m !== null && m !== undefined);
+    const summaryAvgLoggedIn = summaryLoggedInList.length ? Math.round(summaryLoggedInList.reduce((s, m) => s + m, 0) / summaryLoggedInList.length) : null;
+    const summaryAvgBreak = summaryBreakList.length ? Math.round(summaryBreakList.reduce((s, m) => s + m, 0) / summaryBreakList.length) : 0;
+    const summaryAvgBusy = summaryBusyList.length ? Math.round(summaryBusyList.reduce((s, m) => s + m, 0) / summaryBusyList.length) : 0;
+    const summaryFrtList = summaryRows.map((am) => am.frtMinutes).filter((m) => m !== null && m !== undefined);
+    const summaryAvgFrt = summaryFrtList.length ? Math.round(summaryFrtList.reduce((s, m) => s + m, 0) / summaryFrtList.length) : null;
+    // Mean of the agents' own averages, not a pooled recount - the Team Total row answers "what
+    // does a typical agent look like", same reasoning as RTO's own.
+    const summaryGapList = summaryRows.map((am) => am.disposeGapMinutes).filter((m) => m !== null && m !== undefined);
+    const summaryAvgDisposeGap = summaryGapList.length ? Math.round(summaryGapList.reduce((s, m) => s + m, 0) / summaryGapList.length) : null;
+
+    const totalAssigned = summaryTotals.assigned;
+    const totalDisposed = summaryTotals.disposed;
+    const totalPending = summaryTotals.pending;
+    const avgConnectRate = totalDisposed > 0 ? Math.round((summaryTotals.connected / totalDisposed) * 100) : 0;
+    const onlineCount = roster.filter((a) => a.status === 'Online').length;
+
+    const escapeCsv = (v) => {
+      const s = String(v ?? '');
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const downloadBlob = (lines, filename) => {
+      const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    };
+
+    // Same Blob/anchor download pattern as RTO's downloadAgentSummaryCsv - exports exactly
+    // what's on screen, one row per agent plus the Team Total row.
+    function downloadAgentSummaryCsv() {
+      const header = ['Agent Name', 'Total Leads Assigned', 'Total Disposed', 'First Called At', 'Last Called At', 'FRT', 'Avg Time to Dispose', 'Total Connected', 'Connected %', 'Logged In At', 'Total Break Time', 'Total Busy Time'];
+      const rowFor = (am) => {
+        const presence = serverPresence[am.email.toLowerCase()];
+        return [
+          am.name, am.assigned, am.disposed, formatTimeOfDay(am.firstCalledAtMinutes), formatTimeOfDay(am.lastCalledAtMinutes),
+          formatFrt(am.frtMinutes), formatFrt(am.disposeGapMinutes), am.connected, formatPct(am.connected, am.disposed),
+          formatTimeOfDay(presence?.loggedInMinutes), formatBreakMinutes(presence?.breakMinutes), formatBreakMinutes(presence?.busyMinutes),
+        ];
+      };
+      const lines = [header.map(escapeCsv).join(',')];
+      summaryRows.forEach((am) => lines.push(rowFor(am).map(escapeCsv).join(',')));
+      if (summaryRows.length > 0) {
+        lines.push([
+          'Team Total', summaryTotals.assigned, summaryTotals.disposed, '—', '—', formatFrt(summaryAvgFrt), formatFrt(summaryAvgDisposeGap),
+          summaryTotals.connected, formatPct(summaryTotals.connected, summaryTotals.disposed),
+          formatTimeOfDay(summaryAvgLoggedIn), formatBreakMinutes(summaryAvgBreak), formatBreakMinutes(summaryAvgBusy),
+        ].map(escapeCsv).join(','));
+      }
+      downloadBlob(lines, `nps-calling-agent-summary-${new Date().toISOString().slice(0, 10)}.csv`);
+    }
+
+    // Raw per-lead detail behind the summary table above - one row per ticket rather than
+    // aggregated per agent, so an admin can audit exactly which leads make up a summary number.
+    // Union of assignedDateInScope OR (disposed AND disposedDateInScope), same as RTO's own
+    // rawLeadDetailsList, so a lead assigned yesterday and disposed today appears once, not
+    // double counted.
+    const rawLeadDetailsList = roster.flatMap((ag) => {
+      const email = ag.email.toLowerCase();
+      const mine = ticketSource.filter((t) => (t.agent_email || '').toLowerCase() === email
+        && (assignedDateInScope(t) || (t.disposed_at && disposedDateInScope(t))));
+      const { gapByKey } = disposalGaps(mine.map((t) => ({ key: t.response_id, disposedAt: t.disposed_at })));
+      return mine.map((t) => {
+        const frtMinutes = (t.assigned_at && t.disposed_at)
+          ? (new Date(t.disposed_at).getTime() - new Date(t.assigned_at).getTime()) / 60000 : null;
+        return {
+          responseId: t.response_id,
+          customerName: t.customer_name || '',
+          agentName: ag.name,
+          assignedAt: t.assigned_at || '',
+          disposedAt: t.disposed_at || '',
+          frtMinutes: (frtMinutes !== null && frtMinutes >= 0) ? Math.round(frtMinutes) : null,
+          disposeGapMinutes: (() => {
+            const g = gapByKey.get(t.response_id);
+            return (g === null || g === undefined) ? null : Math.round(g);
+          })(),
+          connected: t.connected || '',
+          disposition: t.disposition || '',
+        };
+      });
+    }).sort((a, b) => a.agentName.localeCompare(b.agentName) || String(a.responseId).localeCompare(String(b.responseId)));
+
+    function downloadRawLeadDetailsCsv() {
+      const formatCsvDate = (iso) => iso
+        ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })
+        : '';
+      const lines = [
+        ['Response ID', 'Customer', 'Agent Name', 'Assigned Date', 'Disposed Date', 'FRT', 'Time Since Prev Disposal', 'Connected', 'Disposition'].join(','),
+        ...rawLeadDetailsList.map((r) => [
+          r.responseId, r.customerName, r.agentName, formatCsvDate(r.assignedAt), formatCsvDate(r.disposedAt),
+          formatFrt(r.frtMinutes), formatFrt(r.disposeGapMinutes), r.connected, r.disposition,
+        ].map(escapeCsv).join(',')),
+      ];
+      downloadBlob(lines, `nps-calling-raw-leads-${new Date().toISOString().slice(0, 10)}.csv`);
+    }
+
+    // Time-of-Day Distribution - server buckets (timeOfDay above), not computed from
+    // allTickets/tickets: same "Dialled" (every disposed lead)/"Connected" (narrows to
+    // connected='Yes') shape as RTO's own, just without a 'converted' option.
+    const bucketsByAgent = new Map();
+    for (const b of timeOfDay.buckets) {
+      if (!bucketsByAgent.has(b.agentEmail)) bucketsByAgent.set(b.agentEmail, []);
+      bucketsByAgent.get(b.agentEmail).push(b);
+    }
+    const heatmapAgentData = roster.map((ag) => {
+      const email = ag.email.toLowerCase();
+      const bucketCounts = new Map();
+      for (const b of bucketsByAgent.get(email) || []) {
+        const value = b[heatmapMetric] || 0;
+        if (!value) continue;
+        const bucketIndex = Math.floor((b.bucket15 * 15) / heatmapIntervalMinutes);
+        bucketCounts.set(bucketIndex, (bucketCounts.get(bucketIndex) || 0) + value);
+      }
+      return { ...ag, bucketCounts };
+    });
+    const visibleHeatmapAgentData = heatmapAgentData.filter((a) => a.bucketCounts.size > 0);
+    // Columns span only the buckets SOMEONE actually has activity in, not a fixed full-day grid.
+    const allHeatmapBucketIndexes = visibleHeatmapAgentData.flatMap((a) => [...a.bucketCounts.keys()]);
+    const heatmapBucketIndexes = [];
+    if (allHeatmapBucketIndexes.length) {
+      const minBucket = Math.min(...allHeatmapBucketIndexes);
+      const maxBucket = Math.max(...allHeatmapBucketIndexes);
+      for (let i = minBucket; i <= maxBucket; i++) heatmapBucketIndexes.push(i);
+    }
+    // Global min/max across every rendered cell (Total row/column excluded) drives the
+    // "lower = more highlighted" tint - amber-500, matching this table's Total Break Time accent.
+    const allHeatmapValues = visibleHeatmapAgentData.flatMap((a) => heatmapBucketIndexes.map((idx) => a.bucketCounts.get(idx) || 0));
+    const heatmapMin = allHeatmapValues.length ? Math.min(...allHeatmapValues) : 0;
+    const heatmapMax = allHeatmapValues.length ? Math.max(...allHeatmapValues) : 0;
+    function heatmapCellStyle(value) {
+      if (heatmapMax <= heatmapMin) return undefined;
+      const t = (heatmapMax - value) / (heatmapMax - heatmapMin);
+      return { backgroundColor: `rgba(245, 158, 11, ${(t * 0.4).toFixed(2)})` };
+    }
+
+    return {
+      roster, summaryRows, summaryTotals, summaryAvgFrt, summaryAvgDisposeGap, summaryAvgLoggedIn, summaryAvgBreak, summaryAvgBusy,
+      downloadAgentSummaryCsv, rawLeadDetailsList, downloadRawLeadDetailsCsv,
+      totalAssigned, totalDisposed, totalPending, avgConnectRate, onlineCount,
+      visibleHeatmapAgentData, heatmapBucketIndexes, heatmapCellStyle,
+      timeOfDayState: { loading: timeOfDay.loading, error: timeOfDay.error },
+    };
+  }, [allTickets, tickets, processAgents, canAdminTab, googleUser, dateScope, customDateFrom, customDateTo, serverPresence, timeOfDay, heatmapMetric, heatmapIntervalMinutes]);
 
   // Best-effort "who would get this" for the Next to Assign preview below - real assignment is
   // demand-pulled (an agent's own going-Online/heartbeat/self-refill claims whatever their own
@@ -1062,39 +1355,269 @@ export default function NpsCallingClient() {
                 </div>
               )}
 
-              {tab === 'overview' && (
-                <div className="space-y-3">
-                  <div>
-                    <h3 className="text-[15px] font-bold text-zinc-100 tracking-tight">Overview</h3>
-                    <p className="text-[12px] text-zinc-500 mt-0.5">
-                      {canAdminTab ? "Roster-wide totals, all agents, all time." : 'Your own totals, all time.'}
-                    </p>
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    {(() => {
-                      const source = allTickets || tickets;
-                      const total = source.length;
-                      const disposedCount = source.filter((t) => !isUndisposed(t)).length;
-                      const undisposedCount = total - disposedCount;
-                      const connectedCount = source.filter((t) => t.connected === 'Yes').length;
-                      const stats = [
-                        { label: 'Total Leads', value: total, icon: '📋' },
-                        { label: 'Disposed', value: disposedCount, icon: '✅' },
-                        { label: 'Pending', value: undisposedCount, icon: '⏳' },
-                        { label: 'Connected', value: connectedCount, icon: '📞' },
-                      ];
-                      return stats.map((s) => (
+              {tab === 'overview' && (() => {
+                const {
+                  roster, summaryRows, summaryTotals, summaryAvgFrt, summaryAvgDisposeGap,
+                  summaryAvgLoggedIn, summaryAvgBreak, summaryAvgBusy,
+                  downloadAgentSummaryCsv, rawLeadDetailsList, downloadRawLeadDetailsCsv,
+                  totalAssigned, totalDisposed, totalPending, avgConnectRate, onlineCount,
+                  visibleHeatmapAgentData, heatmapBucketIndexes, heatmapCellStyle, timeOfDayState,
+                } = overviewMetrics;
+                return (
+                  <div className="space-y-5 animate-fadeIn">
+                    {/* Header */}
+                    <div className="flex items-center justify-between flex-wrap gap-3">
+                      <div>
+                        <h3 className="text-[15px] font-bold text-zinc-100 tracking-tight">
+                          {canAdminTab ? '📊 Overview & Agents Performance' : '📊 My Overview'}
+                        </h3>
+                        <p className="text-[12px] text-zinc-500 mt-0.5">
+                          {canAdminTab
+                            ? `Real-time metrics and per-agent performance across all ${roster.length} team members.`
+                            : 'Your own real-time metrics and performance, scoped to the date range below.'}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <CustomSelect
+                          value={dateScope}
+                          onChange={(val) => { setDateScope(val); localStorage.setItem('nps_calling_date_scope', val); }}
+                          options={dateOptions}
+                          icon={CalendarIcon}
+                          placeholder="Date Scope"
+                        />
+                        {dateScope === 'CUSTOM' && (
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="date"
+                              value={customDateFrom}
+                              onChange={(e) => { setCustomDateFrom(e.target.value); localStorage.setItem('nps_calling_custom_date_from', e.target.value); }}
+                              className="h-8 px-2 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[12px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+                            />
+                            <span className="text-zinc-500 text-[12px]">to</span>
+                            <input
+                              type="date"
+                              value={customDateTo}
+                              onChange={(e) => { setCustomDateTo(e.target.value); localStorage.setItem('nps_calling_custom_date_to', e.target.value); }}
+                              className="h-8 px-2 bg-zinc-900/90 border border-zinc-800 rounded-lg text-[12px] text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+                            />
+                          </div>
+                        )}
+                        {canAdminTab && (
+                          <span className="text-[12px] text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-2.5 py-1 rounded-lg font-mono flex items-center gap-1.5">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 pulse-dot"></span>
+                            {onlineCount}/{roster.length} Active
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Top KPI Stat Cards */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      {[
+                        { label: 'Total Assigned', value: totalAssigned, icon: '📋' },
+                        { label: 'Total Disposed', value: totalDisposed, icon: '✅' },
+                        { label: 'Pending Queue', value: totalPending, icon: '⏳' },
+                        { label: 'Avg Connect Rate', value: `${avgConnectRate}%`, icon: '📞' },
+                      ].map((s) => (
                         <div key={s.label} className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl p-4">
                           <p className="text-[11px] text-zinc-500 font-semibold uppercase flex items-center gap-1.5">
                             <span>{s.icon}</span>{s.label}
                           </p>
                           <p className="text-2xl font-extrabold text-zinc-100 tracking-tight">{s.value}</p>
                         </div>
-                      ));
-                    })()}
+                      ))}
+                    </div>
+
+                    {/* Agent Performance Summary */}
+                    <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
+                      <div className="flex items-start justify-between flex-wrap gap-3">
+                        <div>
+                          <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">📋 Agent Performance Summary</h3>
+                          <p className="text-[12px] text-zinc-500 mt-0.5">
+                            Follows the date range above - Total Leads Assigned uses when the lead was actually handed to
+                            the agent; Total Disposed/Connected use when the agent actually resolved it, so a lead assigned
+                            yesterday and disposed today counts toward today's Disposed/Connected numbers even though it
+                            doesn't count toward today's Assigned ones. First/Last Called At are the average time-of-day of
+                            the first/last disposition each active day; Logged In At/Total Break Time/Total Busy Time follow
+                            the same active-day average. FRT is the average time between a lead's assignment and its
+                            disposition; Avg Time to Dispose is the average gap between one disposition and the agent's
+                            next, same-day only.
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={downloadRawLeadDetailsCsv}
+                            disabled={rawLeadDetailsList.length === 0}
+                            title="One row per lead behind this table - Response ID, Customer, Agent Name, Assigned Date, Disposed Date, FRT, Time Since Prev Disposal, Connected, Disposition"
+                            className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-[13px] font-medium text-zinc-200 transition-all shadow-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <DownloadIcon />
+                            Raw Lead Details
+                          </button>
+                          <button
+                            type="button"
+                            onClick={downloadAgentSummaryCsv}
+                            disabled={summaryRows.length === 0}
+                            title="This table exactly as shown, one row per agent plus Team Total"
+                            className="h-8 px-3 flex items-center gap-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-[13px] font-medium text-zinc-200 transition-all shadow-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <DownloadIcon />
+                            Export CSV
+                          </button>
+                        </div>
+                      </div>
+                      <div className="overflow-x-auto custom-scroll">
+                        <table className="w-full min-w-[820px] text-[12.5px] border-collapse">
+                          <thead>
+                            <tr className="text-left text-zinc-500 uppercase text-[10px] tracking-wider border-b border-zinc-800">
+                              <th className="py-2 pr-3 font-bold sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Agent Name</th>
+                              <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real assignment date">Total Leads Assigned</th>
+                              <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Disposed</th>
+                              <th className="py-2 px-3 font-bold" title="Average time-of-day of the first disposition across the range's active days">First Called At</th>
+                              <th className="py-2 px-3 font-bold" title="Average time-of-day of the last disposition across the range's active days">Last Called At</th>
+                              <th className="py-2 px-3 font-bold" title="Average time between a lead's assignment and its disposition, across disposed leads with both timestamps">FRT</th>
+                              <th className="py-2 px-3 font-bold" title="Average gap between one disposition and the agent's next, same-day only">Avg Time to Dispose</th>
+                              <th className="py-2 px-3 font-bold text-right" title="Scoped by the lead's real disposed date">Total Connected</th>
+                              <th className="py-2 px-3 font-bold text-right" title="Total Connected / Total Disposed">Connected %</th>
+                              <th className="py-2 px-3 font-bold" title="Average first-login time-of-day across the range's active days">Logged In At</th>
+                              <th className="py-2 px-3 font-bold" title="Average break minutes per active day in the range">Total Break Time</th>
+                              <th className="py-2 pl-3 font-bold" title="Average Busy (on-call) minutes per active day in the range">Total Busy Time</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {summaryRows.map((am) => {
+                              const presence = serverPresence[am.email.toLowerCase()];
+                              return (
+                                <tr key={am.email} className="group border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
+                                  <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800 border-r border-zinc-800 transition-colors">{am.name}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.assigned}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-zinc-300">{am.disposed}</td>
+                                  <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(am.firstCalledAtMinutes)}</td>
+                                  <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(am.lastCalledAtMinutes)}</td>
+                                  <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatFrt(am.frtMinutes)}</td>
+                                  <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatFrt(am.disposeGapMinutes)}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{am.connected}</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums text-emerald-400">{formatPct(am.connected, am.disposed)}</td>
+                                  <td className="py-2.5 px-3 text-zinc-400 font-mono whitespace-nowrap">{formatTimeOfDay(presence?.loggedInMinutes)}</td>
+                                  <td className="py-2.5 px-3 text-amber-400 font-mono whitespace-nowrap">{formatBreakMinutes(presence?.breakMinutes)}</td>
+                                  <td className="py-2.5 pl-3 text-rose-400 font-mono whitespace-nowrap">{formatBreakMinutes(presence?.busyMinutes)}</td>
+                                </tr>
+                              );
+                            })}
+                            {summaryRows.length > 0 && (
+                              <tr className="border-t-2 border-zinc-700 bg-zinc-900/80 font-bold">
+                                <td className="py-2.5 pr-3 text-zinc-100 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Team Total</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.assigned}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{summaryTotals.disposed}</td>
+                                <td className="py-2.5 px-3 text-zinc-500">—</td>
+                                <td className="py-2.5 px-3 text-zinc-500">—</td>
+                                <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Average across disposed leads with both timestamps">{formatFrt(summaryAvgFrt)}</td>
+                                <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Mean of each agent's own average gap">{formatFrt(summaryAvgDisposeGap)}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{summaryTotals.connected}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums text-emerald-300">{formatPct(summaryTotals.connected, summaryTotals.disposed)}</td>
+                                <td className="py-2.5 px-3 text-zinc-300 font-mono whitespace-nowrap" title="Average across agents with a real value">{formatTimeOfDay(summaryAvgLoggedIn)}</td>
+                                <td className="py-2.5 px-3 text-amber-300 font-mono whitespace-nowrap" title="Average across agents with a real value">{formatBreakMinutes(summaryAvgBreak)}</td>
+                                <td className="py-2.5 pl-3 text-rose-300 font-mono whitespace-nowrap" title="Average across agents with a real value">{formatBreakMinutes(summaryAvgBusy)}</td>
+                              </tr>
+                            )}
+                            {summaryRows.length === 0 && (
+                              <tr><td colSpan={12} className="py-6 text-center text-zinc-500">No agents with assigned leads in this date range.</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* Time-of-Day Distribution */}
+                    <div className="bg-zinc-900/60 rounded-xl border border-zinc-800/80 p-5 space-y-4">
+                      <div className="flex items-center justify-between flex-wrap gap-3">
+                        <div>
+                          <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">🕐 Time-of-Day Distribution</h3>
+                          <p className="text-[12px] text-zinc-500 mt-0.5">
+                            Same date range as above, bucketed by time of day - columns span only the buckets with any
+                            activity (not a fixed full-day grid). A multi-day range sums every matching day into the same
+                            time-of-day bucket. Cell shading is a whole-table scale - the darker the highlight, the lower
+                            that count is relative to every other cell currently shown (Total row/column excluded from the
+                            scale itself).
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <CustomSelect
+                            value={heatmapMetric}
+                            onChange={(v) => { setHeatmapMetric(v); localStorage.setItem('nps_calling_heatmap_metric', v); }}
+                            options={heatmapMetricOptions}
+                          />
+                          <CustomSelect
+                            value={heatmapIntervalMinutes}
+                            onChange={(v) => { setHeatmapIntervalMinutes(v); localStorage.setItem('nps_calling_heatmap_interval', String(v)); }}
+                            options={heatmapIntervalOptions}
+                          />
+                        </div>
+                      </div>
+                      <div className="overflow-x-auto custom-scroll">
+                        <table className="w-full text-[12.5px] border-collapse">
+                          <thead>
+                            <tr className="text-left text-zinc-500 uppercase text-[10px] tracking-wider border-b border-zinc-800">
+                              <th className="py-2 pr-3 font-bold whitespace-nowrap sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Agent Name</th>
+                              {heatmapBucketIndexes.map((idx) => (
+                                <th key={idx} className="py-2 px-3 font-bold text-right whitespace-nowrap">
+                                  {formatTimeOfDay(idx * heatmapIntervalMinutes)}
+                                </th>
+                              ))}
+                              <th className="py-2 pl-3 font-bold text-right whitespace-nowrap border-l border-zinc-800">Total</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {visibleHeatmapAgentData.map((a) => {
+                              const rowTotal = heatmapBucketIndexes.reduce((s, idx) => s + (a.bucketCounts.get(idx) || 0), 0);
+                              return (
+                                <tr key={a.email} className="group border-b border-zinc-900 hover:bg-zinc-900/40 transition-colors">
+                                  <td className="py-2.5 pr-3 font-semibold text-zinc-200 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 group-hover:bg-zinc-800 border-r border-zinc-800 transition-colors">{a.name}</td>
+                                  {heatmapBucketIndexes.map((idx) => {
+                                    const value = a.bucketCounts.get(idx) || 0;
+                                    return (
+                                      <td key={idx} className="py-2.5 px-3 text-right tabular-nums text-zinc-200" style={heatmapCellStyle(value)}>
+                                        {value}
+                                      </td>
+                                    );
+                                  })}
+                                  <td className="py-2.5 pl-3 text-right tabular-nums text-zinc-100 font-bold border-l border-zinc-800">{rowTotal}</td>
+                                </tr>
+                              );
+                            })}
+                            {visibleHeatmapAgentData.length > 0 && (
+                              <tr className="border-t-2 border-zinc-700 bg-zinc-900/80 font-bold">
+                                <td className="py-2.5 pr-3 text-zinc-100 whitespace-nowrap sticky left-0 z-10 bg-zinc-900 border-r border-zinc-800">Team Total</td>
+                                {heatmapBucketIndexes.map((idx) => {
+                                  const columnTotal = visibleHeatmapAgentData.reduce((s, a) => s + (a.bucketCounts.get(idx) || 0), 0);
+                                  return (
+                                    <td key={idx} className="py-2.5 px-3 text-right tabular-nums text-zinc-100">{columnTotal}</td>
+                                  );
+                                })}
+                                <td className="py-2.5 pl-3 text-right tabular-nums text-zinc-100 border-l border-zinc-800">
+                                  {visibleHeatmapAgentData.reduce((s, a) => s + heatmapBucketIndexes.reduce((s2, idx) => s2 + (a.bucketCounts.get(idx) || 0), 0), 0)}
+                                </td>
+                              </tr>
+                            )}
+                            {visibleHeatmapAgentData.length === 0 && (
+                              <tr>
+                                <td colSpan={heatmapBucketIndexes.length + 2} className="py-6 text-center text-zinc-500">
+                                  {timeOfDayState.loading
+                                    ? 'Loading…'
+                                    : timeOfDayState.error
+                                      ? `Could not load time-of-day data: ${timeOfDayState.error}`
+                                      : `No ${heatmapMetricOptions.find((o) => o.value === heatmapMetric)?.label.toLowerCase()} activity in this date range.`}
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {tab === 'admin' && canAdminTab && (
                 <div className="space-y-5">

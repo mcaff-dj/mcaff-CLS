@@ -2373,6 +2373,41 @@ async function getAllDetractorTickets() {
   return rows;
 }
 
+// Per-agent, per-15-minute-of-day dialled/connected counts for NPS-Calling's Overview Time-of-
+// Day Distribution table - same shape as RTO's getCallingTimeOfDay below, but far simpler: no
+// "converted" metric (NPS-Calling has no order/conversion concept, just Connected/Non Connected
+// dispositions), and no per-(agent,lead,day) dedup against retired cycles either -
+// disposeDetractorLead's WHERE disposed_at IS NULL makes a second dispose of the same
+// response_id a no-op (see its own comment), and reassigned_away_at is never set for this
+// process (no reassignment path exists yet), so there is exactly one disposed row per lead,
+// ever, straight off the base table.
+async function getDetractorTimeOfDay({ dateFrom, dateTo } = {}) {
+  await ensureSchema();
+  const { from, to } = dateBounds(dateFrom, dateTo);
+  const { rows } = await sql`
+    SELECT
+      LOWER(agent_email) AS agent_email,
+      FLOOR((HOUR(CONVERT_TZ(disposed_at, '+00:00', '+05:30')) * 60 + MINUTE(CONVERT_TZ(disposed_at, '+00:00', '+05:30'))) / 15) AS bucket15,
+      COUNT(*) AS dialled,
+      SUM(connected = 'Yes') AS connected
+    FROM CLS_NPS_calling
+    WHERE disposed_at IS NOT NULL AND agent_email IS NOT NULL AND agent_email <> ''
+      AND (${from} IS NULL OR disposed_at >= ${from}) AND (${to} IS NULL OR disposed_at <= ${to})
+    GROUP BY 1, 2
+  `;
+  return rows.map((r) => ({
+    agentEmail: r.agent_email,
+    bucket15: Number(r.bucket15) || 0,
+    dialled: Number(r.dialled) || 0,
+    connected: Number(r.connected) || 0,
+  }));
+}
+
+async function getDetractorTimeOfDayData(query) {
+  const { dateFrom, dateTo } = query || {};
+  return { buckets: await getDetractorTimeOfDay({ dateFrom, dateTo }) };
+}
+
 // Falls back to this only when no admin has ever set calling_process_settings.default_quota for
 // 'productkyc' - same pattern as DETRACTOR_FALLBACK_QUOTA above.
 const PRODUCTCALLING_FALLBACK_QUOTA = 15;
@@ -6213,6 +6248,7 @@ module.exports = {
   getNdrAgentAssignmentConfig,
   getDetractorAgentQuota, getDetractorAgentAvailability, getDetractorLoadByAgent, getDetractorQuotaAndLoad,
   getNextDetractorLead, getUnassignedDetractorLeads, disposeDetractorLead, getDetractorTicketsForAgent, getAllDetractorTickets,
+  getDetractorTimeOfDay, getDetractorTimeOfDayData,
   assignDetractorLeadsToAgent, topUpDetractorAgent, safeLimit, raw, buildSqlText,
   PRODUCTCALLING_FALLBACK_QUOTA, getProductCallingAgentQuota, getProductCallingAgentAvailability,
   getProductCallingLoadByAgent, getProductCallingQuotaAndLoad, claimNextProductCallingLead,
