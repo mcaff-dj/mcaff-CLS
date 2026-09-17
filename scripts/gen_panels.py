@@ -22,6 +22,8 @@ from gen_raw_export import raw_download_link
 from nps_source import _month_label as nps_month_label
 from report_context import (ci_key, fnum, h_enc, index_map, j_enc, n0, pretty_month, round1,
                             sort_keys_by_last_period, year_of)
+from collections import Counter
+from nps_feedback_categorizer import OTHER_CATEGORY, categorize
 
 
 def build_cross_filter_panel(ctx, cls, dim2_key, dim2_label, dim2_title, pct_mode, dim2_pct_label, dim2_cap, coverage_mode,
@@ -684,17 +686,27 @@ def _prodwise_year_json(months, years):
     return "{" + ",".join(parts) + "}"
 
 
-def _build_prodwise_heatmap(capped):
+def _build_prodwise_heatmap(capped, dip_feedback):
     """Product x month avg NPS score (1-10) heatmap. Color midpoint is 7.0 (NPS promoter
     threshold): below = red (--s6), above = aqua (--s2), normalized against the actual data
     spread (floor 1.0 so a flat dataset still shows some color contrast). Each month is a
     colspan=2 group (Total Response, Total NPS), same two-row thead pattern as the category
-    pivots above; both sub-columns carry data-yr so the Year-chip sweep hides whole months."""
+    pivots above; both sub-columns carry data-yr so the Year-chip sweep hides whole months.
+
+    Rows with at least one month-over-month NPS drop get a clickable chevron; clicking
+    expands an inline detail row (colspan-ing the full table) listing that product's own
+    dip months only, sorted biggest-drop-first, with reason categories mined from
+    dip_feedback via nps_feedback_categorizer.categorize() and a low-sample guard (<5
+    Detractors that month). dip_feedback: {product_name: {ym: [feedback_text, ...]}}, see
+    nps_source.fetch_product_dip_feedback. See
+    docs/superpowers/specs/2026-09-17-nps-dip-reasons-design.md."""
     all_yms = sorted({ym for r in capped for ym in r["months"]})
     if not all_yms:
         return ""
 
     NPS_MID = 50  # "excellent NPS" threshold: below 50 = underperforming (red), above = strong (green)
+    LOW_SAMPLE_DETRACTORS = 5
+    colspan = 2 + 2 * len(all_yms)  # rowlabel + trend + 2 cols/month
 
     def _nps(m):
         return m["nps_pct"] if m else None
@@ -711,6 +723,71 @@ def _build_prodwise_heatmap(capped):
         mix = round(abs(t) * 70)
         return f" style=\"background:color-mix(in oklab, var(--grid) {100 - mix}%, var({slot}) {mix}%)\""
 
+    def _dip_months(r):
+        """[(ym, prev_m, cur_m, delta), ...] sorted biggest-drop-first (delta most negative)."""
+        dips = []
+        for i in range(1, len(all_yms)):
+            prev_m, cur_m = r["months"].get(all_yms[i - 1]), r["months"].get(all_yms[i])
+            if not prev_m or not cur_m or prev_m["nps_pct"] is None or cur_m["nps_pct"] is None:
+                continue
+            if cur_m["nps_pct"] < prev_m["nps_pct"]:
+                dips.append((all_yms[i], prev_m, cur_m, round(cur_m["nps_pct"] - prev_m["nps_pct"], 1)))
+        dips.sort(key=lambda d: d[3])
+        return dips
+
+    def _reason_cells(product, ym, cur_m):
+        detractors = cur_m["detractors"]
+        if detractors < LOW_SAMPLE_DETRACTORS:
+            return (f"<td class='reasons-cell' colspan='2'><span class='pending'>"
+                    f"Not enough feedback (n&lt;{LOW_SAMPLE_DETRACTORS})</span></td>")
+        texts = dip_feedback.get(product, {}).get(ym, [])
+        if not texts:
+            return "<td class='reasons-cell' colspan='2'><span class='pending'>No feedback text left this month</span></td>"
+        counts = Counter()
+        by_category = {}
+        for text in texts:
+            for cat in categorize(text):
+                counts[cat] += 1
+                by_category.setdefault(cat, []).append(text)
+        # Prefer real categories over the Other/Unclear catch-all for the headline reasons;
+        # only fall back to Other if literally nothing else matched.
+        ranked = [c for c in counts.most_common() if c[0] != OTHER_CATEGORY]
+        top = ranked[:2] or counts.most_common(1)
+        pills = "".join(
+            f"<span class='reason-pill' title='{n} of {detractors} Detractors mentioned this'>"
+            f"{h_enc(cat)} &mdash; {round(n / detractors * 100)}%</span>"
+            for cat, n in top
+        )
+        quote = min(by_category[top[0][0]], key=len)
+        quote_short = quote if len(quote) <= 80 else quote[:77] + "..."
+        return (
+            f"<td class='reasons-cell'>{pills}</td>"
+            f"<td class='quote' title=\"{h_enc(quote)}\">&ldquo;{h_enc(quote_short)}&rdquo;</td>"
+        )
+
+    def _detail_row(row_id, product, dips):
+        if not dips:
+            return ""
+        lines = []
+        for ym, prev_m, cur_m, delta in dips:
+            reason_html = _reason_cells(product, ym, cur_m)
+            lines.append(
+                f"<tr><td class='rowlabel sub'>{h_enc(_nps_month_label(ym))}</td>"
+                f"<td class='num'>{fnum(prev_m['nps_pct'])} &rarr; {fnum(cur_m['nps_pct'])}</td>"
+                f"<td class='delta-down'>{delta}</td><td class='num'>{n0(cur_m['responses'])}</td>{reason_html}</tr>"
+            )
+        inner = (
+            "<table class='dip-inner-table'><thead><tr><th class='corner'>Month</th>"
+            "<th>NPS (prev &rarr; current)</th><th>&Delta;</th><th>Responses</th>"
+            "<th class='reasons-cell' style='text-align:left'>Top reasons</th>"
+            "<th class='reasons-cell' style='text-align:left'>Example feedback</th></tr></thead>"
+            f"<tbody>{''.join(lines)}</tbody></table>"
+        )
+        return (
+            f"<tr class='dip-detail' data-for='{row_id}' hidden><td colspan='{colspan}'><div class='dip-panel'>"
+            f"<div class='dip-panel-title'>Dip months for <b>{h_enc(product)}</b></div>{inner}</div></td></tr>"
+        )
+
     month_group_head = "".join(
         f"<th colspan='2' class='month-hdr' data-yr='{ym[:4]}'>{h_enc(_nps_month_label(ym))}</th>" for ym in all_yms
     )
@@ -720,8 +797,12 @@ def _build_prodwise_heatmap(capped):
     )
 
     body_rows = []
+    any_dips = False
     for i, r in enumerate(capped):
         z = "zebra" if i % 2 == 1 else ""
+        row_id = f"hm-row-{i}"
+        dips = _dip_months(r)
+        any_dips = any_dips or bool(dips)
         cells = []
         for ym in all_yms:
             m = r["months"].get(ym)
@@ -734,11 +815,15 @@ def _build_prodwise_heatmap(capped):
                 f"<td class='num hm-cell' data-yr='{ym[:4]}'{cell_style(avg)}{title}>{nps_label}</td>"
             )
         spark_svg, spark_json = _prodwise_sparkline(r["months"])
+        chevron = "<span class='chevron'>&#9656;</span>" if dips else ""
+        row_class = (f"{z} dip-row").strip() if dips else z
+        row_attr = f" data-row-id='{row_id}'" if dips else ""
         body_rows.append(
-            f"<tr class='{z}' data-hm-spark='{spark_json}'>"
-            f"<td class='rowlabel' title=\"{h_enc(r['product'])}\">{h_enc(r['product'])}</td>{''.join(cells)}"
+            f"<tr class='{row_class}' data-hm-spark='{spark_json}'{row_attr}>"
+            f"<td class='rowlabel' title=\"{h_enc(r['product'])}\">{chevron}{h_enc(r['product'])}</td>{''.join(cells)}"
             f"<td class='num' style='min-width:80px'>{spark_svg}</td></tr>"
         )
+        body_rows.append(_detail_row(row_id, r["product"], dips))
 
     legend = (
         "<div class='legend-row' style='justify-content:center;gap:10px;'>"
@@ -748,13 +833,30 @@ def _build_prodwise_heatmap(capped):
         "<span class='lname'>&gt; 50 (excellent)</span></div>"
     )
 
+    dip_script = "" if not any_dips else """<script>
+(function(){
+  document.querySelectorAll('.nps-heatmap-table tr.dip-row').forEach(function(row){
+    row.addEventListener('click', function(){
+      var id = row.getAttribute('data-row-id');
+      var detail = row.parentElement.querySelector("tr.dip-detail[data-for='" + id + "']");
+      if (!detail) return;
+      var opening = detail.hidden;
+      detail.hidden = !opening;
+      row.classList.toggle('expanded', opening);
+    });
+  });
+})();
+</script>"""
+
     return (
         "<div class='pivot-wrap'><div class='pivot-title'>Product wise NPS &mdash; Monthly Heatmap</div>"
         "<p class='desc'>NPS% = (Promoters &minus; Detractors) &divide; Total &times; 100, per product per month. "
-        "Color midpoint is 50 (excellent NPS threshold); blank cells had no survey responses that month.</p>"
+        "Color midpoint is 50 (excellent NPS threshold); blank cells had no survey responses that month. "
+        "Click a product with a &#9656; to see which months it dipped and why (mined from Detractors&#39; "
+        "free-text feedback; a response that rated more than one product may show the same feedback under each).</p>"
         f"{legend}<div class='pivot-scroll'><table class='pivot-table nps-heatmap-table'><thead><tr>"
         f"<th class='corner' rowspan='2'>Product</th>{month_group_head}<th rowspan='2'>Trend</th></tr>"
-        f"<tr>{sub_head}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>"
+        f"<tr>{sub_head}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div></div>{dip_script}"
     )
 
 
@@ -875,7 +977,7 @@ def build_product_wise_nps_panel(ctx):
 })();
 </script>"""
 
-    heatmap = _build_prodwise_heatmap(capped)
+    heatmap = _build_prodwise_heatmap(capped, getattr(ctx, "prodwise_dip_feedback", None) or {})
 
     return f"""  <div class="tab-panel" id="panel-prodwisenps">
     <section>

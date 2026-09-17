@@ -127,6 +127,25 @@
      class+class here, not just the generic td selector two rules up. */
   .nps-heatmap-table th.corner,.nps-heatmap-table td.rowlabel{width:130px;word-break:break-word;position:static;white-space:normal;}
   .nps-heatmap-table th.sub-hdr{font-size:9px;line-height:1.15;}
+  /* NPS Dip Reasons: click-to-expand rows on the heatmap above (see
+     docs/superpowers/specs/2026-09-17-nps-dip-reasons-design.md). */
+  .nps-heatmap-table tr.dip-row td.rowlabel{cursor:pointer;user-select:none;}
+  .nps-heatmap-table tr.dip-row:hover td{background:var(--pivot-header-bg);}
+  .nps-heatmap-table tr.dip-row.zebra:hover td{background:color-mix(in srgb, var(--pivot-zebra-bg) 60%, var(--pivot-header-bg));}
+  .nps-heatmap-table .chevron{display:inline-block;margin-right:6px;font-size:9px;color:var(--s1);transition:transform .15s ease;}
+  .nps-heatmap-table tr.dip-row.expanded .chevron{transform:rotate(90deg);}
+  .nps-heatmap-table tr.dip-detail td{background:var(--surface-1);padding:0;border-top:none;}
+  .dip-panel{padding:14px 18px 16px 34px;}
+  .dip-panel-title{font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:10px;}
+  table.dip-inner-table{border-collapse:collapse;width:100%;font-size:11.5px;}
+  table.dip-inner-table th,table.dip-inner-table td{border:1px solid var(--grid);padding:5px 8px;text-align:right;}
+  table.dip-inner-table th.corner{text-align:left;background:var(--pivot-header-bg);}
+  table.dip-inner-table td.rowlabel.sub{text-align:left;font-weight:500;background:var(--surface-card);white-space:nowrap;}
+  table.dip-inner-table td.reasons-cell{text-align:left;white-space:normal;}
+  table.dip-inner-table td.quote{color:var(--text-secondary);font-style:italic;font-weight:400;text-align:left;white-space:normal;max-width:240px;}
+  table.dip-inner-table td.delta-down{color:var(--s6);font-weight:600;font-variant-numeric:tabular-nums;}
+  .reason-pill{display:inline-block;font-size:11px;background:var(--pivot-header-bg);color:var(--text-primary);border-radius:6px;padding:2px 7px;margin:0 4px 4px 0;white-space:nowrap;font-weight:600;cursor:help;}
+  .pending{color:var(--text-muted);font-style:italic;font-size:11.5px;}
 
   section{margin-bottom:32px;max-width:100%;min-width:0;}
   section h2{font-size:16px;margin:0 0 4px;}
