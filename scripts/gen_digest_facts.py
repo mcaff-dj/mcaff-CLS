@@ -25,6 +25,7 @@ TOP_CATEGORIES = 150
 TOP_PARTNER_CATS = 300
 TOP_PRODUCT_CATS = 300
 TOP_BATCHES = 80
+TOP_BATCH_CATS = 300
 TOP_PRODUCT_DEMO = 600
 
 SEP = "||"
@@ -121,7 +122,7 @@ def build_facts(ctx):
     month_set = set(months)
 
     tickets, tickets_all, classes, cats = {}, {}, {}, {}
-    partners, partner_cats, product_cats, batches = {}, {}, {}, {}
+    partners, partner_cats, product_cats, batches, batch_cats = {}, {}, {}, {}, {}
     product_demo = {}
 
     for r in ctx.data_rows:
@@ -156,6 +157,7 @@ def build_facts(ctx):
             batch = str(ctx.cell(r, col["batch"])).strip()
             if batch and batch.lower() not in ("na", "n/a", "-"):
                 _bump(batches, prod + SEP + batch, mo)
+                _bump(batch_cats, prod + SEP + batch + SEP + cat, mo)
             for field in DEMO_FIELDS:
                 idx = col.get(field)
                 if idx is None:
@@ -182,6 +184,7 @@ def build_facts(ctx):
         "partner_cats": _prune(partner_cats, TOP_PARTNER_CATS),
         "product_cats": _prune(product_cats, TOP_PRODUCT_CATS),
         "batches": _prune(batches, TOP_BATCHES),
+        "batch_cats": _prune(batch_cats, TOP_BATCH_CATS),
         "product_demo": _prune(product_demo, TOP_PRODUCT_DEMO),
         "csat": series_by_month(ctx.agent, months),
         "ai_csat": series_by_month(ctx.ai, months),

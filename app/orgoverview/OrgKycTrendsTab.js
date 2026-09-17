@@ -225,18 +225,20 @@ function demoSentence(item) {
 }
 
 function ProductDemographicsSection({ demographics }) {
+  // A brand whose sheet never tracks age/gender/skin type/first-time-vs-regular has
+  // permanently empty items (not just not-yet-built) - nothing to show, so skip the card
+  // entirely instead of rendering a "no data" placeholder for a gap that'll never fill in.
+  const visible = demographics.filter((brand) => brand.items.length > 0 || brand.pending);
   return (
     <div className="og-stack">
-      {demographics.map((brand) => {
+      {visible.map((brand) => {
         const top3 = groupDemographicsByProduct(brand.items).slice(0, 3);
         return (
           <div className="og-card" key={brand.brand}>
             <div className="og-card-title">{brand.title} — Product-Efficacy Demographics</div>
             {brand.items.length === 0 ? (
               <p className="og-note">
-                {brand.pending
-                  ? 'Not populated yet — run the report pipeline (generate_report.py + build_trend_digest.py) to fill this section in.'
-                  : "No demographic breakdown available for this brand — its sheet doesn't track age/gender/skin type/first-time-vs-regular."}
+                Not populated yet — run the report pipeline (generate_report.py + build_trend_digest.py) to fill this section in.
               </p>
             ) : (
               <>
@@ -378,7 +380,7 @@ function PackagingSection({ packaging, narrative, windowMonths }) {
               <div className="og-table-scroll">
                 <table className="og-table">
                   <thead>
-                    <tr><th>SKU</th><th>Batch</th><th>Window cases</th></tr>
+                    <tr><th>SKU</th><th>Batch</th><th>Window cases</th><th>Top reason</th></tr>
                   </thead>
                   <tbody>
                     {brand.batches.map((b, i) => (
@@ -386,6 +388,7 @@ function PackagingSection({ packaging, narrative, windowMonths }) {
                         <td className="og-rowlabel">{b.product}</td>
                         <td>{b.batch}</td>
                         <td>{fmtNum(b.window_cases)}</td>
+                        <td>{b.top_issue ? `${b.top_issue} (${fmtNum(b.top_issue_cases)})` : '–'}</td>
                       </tr>
                     ))}
                   </tbody>

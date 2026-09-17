@@ -206,6 +206,10 @@ function candidates(brand, store, dimension, baselineMonths, windowMonths, minCa
   const found = [];
   for (const key of Object.keys(store)) {
     if (dimension === 'class' && EXCLUDED_CLASSES.has(key)) continue;
+    // "(blank)" courier means the ticket never had a courier filled in - not a real
+    // partner, same exclusion build_trend_digest.py's build_repeat_offenders already
+    // applies for its own courier table.
+    if (dimension === 'courier' && key.split(SEP)[0] === '(blank)') continue;
     const perMonth = store[key];
     const bc = sum(baselineMonths.map((m) => perMonth[m] ?? 0));
     const wc = sum(windowMonths.map((m) => perMonth[m] ?? 0));

@@ -262,6 +262,11 @@ def _candidates(b, store, dimension, baseline, window, min_cases, always_include
     for key in store:
         if dimension == "class" and key in EXCLUDED_CLASSES:
             continue
+        # "(blank)" courier means the ticket never had a courier filled in - not a real
+        # partner, same exclusion build_repeat_offenders already applies for its own
+        # courier table.
+        if dimension == "courier" and key.split(SEP)[0] == "(blank)":
+            continue
         bc = sum(counts_for(store, key, b["brand"], baseline))
         wc = sum(counts_for(store, key, b["brand"], window))
         if wc < min_cases:
@@ -405,14 +410,31 @@ def _packaging_for_brand(b, baseline, window):
     rows.sort(key=lambda r: -(r["delta"] or 0))
     dropped.sort(key=lambda r: -r["baseline_cases"])
 
+    # Per-batch defect-type breakdown (window only), same "which specific issue is
+    # actually driving this" idea as issues_by_sku above, one level narrower - a
+    # product's overall top issue can differ from what a single bad batch is really
+    # tied to.
+    issues_by_batch = {}
+    for key, per_month in (b.get("batch_cats") or {}).items():
+        prod, batch, cat = key.split(SEP, 2)
+        n = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in window)
+        if n:
+            bucket = issues_by_batch.setdefault(prod + SEP + batch, {})
+            bucket[cat] = bucket.get(cat, 0) + n
+
     batch_rows = []
     for key, per_month in (b.get("batches") or {}).items():
         prod, batch = key.split(SEP, 1)
         wc = sum(per_month.get(e["labels"].get(b["brand"]), 0) for e in window)
         if wc < MIN_WINDOW_CASES_SKU:
             continue
-        batch_rows.append({"product": prod, "batch": batch, "window_cases": wc,
-                           "months": [per_month.get(e["labels"].get(b["brand"]), 0) for e in window]})
+        issues = sorted(issues_by_batch.get(key, {}).items(), key=lambda kv: -kv[1])
+        batch_rows.append({
+            "product": prod, "batch": batch, "window_cases": wc,
+            "months": [per_month.get(e["labels"].get(b["brand"]), 0) for e in window],
+            "top_issue": issues[0][0] if issues else None,
+            "top_issue_cases": issues[0][1] if issues else 0,
+        })
     batch_rows.sort(key=lambda r: -r["window_cases"])
     return {"brand": b["brand"], "title": b["title"], "packaging_classes": pack_classes,
             "rows": rows, "batches": batch_rows, "dropped": dropped}
