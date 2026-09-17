@@ -293,6 +293,16 @@ def main():
             nps_cache["top_rated_area"] = top_rated_area
             with open(nps_cache_path, "w", encoding="utf-8") as f:
                 json.dump(nps_cache, f, separators=(",", ":"))
+        # Same "why did this dip" data the heatmap's click-to-expand rows use - not
+        # month-nested the way prodwise_nps needs its own backfill checks above, so a plain
+        # presence check is enough; re-query if this cache predates the feature.
+        prodwise_dip_feedback = nps_cache.get("prodwise_dip_feedback")
+        if prodwise_dip_feedback is None:
+            print(f"[{b['brand']}] no cached dip-feedback yet, querying...")
+            prodwise_dip_feedback = nps_source.fetch_product_dip_feedback(b["nps_mysql_brand"])
+            nps_cache["prodwise_dip_feedback"] = prodwise_dip_feedback
+            with open(nps_cache_path, "w", encoding="utf-8") as f:
+                json.dump(nps_cache, f, separators=(",", ":"))
     else:
         reason = "--refresh-nps" if args.refresh_nps else "no cache yet"
         print(f"[{b['brand']}] querying NPS tables ({reason})...")
@@ -306,9 +316,13 @@ def main():
         prodwise_nps = nps_source.fetch_product_wise_nps(b["nps_mysql_brand"])
         # Top Rated Area breakdown (per-question CSAT %positive by month) - also no sheet override, MySQL-only.
         top_rated_area = nps_source.fetch_top_rated_area_by_month(b["nps_mysql_brand"])
+        # Detractors' free-text feedback, for the heatmap's click-to-expand dip reasons.
+        prodwise_dip_feedback = nps_source.fetch_product_dip_feedback(b["nps_mysql_brand"])
         nps_cache_path.parent.mkdir(parents=True, exist_ok=True)
         with open(nps_cache_path, "w", encoding="utf-8") as f:
-            json.dump({"mom": mom, "prodnps": prodnps, "prodwise_nps": prodwise_nps, "top_rated_area": top_rated_area}, f, separators=(",", ":"))
+            json.dump({"mom": mom, "prodnps": prodnps, "prodwise_nps": prodwise_nps,
+                       "top_rated_area": top_rated_area, "prodwise_dip_feedback": prodwise_dip_feedback},
+                      f, separators=(",", ":"))
 
     rtoconv_cache_path = REPO_ROOT / f"data/{b['brand']}_rtoconv_cache.json"
     if args.quick and rtoconv_cache_path.exists():
@@ -329,6 +343,7 @@ def main():
 
     ctx.data_rows = data_rows
     ctx.mom, ctx.prodnps, ctx.prodwise_nps, ctx.top_rated_area_by_month, ctx.agent, ctx.ai = mom, prodnps, prodwise_nps, top_rated_area, agent, ai
+    ctx.prodwise_dip_feedback = prodwise_dip_feedback
     ctx.months = b["months"]
     ctx.n = len(ctx.months)
     # ctx.months is a list, and nearly every per-row loop in the panel builders needs the
