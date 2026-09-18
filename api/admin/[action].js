@@ -29,6 +29,13 @@
 //   DELETE /api/admin/calling-agents  -> revoke ONE process's access for one agent, leaving
 //                                        every other process/card they hold untouched:
 //                                        { processKey, email }
+//   POST   /api/admin/calling-invite  -> invite someone straight onto ONE process's own roster
+//                                        (Team Roster's own "Invite" control) - full admin OR
+//                                        that process's own process admin, scoped to exactly
+//                                        that processKey: { processKey, email, name? }. Adds the
+//                                        'calling' permission + that one tab if they don't
+//                                        already have broader/equal access; sends the same
+//                                        invite email as /api/admin/users.
 //   POST   /api/admin/calling-assign-now -> { processKey: 'detractor', email, count? } - admin/
 //                                        process-admin manual stopgap for the going-Online
 //                                        auto-fill trigger: claims `count` leads (default: quota
@@ -748,6 +755,65 @@ async function handleCallingAgents(req, res, session) {
   });
 }
 
+// An admin OR a process admin can invite someone straight from THIS process's own Team
+// Roster, instead of having to go through Admin -> Permissions first (that page is full-admin
+// only - see PROCESS_ADMIN_ACTIONS below). Deliberately scoped to exactly this processKey: a
+// process admin only ever administers one process, so they can only grant that one, never the
+// company-wide 'calling' access Admin -> Permissions can hand out. Reuses upsertAndInvite so a
+// brand-new agent's invite email/flow is identical either way, and they land on this process's
+// roster immediately - getCallingProcessAgents' "appear automatically" rule (see its own comment
+// in db.js) needs exactly the permissions/tab rows this writes, nothing else.
+async function handleCallingInvite(req, res, session) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
+  const body = parseBody(req);
+  const known = CALLING_PROCESSES.processes.map((p) => p.key);
+  const processKey = body.processKey;
+  if (!known.includes(processKey)) {
+    res.status(400).json({ error: `processKey must be one of: ${known.join(', ')}` });
+    return;
+  }
+  if (!session.isAdmin && !(await isCallingProcessAdmin(session.email, processKey))) {
+    res.status(403).json({ error: 'You do not administer that process' });
+    return;
+  }
+  const email = (body.email || '').trim().toLowerCase();
+  const name = (body.name || '').trim();
+  if (!email) {
+    res.status(400).json({ error: 'Email is required' });
+    return;
+  }
+
+  const existingUser = await getUserByEmail(email);
+  // Mirrors handleCallingAgents' own DELETE branch, just adding one process instead of removing
+  // one: "no tab rows for 'calling'" already means unrestricted (every process), so a user
+  // already in that state - or one whose explicit list already names this process - needs no
+  // tab write at all. Anyone else gets exactly one process added to whatever list they already
+  // had (never a wholesale replace), so inviting someone here can't accidentally narrow access
+  // another admin already granted them elsewhere.
+  let tabsToGrant = null;
+  if (!existingUser) {
+    tabsToGrant = [processKey];
+  } else {
+    const { rows: permRows } = await sql`SELECT 1 FROM permissions WHERE user_id = ${existingUser.id} AND card_key = 'calling'`;
+    if (!permRows.length) {
+      tabsToGrant = [processKey];
+    } else {
+      const currentTabs = (await getUserTabPermissions(existingUser.id)).calling;
+      if (currentTabs && currentTabs.length && !currentTabs.includes(processKey)) {
+        tabsToGrant = [...currentTabs, processKey];
+      }
+    }
+  }
+
+  const user = await upsertAndInvite(email, name, ['calling'], tabsToGrant ? { calling: tabsToGrant } : {}, req);
+  await logEvent(session.uid, session.email, 'calling', 'invite', `${processKey}: invited ${email}`, ip);
+  res.status(200).json({ user, agents: await getCallingProcessAgents(processKey) });
+}
+
 // Manual stopgap for NPS-Calling's going-Online auto-fill trigger (handleProcessPresence in
 // api/auth/[action].js) - lets an admin/process admin fill one agent's queue on demand instead
 // of relying on that agent toggling their own status. Same claim path
@@ -1174,7 +1240,7 @@ module.exports = async (req, res) => {
   // being read or written; passing this gate alone authorises nothing. 'calling-teams' is
   // listed here only for its GET branch (a team lead reading its own team name) - the handler
   // itself still turns every POST/PUT away from anyone but a full admin.
-  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'default-quota', 'lead-order', 'lead-date-range', 'calling-agents', 'calling-assign-now', 'dispositions', 'calling-teams', 'delivery-partner-access'];
+  const PROCESS_ADMIN_ACTIONS = ['business-hours', 'default-quota', 'lead-order', 'lead-date-range', 'calling-agents', 'calling-invite', 'calling-assign-now', 'dispositions', 'calling-teams', 'delivery-partner-access'];
   if (!session.isAdmin && !PROCESS_ADMIN_ACTIONS.includes(action)) {
     res.status(403).json({ error: 'Forbidden' });
     return;
@@ -1188,6 +1254,7 @@ module.exports = async (req, res) => {
   if (action === 'lead-order') return handleLeadOrder(req, res, session);
   if (action === 'lead-date-range') return handleDateRange(req, res, session);
   if (action === 'calling-agents') return handleCallingAgents(req, res, session);
+  if (action === 'calling-invite') return handleCallingInvite(req, res, session);
   if (action === 'calling-assign-now') return handleCallingAssignNow(req, res, session);
   if (action === 'dispositions') return handleDispositions(req, res, session);
   if (action === 'calling-teams') return handleCallingTeams(req, res, session);

@@ -359,6 +359,7 @@ export default function NpsCallingClient() {
   const {
     googleUser, sessionIsAdmin, invitedProcessKeys, processPermsLoaded,
     processAgents, isProcessAdmin, saveProcessAgent, savingAgentEmail,
+    inviteAgent, invitingAgent,
     setStatusForAgent, showToast, serverPresence,
   } = session;
 
@@ -415,6 +416,9 @@ export default function NpsCallingClient() {
   }, [dateScope, customDateFrom, customDateTo]);
 
   const [rosterStatusFilter, setRosterStatusFilter] = useState('All');
+  const [showInviteForm, setShowInviteForm] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteName, setInviteName] = useState('');
   const [allLeadsSearch, setAllLeadsSearch] = useState('');
   const [allLeadsAgentFilter, setAllLeadsAgentFilter] = useState('ALL');
   // Defaults to DISPOSED, not ALL - the tab is literally labelled "All Leads (Disposed)" and its
@@ -493,6 +497,17 @@ export default function NpsCallingClient() {
       showToast(`⚠️ ${e.message || 'Could not assign leads'}`);
     } finally {
       setAssigningEmail('');
+    }
+  };
+
+  const handleInviteSubmit = async () => {
+    const email = inviteEmail.trim();
+    if (!email) { showToast('⚠️ Email is required'); return; }
+    const result = await inviteAgent(email, inviteName.trim());
+    if (result.ok) {
+      setInviteEmail('');
+      setInviteName('');
+      setShowInviteForm(false);
     }
   };
 
@@ -1750,8 +1765,9 @@ export default function NpsCallingClient() {
                       <div>
                         <h3 className="text-[15px] font-bold text-zinc-100">Team Roster</h3>
                         <p className="text-[12px] text-zinc-500 mt-0.5">
-                          Manage agent status and lead capacity limits. New agents appear here
-                          automatically once granted NPS-Calling under Admin → Permissions.
+                          Manage agent status and lead capacity limits. Invite someone below, or
+                          they'll appear here automatically once granted NPS-Calling under
+                          Admin → Permissions.
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
@@ -1761,6 +1777,14 @@ export default function NpsCallingClient() {
                           options={ROSTER_STATUS_OPTIONS}
                           placeholder="Filter by status"
                         />
+                        <button
+                          type="button"
+                          onClick={() => setShowInviteForm((v) => !v)}
+                          className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-[12px] font-bold transition-all shadow-xs shrink-0"
+                          title="Invite someone straight onto this process's roster"
+                        >
+                          ➕ Invite Agent
+                        </button>
                         <button
                           type="button"
                           onClick={() => {
@@ -1776,8 +1800,35 @@ export default function NpsCallingClient() {
                       </div>
                     </div>
 
+                    {showInviteForm && (
+                      <div className="flex items-end flex-wrap gap-2 px-4 pb-3">
+                        <input
+                          type="email"
+                          value={inviteEmail}
+                          onChange={(e) => setInviteEmail(e.target.value)}
+                          placeholder="agent@mcaffeine.com"
+                          className="min-w-[220px] flex-1 px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-700 text-zinc-100 text-[12px] placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
+                        />
+                        <input
+                          type="text"
+                          value={inviteName}
+                          onChange={(e) => setInviteName(e.target.value)}
+                          placeholder="Name (optional)"
+                          className="min-w-[160px] flex-1 px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-700 text-zinc-100 text-[12px] placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleInviteSubmit}
+                          disabled={invitingAgent}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[12px] font-bold transition-all disabled:opacity-40 shrink-0"
+                        >
+                          {invitingAgent ? 'Inviting…' : 'Send Invite'}
+                        </button>
+                      </div>
+                    )}
+
                     {!agentMetrics.length && (
-                      <p className="text-[12px] text-zinc-500 px-4 pb-4">No agents invited yet - grant access from Admin → Permissions.</p>
+                      <p className="text-[12px] text-zinc-500 px-4 pb-4">No agents invited yet - use "Invite Agent" above, or grant access from Admin → Permissions.</p>
                     )}
 
                     {!!agentMetrics.length && (

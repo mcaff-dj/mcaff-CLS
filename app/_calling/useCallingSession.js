@@ -116,6 +116,7 @@ export function useCallingSession(processKey, { getPendingBox, getDateBounds } =
   const [isProcessAdmin, setIsProcessAdmin] = useState(false);
   const [processAgentsError, setProcessAgentsError] = useState('');
   const [savingAgentEmail, setSavingAgentEmail] = useState('');
+  const [invitingAgent, setInvitingAgent] = useState(false);
 
   // Reloaded whenever the page switches process - the whole point is that each process has its
   // own answer, so it can't be cached across them. Fetched for everyone signed in: the endpoint
@@ -175,6 +176,38 @@ export function useCallingSession(processKey, { getPendingBox, getDateBounds } =
       setSavingAgentEmail('');
     }
   };
+
+  // Invites someone straight onto THIS process's roster (Team Roster's own "Invite" control) -
+  // an admin/process-admin thing, same server-side gate as saveProcessAgent/setStatusForAgent
+  // above, just for a person who doesn't have access yet rather than one already on the roster.
+  // Returns { ok, error } instead of throwing so the caller's form can show its own message
+  // inline without a try/catch at every call site.
+  const inviteAgent = useCallback(async (email, name) => {
+    setInvitingAgent(true);
+    setProcessAgentsError('');
+    try {
+      const r = await fetch('/api/admin/calling-invite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ processKey, email, name }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const msg = d.error || `Could not invite (${r.status})`;
+        showToast(`⚠️ ${msg}`);
+        return { ok: false, error: msg };
+      }
+      setProcessAgents(d.agents || []);
+      showToast(`✅ Invited ${email}`);
+      return { ok: true };
+    } catch (e) {
+      const msg = e.message || 'Could not invite';
+      showToast(`⚠️ ${msg}`);
+      return { ok: false, error: msg };
+    } finally {
+      setInvitingAgent(false);
+    }
+  }, [processKey, showToast]);
 
   // Namespaced per process (rto_agent_status:<processKey>) - a single global key meant two
   // browser tabs on different processes (one RTO, one NDR) fought over the same cached value.
@@ -397,6 +430,7 @@ export function useCallingSession(processKey, { getPendingBox, getDateBounds } =
     sessionIsAdmin, invitedProcessKeys, processPermsLoaded,
     processAgents, isProcessAdmin, processAgentsError, savingAgentEmail,
     loadProcessAgents, saveProcessAgent,
+    inviteAgent, invitingAgent,
     agentStatus, serverPresence,
     setStatus, setStatusForAgent,
     toast, showToast,
