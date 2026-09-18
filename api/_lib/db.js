@@ -2532,10 +2532,19 @@ async function getDetractorTimeOfDayData(query) {
 // requests, not because it matters which of two equally-rated products sorts first.
 async function getDetractorProductNames({ brand } = {}) {
   await ensureSchema();
+  // mysql2 rejects a bound parameter of `undefined` outright ("Bind parameters must not
+  // contain undefined") - unlike every OTHER brand-filter query in this file, which reads its
+  // filter value through _detractorBrandFilterFor (always a real string, '' when unset), this
+  // one takes `brand` straight from the caller - the roster-wide catalog fetch
+  // (NpsCallingClient.js's rosterProductCatalog) calls this with no brand param at all, so
+  // `brand` arrives as JS `undefined`, not ''. Normalized to a string ONCE here so both
+  // interpolations below see the same defined value - the bug this fixes: the second one used
+  // to interpolate bare `brand`, still undefined even after the first was defensively OR'd.
+  const brandValue = brand || '';
   const { rows } = await sql`
     SELECT product_name, COUNT(*) AS response_count FROM nps_product
     WHERE product_name IS NOT NULL AND TRIM(product_name) NOT IN ('', 'NA')
-      AND (${brand || ''} = '' OR brand = ${brand})
+      AND (${brandValue} = '' OR brand = ${brandValue})
       AND STR_TO_DATE(submitted_date, '%d/%m/%Y') >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH)
     GROUP BY product_name
     ORDER BY response_count DESC, product_name ASC
