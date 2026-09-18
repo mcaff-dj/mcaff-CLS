@@ -19,15 +19,28 @@ function parseDdMmYyyy(dateStr) {
 // = oldest-first, the admin default; -1 = newest-first) - the SAME setting the delivery-only
 // claim already used, now applied across both pools instead of within one.
 //
+// delivery/product are { submittedDate, hasProduct } (or null/undefined - "nothing eligible
+// left to peek in this pool"), not bare date strings - hasProduct is a REAL, admin-visible
+// priority: a candidate whose product name is already known (product_name_list/product_name
+// resolved to something real, not null/blank/'NA') is claimed before ANY candidate without one,
+// regardless of which is chronologically older - so a Detractor an agent can actually ask "how
+// did you find <product>?" about gets worked first, rather than sitting behind ones that would
+// need the free-text/catalog fallback anyway. Only once both candidates agree on hasProduct does
+// date resolve it, same lead-order rule as before this priority existed.
+//
 // A pool with nothing to peek (its caller already found no eligible row) always loses to the
-// other pool, regardless of lead order - "nothing" never outranks "something". A tie (identical
-// submitted_date down to the day) resolves to 'delivery' deterministically rather than being
-// arbitrary between runs - ties are already rare (same-day submissions across two different
-// surveys) and no ordering has ever been promised between them.
-function pickOlderDetractorCandidate(deliverySubmittedDate, productSubmittedDate, sortDirection = 1) {
-  const d = parseDdMmYyyy(deliverySubmittedDate);
-  const p = parseDdMmYyyy(productSubmittedDate);
-  if (d == null && p == null) return null;
+// other pool, regardless of priority or lead order - "nothing" never outranks "something". A tie
+// (same hasProduct AND identical submitted_date down to the day) resolves to 'delivery'
+// deterministically rather than being arbitrary between runs - ties are already rare (same-day
+// submissions across two different surveys) and no ordering has ever been promised between them.
+function pickOlderDetractorCandidate(delivery, product, sortDirection = 1) {
+  if (!delivery && !product) return null;
+  if (!delivery) return 'product';
+  if (!product) return 'delivery';
+  if (!!delivery.hasProduct !== !!product.hasProduct) return delivery.hasProduct ? 'delivery' : 'product';
+  const d = parseDdMmYyyy(delivery.submittedDate);
+  const p = parseDdMmYyyy(product.submittedDate);
+  if (d == null && p == null) return 'delivery';
   if (d == null) return 'product';
   if (p == null) return 'delivery';
   if (d === p) return 'delivery';

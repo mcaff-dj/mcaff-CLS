@@ -1997,12 +1997,22 @@ async function _detractorLeadTypeFilterFor(email) {
 // doesn't parse as a date, and NULL >= anything is unknown/false in SQL, so a malformed
 // submitted_date fails this filter too rather than being silently treated as "recent enough".
 //
+// Priority bucket ahead of the date sort: a candidate whose product_name_list already resolves
+// to something real (not null/blank/'NA' - same convention claimOneProductDetractorLead's own
+// GROUP_CONCAT filter uses) is ordered before every candidate without one, regardless of which
+// is chronologically older - date (per sortDirection) only breaks ties WITHIN a bucket. This is
+// what lets an agent ask "how did you find <product>?" on this pool's own oldest/newest KNOWN-
+// product lead before ever falling through to one that would need the catalog/free-text
+// fallback - see getNextDetractorLeadEitherPool for how this combines with the product pool's
+// own priority the same way.
+//
 // SELECT-only half of the delivery claim - the same 30-day-filtered, lead-order-sorted,
 // brand-filtered nps_delivery query getNextDetractorLead always ran, now callable without also
 // inserting. limit and email=null exist for callers that don't need a specific agent's brand
 // filter or a single row - getUnassignedDetractorLeads does NOT use this (it needs its own
 // always-oldest-first ordering, independent of the admin's configurable lead-order setting this
-// function respects, so it writes its own inline query instead).
+// function respects, so it writes its own inline query instead - though it applies this SAME
+// priority bucket on top of that oldest-first order).
 async function peekDeliveryDetractorCandidates({ email = null, limit = 1 } = {}) {
   await ensureSchema();
   if (!poolAllowedByLeadTypeFilter('delivery', await _detractorLeadTypeFilterFor(email))) return [];
@@ -2033,7 +2043,8 @@ async function peekDeliveryDetractorCandidates({ email = null, limit = 1 } = {})
     WHERE d.nps_category = 'Detractor' AND c.response_id IS NULL
       AND (${brandFilter} = '' OR d.brand = ${brandFilter})
       AND STR_TO_DATE(d.submitted_date, '%d/%m/%Y') BETWEEN ${from} AND ${to}
-    ORDER BY TO_DAYS(STR_TO_DATE(d.submitted_date, '%d/%m/%Y')) * ${sortDirection} ASC
+    ORDER BY (d.product_name_list IS NULL OR TRIM(d.product_name_list) IN ('', 'NA')) ASC,
+             TO_DAYS(STR_TO_DATE(d.submitted_date, '%d/%m/%Y')) * ${sortDirection} ASC
     LIMIT ${raw(safeLimit(limit, 1))}
   `;
   return rows;
@@ -2089,9 +2100,15 @@ async function getNextDetractorLead(email) {
 // rows per response_id (one per rated product, product_slot 0-3) with nps_category constant
 // across a response's own slots (confirmed against nps_source.py's own finding) - this dedups to
 // one row per response_id, same "one lead per person" shape nps_delivery already has. Returns
-// only response_id/submitted_date/nps_category: enough to peek and compare against the delivery
-// pool's own candidates (see detractorMerge.js), not the full row - claimOneProductDetractorLead
-// fetches the rest only for the response_id that actually wins.
+// response_id/submitted_date/nps_category/hasProduct: enough to peek and compare against the
+// delivery pool's own candidates (see detractorMerge.js), not the full row -
+// claimOneProductDetractorLead fetches the rest only for the response_id that actually wins.
+//
+// hasProduct: same priority bucket as peekDeliveryDetractorCandidates' own product_name_list
+// check (see that function's comment) - MAX(...) across a response's own up-to-4 slots, since
+// only ONE of them needs a real product_name for this response to count as "known" (matches
+// claimOneProductDetractorLead's own GROUP_CONCAT, which joins every slot with a real name, not
+// just the first).
 async function peekProductDetractorCandidates({ email = null, limit = 1 } = {}) {
   await ensureSchema();
   if (!poolAllowedByLeadTypeFilter('product', await _detractorLeadTypeFilterFor(email))) return [];
@@ -2099,7 +2116,8 @@ async function peekProductDetractorCandidates({ email = null, limit = 1 } = {}) 
   const brandFilter = await _detractorBrandFilterFor(email);
   const { from, to } = await _detractorRecencyBounds();
   const { rows } = await sql`
-    SELECT p.response_id, MIN(p.submitted_date) AS submitted_date, MIN(p.nps_category) AS nps_category
+    SELECT p.response_id, MIN(p.submitted_date) AS submitted_date, MIN(p.nps_category) AS nps_category,
+           MAX(p.product_name IS NOT NULL AND TRIM(p.product_name) NOT IN ('', 'NA')) AS has_product
     FROM nps_product p
     LEFT JOIN CLS_NPS_calling c ON c.response_id = p.response_id
     WHERE c.response_id IS NULL
@@ -2107,7 +2125,7 @@ async function peekProductDetractorCandidates({ email = null, limit = 1 } = {}) 
       AND STR_TO_DATE(p.submitted_date, '%d/%m/%Y') BETWEEN ${from} AND ${to}
     GROUP BY p.response_id
     HAVING MIN(p.nps_category) = 'Detractor'
-    ORDER BY TO_DAYS(STR_TO_DATE(MIN(p.submitted_date), '%d/%m/%Y')) * ${sortDirection} ASC
+    ORDER BY has_product DESC, TO_DAYS(STR_TO_DATE(MIN(p.submitted_date), '%d/%m/%Y')) * ${sortDirection} ASC
     LIMIT ${raw(safeLimit(limit, 1))}
   `;
   return rows;
@@ -2174,11 +2192,24 @@ async function claimOneProductDetractorLead(email) {
   };
 }
 
+// Same "not null/blank/'NA'" convention the product_name/product_name_list SQL checks above use,
+// applied client-side here to whichever single candidate row peekDeliveryDetractorCandidates
+// already fetched - that query's own ORDER BY needs the identical rule expressed in SQL (it's
+// ranking a whole result set), but this call site only ever has ONE already-fetched row to
+// classify, so a plain JS check is simpler than a second round trip.
+function hasRealProductNameList(v) {
+  return v != null && !['', 'NA'].includes(String(v).trim());
+}
+
 // Peeks both pools' top candidate and claims whichever wins under the admin's lead-order
-// setting (see pickOlderDetractorCandidate) - the single shared-quota merge point every
-// auto-assign trigger (going-Online batch-fill, on-disposal self-refill) now goes through by
-// default. A pool with nothing left to peek just loses every comparison; no special-casing
-// needed for "one pool is empty" beyond what pickOlderDetractorCandidate already does.
+// setting AND the "known product name" priority (see pickOlderDetractorCandidate) - the single
+// shared-quota merge point every auto-assign trigger (going-Online batch-fill, on-disposal
+// self-refill) now goes through by default. A pool with nothing left to peek just loses every
+// comparison; no special-casing needed for "one pool is empty" beyond what
+// pickOlderDetractorCandidate already does. Each peek* call above already returns its OWN pool's
+// best candidate by (hasProduct, date) - so if a pool's top-1 has no known product, that pool
+// truly has nothing better to offer, and comparing just the two top-1s here is enough to get the
+// combined-pool priority right without peeking more than 1 per pool.
 async function getNextDetractorLeadEitherPool(email) {
   const sortDirection = (await getCallingLeadOrder('detractor')) === 'newest' ? -1 : 1;
   const [[deliveryCandidate], [productCandidate]] = await Promise.all([
@@ -2186,8 +2217,8 @@ async function getNextDetractorLeadEitherPool(email) {
     peekProductDetractorCandidates({ email, limit: 1 }),
   ]);
   const pick = pickOlderDetractorCandidate(
-    deliveryCandidate && deliveryCandidate.submitted_date,
-    productCandidate && productCandidate.submitted_date,
+    deliveryCandidate && { submittedDate: deliveryCandidate.submitted_date, hasProduct: hasRealProductNameList(deliveryCandidate.product_name_list) },
+    productCandidate && { submittedDate: productCandidate.submitted_date, hasProduct: !!productCandidate.has_product },
     sortDirection,
   );
   if (pick === 'delivery') return getNextDetractorLead(email);
@@ -2286,39 +2317,51 @@ async function topUpDetractorAgent(email, deps = {}) {
 async function getUnassignedDetractorLeads(limit = 20) {
   await ensureSchema();
   const { from, to } = await _detractorRecencyBounds();
+  // has_product: same priority bucket peekDeliveryDetractorCandidates/peekProductDetractorCandidates
+  // apply to the real claim order (see their own comments) - applied here too, and BEFORE each
+  // pool's own LIMIT, so a known-product lead sitting past position `limit` in its own pool by
+  // date alone still isn't silently excluded from this preview ahead of a no-product one that
+  // would've made the cut on date alone.
   const { rows: deliveryRows } = await sql`
     SELECT d.response_id, d.brand, d.channel_order_id, d.customer_name, d.nps_score, d.nps_category,
-           d.category, d.sub_category, d.submitted_date
+           d.category, d.sub_category, d.submitted_date,
+           (d.product_name_list IS NOT NULL AND TRIM(d.product_name_list) NOT IN ('', 'NA')) AS has_product
     FROM nps_delivery d
     LEFT JOIN CLS_NPS_calling c ON c.response_id = d.response_id
     WHERE d.nps_category = 'Detractor' AND c.response_id IS NULL
       AND STR_TO_DATE(d.submitted_date, '%d/%m/%Y') BETWEEN ${from} AND ${to}
-    ORDER BY STR_TO_DATE(d.submitted_date, '%d/%m/%Y') ASC
+    ORDER BY has_product DESC, STR_TO_DATE(d.submitted_date, '%d/%m/%Y') ASC
     LIMIT ${raw(safeLimit(limit, 20))}
   `;
   const { rows: productRows } = await sql`
     SELECT p.response_id, MIN(p.brand) AS brand, MIN(p.channel_order_id) AS channel_order_id, MIN(p.customer_name) AS customer_name,
            MIN(p.overall_nps_score) AS nps_score, MIN(p.nps_category) AS nps_category,
-           MIN(p.category) AS category, MIN(p.sub_category) AS sub_category, MIN(p.submitted_date) AS submitted_date
+           MIN(p.category) AS category, MIN(p.sub_category) AS sub_category, MIN(p.submitted_date) AS submitted_date,
+           MAX(p.product_name IS NOT NULL AND TRIM(p.product_name) NOT IN ('', 'NA')) AS has_product
     FROM nps_product p
     LEFT JOIN CLS_NPS_calling c ON c.response_id = p.response_id
     WHERE c.response_id IS NULL
       AND STR_TO_DATE(p.submitted_date, '%d/%m/%Y') BETWEEN ${from} AND ${to}
     GROUP BY p.response_id
     HAVING MIN(p.nps_category) = 'Detractor'
-    ORDER BY STR_TO_DATE(MIN(p.submitted_date), '%d/%m/%Y') ASC
+    ORDER BY has_product DESC, STR_TO_DATE(MIN(p.submitted_date), '%d/%m/%Y') ASC
     LIMIT ${raw(safeLimit(limit, 20))}
   `;
   // Same convention this function already used for its own single-pool query: submitted_date is
   // DD/MM/YYYY text, so a plain string sort is wrong (see parseDdMmYyyy in ./detractorMerge for
   // why) - both lists are re-sorted together on their PARSED date, oldest-first, matching this
-  // function's existing (hardcoded, lead-order-independent) behavior. parseDdMmYyyy is already
-  // imported at module scope by Task 5.
+  // function's existing (hardcoded, lead-order-independent) behavior, with has_product as the
+  // same priority bucket ahead of date that the real claim order now applies (see
+  // pickOlderDetractorCandidate) - so this preview shows leads in the same order they'll actually
+  // be assigned in. parseDdMmYyyy is already imported at module scope by Task 5.
   const tagged = [
     ...deliveryRows.map((r) => ({ ...r, lead_type: 'delivery' })),
     ...productRows.map((r) => ({ ...r, lead_type: 'product' })),
   ];
-  tagged.sort((a, b) => (parseDdMmYyyy(a.submitted_date) ?? Infinity) - (parseDdMmYyyy(b.submitted_date) ?? Infinity));
+  tagged.sort((a, b) => {
+    if (!!a.has_product !== !!b.has_product) return a.has_product ? -1 : 1;
+    return (parseDdMmYyyy(a.submitted_date) ?? Infinity) - (parseDdMmYyyy(b.submitted_date) ?? Infinity);
+  });
   return tagged.slice(0, safeLimit(limit, 20));
 }
 
