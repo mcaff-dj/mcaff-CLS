@@ -474,6 +474,23 @@ export default function NpsCallingClient() {
   }, []);
   useEffect(() => { if (canAdminTab) fetchAllTickets(); }, [canAdminTab, fetchAllTickets]);
 
+  // Team Roster's own "Product" filter (per-agent detractor_product_filter) picks from this -
+  // every product rated for EITHER brand in the last 3 months (see getDetractorProductNames'
+  // own comment), unlike the dispose modal's own catalogProductNames below which is scoped to
+  // one ticket's own brand - an admin setting a roster-wide filter has no single ticket's brand
+  // to scope it to, so this fetches both combined (no brand param = unrestricted, same
+  // convention the endpoint's own brand filter already uses for "unset").
+  const [rosterProductCatalog, setRosterProductCatalog] = useState([]);
+  useEffect(() => {
+    if (!canAdminTab) return;
+    let cancelled = false;
+    fetch('/api/report/data/detractor-product-names')
+      .then((r) => (r.ok ? r.json() : { productNames: [] }))
+      .then((d) => { if (!cancelled) setRosterProductCatalog(d.productNames || []); })
+      .catch(() => { if (!cancelled) setRosterProductCatalog([]); });
+    return () => { cancelled = true; };
+  }, [canAdminTab]);
+
   // Manual stopgap for the going-Online auto-fill trigger - lets an admin/process admin fill
   // one agent's queue on demand (fills to that agent's own quota minus current load, same
   // default the real trigger uses) instead of waiting for the agent to toggle their own status.
@@ -1042,6 +1059,12 @@ export default function NpsCallingClient() {
       if (currentLoad >= quota) return false;
       if (a.detractorBrandFilter && a.detractorBrandFilter !== lead.brand) return false;
       if (a.detractorLeadTypeFilter && a.detractorLeadTypeFilter !== lead.lead_type) return false;
+      // detractorProductFilter is NOT checked here - lead (from getUnassignedDetractorLeads)
+      // only carries has_product (a boolean), not the actual product name(s), so there's
+      // nothing to match an agent's filter against without a second round trip. This preview
+      // is already documented as approximate (see this function's own comment above); an agent
+      // with a product filter set may show here as eligible for a lead their filter would
+      // actually exclude server-side.
       return true;
     });
   }, [agentMetrics, defaultQuota.quota]);
@@ -1843,6 +1866,7 @@ export default function NpsCallingClient() {
                             <th className="py-3 px-4 text-left font-medium">Quota</th>
                             <th className="py-3 px-4 text-left font-medium" title="Brand restriction for lead assignment - All Brands means no restriction">Brand</th>
                             <th className="py-3 px-4 text-left font-medium" title="Which pool this agent is auto-assigned from - Both means the shared mixed-pool default">Process</th>
+                            <th className="py-3 px-4 text-left font-medium" title="Restricts assignment to leads about these specific product(s) - checked against both Delivery NPS orders and Product NPS responses. Empty means no restriction.">Product</th>
                             <th className="py-3 px-4 text-center font-medium" title="Can manage this process's roster and calling hours - nothing else">Process admin</th>
                             <th className="py-3 px-4 text-center font-medium" title="Manually fill this agent's queue now instead of waiting for them to go Online">Assign</th>
                           </tr></thead>
@@ -1907,6 +1931,16 @@ export default function NpsCallingClient() {
                                       { value: 'delivery', label: 'Delivery NPS' },
                                       { value: 'product', label: 'Product NPS' },
                                     ]}
+                                  />
+                                </td>
+                                <td className="py-3 px-4">
+                                  <MultiSelectDropdown
+                                    value={a.detractorProductFilter ? a.detractorProductFilter.split(',').map((s) => s.trim()).filter(Boolean) : []}
+                                    onChange={(vals) => saveProcessAgent(a.email, { detractorProductFilter: vals.join(', ') })}
+                                    options={rosterProductCatalog}
+                                    searchable
+                                    placeholder="Any product"
+                                    itemNoun="products"
                                   />
                                 </td>
                                 <td className="py-3 px-4 text-center">

@@ -623,6 +623,7 @@ async function handleCallingAgents(req, res, session) {
           ndrBrandFilter: body.ndrBrandFilter,
           detractorBrandFilter: body.detractorBrandFilter,
           detractorLeadTypeFilter: body.detractorLeadTypeFilter,
+          detractorProductFilter: body.detractorProductFilter,
           teamId: body.teamId,
         },
         session.email,

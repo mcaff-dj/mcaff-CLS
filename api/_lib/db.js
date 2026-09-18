@@ -644,6 +644,12 @@ async function bootstrapSchema() {
   // Leads spec) this agent may claim from - '' = Both (every pre-existing agent's unrestricted
   // behavior), 'delivery' or 'product' restricts them to that pool only. Checked via
   // poolAllowedByLeadTypeFilter in peekDeliveryDetractorCandidates/peekProductDetractorCandidates.
+  // detractor_product_filter: same "free text, no fixed value set" shape as priority_rto_reasons/
+  // ndr_reason_filter above, not detractor_brand_filter's fixed set - comma-joined product
+  // names (as picked from getDetractorProductNames' own catalog), '' = unrestricted. Applies to
+  // BOTH pools: matched against nps_delivery.product_name_list (an order's own comma-joined
+  // list) and nps_product.product_name (one per rated slot) - see
+  // getDetractorProductFilterFor's own comment for exactly how each is checked.
   await sql`
     CREATE TABLE IF NOT EXISTS calling_agent_process (
       email VARCHAR(320) NOT NULL,
@@ -660,6 +666,7 @@ async function bootstrapSchema() {
       ndr_brand_filter VARCHAR(16),
       detractor_brand_filter VARCHAR(16),
       detractor_lead_type_filter VARCHAR(16),
+      detractor_product_filter TEXT,
       -- team_id: which calling_teams row (if any) this agent belongs to within the process. This
       -- column already exists on the LIVE table via scripts/migrate_ndr_team_id.py, which is
       -- still the path for prod - IF NOT EXISTS makes this line a no-op there. It is added here so
@@ -1981,6 +1988,39 @@ async function _detractorLeadTypeFilterFor(email) {
   return (rows[0] && rows[0].detractor_lead_type_filter) || '';
 }
 
+// Reads calling_agent_process.detractor_product_filter - same "'' = unrestricted" convention as
+// _detractorBrandFilterFor/_detractorLeadTypeFilterFor above. '' for a preview/admin call with
+// no agent behind it (getUnassignedDetractorLeads doesn't scope by agent, so it never calls
+// this - same as it never calls the other two).
+async function _detractorProductFilterFor(email) {
+  if (!email) return '';
+  const { rows } = await sql`
+    SELECT detractor_product_filter FROM calling_agent_process WHERE email = ${email} AND process_key = 'detractor'
+  `;
+  return (rows[0] && rows[0].detractor_product_filter) || '';
+}
+
+// Turns a comma-joined product-filter string into a single MySQL REGEXP pattern
+// ('name1|name2|...'), or null when the filter is empty (unrestricted - callers skip the
+// REGEXP entirely rather than passing this through, same "'' means don't even check" shape
+// brand/lead-type filters already use). One bound parameter either way, so this plugs into the
+// existing sql-tagged-template queries with no dynamic placeholder count to worry about (see
+// buildSqlText's own comment on why LIMIT is the one place this file interpolates raw SQL -
+// everywhere else, including here, stays a single bound value).
+//
+// Each name is regex-escaped (product names are free text off a live catalog - a raw, unescaped
+// "(" or "." would either break the pattern outright or silently match more than intended) and
+// unanchored: nps_delivery.product_name_list is a comma-joined list of several products per
+// order, so this has to find a name ANYWHERE in that string, not match the whole field - see
+// getDetractorProductFilterFor's own comment on why nps_product's single-value product_name
+// gets an exact-match check instead, not this regex.
+function buildProductFilterRegex(csv) {
+  const names = String(csv || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!names.length) return null;
+  const escaped = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return escaped.join('|');
+}
+
 // Hands back the fields the agent needs to eventually copy into CLS_NPS_calling (the caller,
 // getNextDetractorLead, does that INSERT - see that table's own comment for why this is
 // copy-on-assign rather than a live join). nps_delivery is read-only here: this function never
@@ -2006,18 +2046,26 @@ async function _detractorLeadTypeFilterFor(email) {
 // fallback - see getNextDetractorLeadEitherPool for how this combines with the product pool's
 // own priority the same way.
 //
+// productFilterPattern: this agent's own detractor_product_filter (see
+// buildProductFilterRegex's own comment), unanchored against product_name_list - a hard filter,
+// same "restricts, doesn't just deprioritize" contract as brandFilter above, checked ANYWHERE
+// in the order's own comma-joined product list rather than the whole field.
+//
 // SELECT-only half of the delivery claim - the same 30-day-filtered, lead-order-sorted,
-// brand-filtered nps_delivery query getNextDetractorLead always ran, now callable without also
-// inserting. limit and email=null exist for callers that don't need a specific agent's brand
-// filter or a single row - getUnassignedDetractorLeads does NOT use this (it needs its own
-// always-oldest-first ordering, independent of the admin's configurable lead-order setting this
-// function respects, so it writes its own inline query instead - though it applies this SAME
-// priority bucket on top of that oldest-first order).
+// brand/product-filtered nps_delivery query getNextDetractorLead always ran, now callable
+// without also inserting. limit and email=null exist for callers that don't need a specific
+// agent's own filters or a single row - getUnassignedDetractorLeads does NOT use this (it needs
+// its own always-oldest-first ordering, independent of the admin's configurable lead-order
+// setting this function respects, so it writes its own inline query instead - though it applies
+// this SAME priority bucket on top of that oldest-first order; it never applies any agent's
+// brand/product/lead-type filter either, same as before this filter existed, since that preview
+// has no specific agent to filter for).
 async function peekDeliveryDetractorCandidates({ email = null, limit = 1 } = {}) {
   await ensureSchema();
   if (!poolAllowedByLeadTypeFilter('delivery', await _detractorLeadTypeFilterFor(email))) return [];
   const sortDirection = (await getCallingLeadOrder('detractor')) === 'newest' ? -1 : 1;
   const brandFilter = await _detractorBrandFilterFor(email);
+  const productFilterPattern = buildProductFilterRegex(await _detractorProductFilterFor(email));
   const { from, to } = await _detractorRecencyBounds();
   const { rows } = await sql`
     SELECT d.response_id, d.brand, d.channel_order_id, d.customer_name, d.customer_phone,
@@ -2042,6 +2090,7 @@ async function peekDeliveryDetractorCandidates({ email = null, limit = 1 } = {})
     LEFT JOIN CLS_NPS_calling c ON c.response_id = d.response_id
     WHERE d.nps_category = 'Detractor' AND c.response_id IS NULL
       AND (${brandFilter} = '' OR d.brand = ${brandFilter})
+      AND (${productFilterPattern} IS NULL OR d.product_name_list REGEXP ${productFilterPattern})
       AND STR_TO_DATE(d.submitted_date, '%d/%m/%Y') BETWEEN ${from} AND ${to}
     ORDER BY (d.product_name_list IS NULL OR TRIM(d.product_name_list) IN ('', 'NA')) ASC,
              TO_DAYS(STR_TO_DATE(d.submitted_date, '%d/%m/%Y')) * ${sortDirection} ASC
@@ -2109,11 +2158,26 @@ async function getNextDetractorLead(email) {
 // only ONE of them needs a real product_name for this response to count as "known" (matches
 // claimOneProductDetractorLead's own GROUP_CONCAT, which joins every slot with a real name, not
 // just the first).
+//
+// productFilterPattern: this agent's own detractor_product_filter, unanchored against
+// product_name - same shape as peekDeliveryDetractorCandidates' own check against
+// product_name_list, and for the same reason: confirmed live against real data (2026-09-18)
+// that product_name is NOT reliably a single clean value per slot - ~7% of nps_product rows
+// (16,704 of 237,842) have their OWN comma-joined jumble of several product names in this one
+// field (a data-quality artifact of the external ingestion pipeline, not this app). An anchored
+// exact match was tried first and undercounted a real filter name's matches by ~18% (missed
+// every row where that name was embedded inside one of these jumbles) before this was caught -
+// left as a cautionary note against re-anchoring this without re-checking live data first.
+// Filtered in the WHERE clause, BEFORE the GROUP BY dedup below - a response with 3 slots where
+// only 1 matches still produces a row here (from that 1 surviving slot), which is exactly "this
+// response has AT LEAST one qualifying product", the same semantics hasProduct's own MAX(...)
+// already uses for "known at all".
 async function peekProductDetractorCandidates({ email = null, limit = 1 } = {}) {
   await ensureSchema();
   if (!poolAllowedByLeadTypeFilter('product', await _detractorLeadTypeFilterFor(email))) return [];
   const sortDirection = (await getCallingLeadOrder('detractor')) === 'newest' ? -1 : 1;
   const brandFilter = await _detractorBrandFilterFor(email);
+  const productFilterPattern = buildProductFilterRegex(await _detractorProductFilterFor(email));
   const { from, to } = await _detractorRecencyBounds();
   const { rows } = await sql`
     SELECT p.response_id, MIN(p.submitted_date) AS submitted_date, MIN(p.nps_category) AS nps_category,
@@ -2122,6 +2186,7 @@ async function peekProductDetractorCandidates({ email = null, limit = 1 } = {}) 
     LEFT JOIN CLS_NPS_calling c ON c.response_id = p.response_id
     WHERE c.response_id IS NULL
       AND (${brandFilter} = '' OR p.brand = ${brandFilter})
+      AND (${productFilterPattern} IS NULL OR p.product_name REGEXP ${productFilterPattern})
       AND STR_TO_DATE(p.submitted_date, '%d/%m/%Y') BETWEEN ${from} AND ${to}
     GROUP BY p.response_id
     HAVING MIN(p.nps_category) = 'Detractor'
@@ -4673,7 +4738,8 @@ async function getCallingProcessAgents(processKey, teamId) {
     sql`
       SELECT email, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons,
              reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter,
-             ndr_brand_filter, detractor_brand_filter, detractor_lead_type_filter, team_id, updated_at, updated_by
+             ndr_brand_filter, detractor_brand_filter, detractor_lead_type_filter, detractor_product_filter,
+             team_id, updated_at, updated_by
       FROM calling_agent_process WHERE process_key = ${processKey}
     `,
   ]);
@@ -4697,6 +4763,7 @@ async function getCallingProcessAgents(processKey, teamId) {
       ndrBrandFilter: (s && s.ndr_brand_filter) || '',
       detractorBrandFilter: (s && s.detractor_brand_filter) || '',
       detractorLeadTypeFilter: (s && s.detractor_lead_type_filter) || '',
+      detractorProductFilter: (s && s.detractor_product_filter) || '',
       // null means "no team", which for a team-scoped view means excluded from every real
       // team's roster - the INVERSE of the report_tab_permissions convention above (membership
       // query) where absence of a tab row means unrestricted/every-process. Two tables, two
@@ -4719,7 +4786,7 @@ async function getCallingProcessAgents(processKey, teamId) {
 
 // Upserts one agent's status and/or quota for one process. Either field may be omitted, so an
 // agent flipping their own status can't accidentally reset a quota an admin set.
-async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons, reassignPaymentMode, attemptCountFilter, ndrReasonFilter, ndrPaymentModeFilter, ndrBrandFilter, detractorBrandFilter, detractorLeadTypeFilter, teamId } = {}, updatedBy) {
+async function setCallingProcessAgent(processKey, email, { status, maxQuota, isProcessAdmin, prepaidPct, priorityRtoReasons, reassignPaymentMode, attemptCountFilter, ndrReasonFilter, ndrPaymentModeFilter, ndrBrandFilter, detractorBrandFilter, detractorLeadTypeFilter, detractorProductFilter, teamId } = {}, updatedBy) {
   await ensureSchema();
   const key = String(email || '').trim().toLowerCase();
   if (!processKey || !key) throw new Error('processKey and email are required');
@@ -4793,6 +4860,11 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
     throw new Error("detractorLeadTypeFilter must be '', 'delivery', or 'product'");
   }
   const detractorLeadTypeFilterText = detractorLeadTypeFilter === undefined ? null : String(detractorLeadTypeFilter || '').trim();
+  // Free text, no fixed value set - same "'' is a real, distinct-from-NULL value" contract as
+  // reasonsText/ndrReasonFilterText above, not detractorBrandFilter/detractorLeadTypeFilter's
+  // validated set. A comma-joined list of product names (as picked from getDetractorProductNames'
+  // own catalog by the UI), checked against BOTH pools - see buildProductFilterRegex.
+  const detractorProductFilterText = detractorProductFilter === undefined ? null : String(detractorProductFilter || '').trim();
   // team_id needs a THIRD state that COALESCE(new, old) cannot express on its own: undefined =
   // leave the stored team alone (COALESCE would handle this fine), a number = assign that team
   // (COALESCE handles this too) - but null = explicitly UNASSIGN, and COALESCE(NULL, team_id)
@@ -4814,8 +4886,8 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
     if (!Number.isFinite(teamValue) || teamValue <= 0) throw new Error('teamId must be a positive whole number or null');
   }
   await sql`
-    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter, ndr_brand_filter, detractor_brand_filter, detractor_lead_type_filter, team_id, updated_at, updated_by)
-    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, ${reassignModeText || ''}, ${attemptFilterText || ''}, ${ndrReasonFilterText || ''}, ${ndrPaymentModeFilterText || ''}, ${ndrBrandFilterText || ''}, ${detractorBrandFilterText || ''}, ${detractorLeadTypeFilterText || ''}, ${touchTeam ? teamValue : null}, NOW(), ${updatedBy || null})
+    INSERT INTO calling_agent_process (email, process_key, status, max_quota, is_process_admin, prepaid_pct, priority_rto_reasons, reassign_payment_mode, attempt_count_filter, ndr_reason_filter, ndr_payment_mode_filter, ndr_brand_filter, detractor_brand_filter, detractor_lead_type_filter, detractor_product_filter, team_id, updated_at, updated_by)
+    VALUES (${key}, ${processKey}, ${status || 'Offline'}, ${quota}, ${adminFlag === null ? false : adminFlag}, ${prepaidTarget}, ${reasonsText || ''}, ${reassignModeText || ''}, ${attemptFilterText || ''}, ${ndrReasonFilterText || ''}, ${ndrPaymentModeFilterText || ''}, ${ndrBrandFilterText || ''}, ${detractorBrandFilterText || ''}, ${detractorLeadTypeFilterText || ''}, ${detractorProductFilterText || ''}, ${touchTeam ? teamValue : null}, NOW(), ${updatedBy || null})
     ON DUPLICATE KEY UPDATE
       status = COALESCE(${status || null}, status),
       max_quota = COALESCE(${quota}, max_quota),
@@ -4830,6 +4902,7 @@ async function setCallingProcessAgent(processKey, email, { status, maxQuota, isP
       ndr_brand_filter = COALESCE(${ndrBrandFilterText}, ndr_brand_filter),
       detractor_brand_filter = COALESCE(${detractorBrandFilterText}, detractor_brand_filter),
       detractor_lead_type_filter = COALESCE(${detractorLeadTypeFilterText}, detractor_lead_type_filter),
+      detractor_product_filter = COALESCE(${detractorProductFilterText}, detractor_product_filter),
       updated_at = NOW(),
       updated_by = ${updatedBy || null}
   `;
