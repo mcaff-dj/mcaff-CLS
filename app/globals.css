@@ -194,6 +194,7 @@ body.theme-light .shadow-emerald-950\/50,
 body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08) !important; }
 
 @media print {
+  @page { size: A4 landscape; margin: 10mm; }
   body * { visibility: hidden; }
   #printable-receipt, #printable-receipt * { visibility: visible; }
   #printable-receipt { position: absolute; left: 0; top: 0; width: 100%; color: #000; background: #fff; padding: 32px; }
@@ -213,6 +214,24 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
     color: #000 !important;
     border: 1px solid #000 !important;
   }
+  /* On screen, wide tables scroll horizontally instead of wrapping (.og-table-scroll:
+     overflow-x: auto; th/td: white-space: nowrap) so multi-month tables stay readable
+     without squeezing every column to mobile width. Print has no scrollbar - left as-is,
+     everything past the page edge is simply clipped, which is why whole columns (Window,
+     Sep, vs Baseline...) were disappearing off the right side of the downloaded PDF.
+     Landscape + a small font + letting cells wrap gives the browser's table layout room
+     to shrink columns to fit the printable width instead of cutting them off. */
+  #printable-receipt .og-table-scroll { overflow: visible !important; width: auto !important; }
+  #printable-receipt .og-table { width: 100% !important; table-layout: auto; font-size: 9px; }
+  #printable-receipt .og-table th,
+  #printable-receipt .og-table td {
+    white-space: normal !important;
+    word-break: break-word;
+    padding: 4px 5px;
+  }
+  #printable-receipt table { page-break-inside: auto; }
+  #printable-receipt tr { page-break-inside: avoid; page-break-after: auto; }
+  #printable-receipt thead { display: table-header-group; }
 }
 
 /* ── Shared theme variables for login/admin/dashboard/home ──────────────
