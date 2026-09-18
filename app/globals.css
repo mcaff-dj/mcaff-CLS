@@ -194,7 +194,10 @@ body.theme-light .shadow-emerald-950\/50,
 body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08) !important; }
 
 @media print {
-  @page { size: A4 landscape; margin: 10mm; }
+  /* Extra bottom margin gives the print engine's page-break calculation some slack -
+     with a tight margin, a card/row that just barely fits gets sliced by the page edge
+     instead of being pushed whole onto the next page. */
+  @page { size: A4 landscape; margin: 12mm 12mm 20mm 12mm; }
   body * { visibility: hidden; }
   #printable-receipt, #printable-receipt * { visibility: visible; }
   #printable-receipt { position: absolute; left: 0; top: 0; width: 100%; color: #000; background: #fff; padding: 32px; }
@@ -232,6 +235,21 @@ body.theme-light .shadow-rose-950\/40 { --tw-shadow-color: rgba(15, 23, 42, 0.08
   #printable-receipt table { page-break-inside: auto; }
   #printable-receipt tr { page-break-inside: avoid; page-break-after: auto; }
   #printable-receipt thead { display: table-header-group; }
+  /* Without an explicit break-inside rule, a table row, a Worst-Trends bullet (<li> in
+     .og-trend-group) or a whole .og-card can straddle a page boundary - the print engine
+     slices it wherever the page ends, so the last line(s) before the cut are lost instead
+     of moving down. break-inside is the modern property; page-break-inside is kept for
+     older WebKit print/PDF engines that don't honor it. */
+  #printable-receipt .og-card,
+  #printable-receipt .og-trend-group,
+  #printable-receipt li {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  #printable-receipt p {
+    orphans: 3;
+    widows: 3;
+  }
 }
 
 /* ── Shared theme variables for login/admin/dashboard/home ──────────────
