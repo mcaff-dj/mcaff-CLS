@@ -287,49 +287,38 @@ function DispositionChecklist({
   const productFollowUp = (n) => {
     const picked = productsByReason[n.id] || [];
     // Always asked once checked - not gated on productOptions.length. Most tickets carry their
-    // own product_name_list (order/response line items), so the common case is the picker below;
-    // a ticket with none (nothing to pick from - the ticket's own product name never made it into
+    // own product_name_list (order/response line items), so that's the list; a ticket with none
+    // (nothing to pick from - the ticket's own product name never made it into
     // product_name_list) still must not skip the question entirely, so it falls back to the
-    // recent catalog instead of silently showing nothing.
-    if (productOptions.length > 0) {
+    // brand's recent catalog instead of silently showing nothing.
+    const ownList = productOptions.length > 0;
+    const options = ownList ? productOptions : catalogProductNames;
+    if (!options.length) {
       return (
-        <>
-          <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
-            Which product(s)? {picked.length ? `· ${picked.length} selected` : ''}
-          </label>
-          <select
-            multiple
-            value={picked}
-            onChange={(e) => onProductsChange(n.id, Array.from(e.target.selectedOptions, (o) => o.value))}
-            size={Math.min(productOptions.length, 4)}
-            className="w-full text-[12px] bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 p-1"
-          >
-            {productOptions.map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
-        </>
+        <p className="text-[11px] text-zinc-500">
+          {catalogLoading ? 'Loading product catalog…' : 'No recent products found for this brand.'}
+        </p>
       );
     }
-    if (catalogProductNames.length > 0) {
-      return (
-        <>
-          <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
-            Which product(s)? (not on this ticket's own list - search the recent catalog below)
-          </label>
-          <MultiSelectDropdown
-            value={picked}
-            onChange={(vals) => onProductsChange(n.id, vals)}
-            options={catalogProductNames}
-            searchable
-            placeholder="Search products…"
-            itemNoun="products"
-          />
-        </>
-      );
-    }
+    // A checkbox list, not a native <select multiple>: one order's reason can genuinely span
+    // several products, but picking one in a native multi-select REPLACES the rest unless the
+    // agent knows to ctrl-click, so an agent confirming one product quietly dropped the others
+    // (including the ones toggleReason pre-filled from the ticket itself).
     return (
-      <p className="text-[11px] text-zinc-500">
-        {catalogLoading ? 'Loading product catalog…' : 'No recent products found for this brand.'}
-      </p>
+      <>
+        <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
+          Which product(s)?{ownList ? '' : " (not on this ticket's own list - search the recent catalog)"}
+          {picked.length ? ` · ${picked.length} selected` : ''}
+        </label>
+        <MultiSelectDropdown
+          value={picked}
+          onChange={(vals) => onProductsChange(n.id, vals)}
+          options={options}
+          searchable={!ownList}
+          placeholder="Select product(s)"
+          itemNoun="products"
+        />
+      </>
     );
   };
 
