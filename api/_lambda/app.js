@@ -122,6 +122,10 @@ mount('all', '/api/escalation/:action', '../escalation/[action].js', 'action');
 // 2026-08-19-report-cell-comments-design.md.
 mount('all', '/api/report-comments/:action', '../report-comments/[action].js', 'action');
 
+// "Open with Google Docs" on the Org Overview report tabs - see that file's header
+// comment for the Drive/Shared-Drive setup this needs.
+mount('post', '/api/orgoverview/export-doc', '../orgoverview/export-doc.js');
+
 // Registered before the dynamic /api/report/:card route below - Express matches routes
 // in registration order, so these more specific paths have to win the match before
 // "raw"/"data" are ever tried as a :card value.
