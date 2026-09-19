@@ -237,90 +237,195 @@ function isUndisposed(t) {
 // (calling_process_dispositions.triggers_product_followup), edited from a checkbox in
 // CallingAdminPanel.js's DispNode (allowProductFollowupControl), so a rename can no longer unhook
 // it - flip the checkbox back on after a rename instead of shipping a code change.
-// A category's reasons stay collapsed until the category itself is opened - true even for a
-// category that already has a reason checked in it (subtreeHasSelection keeps it open across
-// re-renders so a pick made before a remount, e.g. re-opening the same ticket, doesn't vanish
-// behind a closed accordion).
-function subtreeHasSelection(node, selected) {
-  if (!node.children || !node.children.length) return selected.has(node.id);
-  return node.children.some((c) => subtreeHasSelection(c, selected));
+// Every id in a subtree, the node's own included - what a pick has to clear when it's undone or
+// when a one-of sibling takes over, so an answer the agent can no longer see can never still be
+// sitting in selectedReasons at save time.
+function collectIds(node, out = []) {
+  out.push(node.id);
+  (node.children || []).forEach((c) => collectIds(c, out));
+  return out;
 }
 
+// The tree an admin builds in CallingAdminPanel's ProcessDispositionsCard has four levels, and
+// each one means something different here:
+//
+//   Connected / Non Connected   the branch - picked by the segmented control in the modal, so
+//                               this component is handed its CHILDREN and never draws the branch
+//                               itself (drawing it asked the agent to pick "Connected" twice)
+//     Have you reached out…     depth 1, a question - a heading, never answerable itself
+//       Yes / No                depth 2, an answer
+//         Query not resolved…   depth 3+, a follow-up answer
+//
+// `inputType` is the parent's own children_input_type column and says how the nodes in THIS array
+// are answered: 'single' draws them as one-of pills and keeps drilling into whichever one is
+// picked, 'multi' draws checkboxes and stops there (children of a checkbox are deliberately not
+// drawn - the same rule delivery-escalation documents at DeliveryEscalationClient.js's dispLevels).
+// Either way, a node's children only appear once that node itself is picked, so the agent is only
+// ever shown the follow-up to an answer they actually gave.
 function DispositionChecklist({
-  nodes, selected, onToggle, ancestors = [], ancestorNeedsProduct = false,
+  nodes, selected, onToggle, ancestors = [], depth = 1, inputType = 'single', ancestorNeedsProduct = false,
   productOptions = [], productsByReason = {}, onProductsChange,
   catalogProductNames = [], catalogLoading = false,
 }) {
-  const [expanded, setExpanded] = useState(() => new Set());
-  const toggleExpanded = (id) => setExpanded((prev) => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
-
   if (!nodes || !nodes.length) {
     return <p className="text-[12px] text-zinc-500">No disposition options configured yet - an admin can add some under Admin Panel.</p>;
   }
-  // Top-level nodes (categories, e.g. "Product Related Issue") get their own card so the eye can
-  // chunk the list into groups instead of scanning one long undifferentiated run of checkboxes -
-  // nested children (there are none deeper than one level today) fall back to the plain list.
-  const isTopLevel = ancestors.length === 0;
-  return (
-    <div className="space-y-2">
-      {nodes.map((n) => {
-        const path = [...ancestors, n.label];
-        // Sticky once true - a descendant three levels down a flagged category still needs the
-        // follow-up even if none of ITS own ancestors between here and there are individually
-        // flagged (e.g. "Query Class" flagged, "Packaging issue" not, "Broken Nozzle" not - the
-        // leaf still needs it because Query Class does).
-        const needsProduct = ancestorNeedsProduct || !!n.triggersProductFollowup;
-        const hasChildren = n.children && n.children.length > 0;
-        if (hasChildren) {
-          const body = (
-            <DispositionChecklist
-              nodes={n.children} selected={selected} onToggle={onToggle} ancestors={path} ancestorNeedsProduct={needsProduct}
-              productOptions={productOptions} productsByReason={productsByReason} onProductsChange={onProductsChange}
-              catalogProductNames={catalogProductNames} catalogLoading={catalogLoading}
-            />
-          );
-          if (!isTopLevel) {
+
+  // Sticky once true - a descendant three levels down a flagged question still needs the
+  // follow-up even if none of ITS own ancestors between here and there are individually flagged
+  // (e.g. "Query Class" flagged, "Packaging issue" not, "Broken Nozzle" not - the leaf still
+  // needs it because Query Class does).
+  const needsProductFor = (n) => ancestorNeedsProduct || !!n.triggersProductFollowup;
+
+  const productFollowUp = (n) => {
+    const picked = productsByReason[n.id] || [];
+    // Always asked once checked - not gated on productOptions.length. Most tickets carry their
+    // own product_name_list (order/response line items), so the common case is the picker below;
+    // a ticket with none (nothing to pick from - the ticket's own product name never made it into
+    // product_name_list) still must not skip the question entirely, so it falls back to the
+    // recent catalog instead of silently showing nothing.
+    if (productOptions.length > 0) {
+      return (
+        <>
+          <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
+            Which product(s)? {picked.length ? `· ${picked.length} selected` : ''}
+          </label>
+          <select
+            multiple
+            value={picked}
+            onChange={(e) => onProductsChange(n.id, Array.from(e.target.selectedOptions, (o) => o.value))}
+            size={Math.min(productOptions.length, 4)}
+            className="w-full text-[12px] bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 p-1"
+          >
+            {productOptions.map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </>
+      );
+    }
+    if (catalogProductNames.length > 0) {
+      return (
+        <>
+          <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
+            Which product(s)? (not on this ticket's own list - search the recent catalog below)
+          </label>
+          <MultiSelectDropdown
+            value={picked}
+            onChange={(vals) => onProductsChange(n.id, vals)}
+            options={catalogProductNames}
+            searchable
+            placeholder="Search products…"
+            itemNoun="products"
+          />
+        </>
+      );
+    }
+    return (
+      <p className="text-[11px] text-zinc-500">
+        {catalogLoading ? 'Loading product catalog…' : 'No recent products found for this brand.'}
+      </p>
+    );
+  };
+
+  // Whatever a picked answer still has to ask: its own children (the next question), or - once
+  // there are none left - the "which product?" follow-up if this path is flagged for it. Asked
+  // only at the end of the line, so a flagged question doesn't ask it again at every level down.
+  const revealed = (n) => {
+    const needsProduct = needsProductFor(n);
+    const hasChildren = n.children && n.children.length > 0;
+    if (!hasChildren) {
+      return needsProduct
+        ? <div className="mt-2 pl-3 border-l-2 border-indigo-500/30">{productFollowUp(n)}</div>
+        : null;
+    }
+    return (
+      <div className="mt-2 pl-3 border-l-2 border-indigo-500/30">
+        <DispositionChecklist
+          nodes={n.children} selected={selected} onToggle={onToggle}
+          ancestors={[...ancestors, n.label]} depth={depth + 1} inputType={n.childrenInputType || 'single'}
+          ancestorNeedsProduct={needsProduct}
+          productOptions={productOptions} productsByReason={productsByReason} onProductsChange={onProductsChange}
+          catalogProductNames={catalogProductNames} catalogLoading={catalogLoading}
+        />
+      </div>
+    );
+  };
+
+  // The question level: a label and its answers, one card each. Always open - these are the
+  // call's script, so collapsing them would only hide the next question from the agent.
+  if (depth === 1) {
+    return (
+      <div className="space-y-2">
+        {nodes.map((n) => {
+          const hasChildren = n.children && n.children.length > 0;
+          if (!hasChildren) {
+            // A reason hung straight off the branch with no answers of its own - not a question,
+            // so it stays an answer row rather than becoming an empty heading.
             return (
-              <div key={n.id} className="space-y-1.5">
-                <p className="text-[12px] font-bold text-zinc-300">{n.label}</p>
-                <div className="pl-3 border-l border-zinc-800">{body}</div>
+              <div key={n.id} className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl p-3">
+                <DispositionChecklist
+                  nodes={[n]} selected={selected} onToggle={onToggle} ancestors={ancestors}
+                  depth={2} inputType={inputType} ancestorNeedsProduct={ancestorNeedsProduct}
+                  productOptions={productOptions} productsByReason={productsByReason} onProductsChange={onProductsChange}
+                  catalogProductNames={catalogProductNames} catalogLoading={catalogLoading}
+                />
               </div>
             );
           }
-          // Category card is a disclosure control: its reasons (the child question) render only
-          // once the category (the parent question) has been opened - either by tapping it, or
-          // automatically when it already holds a checked reason.
-          const isOpen = expanded.has(n.id) || subtreeHasSelection(n, selected);
           return (
-            <div key={n.id} className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden">
-              <button
-                type="button"
-                onClick={() => toggleExpanded(n.id)}
-                className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-zinc-900/60 transition-colors"
-              >
-                <span className="text-[12px] font-bold text-zinc-200 tracking-tight">{n.label}</span>
-                <ChevronDown className={`shrink-0 text-zinc-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
-              </button>
-              <div className={`grid transition-[grid-template-rows] duration-300 ease-out ${isOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
-                <div className="overflow-hidden">
-                  <div className="px-3 pb-3 pt-0.5">{body}</div>
-                </div>
-              </div>
+            <div key={n.id} className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl p-3 space-y-2">
+              <p className="text-[12.5px] font-bold text-zinc-100 tracking-tight leading-snug">{n.label}</p>
+              <DispositionChecklist
+                nodes={n.children} selected={selected} onToggle={onToggle}
+                ancestors={[...ancestors, n.label]} depth={2} inputType={n.childrenInputType || 'single'}
+                ancestorNeedsProduct={needsProductFor(n)}
+                productOptions={productOptions} productsByReason={productsByReason} onProductsChange={onProductsChange}
+                catalogProductNames={catalogProductNames} catalogLoading={catalogLoading}
+              />
             </div>
           );
-        }
+        })}
+      </div>
+    );
+  }
+
+  // One-of: pills on one row, and since at most one of them can be picked, whatever that pick
+  // still has to ask goes underneath the whole row rather than beside a pill.
+  if (inputType === 'single') {
+    const picked = nodes.find((n) => selected.has(n.id));
+    const clearIdsFor = (n) => nodes.filter((s) => s.id !== n.id).flatMap((s) => collectIds(s)).concat(collectIds(n).slice(1));
+    return (
+      <div>
+        <div className="flex flex-wrap gap-2">
+          {nodes.map((n) => {
+            const isPicked = selected.has(n.id);
+            return (
+              <button
+                key={n.id}
+                type="button"
+                title={n.description || ''}
+                onClick={() => onToggle(n.id, [...ancestors, n.label], needsProductFor(n), clearIdsFor(n))}
+                className={`px-3 py-1.5 rounded-lg text-[12.5px] font-semibold border transition-colors ${
+                  isPicked
+                    ? 'bg-indigo-500/15 border-indigo-500 text-indigo-200'
+                    : 'bg-zinc-900/60 border-zinc-800 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
+                }`}
+              >
+                {n.label}
+              </button>
+            );
+          })}
+        </div>
+        {picked && revealed(picked)}
+      </div>
+    );
+  }
+
+  // Pick-many: a checkbox per answer, each carrying its own "which product?" follow-up.
+  return (
+    <div className="space-y-0.5">
+      {nodes.map((n) => {
         const checked = selected.has(n.id);
-        // Always asked once checked - not gated on productOptions.length. Most tickets carry
-        // their own product_name_list (order/response line items), so the common case is the
-        // picker below; a ticket with none (nothing to pick from - the ticket's own product name
-        // never made it into product_name_list) still must not skip the question entirely, so it
-        // falls back to a free-text box instead of silently showing nothing.
-        const showProductFollowUp = checked && needsProduct;
-        const picked = productsByReason[n.id] || [];
+        const needsProduct = needsProductFor(n);
         return (
           <div key={n.id}>
             <label
@@ -332,11 +437,11 @@ function DispositionChecklist({
               <input
                 type="checkbox"
                 checked={checked}
-                onChange={() => onToggle(n.id, path, needsProduct)}
-                className="sr-only peer"
+                onChange={() => onToggle(n.id, [...ancestors, n.label], needsProduct, collectIds(n).slice(1))}
+                className="sr-only"
               />
               <span
-                className={`shrink-0 w-[18px] h-[18px] rounded-full border flex items-center justify-center transition-colors ${
+                className={`shrink-0 w-[18px] h-[18px] rounded-[6px] border flex items-center justify-center transition-colors ${
                   checked ? 'bg-indigo-500 border-indigo-500' : 'border-zinc-600'
                 }`}
               >
@@ -344,45 +449,8 @@ function DispositionChecklist({
               </span>
               {n.label}
             </label>
-            {/* Follow-up question conditioned on this leaf: hidden until its own parent (this
-                reason) is checked, same disclosure rule as the category accordion above. */}
-            {showProductFollowUp && (
-              <div className="pl-[26px] pb-1.5 pt-1">
-                {productOptions.length > 0 ? (
-                  <>
-                    <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
-                      Which product(s)? {picked.length ? `· ${picked.length} selected` : ''}
-                    </label>
-                    <select
-                      multiple
-                      value={picked}
-                      onChange={(e) => onProductsChange(n.id, Array.from(e.target.selectedOptions, (o) => o.value))}
-                      size={Math.min(productOptions.length, 4)}
-                      className="w-full text-[12px] bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 p-1"
-                    >
-                      {productOptions.map((p) => <option key={p} value={p}>{p}</option>)}
-                    </select>
-                  </>
-                ) : catalogProductNames.length > 0 ? (
-                  <>
-                    <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
-                      Which product(s)? (not on this ticket's own list - search the recent catalog below)
-                    </label>
-                    <MultiSelectDropdown
-                      value={picked}
-                      onChange={(vals) => onProductsChange(n.id, vals)}
-                      options={catalogProductNames}
-                      searchable
-                      placeholder="Search products…"
-                      itemNoun="products"
-                    />
-                  </>
-                ) : (
-                  <p className="text-[11px] text-zinc-500">
-                    {catalogLoading ? 'Loading product catalog…' : 'No recent products found for this brand.'}
-                  </p>
-                )}
-              </div>
+            {checked && needsProduct && (
+              <div className="pl-[26px] pb-1.5 pt-1">{productFollowUp(n)}</div>
             )}
           </div>
         );
@@ -635,18 +703,24 @@ export default function NpsCallingClient() {
     setSelectedReasons(new Map());
   };
 
-  // Leaves only ever come from whichever branch pickBranch chose (visibleDispositionNodes is
-  // filtered to it), so cross-branch cleanup here is just a belt-and-suspenders guard.
+  // Leaves only ever come from whichever branch pickBranch chose (branchNode is filtered to it),
+  // so cross-branch cleanup here is just a belt-and-suspenders guard.
   // needsProduct comes from DispositionChecklist's own ancestor walk (whether this leaf or any
   // ancestor of it has triggersProductFollowup set) - computed there, not re-derived here, since
   // only that recursion still has the actual node objects; selectedReasons only ever stores the
   // flat {id, path} breadcrumb, plus this bit, for every later reader (affectedProductsText,
   // saveDisposition) to use without re-walking the tree.
-  const toggleReason = (id, path, needsProduct = false) => {
+  //
+  // clearIds is everything this pick invalidates, also computed there for the same reason: the
+  // node's own descendants (answers to a follow-up the agent is now taking back), plus, in a
+  // one-of group, the sibling being replaced and ITS descendants. Without it an answer that
+  // scrolled off screen when its parent changed would still be saved.
+  const toggleReason = (id, path, needsProduct = false, clearIds = []) => {
     const willCheck = !selectedReasons.has(id);
     setSelectedReasons((prev) => {
       const next = new Map(prev);
-      if (next.has(id)) {
+      for (const clearId of clearIds) next.delete(clearId);
+      if (!willCheck) {
         next.delete(id);
         return next;
       }
@@ -671,10 +745,15 @@ export default function NpsCallingClient() {
   // Every checked leaf's breadcrumb, joined "Category > Reason", one per selection - lets one
   // call carry several reasons (even across categories) in the single `disposition` column
   // rather than forcing the whole call into one final label.
-  const joinedDisposition = useMemo(
-    () => Array.from(selectedReasons.values()).map((r) => r.path.join(' > ')).join('; '),
-    [selectedReasons],
-  );
+  //
+  // An answer stays checked while its own follow-up is being answered (that's what keeps the
+  // follow-up on screen), so drop any breadcrumb another selection already continues - "… > Yes"
+  // says nothing next to "… > Yes > Query not resolved", and the saved string would otherwise
+  // carry both.
+  const joinedDisposition = useMemo(() => {
+    const paths = Array.from(selectedReasons.values()).map((r) => r.path.join(' > '));
+    return paths.filter((p) => !paths.some((other) => other.startsWith(`${p} > `))).join('; ');
+  }, [selectedReasons]);
 
   // branchChoice is the picked top-level branch; the checklist below only ever shows that
   // branch's categories (nothing renders until it's picked), so every selected leaf's path[0]
@@ -689,9 +768,13 @@ export default function NpsCallingClient() {
     leadType: detailTkt && detailTkt.lead_type === 'product' ? 'product' : null,
   });
 
-  const visibleDispositionNodes = useMemo(() => {
-    if (!branchChoice) return [];
-    return (dispForTicket.processDispositions || []).filter((n) => n.label === (branchChoice === 'Yes' ? 'Connected' : 'Non Connected'));
+  // The branch the segmented control picked. Its CHILDREN are what the checklist draws - drawing
+  // the branch node itself made the agent pick "Connected" a second time, in a card, right after
+  // picking it in the toggle above.
+  const branchNode = useMemo(() => {
+    if (!branchChoice) return null;
+    const label = branchChoice === 'Yes' ? 'Connected' : 'Non Connected';
+    return (dispForTicket.processDispositions || []).find((n) => n.label === label) || null;
   }, [dispForTicket.processDispositions, branchChoice]);
 
   // This lead's own product_name_list ("Product A, Product B") split into options - only ever
@@ -2100,7 +2183,10 @@ export default function NpsCallingClient() {
               {branchChoice
                 ? (
                   <DispositionChecklist
-                    nodes={visibleDispositionNodes} selected={selectedReasons} onToggle={toggleReason}
+                    nodes={branchNode ? branchNode.children : []} selected={selectedReasons} onToggle={toggleReason}
+                    ancestors={branchNode ? [branchNode.label] : []} depth={1}
+                    inputType={branchNode && branchNode.childrenInputType ? branchNode.childrenInputType : 'multi'}
+                    ancestorNeedsProduct={!!(branchNode && branchNode.triggersProductFollowup)}
                     productOptions={productOptions} productsByReason={productsByReason} onProductsChange={setReasonProducts}
                     catalogProductNames={catalogProductNames} catalogLoading={catalogLoading}
                   />
