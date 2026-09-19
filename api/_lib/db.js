@@ -4674,6 +4674,13 @@ async function setCallingDateRange(processKey, dateFrom, dateTo, updatedBy) {
     if (from > to) {
       throw new Error('Start date must not be after end date');
     }
+    // This range is the sole eligibility window every detractor-pool query filters leads
+    // through (see _detractorRecencyBounds) - a date_to already in the past can never match a
+    // lead going forward, so saving one always means "assign nothing" rather than a real intent
+    // (the exact stale-range bug that silently starved the Hyphen/Delivery pool for 3 days).
+    if (to < ymd(new Date())) {
+      throw new Error('End date must not be in the past - this range gates live lead assignment, so a past end date would stop all assignment for this process');
+    }
   }
   await sql`
     INSERT INTO calling_process_settings (process_key, date_from, date_to, updated_at, updated_by)

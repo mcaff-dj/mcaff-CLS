@@ -471,8 +471,16 @@ export function useDateRange(processKey, { userRole, isProcessAdmin, showToast }
 // range = a useDateRange() return value; processLabel = display name (e.g. "NPS-Calling");
 // fallbackDays = the process's built-in window when no range is set (e.g. 30).
 export function DateRangeCard({ processLabel, fallbackDays, range }) {
-  const { loaded, draftFrom, setDraftFrom, draftTo, setDraftTo, saving, error, saveRange, clearRange } = range;
+  const { range: savedRange, loaded, draftFrom, setDraftFrom, draftTo, setDraftTo, saving, error, saveRange, clearRange } = range;
   if (!loaded) return null;
+  // A range can go stale just by the calendar moving past its own end date, with nobody
+  // re-saving it - this banner flags that on every load, not only at save time (setCallingDateRange
+  // only catches a NEW save of a past end date, not one that already exists and ages out).
+  // Local getters, not toISOString, so this can't shift a day relative to the viewer's own
+  // clock the way UTC conversion would (same reasoning as db.js's ymd()).
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const isStale = savedRange.dateTo && savedRange.dateTo < todayStr;
   return (
     <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-5 shadow-xl backdrop-blur-md">
       <div className="flex items-start justify-between flex-wrap gap-3 mb-1">
@@ -518,6 +526,12 @@ export function DateRangeCard({ processLabel, fallbackDays, range }) {
           </button>
         </div>
       </div>
+      {isStale && (
+        <p className="mt-3 text-[13px] text-amber-400 bg-amber-950/40 border border-amber-900/60 rounded-lg px-3 py-2">
+          ⚠️ This range ended {savedRange.dateTo}, which is in the past - no leads are being
+          assigned for this process right now. Extend or clear the range above.
+        </p>
+      )}
       {error && (
         <p className="mt-3 text-[13px] text-rose-400 bg-rose-950/40 border border-rose-900/60 rounded-lg px-3 py-2">
           {error}
