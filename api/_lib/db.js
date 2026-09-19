@@ -2465,6 +2465,41 @@ async function disposeDetractorLead(responseId, disposition, agentRemarks, conne
   return { originalAgentEmail };
 }
 
+// Admin/process-admin only (checked by the caller, api/detractor/lead-assignment.js) hands an
+// undisposed lead to a different agent. Unlike RTO/NDR's retire-then-insert reassignment, this is
+// a plain UPDATE, deliberately: a response_id is disposed at most once, ever, in this table (see
+// disposeDetractorLead's own comment above - there is no re-dispose/re-open cycle here for a
+// second row to preserve as history), so a retire+insert would only add risk - a plain
+// `response_id = ?` match (this table has no index on it, unlike live_order_id elsewhere) would
+// then have TWO rows to hit, and disposeDetractorLead's own WHERE (response_id + disposed_at IS
+// NULL, no reassigned_away_at check - correct today because it's never set) would need auditing
+// everywhere reassigned_away_at could now be non-NULL for this table. None of that risk buys
+// anything real here, so this stays a same-row UPDATE and reassigned_away_at stays unused.
+//
+// assigned_at is bumped to now, matching recordLeadDisposition's own reasoning elsewhere that it
+// should reflect when the CURRENT owner actually got the lead - an FRT/handle-time metric reading
+// assigned_at/disposed_at as one gap would otherwise blame the new agent for time the old one
+// already spent sitting on it. disposed_at IS NULL in the WHERE for the same reason a disposed
+// lead can't be re-claimed elsewhere in this file: reassigning a closed case has no legitimate
+// use here (Fresh Leads, the only place this is offered, is already undisposed-only).
+//
+// Returns the lead's PREVIOUS agent_email (null if the lead doesn't exist or is already disposed,
+// either of which the caller reports as a per-lead failure rather than a thrown error, since a
+// bulk reassign expects some rows to have moved on between the click and this running).
+async function reassignDetractorLead(responseId, newAgentEmail) {
+  await ensureSchema();
+  const { rows: existing } = await sql`
+    SELECT agent_email FROM CLS_NPS_calling WHERE response_id = ${responseId} AND disposed_at IS NULL
+  `;
+  if (!existing.length) return { previousAgentEmail: null };
+  await sql`
+    UPDATE CLS_NPS_calling SET agent_email = ${newAgentEmail}, assigned_at = NOW()
+    WHERE response_id = ${responseId} AND disposed_at IS NULL
+  `;
+  invalidateCache('calling:detractorLeadDates');
+  return { previousAgentEmail: existing[0].agent_email };
+}
+
 // This agent's own tickets (assigned and/or disposed), newest first - "My Queue"/"Disposed" tabs.
 async function getDetractorTicketsForAgent(email) {
   await ensureSchema();
@@ -6420,7 +6455,7 @@ module.exports = {
   claimNdrLead, disposeNdrLead, getLiveNdrLeadEmail, getDeliveredAwbNumbers,
   getNdrAgentAssignmentConfig,
   getDetractorAgentQuota, getDetractorAgentAvailability, getDetractorLoadByAgent, getDetractorQuotaAndLoad,
-  getNextDetractorLead, getUnassignedDetractorLeads, disposeDetractorLead, getDetractorTicketsForAgent, getAllDetractorTickets,
+  getNextDetractorLead, getUnassignedDetractorLeads, disposeDetractorLead, reassignDetractorLead, getDetractorTicketsForAgent, getAllDetractorTickets,
   getDetractorTimeOfDay, getDetractorTimeOfDayData,
   getDetractorProductNames, getDetractorProductNamesData,
   assignDetractorLeadsToAgent, topUpDetractorAgent, safeLimit, raw, buildSqlText,

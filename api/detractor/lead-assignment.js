@@ -5,8 +5,9 @@
 // nothing separate to claim.
 const { getSession } = require('../_lib/session');
 const {
-  disposeDetractorLead, isCallingProcessAdmin, logEvent,
+  disposeDetractorLead, reassignDetractorLead, isCallingProcessAdmin, logEvent,
   getDetractorAgentAvailability, getDetractorQuotaAndLoad, assignDetractorLeadsToAgent,
+  getCallingProcessAgents,
 } = require('../_lib/db');
 
 const CARD_KEY = 'calling';
@@ -18,6 +19,59 @@ function checkAccess(session) {
   const tabs = session.tabPerms && session.tabPerms[CARD_KEY];
   if (Array.isArray(tabs) && tabs.length && !tabs.includes(TAB_KEY)) return 'You do not have access to NPS-Calling.';
   return null;
+}
+
+// Admin/process-admin only - reassigns one or many undisposed leads to a different agent, from
+// the Fresh Leads table's per-row action or its bulk-select bar (NpsCallingClient.js). Single
+// ({ responseId }) and bulk ({ responseIds }) share this one path so there's only one place
+// validating the target agent and logging the move, and a bulk pick that lands mid-flight (a lead
+// got disposed a second before the click) fails just that one row instead of the whole batch.
+async function handleReassign(req, res, session, { responseIds, responseId, newAgentEmail }) {
+  const isAllowed = session.isAdmin || (await isCallingProcessAdmin(session.email, TAB_KEY));
+  if (!isAllowed) {
+    res.status(403).json({ error: 'Only an admin or process admin can reassign leads.' });
+    return;
+  }
+  const ids = Array.isArray(responseIds) && responseIds.length ? responseIds : (responseId ? [responseId] : []);
+  if (!ids.length) {
+    res.status(400).json({ error: 'responseId or responseIds is required' });
+    return;
+  }
+  if (!newAgentEmail) {
+    res.status(400).json({ error: 'newAgentEmail is required' });
+    return;
+  }
+  // The target has to be a real member of THIS process's own roster - never trust the client to
+  // have only offered valid options, since a typo'd or stale email would otherwise silently
+  // strand a lead on an agent who can't even see it.
+  const agents = await getCallingProcessAgents(TAB_KEY);
+  const targetAgent = (agents || []).find((a) => String(a.email).toLowerCase() === String(newAgentEmail).toLowerCase());
+  if (!targetAgent) {
+    res.status(400).json({ error: `${newAgentEmail} is not an agent on this process.` });
+    return;
+  }
+
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || '';
+  // Sequential, not Promise.all - this is an admin picking rows on a screen, not a bulk import,
+  // so there's no throughput reason to parallelize, and sequential keeps the audit log in the
+  // same order the rows were reassigned.
+  const results = [];
+  for (const id of ids) {
+    try {
+      const { previousAgentEmail } = await reassignDetractorLead(id, targetAgent.email);
+      if (!previousAgentEmail) {
+        results.push({ responseId: id, ok: false, error: 'Lead not found or already disposed' });
+        continue;
+      }
+      results.push({ responseId: id, ok: true, previousAgentEmail });
+      await logEvent(session.uid, session.email, CARD_KEY, 'detractor-reassign',
+        `Reassigned ${id} from ${previousAgentEmail} to ${targetAgent.email}`, ip);
+    } catch (e) {
+      console.error('api/detractor/lead-assignment reassign error:', id, e);
+      results.push({ responseId: id, ok: false, error: e.message || 'Could not reassign' });
+    }
+  }
+  res.status(200).json({ ok: true, results });
 }
 
 module.exports = async (req, res) => {
@@ -32,7 +86,16 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const { action, responseId, disposition, agentRemarks, connected, attempt, affectedProducts } = req.body || {};
+  const {
+    action, responseId, disposition, agentRemarks, connected, attempt, affectedProducts,
+    responseIds, newAgentEmail,
+  } = req.body || {};
+
+  if (action === 'reassign') {
+    await handleReassign(req, res, session, { responseIds, responseId, newAgentEmail });
+    return;
+  }
+
   if (!responseId) {
     res.status(400).json({ error: 'responseId is required' });
     return;

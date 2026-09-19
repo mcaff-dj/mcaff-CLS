@@ -281,7 +281,7 @@ function DispositionChecklist({
   // ...but only the end of the line actually ANSWERS it: "Query Class" is flagged and "Product
   // issue" inherits that, yet the product belongs to whichever of its eight reasons was checked.
   // Passed to onToggle so a parent picked on the way down never lands in affectedProductsText
-  // (nor gets its products pre-filled) for a picker it was never shown.
+  // for a picker it was never shown.
   const asksProduct = (n) => needsProductFor(n) && !(n.children && n.children.length);
 
   const productFollowUp = (n) => {
@@ -302,8 +302,10 @@ function DispositionChecklist({
     }
     // A checkbox list, not a native <select multiple>: one order's reason can genuinely span
     // several products, but picking one in a native multi-select REPLACES the rest unless the
-    // agent knows to ctrl-click, so an agent confirming one product quietly dropped the others
-    // (including the ones toggleReason pre-filled from the ticket itself).
+    // agent knows to ctrl-click, so an agent confirming one product quietly dropped the others.
+    // Starts with nothing checked either way - a ticket with several products on it is exactly
+    // the case where assuming "all of them" answered a question the agent was never actually
+    // asked.
     return (
       <>
         <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
@@ -536,6 +538,16 @@ export default function NpsCallingClient() {
   // One brand per lead (nps_delivery/nps_product both carry it), so unlike the agent picker this
   // is a plain one-of, with the same 'ALL' sentinel the status filter below already uses.
   const [allLeadsBrandFilter, setAllLeadsBrandFilter] = useState('ALL');
+  // response_ids checked in the Fresh/All Leads tables' bulk-reassign column. A plain Set, not
+  // scoped to either tab, so switching tabs doesn't silently discard a pick mid-flight - cleared
+  // only once a reassign actually goes through (see submitReassign) or the agent clears it by hand.
+  const [selectedLeadIds, setSelectedLeadIds] = useState(new Set());
+  // Which response_ids the reassign modal is currently open for - a bulk pick (several ids) or a
+  // single row's own "Reassign" button (one id) go through this same array, so there's only one
+  // modal and one submit path for both.
+  const [reassignModalIds, setReassignModalIds] = useState(null);
+  const [reassignAgentEmail, setReassignAgentEmail] = useState('');
+  const [reassigning, setReassigning] = useState(false);
   // Defaults to DISPOSED, not ALL - the tab is literally labelled "All Leads (Disposed)" and its
   // count badge only counts disposed tickets, so showing Pending rows under it by default
   // contradicted both the label and the badge.
@@ -733,15 +745,6 @@ export default function NpsCallingClient() {
       next.set(id, { id, path, needsProduct });
       return next;
     });
-    // Pre-fill "which product?" with this ticket's own known product(s) - via
-    // product_name_list, already split into productOptions below - the moment a reason needing
-    // the follow-up is checked, instead of starting blank and making the agent re-pick what the
-    // data already told us. Only sets the initial default (guarded by `!prev[id]`) - never
-    // overwrites a pick the agent already made, e.g. re-checking after an uncheck, or a second
-    // reason under the same category with its own products.
-    if (willCheck && productOptions.length > 0 && needsProduct) {
-      setProductsByReason((prev) => (prev[id] ? prev : { ...prev, [id]: productOptions }));
-    }
   };
 
   // Every checked leaf's breadcrumb, joined "Category > Reason", one per selection - lets one
@@ -876,6 +879,51 @@ export default function NpsCallingClient() {
       showToast(`⚠️ ${e.message}`);
     } finally {
       setDispSaving(false);
+    }
+  };
+
+  // Admin/process-admin: hands whichever leads reassignModalIds names to a different agent, one
+  // request for a bulk pick or a single row's own "Reassign" button alike (see reassignModalIds'
+  // own comment). Server-side re-validates the target agent and re-checks each lead is still
+  // undisposed - a row picked in the bulk bar a moment before someone else disposed it just fails
+  // that one id rather than the whole batch, so partial success is the expected, not exceptional,
+  // outcome here.
+  const submitReassign = async () => {
+    if (!reassignModalIds || !reassignModalIds.length || !reassignAgentEmail) return;
+    setReassigning(true);
+    try {
+      const r = await fetch('/api/detractor/lead-assignment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reassign', responseIds: reassignModalIds, newAgentEmail: reassignAgentEmail }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { showToast(`⚠️ ${d.error || 'Could not reassign'}`); return; }
+      const results = d.results || [];
+      const okIds = new Set(results.filter((x) => x.ok).map((x) => x.responseId));
+      const failedCount = results.length - okIds.size;
+      if (okIds.size) {
+        const now = new Date().toISOString();
+        const patch = (t) => (okIds.has(t.response_id) ? { ...t, agent_email: reassignAgentEmail, assigned_at: now } : t);
+        setTickets((prev) => prev.map(patch));
+        setAllTickets((prev) => (prev ? prev.map(patch) : prev));
+      }
+      setSelectedLeadIds((prev) => {
+        const next = new Set(prev);
+        okIds.forEach((id) => next.delete(id));
+        return next;
+      });
+      showToast(
+        failedCount
+          ? `Reassigned ${okIds.size}, ${failedCount} could not be moved (already disposed or reassigned elsewhere)`
+          : `Reassigned ${okIds.size} lead${okIds.size === 1 ? '' : 's'} to ${reassignAgentEmail}`,
+      );
+      setReassignModalIds(null);
+      setReassignAgentEmail('');
+    } catch (e) {
+      showToast(`⚠️ ${e.message}`);
+    } finally {
+      setReassigning(false);
     }
   };
 
@@ -1337,6 +1385,24 @@ export default function NpsCallingClient() {
       URL.revokeObjectURL(url);
     };
 
+    // Only an undisposed lead can be reassigned (reassignDetractorLead's own WHERE), so only
+    // undisposed rows are selectable - a disposed row just gets a blank cell instead of a
+    // checkbox rather than one that would silently no-op.
+    const selectableIds = filtered.filter((t) => !t.disposed_at).map((t) => t.response_id);
+    const selectedInView = selectableIds.filter((id) => selectedLeadIds.has(id));
+    const allSelectedInView = selectableIds.length > 0 && selectedInView.length === selectableIds.length;
+    const toggleSelectAll = () => setSelectedLeadIds((prev) => {
+      const next = new Set(prev);
+      selectableIds.forEach((id) => (allSelectedInView ? next.delete(id) : next.add(id)));
+      return next;
+    });
+    const toggleSelectOne = (id) => setSelectedLeadIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+    const openReassign = (ids) => { setReassignAgentEmail(''); setReassignModalIds(ids); };
+
     return (
       <div className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden">
         <div className="flex items-center justify-between flex-wrap gap-3 p-4 pb-3">
@@ -1412,6 +1478,26 @@ export default function NpsCallingClient() {
           </div>
         </div>
 
+        {selectedInView.length > 0 && (
+          <div className="flex items-center gap-3 px-4 pb-3">
+            <span className="text-[12px] font-semibold text-indigo-300">{selectedInView.length} selected</span>
+            <button
+              type="button"
+              onClick={() => openReassign(selectedInView)}
+              className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+            >
+              Reassign…
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedLeadIds((prev) => { const next = new Set(prev); selectedInView.forEach((id) => next.delete(id)); return next; })}
+              className="text-[11px] font-semibold text-zinc-500 hover:text-zinc-300"
+            >
+              Clear
+            </button>
+          </div>
+        )}
+
         {source == null
           ? <p className="text-[12px] text-zinc-500 px-4 pb-4">Loading…</p>
           : !filtered.length
@@ -1420,6 +1506,17 @@ export default function NpsCallingClient() {
               <div className="overflow-x-auto custom-scroll">
                 <table className="w-full text-[13px]">
                   <thead><tr className="border-b border-zinc-800/80 text-zinc-500">
+                    <th className="py-2.5 px-4 text-left font-medium w-8">
+                      {selectableIds.length > 0 && (
+                        <input
+                          type="checkbox"
+                          checked={allSelectedInView}
+                          onChange={toggleSelectAll}
+                          title="Select all reassignable leads shown"
+                          className="accent-indigo-500 w-3.5 h-3.5"
+                        />
+                      )}
+                    </th>
                     <th className="py-2.5 px-4 text-left font-medium">Customer</th>
                     <th className="py-2.5 px-4 text-left font-medium">Order</th>
                     <th className="py-2.5 px-4 text-left font-medium" title="Which detractor pool this lead was claimed from - nps_delivery or nps_product">Type</th>
@@ -1436,6 +1533,16 @@ export default function NpsCallingClient() {
                   <tbody className="divide-y divide-zinc-800/50">
                     {filtered.map((t) => (
                       <tr key={t.response_id} className="hover:bg-zinc-900/40 transition-colors">
+                        <td className="py-2.5 px-4">
+                          {!t.disposed_at && (
+                            <input
+                              type="checkbox"
+                              checked={selectedLeadIds.has(t.response_id)}
+                              onChange={() => toggleSelectOne(t.response_id)}
+                              className="accent-indigo-500 w-3.5 h-3.5"
+                            />
+                          )}
+                        </td>
                         <td className="py-2.5 px-4 text-zinc-200">{t.customer_name || '—'}</td>
                         <td className="py-2.5 px-4 text-zinc-400">{[t.brand, t.channel_order_id].filter(Boolean).join(' · ') || '—'}</td>
                         <td className="py-2.5 px-4">
@@ -1472,14 +1579,24 @@ export default function NpsCallingClient() {
                               View
                             </button>
                           ) : (
-                            <button
-                              type="button"
-                              onClick={() => openDispose(t)}
-                              title="Dispose on this agent's behalf"
-                              className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
-                            >
-                              Dispose
-                            </button>
+                            <div className="flex items-center justify-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => openDispose(t)}
+                                title="Dispose on this agent's behalf"
+                                className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+                              >
+                                Dispose
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => openReassign([t.response_id])}
+                                title="Hand this lead to a different agent"
+                                className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors"
+                              >
+                                Reassign
+                              </button>
+                            </div>
                           )}
                         </td>
                       </tr>
@@ -2296,6 +2413,47 @@ export default function NpsCallingClient() {
                 {hasValue(viewTicket.agent_remarks) ? viewTicket.agent_remarks : '—'}
               </p>
             </div>
+          </div>
+        </Overlay>
+      )}
+
+      {reassignModalIds && (
+        <Overlay onClose={() => { if (!reassigning) { setReassignModalIds(null); setReassignAgentEmail(''); } }}>
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 w-full max-w-sm space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-[15px] font-bold text-zinc-100 tracking-tight">
+                Reassign {reassignModalIds.length} lead{reassignModalIds.length === 1 ? '' : 's'}
+              </h3>
+              <button type="button" onClick={() => { setReassignModalIds(null); setReassignAgentEmail(''); }}>
+                <XIcon className="text-zinc-500 hover:text-zinc-200" />
+              </button>
+            </div>
+
+            <div>
+              <label className="text-[12px] text-zinc-400 font-semibold mb-1.5 block">New agent</label>
+              <CustomSelect
+                value={reassignAgentEmail}
+                onChange={setReassignAgentEmail}
+                options={[
+                  // CustomSelect falls back to its first option whenever `value` matches nothing
+                  // (see app/_calling/ui.js) rather than showing a placeholder - without this row
+                  // an untouched picker would silently display some agent's name as if already
+                  // chosen. Its own blank value never matches a real option, so the button reads
+                  // "Choose an agent…" until the admin actually picks one.
+                  { value: '', label: 'Choose an agent…' },
+                  ...(processAgents || []).map((a) => ({ value: a.email, label: a.name || a.email })),
+                ]}
+              />
+            </div>
+
+            <button
+              type="button"
+              disabled={!reassignAgentEmail || reassigning}
+              onClick={submitReassign}
+              className="w-full py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-[13px] font-bold text-white transition-colors"
+            >
+              {reassigning ? 'Reassigning…' : 'Reassign'}
+            </button>
           </div>
         </Overlay>
       )}
