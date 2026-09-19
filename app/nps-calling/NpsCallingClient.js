@@ -7,7 +7,7 @@
 // api/_lib/db.js's getNextDetractorLead/disposeDetractorLead. So this file has no sync-from-
 // sheet loop, no upload modal, and no team split (single shared queue/disposition tree for v1).
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { XIcon, CheckIcon, PhoneIcon, CustomSelect, Overlay, CalendarIcon, SearchIcon, DownloadIcon, MultiSelectDropdown } from '../_calling/ui';
+import { XIcon, CheckIcon, PhoneIcon, CustomSelect, Overlay, CalendarIcon, SearchIcon, DownloadIcon, MultiSelectDropdown, ChevronDown } from '../_calling/ui';
 import { useCallingSession, ROSTER_STATUS_OPTIONS, STATUS_OPTIONS } from '../_calling/useCallingSession';
 import { useBusinessHours, CallingHoursCard, useDefaultQuota, DefaultQuotaCard, useLeadOrder, LeadOrderCard, useDateRange, DateRangeCard, useProcessDispositions, ProcessDispositionsCard } from '../_calling/CallingAdminPanel';
 import { CallingShell } from '../_calling/CallingShell';
@@ -237,11 +237,27 @@ function isUndisposed(t) {
 // (calling_process_dispositions.triggers_product_followup), edited from a checkbox in
 // CallingAdminPanel.js's DispNode (allowProductFollowupControl), so a rename can no longer unhook
 // it - flip the checkbox back on after a rename instead of shipping a code change.
+// A category's reasons stay collapsed until the category itself is opened - true even for a
+// category that already has a reason checked in it (subtreeHasSelection keeps it open across
+// re-renders so a pick made before a remount, e.g. re-opening the same ticket, doesn't vanish
+// behind a closed accordion).
+function subtreeHasSelection(node, selected) {
+  if (!node.children || !node.children.length) return selected.has(node.id);
+  return node.children.some((c) => subtreeHasSelection(c, selected));
+}
+
 function DispositionChecklist({
   nodes, selected, onToggle, ancestors = [], ancestorNeedsProduct = false,
   productOptions = [], productsByReason = {}, onProductsChange,
   catalogProductNames = [], catalogLoading = false,
 }) {
+  const [expanded, setExpanded] = useState(() => new Set());
+  const toggleExpanded = (id) => setExpanded((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
   if (!nodes || !nodes.length) {
     return <p className="text-[12px] text-zinc-500">No disposition options configured yet - an admin can add some under Admin Panel.</p>;
   }
@@ -250,7 +266,7 @@ function DispositionChecklist({
   // nested children (there are none deeper than one level today) fall back to the plain list.
   const isTopLevel = ancestors.length === 0;
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-2">
       {nodes.map((n) => {
         const path = [...ancestors, n.label];
         // Sticky once true - a descendant three levels down a flagged category still needs the
@@ -267,15 +283,33 @@ function DispositionChecklist({
               catalogProductNames={catalogProductNames} catalogLoading={catalogLoading}
             />
           );
-          return isTopLevel ? (
-            <div key={n.id} className="bg-zinc-950/60 border border-zinc-800/80 rounded-lg p-3 space-y-2">
-              <p className="text-[12px] font-bold text-zinc-200 tracking-tight">{n.label}</p>
-              {body}
-            </div>
-          ) : (
-            <div key={n.id} className="space-y-1.5">
-              <p className="text-[12px] font-bold text-zinc-300">{n.label}</p>
-              <div className="pl-3 border-l border-zinc-800">{body}</div>
+          if (!isTopLevel) {
+            return (
+              <div key={n.id} className="space-y-1.5">
+                <p className="text-[12px] font-bold text-zinc-300">{n.label}</p>
+                <div className="pl-3 border-l border-zinc-800">{body}</div>
+              </div>
+            );
+          }
+          // Category card is a disclosure control: its reasons (the child question) render only
+          // once the category (the parent question) has been opened - either by tapping it, or
+          // automatically when it already holds a checked reason.
+          const isOpen = expanded.has(n.id) || subtreeHasSelection(n, selected);
+          return (
+            <div key={n.id} className="bg-zinc-950/60 border border-zinc-800/80 rounded-xl overflow-hidden">
+              <button
+                type="button"
+                onClick={() => toggleExpanded(n.id)}
+                className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-zinc-900/60 transition-colors"
+              >
+                <span className="text-[12px] font-bold text-zinc-200 tracking-tight">{n.label}</span>
+                <ChevronDown className={`shrink-0 text-zinc-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+              </button>
+              <div className={`grid transition-[grid-template-rows] duration-300 ease-out ${isOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
+                <div className="overflow-hidden">
+                  <div className="px-3 pb-3 pt-0.5">{body}</div>
+                </div>
+              </div>
             </div>
           );
         }
@@ -290,19 +324,30 @@ function DispositionChecklist({
         return (
           <div key={n.id}>
             <label
-              className="flex items-center gap-2 text-[13px] text-zinc-200 cursor-pointer rounded-md px-1.5 py-1 -mx-1.5 hover:bg-zinc-800/40 transition-colors"
+              className={`flex items-center gap-2.5 text-[13px] cursor-pointer rounded-lg px-2 py-1.5 -mx-2 transition-colors ${
+                checked ? 'bg-indigo-500/10 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-800/40'
+              }`}
               title={n.description || ''}
             >
               <input
                 type="checkbox"
                 checked={checked}
                 onChange={() => onToggle(n.id, path, needsProduct)}
-                className="accent-indigo-500 w-4 h-4"
+                className="sr-only peer"
               />
+              <span
+                className={`shrink-0 w-[18px] h-[18px] rounded-full border flex items-center justify-center transition-colors ${
+                  checked ? 'bg-indigo-500 border-indigo-500' : 'border-zinc-600'
+                }`}
+              >
+                {checked && <CheckIcon className="text-white" style={{ width: 11, height: 11 }} />}
+              </span>
               {n.label}
             </label>
+            {/* Follow-up question conditioned on this leaf: hidden until its own parent (this
+                reason) is checked, same disclosure rule as the category accordion above. */}
             {showProductFollowUp && (
-              <div className="pl-6 pb-1.5">
+              <div className="pl-[26px] pb-1.5 pt-1">
                 {productOptions.length > 0 ? (
                   <>
                     <label className="text-[11px] text-zinc-500 font-semibold mb-1 block">
@@ -1994,14 +2039,20 @@ export default function NpsCallingClient() {
               <TicketSurveyDetails t={detailTkt} />
             </div>
 
-            <div className="flex items-center gap-4 flex-wrap">
-              <div className="flex items-center gap-2">
-                <span className="text-[12px] text-zinc-400 font-semibold">Connected:</span>
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="relative flex items-center bg-zinc-950 border border-zinc-800 rounded-xl p-1 flex-1 min-w-[220px]">
+                {branchChoice && (
+                  <div
+                    className={`absolute top-1 bottom-1 w-[calc(50%-4px)] rounded-lg transition-transform duration-300 ease-out ${
+                      branchChoice === 'Yes' ? 'bg-emerald-600' : 'bg-rose-600 translate-x-[calc(100%+4px)]'
+                    }`}
+                  />
+                )}
                 <button
                   type="button"
                   onClick={() => pickBranch('Yes')}
-                  className={`px-3 py-1 rounded-lg text-[12px] font-bold border ${
-                    branchChoice === 'Yes' ? 'bg-emerald-600 border-emerald-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
+                  className={`relative z-[1] flex-1 py-1.5 rounded-lg text-[12px] font-bold transition-colors ${
+                    branchChoice === 'Yes' ? 'text-white' : 'text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
                   Connected
@@ -2009,22 +2060,36 @@ export default function NpsCallingClient() {
                 <button
                   type="button"
                   onClick={() => pickBranch('No')}
-                  className={`px-3 py-1 rounded-lg text-[12px] font-bold border ${
-                    branchChoice === 'No' ? 'bg-rose-600 border-rose-500 text-white' : 'border-zinc-700 text-zinc-400 hover:border-zinc-500'
+                  className={`relative z-[1] flex-1 py-1.5 rounded-lg text-[12px] font-bold transition-colors ${
+                    branchChoice === 'No' ? 'text-white' : 'text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
                   Non Connected
                 </button>
               </div>
-              <div className="flex items-center gap-2 pl-4 border-l border-zinc-800">
+              <div className="flex items-center gap-2 pl-3 border-l border-zinc-800">
                 <span className="text-[12px] text-zinc-400 font-semibold">Attempt</span>
-                <input
-                  type="number"
-                  min="1"
-                  value={attempt}
-                  onChange={(e) => setAttempt(e.target.value)}
-                  className="w-16 h-8 px-2 rounded-lg bg-zinc-950 border border-zinc-800 text-[12px] text-zinc-200"
-                />
+                <div className="flex items-center gap-1.5 bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1">
+                  <span className="w-5 text-center text-[13px] font-bold text-zinc-100 tabular-nums">{attempt}</span>
+                  <div className="flex flex-col rounded-md overflow-hidden border border-zinc-800">
+                    <button
+                      type="button"
+                      aria-label="Increase attempt"
+                      onClick={() => setAttempt((a) => Math.max(1, Number(a || 1) + 1))}
+                      className="w-5 h-3.5 flex items-center justify-center bg-zinc-900 hover:bg-zinc-800 text-zinc-400 border-b border-zinc-800"
+                    >
+                      <ChevronDown className="rotate-180" style={{ width: 8, height: 8 }} />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Decrease attempt"
+                      onClick={() => setAttempt((a) => Math.max(1, Number(a || 1) - 1))}
+                      className="w-5 h-3.5 flex items-center justify-center bg-zinc-900 hover:bg-zinc-800 text-zinc-400"
+                    >
+                      <ChevronDown style={{ width: 8, height: 8 }} />
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
 
