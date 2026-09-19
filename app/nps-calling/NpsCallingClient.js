@@ -538,7 +538,15 @@ export default function NpsCallingClient() {
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteName, setInviteName] = useState('');
   const [allLeadsSearch, setAllLeadsSearch] = useState('');
-  const [allLeadsAgentFilter, setAllLeadsAgentFilter] = useState('ALL');
+  // Agent picker is multi-select (an admin comparing two agents' pending piles shouldn't have to
+  // look at them one at a time) - empty array means unrestricted, the same thing the old single
+  // 'ALL' value meant. Holds DISPLAY LABELS, not emails: MultiSelectDropdown stores its option
+  // strings as its value, so allLeadsAgentEmails below expands them back (same collapse-on-pick/
+  // expand-on-use convention DE_TAB_LABELS documents in DeliveryEscalationClient.js).
+  const [allLeadsAgentFilter, setAllLeadsAgentFilter] = useState([]);
+  // One brand per lead (nps_delivery/nps_product both carry it), so unlike the agent picker this
+  // is a plain one-of, with the same 'ALL' sentinel the status filter below already uses.
+  const [allLeadsBrandFilter, setAllLeadsBrandFilter] = useState('ALL');
   // Defaults to DISPOSED, not ALL - the tab is literally labelled "All Leads (Disposed)" and its
   // count badge only counts disposed tickets, so showing Pending rows under it by default
   // contradicted both the label and the badge.
@@ -1258,13 +1266,39 @@ export default function NpsCallingClient() {
     </div>
   );
 
-  // Shared by the All Leads and Fresh Leads admin tabs - same search/agent filter controls and
-  // table shape, just a different base list (every ticket vs undisposed-only) and whether the
+  // Agent picker options, and the map back to the email each one filters on. The label is the
+  // agent's name, but two agents really can share one - and a colliding label would silently make
+  // one of them unfilterable - so a repeated name carries its email to tell them apart.
+  const agentLabelToEmail = useMemo(() => {
+    const perName = new Map();
+    for (const a of processAgents || []) {
+      const name = a.name || a.email;
+      perName.set(name, (perName.get(name) || 0) + 1);
+    }
+    return new Map((processAgents || []).map((a) => {
+      const name = a.name || a.email;
+      return [perName.get(name) > 1 ? `${name} (${a.email})` : name, a.email];
+    }));
+  }, [processAgents]);
+  const agentFilterOptions = useMemo(() => Array.from(agentLabelToEmail.keys()), [agentLabelToEmail]);
+  // A label with no agent behind it (the roster changed under a pick that's still in state) falls
+  // back to itself, so it simply matches nothing rather than widening the filter.
+  const allLeadsAgentEmails = useMemo(
+    () => allLeadsAgentFilter.map((label) => String(agentLabelToEmail.get(label) || label).toLowerCase()),
+    [allLeadsAgentFilter, agentLabelToEmail],
+  );
+
+  // Shared by the All Leads and Fresh Leads admin tabs - same search/agent/brand filter controls
+  // and table shape, just a different base list (every ticket vs undisposed-only) and whether the
   // status filter makes sense (Fresh Leads is already fixed to undisposed).
   const renderAdminLeadsTable = (source, { title, subtitle, showStatusFilter }) => {
     const search = allLeadsSearch.trim().toLowerCase();
+    // Whichever brands this tab's own rows actually carry - a fixed list would offer brands that
+    // can't match anything here, and the leads only ever come from the brands already on screen.
+    const brandOptions = Array.from(new Set((source || []).map((t) => t.brand).filter(Boolean))).sort();
     const filtered = (source || []).filter((t) => {
-      if (allLeadsAgentFilter !== 'ALL' && (t.agent_email || '').toLowerCase() !== allLeadsAgentFilter.toLowerCase()) return false;
+      if (allLeadsAgentEmails.length && !allLeadsAgentEmails.includes((t.agent_email || '').toLowerCase())) return false;
+      if (allLeadsBrandFilter !== 'ALL' && (t.brand || '') !== allLeadsBrandFilter) return false;
       if (showStatusFilter) {
         if (allLeadsStatusFilter === 'DISPOSED' && isUndisposed(t)) return false;
         if (allLeadsStatusFilter === 'PENDING' && !isUndisposed(t)) return false;
@@ -1284,8 +1318,8 @@ export default function NpsCallingClient() {
     });
 
     // Client-side only, same pattern as RTO Calling's CSV exports (RtoCrmClient.js) - no server
-    // round trip, exports exactly what's currently on screen (search/agent/status/date filters
-    // already applied to `filtered`).
+    // round trip, exports exactly what's currently on screen (search/agent/brand/status/date
+    // filters already applied to `filtered`).
     const escapeCsv = (v) => {
       const s = String(v ?? '');
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -1332,12 +1366,20 @@ export default function NpsCallingClient() {
               />
             </div>
             <CustomSelect
+              value={allLeadsBrandFilter}
+              onChange={setAllLeadsBrandFilter}
+              options={[
+                { value: 'ALL', label: 'All Brands' },
+                ...brandOptions.map((b) => ({ value: b, label: b })),
+              ]}
+            />
+            <MultiSelectDropdown
               value={allLeadsAgentFilter}
               onChange={setAllLeadsAgentFilter}
-              options={[
-                { value: 'ALL', label: 'All Agents' },
-                ...(processAgents || []).map((a) => ({ value: a.email, label: a.name || a.email })),
-              ]}
+              options={agentFilterOptions}
+              placeholder="All Agents"
+              itemNoun="agents"
+              searchable
             />
             {showStatusFilter && (
               <CustomSelect
