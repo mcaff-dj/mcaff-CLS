@@ -257,11 +257,13 @@ function collectIds(node, out = []) {
 //         Query not resolved…   depth 3+, a follow-up answer
 //
 // `inputType` is the parent's own children_input_type column and says how the nodes in THIS array
-// are answered: 'single' draws them as one-of pills and keeps drilling into whichever one is
-// picked, 'multi' draws checkboxes and stops there (children of a checkbox are deliberately not
-// drawn - the same rule delivery-escalation documents at DeliveryEscalationClient.js's dispLevels).
-// Either way, a node's children only appear once that node itself is picked, so the agent is only
-// ever shown the follow-up to an answer they actually gave.
+// are answered: 'single' draws them as one-of pills, 'multi' draws checkboxes. Either way the pick
+// keeps drilling - a checked checkbox still reveals its own children, unlike delivery-escalation's
+// linear walk where a multi level ends the path (DeliveryEscalationClient.js's dispLevels), because
+// these trees hang further reasons off a checkbox option ("Query Class > Product issue > …").
+//
+// A node's children only appear once that node itself is picked, so the agent is only ever shown
+// the follow-up to an answer they actually gave.
 function DispositionChecklist({
   nodes, selected, onToggle, ancestors = [], depth = 1, inputType = 'single', ancestorNeedsProduct = false,
   productOptions = [], productsByReason = {}, onProductsChange,
@@ -276,6 +278,11 @@ function DispositionChecklist({
   // (e.g. "Query Class" flagged, "Packaging issue" not, "Broken Nozzle" not - the leaf still
   // needs it because Query Class does).
   const needsProductFor = (n) => ancestorNeedsProduct || !!n.triggersProductFollowup;
+  // ...but only the end of the line actually ANSWERS it: "Query Class" is flagged and "Product
+  // issue" inherits that, yet the product belongs to whichever of its eight reasons was checked.
+  // Passed to onToggle so a parent picked on the way down never lands in affectedProductsText
+  // (nor gets its products pre-filled) for a picker it was never shown.
+  const asksProduct = (n) => needsProductFor(n) && !(n.children && n.children.length);
 
   const productFollowUp = (n) => {
     const picked = productsByReason[n.id] || [];
@@ -330,10 +337,9 @@ function DispositionChecklist({
   // there are none left - the "which product?" follow-up if this path is flagged for it. Asked
   // only at the end of the line, so a flagged question doesn't ask it again at every level down.
   const revealed = (n) => {
-    const needsProduct = needsProductFor(n);
     const hasChildren = n.children && n.children.length > 0;
     if (!hasChildren) {
-      return needsProduct
+      return asksProduct(n)
         ? <div className="mt-2 pl-3 border-l-2 border-indigo-500/30">{productFollowUp(n)}</div>
         : null;
     }
@@ -342,7 +348,7 @@ function DispositionChecklist({
         <DispositionChecklist
           nodes={n.children} selected={selected} onToggle={onToggle}
           ancestors={[...ancestors, n.label]} depth={depth + 1} inputType={n.childrenInputType || 'single'}
-          ancestorNeedsProduct={needsProduct}
+          ancestorNeedsProduct={needsProductFor(n)}
           productOptions={productOptions} productsByReason={productsByReason} onProductsChange={onProductsChange}
           catalogProductNames={catalogProductNames} catalogLoading={catalogLoading}
         />
@@ -403,7 +409,7 @@ function DispositionChecklist({
                 key={n.id}
                 type="button"
                 title={n.description || ''}
-                onClick={() => onToggle(n.id, [...ancestors, n.label], needsProductFor(n), clearIdsFor(n))}
+                onClick={() => onToggle(n.id, [...ancestors, n.label], asksProduct(n), clearIdsFor(n))}
                 className={`px-3 py-1.5 rounded-lg text-[12.5px] font-semibold border transition-colors ${
                   isPicked
                     ? 'bg-indigo-500/15 border-indigo-500 text-indigo-200'
@@ -420,12 +426,13 @@ function DispositionChecklist({
     );
   }
 
-  // Pick-many: a checkbox per answer, each carrying its own "which product?" follow-up.
+  // Pick-many: a checkbox per answer, each revealing whatever it still has to ask once checked -
+  // its own reasons ("Product issue" has eight of them), or the product question at the end.
   return (
     <div className="space-y-0.5">
       {nodes.map((n) => {
         const checked = selected.has(n.id);
-        const needsProduct = needsProductFor(n);
+        const followUp = checked ? revealed(n) : null;
         return (
           <div key={n.id}>
             <label
@@ -437,7 +444,7 @@ function DispositionChecklist({
               <input
                 type="checkbox"
                 checked={checked}
-                onChange={() => onToggle(n.id, [...ancestors, n.label], needsProduct, collectIds(n).slice(1))}
+                onChange={() => onToggle(n.id, [...ancestors, n.label], asksProduct(n), collectIds(n).slice(1))}
                 className="sr-only"
               />
               <span
@@ -449,9 +456,7 @@ function DispositionChecklist({
               </span>
               {n.label}
             </label>
-            {checked && needsProduct && (
-              <div className="pl-[26px] pb-1.5 pt-1">{productFollowUp(n)}</div>
-            )}
+            {followUp && <div className="pl-[26px]">{followUp}</div>}
           </div>
         );
       })}
@@ -705,11 +710,11 @@ export default function NpsCallingClient() {
 
   // Leaves only ever come from whichever branch pickBranch chose (branchNode is filtered to it),
   // so cross-branch cleanup here is just a belt-and-suspenders guard.
-  // needsProduct comes from DispositionChecklist's own ancestor walk (whether this leaf or any
-  // ancestor of it has triggersProductFollowup set) - computed there, not re-derived here, since
-  // only that recursion still has the actual node objects; selectedReasons only ever stores the
-  // flat {id, path} breadcrumb, plus this bit, for every later reader (affectedProductsText,
-  // saveDisposition) to use without re-walking the tree.
+  // needsProduct comes from DispositionChecklist's asksProduct (this node or an ancestor has
+  // triggersProductFollowup set, AND it's the end of the line - the one actually shown the
+  // picker) - computed there, not re-derived here, since only that recursion still has the actual
+  // node objects; selectedReasons only ever stores the flat {id, path} breadcrumb, plus this bit,
+  // for every later reader (affectedProductsText, saveDisposition) to use without re-walking.
   //
   // clearIds is everything this pick invalidates, also computed there for the same reason: the
   // node's own descendants (answers to a follow-up the agent is now taking back), plus, in a
