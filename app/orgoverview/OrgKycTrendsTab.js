@@ -508,6 +508,30 @@ function BaselineFilter({ historyMonths, fromIdx, toIdx, onFromChange, onToChang
   );
 }
 
+// Word opens an .html-content file saved with a .doc extension and an application/msword
+// type just fine (this is Word's own "Web Page, Filtered" round-trip format) - no docx
+// library, no server round-trip needed, unlike a real Google Doc which has to be created
+// through Drive. The report's own CSS classes (og-table, og-card, ...) mean nothing
+// without a stylesheet in the file itself, since this never touches globals.css, so the
+// export gets its own compact inline <style> covering just what the tables need.
+function buildWordDoc(title, bodyHtml) {
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  return '<!doctype html><html><head><meta charset="utf-8">' +
+    `<title>${esc(title)}</title>` +
+    `<style>
+      body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; color: #111; }
+      h2 { font-size: 18pt; margin: 0 0 6px; }
+      h3, .og-section-title { font-size: 13pt; color: #4a3aa7; margin: 18px 0 8px; }
+      .og-card-title { font-size: 12pt; font-weight: 700; margin: 14px 0 4px; }
+      p, .og-note, .og-card-sub { font-size: 10pt; color: #444; }
+      table { border-collapse: collapse; width: 100%; margin: 6px 0 16px; }
+      th, td { border: 1px solid #999; padding: 4px 7px; font-size: 9.5pt; text-align: right; }
+      th:first-child, td:first-child, .og-rowlabel, .og-wrap-cell { text-align: left; }
+      th { background: #362a7d; color: #fff; font-weight: 700; }
+      li { font-size: 10pt; margin-bottom: 4px; }
+    </style></head><body>${bodyHtml}</body></html>`;
+}
+
 export default function OrgKycTrendsTab() {
   const [digest, setDigest] = useState(null);
   const [error, setError] = useState(null);
@@ -515,6 +539,19 @@ export default function OrgKycTrendsTab() {
   // seeds it from digest.axis.default_baseline_months (same range the server itself uses
   // for the unfiltered view, so first render matches today exactly).
   const [baselineRange, setBaselineRange] = useState(null);
+
+  function handleDownloadWord() {
+    const html = document.getElementById('printable-receipt').innerHTML;
+    const blob = new Blob(['﻿', buildWordDoc('KYC Complaint Trends', html)], { type: 'application/msword' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'KYC Complaint Trends.doc';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
 
   useEffect(() => {
     fetch('/api/report/data/trend-digest')
@@ -596,7 +633,10 @@ export default function OrgKycTrendsTab() {
 
   return (
     <div className="og-wrap-outer">
-      <button className="og-download-btn" onClick={() => window.print()}>Download PDF</button>
+      <div className="og-download-bar">
+        <button className="og-download-btn" onClick={handleDownloadWord}>Download Word</button>
+        <button className="og-download-btn" onClick={() => window.print()}>Download PDF</button>
+      </div>
       <div className="og-wrap" id="printable-receipt">
       <header className="og-header">
         <span className="og-badge">Auto-refreshed</span>
