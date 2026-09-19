@@ -515,27 +515,6 @@ export default function OrgKycTrendsTab() {
   // seeds it from digest.axis.default_baseline_months (same range the server itself uses
   // for the unfiltered view, so first render matches today exactly).
   const [baselineRange, setBaselineRange] = useState(null);
-  const [docExportBusy, setDocExportBusy] = useState(false);
-
-  async function handleOpenInDocs() {
-    if (docExportBusy) return;
-    setDocExportBusy(true);
-    try {
-      const html = document.getElementById('printable-receipt').innerHTML;
-      const r = await fetch('/api/orgoverview/export-doc', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ html, title: 'KYC Complaint Trends' }),
-      });
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(body.error || `Request failed (${r.status})`);
-      window.open(body.url, '_blank', 'noopener');
-    } catch (e) {
-      window.alert(e.message || 'Could not open this report in Google Docs.');
-    } finally {
-      setDocExportBusy(false);
-    }
-  }
 
   useEffect(() => {
     fetch('/api/report/data/trend-digest')
@@ -617,12 +596,7 @@ export default function OrgKycTrendsTab() {
 
   return (
     <div className="og-wrap-outer">
-      <div className="og-download-bar">
-        <button className="og-download-btn" onClick={handleOpenInDocs} disabled={docExportBusy}>
-          {docExportBusy ? 'Opening…' : 'Open with Google Docs'}
-        </button>
-        <button className="og-download-btn" onClick={() => window.print()}>Download PDF</button>
-      </div>
+      <button className="og-download-btn" onClick={() => window.print()}>Download PDF</button>
       <div className="og-wrap" id="printable-receipt">
       <header className="og-header">
         <span className="og-badge">Auto-refreshed</span>
